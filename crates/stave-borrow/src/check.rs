@@ -23,7 +23,9 @@
 //! temporary at the end of its statement is case `temporary`; a write, a drop, and a storage-dead
 //! do not reach below a dereference, except a drop whose destructor may reach what the value
 //! references, [`Access::DeepDrop`], also checked against the loans of the value its block
-//! returned); reads and moves against the
+//! returned; a loan of a place behind a pointer held in a local `x` is not checked against an
+//! access that every path from its creation reaches through a redefinition of `x`,
+//! `Cx::detached`); reads and moves against the
 //! maybe-moved sites (E0502); writes and `&mut` borrows against binding and reference mutability
 //! (E0503); stores of a ref-like value (an assignment through a dereference, a call whose
 //! callee has a `from` clause on a `&mut` param) against the view objects the pointer may point
@@ -673,6 +675,9 @@ impl Cx<'_, '_> {
         }
         loans.sort_unstable();
         loans.dedup();
+        if !loans.is_empty() {
+            loans.retain(|&l| !self.detached(at, kind, l));
+        }
         let mut verdict = None;
         let mut reported = None;
         if !loans.is_empty() {
@@ -700,6 +705,67 @@ impl Cx<'_, '_> {
         if self.want_dump && node != u32::MAX {
             self.dump.push(DumpAccess { node, kind: kind.dump_name(), verdict, loan: reported });
         }
+    }
+
+    /// Whether loan `l`, of a place behind a dereference of a pointer held in local `x`, no
+    /// longer names what an access at statement `at` names there: every path from the loan's
+    /// creation to `at` redefines `x` entirely (an assignment to `x`, the end of its storage).
+    /// The place then reaches the new pointer's pointee; the old one is reached only through
+    /// the values that hold `l`, and those carry the loans that made the old pointer (a borrow
+    /// keeps the origins of the pointers it reborrows through, [`crate::loans`] **Contents**),
+    /// so the lender stays borrowed. Anything not shown to be such a loan keeps its conflicts: a
+    /// raw dereference first, a captured or static root, a loan whose creation is not a
+    /// statement of the body, one made by the statement of the access before the access (a
+    /// write and the drop it stands for come after the statement's borrows; a borrow's own
+    /// access comes before its loan is made, so a live instance of it is an earlier one).
+    fn detached(&self, at: (u32, u32), kind: Access, l: LoanId) -> bool {
+        let body = self.flow.body;
+        let loan = self.flow.loan(l);
+        let x = loan.place.local;
+        match loan.place.proj.iter().find(|p| matches!(p, Proj::Deref(_))) {
+            Some(Proj::Deref(DerefKind::Mut | DerefKind::Shared)) => {}
+            _ => return false,
+        }
+        let root = &body.locals[x as usize];
+        if root.capture.is_some() || root.static_root || loan.capture || loan.reserved {
+            return false;
+        }
+        let makes = |s: &Stmt| match &s.kind {
+            StmtKind::Assign { rv: Rvalue::Ref { loan, .. }, .. } => *loan == l,
+            StmtKind::Activate { active, .. } => *active == l,
+            _ => false,
+        };
+        let Some(cur) = body.blocks.get(at.0 as usize).and_then(|b| b.stmts.get(at.1 as usize)) else {
+            return false;
+        };
+        if makes(cur) && matches!(kind, Access::Write | Access::DeepDrop) {
+            return false;
+        }
+        let mut seen = vec![false; body.blocks.len()];
+        let mut work = vec![(at.0, at.1 as usize)];
+        while let Some((b, end)) = work.pop() {
+            let stmts = &body.blocks[b as usize].stmts;
+            let mut open = true;
+            for s in stmts[..end.min(stmts.len())].iter().rev() {
+                if makes(s) {
+                    return false;
+                }
+                if stmt_def(s) == Some(x) {
+                    open = false;
+                    break;
+                }
+            }
+            if open {
+                for &p in &self.flow.preds[b as usize] {
+                    if !seen[p as usize] {
+                        seen[p as usize] = true;
+                        work.push((p, body.blocks[p as usize].stmts.len()));
+                    }
+                }
+            }
+        }
+        // the creation must exist: a loan this walk cannot place is not judged
+        body.blocks.iter().any(|blk| blk.stmts.iter().any(makes))
     }
 
     /// The move of local `l` a use at statement `at` sees: one made earlier in the statement, else

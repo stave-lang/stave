@@ -1,0 +1,164 @@
+//~ EXIT 52
+// A reborrow through a reference local (`ps.push(p)` reborrows `*p`) keeps the local's pointee
+// borrowed only while the local holds that pointer. Once every path has given the local a new
+// value (a `let` in a loop body, an assignment, a pattern binding), its place names the new
+// pointee, and borrowing or writing through it does not conflict with the kept reborrow. The
+// lender of the old pointer stays borrowed through the reborrow (see
+// neg_e0501_reborrow_not_rebound.stv).
+import std.arena;
+import std.vec;
+
+struct P { x: i64 }
+
+impl Copy for P {}
+
+struct Q { x: i64, y: i64 }
+
+impl Copy for Q {}
+
+view struct S { p: &mut P, n: u32 }
+
+fn sum(ps: &vec.Vec<&mut P>) -> i64 {
+    let mut s: i64 = 0;
+    for r in ps.as_slice() { s = s + r.x; }
+    return s;
+}
+
+fn mk(a: &arena.Arena, i: i64) -> &mut P from a {
+    let p = a.alloc(P.{ x: 0 });
+    p.x = i;
+    return p;
+}
+
+// 0 + 1 + 2 + 3 + 4
+fn collect_arena() -> i64 {
+    let a = arena.Arena.new(1024);
+    let mut ps = vec.Vec::<&mut P>.new();
+    for i in 0i64..5 {
+        let p = a.alloc(P.{ x: 0 });
+        p.x = i;
+        ps.push(p);
+    }
+    return sum(&ps);
+}
+
+// 0 + 1 + 2
+fn collect_results() -> i64 {
+    let a = arena.Arena.new(1024);
+    let mut ps = vec.Vec::<&mut P>.new();
+    for i in 0i64..3 {
+        ps.push(mk(&a, i));
+    }
+    return sum(&ps);
+}
+
+// 1 + 2
+fn reassigned() -> i64 {
+    let mut x = P.{ x: 1 };
+    let mut y = P.{ x: 2 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = &mut x;
+    ps.push(p);
+    p = &mut y;
+    ps.push(p);
+    return sum(&ps);
+}
+
+// written after an earlier iteration kept `&*p`: 0 + 1 + 2
+fn shared_kept() -> i64 {
+    let a = arena.Arena.new(1024);
+    let mut ps = vec.Vec::<&P>.new();
+    for i in 0i64..3 {
+        let p = a.alloc(P.{ x: 0 });
+        p.x = i;
+        ps.push(&*p);
+    }
+    let mut s: i64 = 0;
+    for r in ps.as_slice() { s = s + r.x; }
+    return s;
+}
+
+// the best so far kept in an `Option`, each new one written first: 2
+fn best_so_far() -> i64 {
+    let a = arena.Arena.new(1024);
+    let mut best: Option<&mut P> = Option.None;
+    for i in 0i64..5 {
+        let p = a.alloc(P.{ x: 0 });
+        p.x = i;
+        if i == 2 { best = Option.Some(p); }
+    }
+    let mut n: i64 = 0;
+    match best {
+        Option.Some(b) => { n = b.x; }
+        Option.None => {}
+    }
+    return n;
+}
+
+// a field of the pointee, a struct holding the pointer, a pattern binding: 6 + 3 + 3
+fn other_forms() -> i64 {
+    let a = arena.Arena.new(1024);
+    let mut xs = vec.Vec::<&mut i64>.new();
+    for i in 0i64..4 {
+        let q = a.alloc(Q.{ x: i, y: 0 });
+        xs.push(&mut q.x);
+        q.y = 1;
+    }
+    let mut s: i64 = 0;
+    for r in xs.as_slice() { s = s + **r; }
+    let mut ps = vec.Vec::<&mut P>.new();
+    for i in 0i64..3 {
+        let w = S.{ p: a.alloc(P.{ x: i }), n: 0 };
+        ps.push(&mut *w.p);
+    }
+    let mut qs = vec.Vec::<&mut P>.new();
+    for i in 0i64..3 {
+        let (p, k) = (a.alloc(P.{ x: 0 }), i);
+        p.x = k;
+        qs.push(p);
+    }
+    return s + sum(&ps) + sum(&qs);
+}
+
+// a param, then another: 3 + 7
+fn params(p: &mut P, q: &mut P) -> i64 {
+    let mut x = p;
+    let keep: Option<&mut P> = Option.Some(&mut *x);
+    x = q;
+    x.x = 7;
+    let mut k: i64 = 0;
+    match keep {
+        Option.Some(r) => {
+            r.x = 3;
+            k = r.x;
+        }
+        Option.None => {}
+    }
+    return k + x.x;
+}
+
+// the reborrow taken back out of the vector, and one re-pointed through it: 4 + 5
+fn taken_back() -> i64 {
+    let mut a = P.{ x: 1 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = &mut a;
+    ps.push(p);
+    p = ps.pop().unwrap();
+    p.x = 4;
+    ps.push(p);
+    let mut b = P.{ x: 1 };
+    let mut qs = vec.Vec::<&mut P>.new();
+    let mut q = &mut b;
+    qs.push(q);
+    q = &mut **qs.get_mut(0);
+    q.x = 5;
+    return sum(&ps) + sum(&qs);
+}
+
+fn main() -> i32 {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let n1 = collect_arena() + collect_results() + reassigned() + shared_kept();
+    let n = n1 + best_so_far() + other_forms() + params(&mut a, &mut b) + taken_back();
+    return n as% i32;
+}

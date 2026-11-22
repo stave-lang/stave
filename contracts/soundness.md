@@ -103,6 +103,48 @@ end drops the new one.
 check. A transfer function that leaves out of the destination's set a loan the new value holds.
 Reading the loans live after a statement from the state before it.
 
+## Loans through a redefined pointer: the place names the new pointee
+
+**Claim.** Take a loan L of a place `x.π * ρ`, made through a `&mut` or `&` pointer held at
+`x.π`, and an access at a point where every path from L's creation to that point redefines `x`
+entirely. Then no use of a reference L stands for can conflict with the access through L's
+place. The loan stays live and keeps everything it carries live, but the access is not checked
+against it. So `for .. { let p = a.alloc(..); ps.push(p); }` reborrows each new `*p` while
+`ps` holds the earlier ones.
+
+**Assumptions.** A redefinition is a whole assignment to `x` or the end of its storage
+(`check::stmt_def`): a `let` in a loop body, `x = e`, a pattern binding, the end of the
+iteration's scope. A borrow carries its loan, the origins of the pointers it reborrows through
+after the last `&` one, and that one's (stave-borrow `loans`, **Contents**). So the value
+holding L also holds the loans that made the pointer at `x.π` when L was made, back to the
+local or param it came from.
+
+**Argument.** L stands for the memory reached from the pointer `p0` that `x.π` held when L was
+made. After the redefinition `x.π` holds another pointer, and the place names the memory
+reached from that one. The new value can reach `p0`'s memory only in these ways:
+- From `p0` itself, taken out of `x` before the redefinition. A move of `x`, a `&mut` of `x`
+  or of a part on the way to `x.π` (`mem.swap`, `mem.replace`, a callee given `&mut x`) are
+  deep accesses above L, so they conflict with L while it is still bound to the old value. A
+  `&mut` pointer is not Copy. A `&` one may be copied, but a loan made through a `&` conflicts
+  only with writes and `&mut` borrows through it, which are E0503.
+- From a value that holds L: the reborrow itself, kept in a vector, an `Option`, or a view.
+  Taking it out moves it (the holder no longer has it), or reborrows through the holder, which
+  makes a loan of the holder's place. The new `x` carries that loan, so the holder stays
+  borrowed while the new `x` is used.
+- Through the original lender: it is still borrowed by the loans L carries, so a new borrow of
+  it conflicts there (`p = &mut x` again after `ps.push(p)`).
+
+In each case one usable path to the memory remains, and the loan on that path is checked.
+
+**Not claimed.** Nothing is claimed for a loan whose first dereference is a raw pointer
+(Copy, and aliasing through it is the unsafe code's obligation). Nothing is claimed for a root
+that is a closure capture or a static, or when the redefinition the checker does not see
+happens through a pointer to `x` or by a write to a field of `x`: such a loan keeps its
+conflicts. A loan made in the statement of an access that comes after that statement's
+borrows (its write, the drop the write stands for) also keeps them. A path that reaches the
+access without the redefinition keeps the conflict: a pointer reborrowed twice without being
+redefined between is still E0501.
+
 ## Stores of a call: the result does not depend on order
 
 **Claim.** Applying the stores of one call until nothing changes ends, and the sets it ends at
