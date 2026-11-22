@@ -890,7 +890,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0106",
         severity: Severity::Error,
         area: "resolve",
-        rule: "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility)",
+        rule: "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name",
         retired: false,
         located: true,
         holes: &[
@@ -920,6 +920,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "mark field `{name}` `pub` in `{module}`, or use the column only inside `{module}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern",
+                message: "struct `{name}` has a private field: its pattern outside module `{module}` is not allowed",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` cannot be taken apart outside `{module}`" },
+                    LabelTemplate { at: "decl", text: "field declared here without `pub`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take `{name}` apart inside `{module}` (a `pub` fn there), or use its `pub` fields and methods outside it",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

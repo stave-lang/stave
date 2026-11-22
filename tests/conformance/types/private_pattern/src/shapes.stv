@@ -1,0 +1,42 @@
+// A struct with a private field is taken apart by a pattern only here; `Open` has none.
+pub struct Mixed { pub a: u32, b: u32 }
+pub struct Hidden { x: u32, y: u32 }
+pub struct Gen<T> { pub v: T, n: u32 }
+pub struct Open { pub p: u32, pub q: u32 }
+
+pub fn mixed(a: u32, b: u32) -> Mixed {
+    return Mixed.{ a: a, b: b };
+}
+
+pub fn row() -> [Mixed; 1] {
+    return [Mixed.{ a: 6, b: 7 }; 1];
+}
+
+pub fn hidden() -> Hidden {
+    return Hidden.{ x: 1, y: 2 };
+}
+
+pub fn gen(v: u32) -> Gen<u32> {
+    return Gen.{ v: v, n: 3 };
+}
+
+pub fn open() -> Open {
+    return Open.{ p: 4, q: 5 };
+}
+
+pub fn sum(m: Mixed) -> u32 {
+    let Mixed.{ a, b } = m;
+    return a + b;
+}
+
+pub fn bump(m: &mut Mixed) {
+    match m {
+        Mixed.{ a: _, b } => { *b = *b + 1; }
+    }
+}
+
+pub fn first(h: &Hidden) -> u32 {
+    match h {
+        Hidden.{ x, y: _ } => { return *x; }
+    }
+}

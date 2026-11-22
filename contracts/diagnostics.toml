@@ -409,7 +409,7 @@ fix = { description = "rename this `{name}`, or remove one of the two declaratio
 code = "E0106"
 severity = "error"
 area = "resolve"
-rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility)"
+rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name"
 holes = { name = "name", module = "path" }
 message = "`{name}` is private to module `{module}`"
 labels = [{ at = "primary", text = "private `{name}` used here" }, { at = "decl", text = "`{name}` declared here without `pub`" }]
@@ -419,6 +419,11 @@ fix = { description = "mark `{name}` `pub` in `{module}`, or use it only inside 
 message = "column `{name}` is private to module `{module}`: its field of the row struct is not `pub`"
 labels = [{ at = "primary", text = "private column `{name}` used here" }, { at = "decl", text = "field `{name}` declared here without `pub`" }]
 fix = { description = "mark field `{name}` `pub` in `{module}`, or use the column only inside `{module}`" }
+
+[diag.cases.pattern]
+message = "struct `{name}` has a private field: its pattern outside module `{module}` is not allowed"
+labels = [{ at = "primary", text = "`{name}` cannot be taken apart outside `{module}`" }, { at = "decl", text = "field declared here without `pub`" }]
+fix = { description = "take `{name}` apart inside `{module}` (a `pub` fn there), or use its `pub` fields and methods outside it" }
 
 [[diag]]
 code = "E0107"

@@ -45,7 +45,7 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | default trait methods | none | Trait bodies hold signatures only: `fn f(&self) -> T;` | per-function checking |
 | overloading, truthiness, null | none | `if n != 0`, not `if n` | one meaning per name; explicit tests |
 | `mut self` param | `self`, `&self`, `&mut self` only | Rebind: `let mut s = self;` | params are immutable bindings |
-| `x @ P`, `..` rest | not in grammar | Bind the value by name to reuse it. A struct pattern names every field, also through `&` (E0208): `f: _` ignores one (a moving pattern drops it where it binds, §3) | not admitted yet (simplicity) |
+| `x @ P`, `..` rest | not in grammar | Bind the value by name to reuse it. A struct pattern names every field, also through `&` (E0208; not beside the private-field E0106): `f: _` ignores one (a moving pattern drops it where it binds, §3) | not admitted yet (simplicity) |
 | `v.pop();` (value ignored) | `let _ = v.pop();` | A non-`()`, non-`never` expression statement is E0210 | an ignored `Result` is always visible |
 
 Casts and overflow operators (outside the table: they contain `|`):
@@ -77,7 +77,7 @@ Notes:
 - A pattern binds a name once and names a field once: `(a, a)`, `P.{ x, y: x }`, `P.{ x, x: _ }` are E0105.
 - f-string holes: a name, `self`, or a field path (`{n}`, `{self.n}`, `{p.x}`). No tuple steps (`{t.0}`) or expressions: bind to a local first (`let a = t.0;` then `{a}`).
 
-Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl Trait for T`, `trait`, `pub` (else private to the module, E0106; none on trait impl methods, E0907), method auto-ref (`x.m()` with `&self`/`&mut self`), auto-deref on `.` through any number of `&`/`&mut`, implicit reborrow of `&mut` args, `&T`/`&mut T` (shared xor exclusive), moves, `?`, `[T; N]`, `[T]`, tuples (`t.0`), `[e; n]` (`e` Copy unless `n` is the constant 1, E0418), `while`, `for x in a..b`, `match` exhaustive (E0300), guards `P if c =>`, `*const T`/`*mut T` (deref unsafe; casts `&x as *const T`, `&mut x as *mut T` safe), `type A = B;`, `const X: T = e;`, `Self`.
+Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl Trait for T`, `trait`, `pub` (else private to the module, E0106; none on trait impl methods, E0907; a private struct field named by `.`, a literal, or any pattern of its struct outside the module is E0106, a pattern once at the type name; enum variant fields have no privacy), method auto-ref (`x.m()` with `&self`/`&mut self`), auto-deref on `.` through any number of `&`/`&mut`, implicit reborrow of `&mut` args, `&T`/`&mut T` (shared xor exclusive), moves, `?`, `[T; N]`, `[T]`, tuples (`t.0`), `[e; n]` (`e` Copy unless `n` is the constant 1, E0418), `while`, `for x in a..b`, `match` exhaustive (E0300), guards `P if c =>`, `*const T`/`*mut T` (deref unsafe; casts `&x as *const T`, `&mut x as *mut T` safe), `type A = B;`, `const X: T = e;`, `Self`.
 
 ## 2. Lexical, keywords, items
 
