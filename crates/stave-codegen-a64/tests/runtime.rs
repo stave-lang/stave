@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use stave_codegen_a64::debug::{BuildConfig, ErrorKind, build_image};
-use stave_ir::{CastKind, Op, Operand, SiteInfo, Static};
+use stave_ir::{CastKind, DataRef, DataTarget, Op, Operand, SiteInfo, Static};
 use stave_obj::{Machine, Options};
 
 /// `static mut` globals: initialized data and bss, read and written through `static_addr`.
@@ -22,8 +22,17 @@ fn statics() {
     for x in [7u32, 8, 9] {
         init.extend_from_slice(&x.to_le_bytes());
     }
-    p.m.statics.push(Static { path: "app.A".into(), ty: arr, init });
-    p.m.statics.push(Static { path: "app.Z".into(), ty: t.u64, init: vec![0; 8] });
+    p.m.statics.push(Static { path: "app.A".into(), ty: arr, init, refs: Vec::new() });
+    p.m.statics.push(Static { path: "app.Z".into(), ty: t.u64, init: vec![0; 8], refs: Vec::new() });
+    // address words: into `app.A` at element 1 and into a string at 1
+    let xyz = p.m.add_string(b"xyz".to_vec());
+    for (path, target, addend) in
+        [("app.TO_A", DataTarget::Static(0), 4), ("app.TO_S", DataTarget::Str(xyz), 1)]
+    {
+        let refs = vec![DataRef { offset: 0, target, addend }];
+        p.m.statics.push(Static { path: path.into(), ty: t.pu8, init: vec![0; 8], refs });
+    }
+    let ppu8 = p.m.types.ptr(true, t.pu8);
     let sa = p.m.intrinsic("static_addr");
     let bump = p.func("app.bump", &[], Some(t.u64), |b, p| {
         let one = b.int(1);
@@ -53,9 +62,17 @@ fn statics() {
             let r = b.call(bump, Some(t.u64), &[]).unwrap();
             p.out(b, r, t.u64);
         }
+        for k in [2, 3] {
+            let kk = b.int(k);
+            let w = b.intrinsic(sa, Some(ppu8), &[kk]).unwrap();
+            let q = b.load(t.pu8, w);
+            let c = b.load(t.u8, q);
+            p.out(b, c, t.u8);
+        }
     });
     let r = check(&p, "statics");
-    assert_eq!(r.stdout.len(), 7 * 8);
+    assert_eq!(r.stdout.len(), 9 * 8);
+    assert_eq!(&r.stdout[7 * 8..], [64u64, u64::from(b'y')].map(u64::to_le_bytes).as_flattened());
 }
 
 /// Large frames (probed), large aggregate copies (the copy loop), and a big slot.

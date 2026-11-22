@@ -60,6 +60,12 @@ stages' numbering, except `d<D>`):
   the program's `static` and `static mut` decls (one sequence over both forms).
   Every static occupies at least one byte in the image (a zero-size static gets one zero
   byte, aligned as its type), so distinct statics have distinct addresses on every target.
+  A static's initial bytes may hold address words: an 8-byte word at an 8-aligned offset is the
+  address of a string constant's bytes or of another static, plus an addend of at most that
+  target's size. A `&str` in a static initializer is such a word (to the literal's bytes) then
+  the length. The image holds the resolved addresses (a static binary: link-time constants, no
+  dynamic relocation); the interpreter writes them before the program starts. A load of such a
+  word is a pointer to read-only program data, like a string operand.
 - `intrinsic.copy_bytes () %dst %src %n` (contracts/intrinsics.md "Untyped copy"): operands
   `*mut u8`, `*const u8`, `usize`, no result. A copy of `n` bytes with their initialization,
   not a `load` or `store` of any type: the IR's one untyped memory access.

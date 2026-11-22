@@ -158,26 +158,45 @@ pub(crate) fn site_table(files: &[SourceFile], rows: &[Row], b: &mut ImageBuilde
     Ok(b.rodata(SITE_TABLE, obj)?)
 }
 
-/// `static mut` globals (`Module::statics`): `.bss` when zero-initialized, else `.data`.
+/// `static mut` globals (`Module::statics`): `.bss` when zero-initialized with no address word,
+/// else `.data`; each address word is an `Abs64` relocation the linker resolves.
 pub(crate) fn statics(
     m: &Module,
     layouts: &stave_ir::layout::Layouts,
+    str_sym: &[SymbolId],
     b: &mut ImageBuilder,
 ) -> Res<Vec<SymbolId>> {
+    // every symbol first: an address word may name a later static
     let mut out = Vec::with_capacity(m.statics.len());
-    for (i, st) in m.statics.iter().enumerate() {
+    for i in 0..m.statics.len() {
+        let name = stave_ir::link::static_symbol(m, i, |p| b.lookup(p).is_some());
+        out.push(b.declare(&name));
+    }
+    for (st, &sym) in m.statics.iter().zip(&out) {
         let l = layouts.get_layout(st.ty).map_err(|e| unsup(format!("static `{}`: {e}", st.path)))?;
         let align = u32::try_from(l.align.max(1)).map_err(|_| unsup("static alignment"))?;
-        let name = stave_ir::link::static_symbol(m, i, |p| b.lookup(p).is_some());
         // At least one byte (contracts/checked-ir.md): distinct statics have distinct addresses.
-        let sym = if st.init.iter().all(|x| *x == 0) {
-            b.bss(&name, l.size.max(1), align)?
-        } else {
-            let mut bytes = st.init.clone();
-            bytes.resize(usize::try_from(l.size).map_err(|_| unsup("static size"))?.max(1), 0);
-            b.data(&name, DataObj::new(bytes, align))?
-        };
-        out.push(sym);
+        if st.refs.is_empty() && st.init.iter().all(|x| *x == 0) {
+            b.define_bss(sym, l.size.max(1), align)?;
+            continue;
+        }
+        let mut bytes = st.init.clone();
+        bytes.resize(usize::try_from(l.size).map_err(|_| unsup("static size"))?.max(1), 0);
+        let mut obj = DataObj::new(bytes, align);
+        for r in &st.refs {
+            let target = match r.target {
+                stave_ir::DataTarget::Str(s) => str_sym.get(s.index()),
+                stave_ir::DataTarget::Static(k) => out.get(k as usize),
+            };
+            let sym = *target.ok_or_else(|| bad("static address word target"))?;
+            obj.relocs.push(Reloc {
+                offset: r.offset,
+                kind: RelocKind::Abs64,
+                sym,
+                addend: i64::from(r.addend),
+            });
+        }
+        b.define_data(sym, obj)?;
     }
     Ok(out)
 }
