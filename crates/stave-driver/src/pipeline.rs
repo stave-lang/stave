@@ -242,6 +242,12 @@ pub struct Options {
     pub borrow_dataflow: stave_borrow::Dataflow,
 }
 
+/// The borrow checker's dataflow that `STAVE_BORROW_DATAFLOW` names; an unknown name is an error
+/// ([`stave_borrow::Dataflow::named`]).
+pub fn borrow_dataflow_from_env() -> Result<stave_borrow::Dataflow, String> {
+    stave_borrow::Dataflow::named(std::env::var(stave_borrow::DATAFLOW_ENV).ok().as_deref())
+}
+
 impl Options {
     pub fn new(goal: Goal) -> Options {
         Options {

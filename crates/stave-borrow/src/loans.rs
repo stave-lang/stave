@@ -83,7 +83,7 @@
 //! stores and the result of the call are those of the state after all of them.
 //!
 //! After a call's store a local may hold origins that the locals holding a loan of it do
-//! not: a loan is live while a live local reaches it ([`Flow::live_loans`] closes under
+//! not: a loan is live while a live local reaches it (the live loans are closed under
 //! [`Flow::reach`]), and a value read through a pointer to a local gets the local's set at
 //! that point ([`Flow::contents_of`]). A call through a fn value stores nothing: its params
 //! take no clause, so its body is held to the rules above with `decl` empty.
@@ -111,10 +111,20 @@
 //! block without one, the walk has only what reaches it in the current round, which is the same
 //! while later rounds can only add to earlier ones: every step is monotone until a store grows
 //! a local ([`Flow::grown`]). From then on a loan's contents are read from the borrowed local's
-//! set at the point of the read instead of the set taken when the loan was made, which can be
-//! smaller. So the walk starts without [`Flow::exact`], and the first time a store grows a
-//! local it starts over with an entry state for every block, as unions of all rounds. Those
-//! also keep the sets of the borrowed locals such a read can reach ([`Flow::lent`]).
+//! set at the point of the read ([`Flow::loan_holds`]) instead of the set taken when the loan
+//! was made, so in a body with a statement that can grow a local the entry states also keep
+//! the sets of the borrowed locals such a read can reach ([`Flow::lent`]).
+//!
+//! A read from the local's set can give LESS than the set taken when the loan was made (the
+//! local was written while borrowed). Then a round after the store finds less than a round
+//! before it did, and the union over the rounds holds what no single round does. Where no such
+//! read happens the rounds before the store found nothing the last round does not find again,
+//! and the walked state is again all an entry state would hold. So the last round compares,
+//! at every read of a borrowed local's set, that set with what the loan's contents were when
+//! the first store grew a local ([`Flow::pre`]); if one lacks an atom, the body is solved
+//! again with an entry state for every block, joined over all rounds ([`Flow::exact`]).
+
+use std::cell::Cell;
 
 use rustc_hash::FxHashMap;
 
@@ -286,8 +296,17 @@ pub struct Cost {
     /// The (local, block) pairs with the local's set or moved mark live at the block's entry:
     /// what the entry states can hold.
     pub live: u64,
+    /// Bodies in which a store grew a local ([`Flow::grown`]).
+    pub grown: u64,
     /// Bodies solved a second time, with an entry state per block ([`Flow::exact`]).
     pub exact: u64,
+    /// Atoms of the sets entered into the set table or joined there.
+    pub atoms: u64,
+    /// Loans counted in or out of the live loans by the checks, and loans visited when the
+    /// loans reached through the live ones are found again.
+    pub counted: u64,
+    /// Times the checks found the loans reached through the live ones again.
+    pub rebuilt: u64,
 }
 
 impl Cost {
@@ -296,7 +315,11 @@ impl Cost {
         self.applied += o.applied;
         self.copied += o.copied;
         self.live += o.live;
+        self.grown += o.grown;
         self.exact += o.exact;
+        self.atoms += o.atoms;
+        self.counted += o.counted;
+        self.rebuilt += o.rebuilt;
     }
 }
 
@@ -364,8 +387,14 @@ pub struct Flow<'b> {
     /// Liveness of the moved marks (by `mvar` index): where an access may still test them.
     mlive: Liveness,
     /// Per tracked local: a loan's contents may be read from its set once a store has grown a
-    /// local ([`Flow::loan_holds`]). Filled when every block gets an entry state.
+    /// local ([`Flow::loan_holds`]). Empty in a body without a statement that can grow one.
     lent: Vec<bool>,
+    /// Per loan: its contents when the first store grew a local, before that store.
+    pre: Vec<Set>,
+    /// Whether a round of [`Flow::iterate`] is on, and whether a read of a borrowed local's
+    /// set in it gave less than the loan's `pre`.
+    watch: bool,
+    short: Cell<bool>,
     /// Whether every reachable block has an entry state (module doc, **Storage**).
     exact: bool,
     /// Per block: it takes the state the walk reached at the end of the block before it in
@@ -494,6 +523,9 @@ impl<'b> Flow<'b> {
             mvar: Vec::new(),
             mlive: Liveness::default(),
             lent: Vec::new(),
+            pre: Vec::new(),
+            watch: false,
+            short: Cell::new(false),
             exact: false,
             carried: vec![false; n],
             entry: vec![None; n],
@@ -541,6 +573,11 @@ impl<'b> Flow<'b> {
         self.exact
     }
 
+    /// What the dataflow did so far.
+    pub fn cost(&self) -> Cost {
+        Cost { atoms: self.sets.work(), ..self.cost }
+    }
+
     /// A cleared state for a walk; [`Flow::recycle`] takes it back.
     pub fn state(&mut self) -> State {
         match self.spare.take() {
@@ -584,30 +621,48 @@ impl<'b> Flow<'b> {
             let b = self.rpo[i] as usize;
             self.carried[b] = self.preds[b].len() == 1 && self.preds[b][0] == self.rpo[i - 1];
         }
-        if self.iterate() {
-            return;
-        }
-        // a store grew a local: later rounds may read less than earlier ones did, and only an
-        // entry state per block keeps what the earlier ones found
-        self.exact = true;
-        self.cost.exact = 1;
-        self.lent = vec![false; self.ntracked];
-        for l in &body.loans {
-            if !l.place.has_deref()
-                && self.is_ref_like(l.place.ty)
-                && let Some(&t) = self.tracked.get(l.place.local as usize)
-                && t != u32::MAX
-            {
-                self.lent[t as usize] = true;
+        // a statement that can grow a local: a store through a dereference, a call that stores
+        let can_grow = body.blocks.iter().flat_map(|b| &b.stmts).any(|s| match &s.kind {
+            StmtKind::Assign { dest, rv, .. } => {
+                (dest.has_deref() && self.is_ref_like(dest.ty))
+                    || matches!(rv, Rvalue::Call { stores, .. } if !stores.is_empty())
+            }
+            _ => false,
+        });
+        if can_grow {
+            self.lent = vec![false; self.ntracked];
+            for l in &body.loans {
+                if !l.place.has_deref()
+                    && self.is_ref_like(l.place.ty)
+                    && let Some(&t) = self.tracked.get(l.place.local as usize)
+                    && t != u32::MAX
+                {
+                    self.lent[t as usize] = true;
+                }
             }
         }
+        self.iterate();
+        self.cost.grown = u64::from(self.grown);
+        if !(self.grown && self.short.get()) {
+            return;
+        }
+        // a round after the store read less than one before it found: only an entry state per
+        // block keeps what the earlier rounds found
+        self.exact = true;
+        self.cost.exact = 1;
         self.grown = false;
+        self.pre = Vec::new();
         self.carried.fill(false);
         self.entry.fill(None);
         let empty = self.empty();
         self.contents.fill(empty.clone());
         self.made.fill(empty);
         self.iterate();
+    }
+
+    /// Whether a loan's contents may be read from the set of tracked local `t`.
+    pub fn is_lent(&self, t: u32) -> bool {
+        self.lent.get(t as usize).is_some_and(|&x| x)
     }
 
     /// Numbers the locals whose moved mark must be followed: those with an access that tests
@@ -662,9 +717,8 @@ impl<'b> Flow<'b> {
         mvar
     }
 
-    /// Runs the rounds to the fixpoint. `false`: a store grew a local and not every block has an
-    /// entry state, so the walk cannot go on.
-    fn iterate(&mut self) -> bool {
+    /// Runs the rounds to the fixpoint.
+    fn iterate(&mut self) {
         let body = self.body;
         let mut st = self.state();
         for (i, l) in body.locals.iter().enumerate() {
@@ -678,9 +732,10 @@ impl<'b> Flow<'b> {
         }
         self.save(0, &st);
         let order = self.rpo.clone();
-        let mut done = true;
-        'rounds: for round in 1..=100_000u32 {
+        self.watch = true;
+        for round in 1..=100_000u32 {
             self.rounds = round;
+            self.short.set(false);
             let mut changed = false;
             // whether `st` is the state at the end of the block before
             let mut have = false;
@@ -694,10 +749,6 @@ impl<'b> Flow<'b> {
                 }
                 for s in &body.blocks[b].stmts {
                     changed |= self.apply(&s.kind, &mut st);
-                }
-                if self.grown && !self.exact {
-                    done = false;
-                    break 'rounds;
                 }
                 let succs = body.blocks[b].term.succs();
                 if succs.len() > 1 && succs.iter().any(|&succ| !self.carried[succ as usize]) {
@@ -713,8 +764,8 @@ impl<'b> Flow<'b> {
                 break;
             }
         }
+        self.watch = false;
         self.recycle(st);
-        done
     }
 
     /// The index of local `l` among the locals whose moved mark is followed (`u32::MAX`: not
@@ -729,7 +780,7 @@ impl<'b> Flow<'b> {
         let mut k = 0;
         for i in 0..st.held.len() {
             let t = st.held[i];
-            let read = self.live.live_out(t, b as u32) || (self.exact && self.lent[t as usize]);
+            let read = self.live.live_out(t, b as u32) || self.is_lent(t);
             if st.o[t as usize] != 0 && read {
                 st.held[k] = t;
                 k += 1;
@@ -759,7 +810,7 @@ impl<'b> Flow<'b> {
         out.moved.clear();
         for &t in &st.held {
             let id = st.o[t as usize];
-            if id != 0 && (self.live.live_in(t, b as u32) || (self.exact && self.lent[t as usize])) {
+            if id != 0 && (self.live.live_in(t, b as u32) || self.is_lent(t)) {
                 out.o.push((t, id));
             }
         }
@@ -913,10 +964,14 @@ impl<'b> Flow<'b> {
     /// made, and once a store has grown a local, for a borrowed local what its set says in `st`
     /// (a store adds to it from the store on: what is stored later on the path is not in the
     /// place yet).
-    fn loan_holds(&self, st: &State, l: usize) -> Set {
+    pub fn loan_holds(&self, st: &State, l: usize) -> Set {
         let place = &self.body.loans[l].place;
         if self.grown && !place.has_deref() && self.is_ref_like(place.ty) {
-            self.local_o(st, place.local)
+            let now = self.local_o(st, place.local);
+            if self.watch && !self.exact && self.pre.get(l).is_some_and(|was| !was.is_subset(&now)) {
+                self.short.set(true);
+            }
+            now
         } else {
             self.contents[l].clone()
         }
@@ -1198,9 +1253,13 @@ impl<'b> Flow<'b> {
                     add.remove(m);
                 }
             }
-            if self.contents[a].union_with(&add) {
-                contents = true;
+            if !add.is_subset(&self.contents[a]) {
+                if !self.grown && !self.exact {
+                    self.pre = self.contents.clone();
+                }
                 self.grown = true;
+                self.contents[a].union_with(&add);
+                contents = true;
             }
             if let Some(&t) = self.tracked.get(l.place.local as usize)
                 && t != u32::MAX
@@ -1419,17 +1478,8 @@ impl<'b> Flow<'b> {
         }
     }
 
-    /// The loans the given live tracked locals reach: those in their origin sets, and after a
-    /// call's store those in the contents of such loans.
-    pub fn live_loans(&self, st: &State, live: &[u32]) -> Set {
-        let mut out = self.empty();
-        for &t in live {
-            out.union_with(self.sets.get(st.o[t as usize]));
-        }
-        if self.grown { self.reach(st, &out) } else { out }
-    }
-
-    /// Whether local `l` reaches loan `loan` ([`Flow::live_loans`]).
+    /// Whether local `l` reaches loan `loan`: it holds it, or after a call's store holds a loan
+    /// whose contents reach it.
     pub fn holds(&self, st: &State, l: LocalId, loan: LoanId) -> bool {
         let o = self.local_o(st, l);
         o.contains(loan as usize) || (self.grown && self.reach(st, &o).contains(loan as usize))

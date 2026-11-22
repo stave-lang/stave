@@ -11,9 +11,12 @@
 //!
 //! The live loans are kept as a count per loan of the live locals that hold it, moved from
 //! statement to statement by what the statement changes: the sets it writes, the locals whose
-//! last use it is, the local it defines. The live loans of each local are chained, the `&mut`
-//! ones apart from the others, and an access looks only at those of its own local that its
-//! kind can conflict with.
+//! last use it is, the local it defines. After a store has grown a local the live loans are
+//! closed under what their places hold ([`crate::loans`] **Stores**): the loans reached through
+//! the counted ones are found again only when a counted loan that leads further comes or goes,
+//! or the set of a borrowed local changes. The live loans of each local are chained, the
+//! `&mut` ones apart from the others, and an access looks only at those of its own local that
+//! its kind can conflict with.
 //!
 //! **Access checks**: every access (read, write, move, drop, storage-dead, and the borrows) is
 //! checked against the live loans whose places overlap it (E0501; the storage-dead of a
@@ -33,7 +36,6 @@ use crate::cfg::{
     StmtKind,
 };
 use crate::loans::{CallStore, Flow, Misfit, Saved, State, for_each_op};
-use crate::set::Set;
 use crate::ty::DerefKind;
 
 /// The kind of an access.
@@ -262,8 +264,29 @@ struct Cx<'f, 'b> {
     /// the state marks.
     moved_now: Vec<LocalId>,
     /// Per loan: how many of the live tracked locals hold it at the point reached. A loan is
-    /// live while that is not zero.
+    /// live while that is not zero, or while it is `reached`.
     holders: Vec<u32>,
+    /// Whether a store has grown a local ([`Flow::grown`]): the live loans are then closed
+    /// under [`Flow::loan_holds`], and the fields up to `stale` are in use.
+    grown: bool,
+    /// Per loan: it leads further (its place is a borrowed local whose set is read from the
+    /// state, or it has contents).
+    leads: Vec<bool>,
+    /// The loans with a holder that lead further, each once; per loan its place in the list
+    /// plus one (0: not in it).
+    roots: Vec<LoanId>,
+    root_at: Vec<u32>,
+    /// Per loan: it is reached through the loans of `roots`; the reached ones. Valid unless
+    /// `stale`.
+    reached: Vec<bool>,
+    reached_list: Vec<LoanId>,
+    /// Per loan: the last search that met it (a count of the searches).
+    met: Vec<u32>,
+    searches: u32,
+    stale: bool,
+    /// Loans counted in or out and loans met by the searches; the searches.
+    counted_loans: u64,
+    rebuilt: u64,
     /// Per tracked local: the id of the set whose loans are counted for it in `holders` (0:
     /// none). At a point reached that is its set if it is live.
     counted_id: Vec<u32>,
@@ -283,10 +306,6 @@ struct Cx<'f, 'b> {
     /// of it or in none of it.
     live: Vec<bool>,
     known_at: Vec<u32>,
-    /// With an entry state per block ([`Flow::exact`]): the loans the live locals reach, while
-    /// they are counted in `holders` ([`Cx::open`]); its scratch.
-    reached: Option<Set>,
-    live_held: Vec<u32>,
     /// Per statement of the block being checked: the tracked locals it uses last, as a range
     /// of `dies`, and the tracked local it defines that is used later (`u32::MAX`: none).
     last_uses: Vec<(u32, u32)>,
@@ -301,12 +320,8 @@ fn chain(body: &Body, l: usize) -> usize {
 }
 
 impl Cx<'_, '_> {
-    /// One more live local holds loan `l`.
-    fn hold(&mut self, l: usize) {
-        self.holders[l] += 1;
-        if self.holders[l] > 1 {
-            return;
-        }
+    /// Loan `l` becomes live: it joins the chain of its local.
+    fn link(&mut self, l: usize) {
         let c = chain(self.flow.body, l);
         let head = self.first[c];
         self.next[l] = head;
@@ -317,12 +332,8 @@ impl Cx<'_, '_> {
         self.first[c] = l as LoanId;
     }
 
-    /// One live local less holds loan `l`.
-    fn release(&mut self, l: usize) {
-        self.holders[l] -= 1;
-        if self.holders[l] > 0 {
-            return;
-        }
+    /// Loan `l` is live no more.
+    fn unlink(&mut self, l: usize) {
         let (next, prev) = (self.next[l], self.prev[l]);
         if next != u32::MAX {
             self.prev[next as usize] = prev;
@@ -333,6 +344,91 @@ impl Cx<'_, '_> {
             let c = chain(self.flow.body, l);
             self.first[c] = next;
         }
+    }
+
+    /// One more live local holds loan `l`.
+    fn hold(&mut self, l: usize) {
+        self.counted_loans += 1;
+        self.holders[l] += 1;
+        if self.holders[l] > 1 {
+            return;
+        }
+        if self.grown && self.leads[l] {
+            self.roots.push(l as LoanId);
+            self.root_at[l] = self.roots.len() as u32;
+            self.stale = true;
+        }
+        if !(self.grown && self.reached[l]) {
+            self.link(l);
+        }
+    }
+
+    /// One live local less holds loan `l`.
+    fn release(&mut self, l: usize) {
+        self.counted_loans += 1;
+        self.holders[l] -= 1;
+        if self.holders[l] > 0 {
+            return;
+        }
+        if self.grown && self.leads[l] {
+            let at = self.root_at[l] as usize - 1;
+            let last = self.roots.pop().unwrap_or(l as LoanId);
+            if at < self.roots.len() {
+                self.roots[at] = last;
+                self.root_at[last as usize] = at as u32 + 1;
+            }
+            self.root_at[l] = 0;
+            self.stale = true;
+        }
+        if !(self.grown && self.reached[l]) {
+            self.unlink(l);
+        }
+    }
+
+    /// Finds the loans reached in state `st` through the loans live locals hold: what
+    /// [`Flow::reach`] adds to those.
+    fn search(&mut self, st: &State) {
+        self.stale = false;
+        self.rebuilt += 1;
+        self.searches += 1;
+        let nloans = self.flow.atoms.nloans;
+        let mut found: Vec<LoanId> = Vec::new();
+        let mut todo = self.roots.clone();
+        while let Some(l) = todo.pop() {
+            let held = self.flow.loan_holds(st, l as usize);
+            for a in held.iter().take_while(|&a| a < nloans) {
+                self.counted_loans += 1;
+                if self.met[a] == self.searches {
+                    continue;
+                }
+                self.met[a] = self.searches;
+                found.push(a as LoanId);
+                // one with a holder is searched from as a root
+                if self.leads[a] && self.holders[a] == 0 {
+                    todo.push(a as LoanId);
+                }
+            }
+        }
+        // the new ones first: a loan reached before and now stays live
+        for &l in &found {
+            let l = l as usize;
+            if !self.reached[l] {
+                self.reached[l] = true;
+                if self.holders[l] == 0 {
+                    self.link(l);
+                }
+            }
+        }
+        for l in std::mem::take(&mut self.reached_list) {
+            let l = l as usize;
+            if self.met[l] != self.searches {
+                self.reached[l] = false;
+                if self.holders[l] == 0 {
+                    self.unlink(l);
+                }
+            }
+        }
+        self.reached_list = found;
     }
 
     /// Counts the loans of set `id` for tracked local `t` in place of the ones counted for
@@ -374,46 +470,12 @@ impl Cx<'_, '_> {
         self.live[t as usize]
     }
 
-    /// With an entry state per block the live loans are not kept from statement to statement
-    /// (they are closed under what the borrowed locals hold in the state): counts the loans the
-    /// live locals reach in `st`, until [`Cx::close`].
-    fn open(&mut self, st: &State) {
-        if !self.flow.exact() {
-            return;
-        }
-        let mut live = std::mem::take(&mut self.live_held);
-        live.clear();
-        for &t in st.held() {
-            if self.alive(t) {
-                live.push(t);
-            }
-        }
-        let reached = self.flow.live_loans(st, &live);
-        self.live_held = live;
-        let nloans = self.flow.atoms.nloans;
-        for a in reached.iter().filter(|&a| a < nloans) {
-            self.hold(a);
-        }
-        self.reached = Some(reached);
-    }
-
-    fn close(&mut self) {
-        let Some(reached) = self.reached.take() else { return };
-        let nloans = self.flow.atoms.nloans;
-        for a in reached.iter().filter(|&a| a < nloans) {
-            self.release(a);
-        }
-    }
-
     /// Applies statement `i` of the block being checked to `st` and moves the live locals and
     /// loans to the point after it.
     fn step(&mut self, st: &mut State, s: &Stmt, i: usize) {
         let (lo, hi) = self.last_uses[i];
         let born = self.born[i];
-        let exact = self.flow.exact();
-        if !exact {
-            st.record();
-        }
+        st.record();
         self.flow.apply(&s.kind, st);
         for k in lo..hi {
             let t = self.dies[k as usize];
@@ -422,14 +484,13 @@ impl Cx<'_, '_> {
         if born != u32::MAX {
             self.live[born as usize] = true;
         }
-        if exact {
-            return;
-        }
         // the locals whose set or liveness the statement changed
         for k in 0..st.recorded().len() {
             let t = st.recorded()[k].0;
             let id = if self.alive(t) { st.id(t) } else { 0 };
             self.count(t, id);
+            // what a loan of this local leads to has changed
+            self.stale |= self.grown && self.flow.is_lent(t);
         }
         for k in lo..hi {
             self.count(self.dies[k as usize], 0);
@@ -491,9 +552,7 @@ impl Cx<'_, '_> {
                 self.born[i] = t;
             }
         }
-        if !flow.exact() {
-            self.recount(st, b);
-        }
+        self.recount(st, b);
         let body = self.flow.body;
         for (i, s) in body.blocks[b].stmts.iter().enumerate() {
             self.pending.clear();
@@ -505,7 +564,8 @@ impl Cx<'_, '_> {
     /// Makes the counted sets those of the locals live at the entry of block `b`, entered in
     /// state `st`, from what the block checked before left counted.
     fn recount(&mut self, st: &State, b: usize) {
-        // a block entered in its entry state: that keeps the sets of the live locals only
+        // a block entered in its entry state: that keeps the sets of the live locals, and of
+        // the borrowed locals a loan's contents may be read from
         let fresh = !self.flow.carried(b);
         if !fresh {
             let before = self.flow.preds[b][0] as usize;
@@ -514,10 +574,12 @@ impl Cx<'_, '_> {
                 return;
             }
         }
+        self.stale |= self.grown && fresh;
         let mut k = 0;
         for i in 0..self.counted.len() {
             let t = self.counted[i];
-            let id = if fresh || self.alive(t) { st.id(t) } else { 0 };
+            let live = (fresh && !self.flow.is_lent(t)) || self.alive(t);
+            let id = if live { st.id(t) } else { 0 };
             self.count(t, id);
             if id == 0 {
                 self.in_counted[t as usize] = false;
@@ -529,14 +591,13 @@ impl Cx<'_, '_> {
         self.counted.truncate(k);
         for i in 0..st.held().len() {
             let t = st.held()[i];
-            if self.counted_id[t as usize] == 0 && (fresh || self.alive(t)) {
+            if self.counted_id[t as usize] == 0 && ((fresh && !self.flow.is_lent(t)) || self.alive(t)) {
                 self.count(t, st.id(t));
             }
         }
     }
 
-    /// Checks an access against the live loans and the moved places. With an entry state per
-    /// block the live loans are those of the innermost [`Cx::open`].
+    /// Checks an access in state `st` against the live loans and the moved places.
     #[allow(clippy::too_many_arguments)]
     fn access(
         &mut self,
@@ -548,6 +609,9 @@ impl Cx<'_, '_> {
         node: u32,
         exclude: &[LoanId],
     ) {
+        if self.stale {
+            self.search(st);
+        }
         let mut loans = Vec::new();
         // only a loan of the same local can conflict, and with an access that is not
         // exclusive only a `&mut` one
@@ -655,7 +719,6 @@ impl Cx<'_, '_> {
     /// (`x = V.{ r: &x.f }`: the write of `x` ends the value the new one borrows).
     fn stmt(&mut self, st: &mut State, at: (u32, u32), s: &Stmt, i: usize) {
         let body = self.flow.body;
-        self.open(st);
         match &s.kind {
             StmtKind::Assign { dest, rv, init } => {
                 match rv {
@@ -698,7 +761,6 @@ impl Cx<'_, '_> {
                 // the stores are judged in the state before the statement, and reported after
                 // its write
                 let stores = self.stores(st, s, dest, rv);
-                self.close();
                 self.step(st, s, i);
                 if !*init {
                     // the write happens after the right side: its moves count (`s.a = f(s)`)
@@ -710,9 +772,7 @@ impl Cx<'_, '_> {
                     });
                     self.moved_now.extend(moves.iter().map(|m| m.0));
                     self.pending.extend(moves);
-                    self.open(st);
                     self.access(st, at, Access::Write, dest, s.span, s.node, &[]);
-                    self.close();
                     if let Err((shared, blame)) = mutability(body, dest) {
                         self.findings.push(Finding::Immutable {
                             place: dest.clone(),
@@ -741,7 +801,6 @@ impl Cx<'_, '_> {
                 self.ret(st, o);
             }
         }
-        self.close();
         self.step(st, s, i);
     }
 
@@ -875,8 +934,32 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         return Checked { findings, dump: Vec::new() };
     }
     let (nt, nloans) = (flow.ntracked, flow.atoms.nloans);
+    // after a store has grown a local: the loans whose places or contents lead to more loans
+    let grown = flow.grown;
+    let leads: Vec<bool> = if grown {
+        (0..nloans)
+            .map(|l| {
+                let place = &body.loans[l].place;
+                (!place.has_deref() && flow.is_ref_like(place.ty)) || !flow.contents[l].is_empty()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let per_loan = if grown { nloans } else { 0 };
     let mut cx = Cx {
         holders: vec![0; nloans],
+        grown,
+        leads,
+        roots: Vec::new(),
+        root_at: vec![0; per_loan],
+        reached: vec![false; per_loan],
+        reached_list: Vec::new(),
+        met: vec![0; per_loan],
+        searches: 0,
+        stale: false,
+        counted_loans: 0,
+        rebuilt: 0,
         counted_id: vec![0; nt],
         counted: Vec::new(),
         in_counted: vec![false; nt],
@@ -887,8 +970,6 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         block_no: 0,
         live: vec![false; nt],
         known_at: vec![0; nt],
-        reached: None,
-        live_held: Vec::new(),
         last_uses: Vec::new(),
         dies: Vec::new(),
         born: Vec::new(),
@@ -927,6 +1008,8 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         }
     }
     cx.flow.recycle(st);
+    cx.flow.cost.counted += cx.counted_loans;
+    cx.flow.cost.rebuilt += cx.rebuilt;
     found.sort_by_key(|x| x.0);
     dumped.sort_by_key(|x| x.0);
     let mut findings: Vec<Finding> = found.into_iter().flat_map(|x| x.1).collect();

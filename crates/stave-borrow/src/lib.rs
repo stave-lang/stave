@@ -106,15 +106,31 @@ pub enum Dataflow {
     Both,
 }
 
+/// The environment variable that names the dataflow.
+pub const DATAFLOW_ENV: &str = "STAVE_BORROW_DATAFLOW";
+
 impl Dataflow {
-    /// The choice of `STAVE_BORROW_DATAFLOW`, read once: `old` is the dense one, `both` both,
-    /// anything else the sparse one.
+    /// The dataflow a value of [`DATAFLOW_ENV`] names: unset, empty or `new` the sparse one, `old`
+    /// the dense one, `both` both. Any other value is an error.
+    pub fn named(v: Option<&str>) -> Result<Dataflow, String> {
+        match v.map(str::trim) {
+            None | Some("" | "new") => Ok(Dataflow::Sparse),
+            Some("old") => Ok(Dataflow::Dense),
+            Some("both") => Ok(Dataflow::Both),
+            Some(s) => Err(format!("{DATAFLOW_ENV} must be `new`, `old` or `both`, not `{s}`")),
+        }
+    }
+
+    /// The choice of [`DATAFLOW_ENV`], read once.
+    ///
+    /// # Panics
+    /// On a value [`Dataflow::named`] rejects: a run must not go on with another dataflow than
+    /// the one asked for. `stave` checks the value first and reports it as a usage error.
     pub fn from_env() -> Dataflow {
         static CHOICE: OnceLock<Dataflow> = OnceLock::new();
-        *CHOICE.get_or_init(|| match std::env::var("STAVE_BORROW_DATAFLOW").as_deref() {
-            Ok("old") => Dataflow::Dense,
-            Ok("both") => Dataflow::Both,
-            _ => Dataflow::Sparse,
+        *CHOICE.get_or_init(|| match Dataflow::named(std::env::var(DATAFLOW_ENV).ok().as_deref()) {
+            Ok(d) => d,
+            Err(msg) => panic!("{msg}"),
         })
     }
 }
@@ -334,7 +350,7 @@ fn check_body_flow(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item:
                     one.internal.get_or_insert("the sparse and the dense borrow dataflow disagree");
                 }
             }
-            one.cost.add(flow.cost);
+            one.cost.add(flow.cost());
             let l = locks::scan(body, &flow.rpo, &|t| flow.is_ref_like(t), tys);
             (found, flow.rounds, l)
         }

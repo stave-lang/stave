@@ -194,12 +194,24 @@ pub struct SetTable {
     by_hash: FxHashMap<u64, u32>,
     /// Per id: the id of the set entered before it with the same hash (`u32::MAX`: none).
     same_hash: Vec<u32>,
+    /// The atoms of the sets looked up or joined so far.
+    work: u64,
 }
 
 impl SetTable {
     /// A table whose sets are over `n` atoms.
     pub fn new(n: usize) -> SetTable {
-        SetTable { sets: vec![Set::new(n)], by_hash: FxHashMap::default(), same_hash: vec![u32::MAX] }
+        SetTable {
+            sets: vec![Set::new(n)],
+            by_hash: FxHashMap::default(),
+            same_hash: vec![u32::MAX],
+            work: 0,
+        }
+    }
+
+    /// The atoms of the sets looked up or joined so far.
+    pub fn work(&self) -> u64 {
+        self.work
     }
 
     #[inline]
@@ -212,6 +224,7 @@ impl SetTable {
         if s.is_empty() {
             return 0;
         }
+        self.work += s.len() as u64;
         let mut h = FxHasher::default();
         s.atoms().hash(&mut h);
         let h = h.finish();
@@ -243,6 +256,7 @@ impl SetTable {
         if a == 0 {
             return b;
         }
+        self.work += (self.sets[a as usize].len() + self.sets[b as usize].len()) as u64;
         if self.sets[b as usize].is_subset(&self.sets[a as usize]) {
             return a;
         }
