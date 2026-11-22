@@ -169,7 +169,8 @@ impl Atoms {
 
 /// The dataflow state at the point a walk has reached: the origin set of every tracked local, as
 /// an id of [`Flow::sets`], and the maybe-moved locals (a value moves whole: one mark per local).
-/// A walk has one state and changes it in place.
+/// A walk has one state and changes it in place. There is no `Clone`: every whole state comes
+/// from [`Flow::state`], which counts the ones it makes ([`Cost::states`]).
 pub struct State {
     o: Vec<u32>,
     /// The tracked locals whose set may be non-empty, each once (`in_held`).
@@ -307,6 +308,9 @@ pub struct Cost {
     pub counted: u64,
     /// Times the checks found the loans reached through the live ones again.
     pub rebuilt: u64,
+    /// Whole states made ([`Flow::state`] with no spare one): each has an entry per tracked
+    /// local and per local.
+    pub states: u64,
 }
 
 impl Cost {
@@ -320,6 +324,7 @@ impl Cost {
         self.atoms += o.atoms;
         self.counted += o.counted;
         self.rebuilt += o.rebuilt;
+        self.states += o.states;
     }
 }
 
@@ -580,7 +585,10 @@ impl<'b> Flow<'b> {
                 st.clear();
                 st
             }
-            None => State::new(self.ntracked, self.body.locals.len()),
+            None => {
+                self.cost.states += 1;
+                State::new(self.ntracked, self.body.locals.len())
+            }
         }
     }
 
@@ -960,9 +968,8 @@ impl<'b> Flow<'b> {
     /// (a store adds to it from the store on: what is stored later on the path is not in the
     /// place yet).
     pub fn loan_holds(&self, st: &State, l: usize) -> Set {
-        let place = &self.body.loans[l].place;
-        if self.grown && !place.has_deref() && self.is_ref_like(place.ty) {
-            let now = self.local_o(st, place.local);
+        if let Some(local) = self.read_local(l) {
+            let now = self.local_o(st, local);
             if self.watch && !self.exact && self.pre.get(l).is_some_and(|was| !was.is_subset(&now)) {
                 self.short.set(true);
             }
@@ -970,6 +977,14 @@ impl<'b> Flow<'b> {
         } else {
             self.contents[l].clone()
         }
+    }
+
+    /// The local whose set in the state is what loan `l`'s place holds ([`Flow::loan_holds`]):
+    /// once a store has grown a local, a ref-like local borrowed without a dereference. `None`:
+    /// the loan's contents.
+    pub fn read_local(&self, l: usize) -> Option<LocalId> {
+        let place = &self.body.loans[l].place;
+        (self.grown && !place.has_deref() && self.is_ref_like(place.ty)).then_some(place.local)
     }
 
     /// `contents(S)` in state `st`.

@@ -13,7 +13,8 @@
 //!   fixed bounds, which no machine load changes: per statement the statements applied, the
 //!   state entries copied (a state is copied only into or out of an entry state), the loans
 //!   counted in or out of the live loans, the atoms of the sets entered or joined, and in all
-//!   the times the loans reached through the live ones were searched again.
+//!   the times the loans reached through the live ones were searched again and the whole states
+//!   made.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -388,25 +389,28 @@ struct Shape {
     atoms: u64,
     /// Searches of the loans reached through the live ones, in the whole program.
     rebuilt: u64,
+    /// Whole states made at 10 000 statements beyond the ones made at 5 000: a body makes one,
+    /// and its solve, checks and replays all walk that one.
+    states: u64,
 }
 
 const SHAPES: [Shape; 11] = [
-    Shape { name: "line", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0 },
-    Shape { name: "loans", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0 },
-    Shape { name: "locals", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0 },
-    Shape { name: "calls", errors: 0, applied: 4, copied: 1, counted: 3, atoms: 3, rebuilt: 0 },
-    Shape { name: "match", errors: 0, applied: 6, copied: 2, counted: 2, atoms: 2, rebuilt: 0 },
-    Shape { name: "joins", errors: 0, applied: 6, copied: 5, counted: 2, atoms: 2, rebuilt: 0 },
+    Shape { name: "line", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
+    Shape { name: "loans", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
+    Shape { name: "locals", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
+    Shape { name: "calls", errors: 0, applied: 4, copied: 1, counted: 3, atoms: 3, rebuilt: 0, states: 0 },
+    Shape { name: "match", errors: 0, applied: 6, copied: 2, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
+    Shape { name: "joins", errors: 0, applied: 6, copied: 5, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
     // every loan is live across every inner `if`: the copies follow the live locals per block
-    Shape { name: "nest", errors: 0, applied: 6, copied: 0, counted: 2, atoms: 2, rebuilt: 0 },
+    Shape { name: "nest", errors: 0, applied: 6, copied: 0, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
     // one more round after the store; the reached loans are searched where the borrow of the
     // view comes and goes, not per statement
-    Shape { name: "grown", errors: 0, applied: 6, copied: 1, counted: 2, atoms: 3, rebuilt: 12 },
+    Shape { name: "grown", errors: 0, applied: 6, copied: 1, counted: 2, atoms: 3, rebuilt: 12, states: 0 },
     // solved twice: without and with an entry state per block
-    Shape { name: "stale", errors: 0, applied: 10, copied: 1, counted: 2, atoms: 4, rebuilt: 20 },
+    Shape { name: "stale", errors: 0, applied: 10, copied: 1, counted: 2, atoms: 4, rebuilt: 20, states: 0 },
     // each E0501 replays its block to find the later use: 20 replays of 15 000 statements
-    Shape { name: "errors", errors: 1, applied: 36, copied: 1, counted: 1, atoms: 1, rebuilt: 0 },
-    Shape { name: "owners", errors: 0, applied: 6, copied: 1, counted: 1, atoms: 1, rebuilt: 0 },
+    Shape { name: "errors", errors: 1, applied: 36, copied: 1, counted: 1, atoms: 1, rebuilt: 0, states: 0 },
+    Shape { name: "owners", errors: 0, applied: 6, copied: 1, counted: 1, atoms: 1, rebuilt: 0, states: 0 },
 ];
 
 /// The most state entries copied per (local, block) pair with the local live at the block's
@@ -436,11 +440,13 @@ fn large_fns_stay_cheap() {
         let per_live = full.cost.copied as f64 / live as f64;
         let (grown, exact) = (full.cost.grown - lib.grown, full.cost.exact - lib.exact);
         let rebuilt = full.cost.rebuilt - lib.rebuilt;
+        let states = full.cost.states.saturating_sub(half.cost.states);
         eprintln!(
             "{shape}: borrowck {:.0} ms; +{stmts} statements, per statement: applied {applied:.2}, copied \
-             {copied:.2}, counted {counted:.2}, atoms {atoms:.2}; searches {rebuilt}; copied {} for {} live \
-             locals per block and {} statements ({per_live:.2}); grown {grown}, per-block {exact}",
-            full.ms, full.cost.copied, full.cost.live, full.cost.stmts
+             {copied:.2}, counted {counted:.2}, atoms {atoms:.2}; searches {rebuilt}; states {} ({states} \
+             more than at half the size); copied {} for {} live locals per block and {} statements ({per_live:.2}); grown \
+             {grown}, per-block {exact}",
+            full.ms, full.cost.states, full.cost.copied, full.cost.live, full.cost.stmts
         );
         assert!(stmts >= 4_000, "{shape}: {stmts}");
         if full.ms > MAX_MS {
@@ -458,6 +464,9 @@ fn large_fns_stay_cheap() {
         }
         if rebuilt > sh.rebuilt {
             bad.push(format!("{shape}: {rebuilt} searches of the reached loans (bound {})", sh.rebuilt));
+        }
+        if states > sh.states {
+            bad.push(format!("{shape}: {states} whole states made (bound {})", sh.states));
         }
         if per_live > MAX_PER_LIVE {
             bad.push(format!("{shape}: {per_live:.2} state entries copied per live local and block"));
