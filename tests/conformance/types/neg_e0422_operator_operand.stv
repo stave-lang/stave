@@ -1,0 +1,110 @@
+//~ CHECK-ONLY
+// An operator (binary, unary, compound assignment) copies its operands: each operand is Copy
+// where the operator is used (E0422 case `operand`). A bound on an operator trait alone does
+// not make a generic param Copy: `T: Add` is rejected, `T: Add + Copy` is accepted. The same
+// holds for an operand behind a reference, a field, an element, or a capture, and for a type
+// whose operator impl is rejected.
+import std.vec;
+
+fn bin<T: Add>(a: T, b: T) -> T {
+    return a + b; //~ ERROR E0422
+}
+
+fn chain<T: Mul>(a: T, b: T, c: T) -> T {
+    return a * b * c; //~ ERROR E0422
+}
+
+fn wrap<T: WrapAdd>(a: T, b: T) -> T {
+    return a +% b; //~ ERROR E0422
+}
+
+fn sat<T: SatSub>(a: T, b: T) -> T {
+    return a -| b; //~ ERROR E0422
+}
+
+fn shl<T: Shl>(a: T, b: T) -> T {
+    return a << b; //~ ERROR E0422
+}
+
+fn bits<T: BitAnd>(a: T, b: T) -> T {
+    return a & b; //~ ERROR E0422
+}
+
+fn neg<T: Neg>(a: T) -> T {
+    return -a; //~ ERROR E0422
+}
+
+fn inv<T: Not>(a: T) -> T {
+    return ~a; //~ ERROR E0422
+}
+
+fn compound<T: Add>(d: T, e: T) -> T {
+    let mut x = d;
+    x += e; //~ ERROR E0422
+    return x;
+}
+
+fn compound_rem<T: Rem>(d: T, e: T) -> T {
+    let mut x = d;
+    x %= e; //~ ERROR E0422
+    return x;
+}
+
+fn behind_ref<T: Mul>(r: &T) -> T {
+    return *r * *r; //~ ERROR E0422
+}
+
+fn behind_mut<T: Add>(r: &mut T, e: T) {
+    *r += e; //~ ERROR E0422
+}
+
+fn element<T: Add>(a: &mut [T; 2], e: T) {
+    a[0] += e; //~ ERROR E0422
+}
+
+struct P<T> { pub d: T, pub n: u32 }
+
+fn field<T: Sub>(p: P<T>, e: T) {
+    let mut q = p;
+    q.d -= e; //~ ERROR E0422
+}
+
+impl<T: BitOr> P<T> {
+    pub fn or(&self, e: T) -> T {
+        return self.d | e; //~ ERROR E0422
+    }
+}
+
+fn capture<T: Add>(d: T) {
+    let mut x = d;
+    let f = fn(e: T) { x += e; }; //~ ERROR E0422
+}
+
+// a Copy bound beside the operator bound: accepted in every form
+fn ok<T: Add + Neg + Copy>(a: T, r: &mut T) -> T {
+    let mut x = a + a;
+    x += *r;
+    *r += a;
+    return -x;
+}
+
+// a concrete type that is not Copy: its operator impl and every use are rejected
+struct Big { pub limbs: vec.Vec<u64> }
+
+impl Add for Big { //~ ERROR E0422
+    fn add(self, rhs: Self) -> Self { return rhs; }
+}
+
+fn big(a: Big, b: Big) -> Big {
+    return a + b; //~ ERROR E0422
+}
+
+fn big_compound(a: Big, b: Big) -> Big {
+    let mut x = a;
+    x += b; //~ ERROR E0422
+    return x;
+}
+
+fn main() -> i32 {
+    return 0;
+}

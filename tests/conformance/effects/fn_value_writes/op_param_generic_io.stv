@@ -1,4 +1,4 @@
-// A generic `<T: view + core.Add>` adds two fn wrappers; the impl calls its `rhs` fn field.
+// A generic `<T: view + core.Add + Copy>` adds two fn wrappers; the impl calls its `rhs` fn field.
 import std.core;
 import std.io;
 
@@ -22,7 +22,7 @@ impl core.Add for H {
     }
 }
 
-fn plus<T: view + core.Add>(a: T, b: T) -> T {
+fn plus<T: view + core.Add + Copy>(a: T, b: T) -> T {
     return a + b;
 }
 

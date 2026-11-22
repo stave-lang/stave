@@ -1,9 +1,8 @@
 //~ CHECK-ONLY
 // Operands are evaluated left to right, the receiver first. A by-value operand that is not Copy
-// moves its place when it is evaluated: a later operand of the same call, method call, literal,
-// or operator that uses the place, or a part of it, uses a moved value (E0502). Each shape
-// would give the value two owners. An operator moves only an operand of a generic type without
-// a `Copy` bound: a user operator's self type is Copy (E0422).
+// moves its place when it is evaluated: a later operand of the same call, method call, or
+// literal that uses the place, or a part of it, uses a moved value (E0502). Each shape would give
+// the value two owners. An operator never moves: its operands are Copy (E0422).
 import std.sync;
 import std.vec;
 
@@ -90,15 +89,6 @@ fn array_literal(d: D) {
 
 fn variant(d: D) {
     let e = E.Two(d, d); //~ ERROR E0502
-}
-
-fn operator<T: Add>(d: T) {
-    let e = d + d; //~ ERROR E0502
-}
-
-fn compound<T: Add>(d: T) {
-    let mut x = d;
-    x += x; //~ ERROR E0502
 }
 
 fn select(d: D, c: bool) {

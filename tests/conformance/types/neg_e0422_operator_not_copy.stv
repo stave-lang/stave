@@ -1,7 +1,8 @@
 //~ CHECK-ONLY
 // An operator trait of `std.core` is implemented only for a type that is Copy in every instance
 // the impl covers (Copy under the impl's own bounds): an operator never moves its operands. A
-// type that owns memory takes a method instead (`a.add(&b)`).
+// type that owns memory takes a method instead (`a.add(&b)`). A use of a rejected impl on a
+// non-Copy operand is E0422 as well (case `operand`).
 import std.string;
 import std.vec;
 
@@ -103,7 +104,7 @@ fn twice<T: Rem + Copy>(x: T) -> T { return x % x; }
 fn main() -> i32 {
     let d1 = D.{ id: 3 };
     let d2 = D.{ id: 1 };
-    let d3 = d1 - d2;
+    let d3 = d1 - d2; //~ ERROR E0422
     let w = W::<u32>.{ v: 1 } + W::<u32>.{ v: 2 };
     let k = K::<u32>.{ v: 1 } * K::<u32>.{ v: 2 };
     let f = F::<u32>.{ v: 1 } & F::<u32>.{ v: 2 };

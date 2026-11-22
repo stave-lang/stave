@@ -2374,10 +2374,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0422",
         severity: Severity::Error,
         area: "kinds",
-        rule: "impl of an operator trait of `std.core` (`Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor Neg Not` and the wrapping and saturating forms) whose self type is not Copy in every instance the impl covers (Copy under the impl's bounds): an operator never moves its operands",
+        rule: "impl of an operator trait of `std.core` (`Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor Neg Not` and the wrapping and saturating forms) whose self type is not Copy in every instance the impl covers (Copy under the impl's bounds), at the impl; case `operand`: a binary or unary operator or compound assignment on a user type whose operand is not Copy where it is used (a generic param bounded by the operator trait but not by `Copy`, also behind a reference), at the operator: an operator never moves its operands",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "bound", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "op", kind: HoleKind::Source, choices: &[] },
             Hole { name: "trait", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -2390,6 +2392,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "make `{type}` Copy (`impl Copy for ..`, with `Copy` bounds on the impl's params if the `impl Copy` has them), or give it a method instead: `fn add(&self, rhs: &Self) -> Self`, called as `a.add(&b)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "operand",
+                message: "operator `{op}` copies its operands, but `{type}` is not known to be Copy here",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                    LabelTemplate { at: "param", text: "`{type}` declared here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `Copy` beside the operator bound: `{type}: {bound} + Copy` (for a type that is not a generic param: `impl Copy for ..`, or a method that borrows, `a.add(&b)`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

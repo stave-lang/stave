@@ -184,9 +184,10 @@ the ones before them, so two operands of one rvalue never share a moved place ei
 a lowering that evaluates operands in another order than the CFG; a Copy operand treated as a
 move (it reads its bytes where it stands and leaves them).
 
-An operator moves an operand only in a generic body whose operand type has no `Copy` bound
-(`T: Add`): an operator trait is implemented only for Copy types (E0422), so in every instance
-the operands are copied, and `p op= e` overwrites a value without drop glue.
+No operator moves an operand: the type checker accepts an operator only on operands that are
+Copy where it is used (E0422 case `operand`; a bound `T: Add` without `Copy` is rejected), and
+an operator trait is implemented only for Copy types (E0422), so the CFG takes every operator
+operand as a copy and `p op= e` overwrites a value without drop glue.
 
 ## Whole moves: no value is left with a moved-out part
 

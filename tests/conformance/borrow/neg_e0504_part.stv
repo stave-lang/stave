@@ -52,13 +52,6 @@ fn let_pattern_on_part(h: H) -> u32 {
     return k;
 }
 
-struct Two<T> { pub a: T, pub n: u32 }
-
-fn compound_field<T: Add>(s: Two<T>, e: T) {
-    let mut t = s;
-    t.a += e; //~ ERROR E0504
-}
-
 fn return_field(s: S) -> vec.Vec<u32> {
     return s.v; //~ ERROR E0504
 }
