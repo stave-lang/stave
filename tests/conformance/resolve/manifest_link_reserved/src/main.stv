@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// E1002: `[target.<T>.link]` is reserved for C link inputs; stage0 links no C object, so the
+// table is an unknown key of the target table.
+fn main() -> i32 {
+    return 0;
+}

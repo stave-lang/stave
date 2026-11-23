@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-eval"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "autocfg"
@@ -132,7 +132,7 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "diaggen"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "toml",
@@ -174,7 +174,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fuzz-classes"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "gen-corpus",
  "stave-diag",
@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "gen-corpus"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "stave-diag",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "gen-tables"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "toml",
@@ -236,7 +236,7 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "lang-budget"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "libc"
@@ -252,7 +252,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "ll1gen"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "stave-syntax",
 ]
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "stave-borrow"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "rayon",
  "rustc-hash",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "stave-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "agent-eval",
  "serde_json",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "stave-codegen-a64"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "stave-ir",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "stave-codegen-x64"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "rustc-hash",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "stave-diag"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "serde_json",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "stave-driver"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "gen-corpus",
  "rayon",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "stave-intern"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "rustc-hash",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "stave-ir"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "rustc-hash",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "stave-obj"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "rustc-hash",
@@ -583,14 +583,14 @@ dependencies = [
 
 [[package]]
 name = "stave-opt"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "stave-ir",
 ]
 
 [[package]]
 name = "stave-sema"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "gen-corpus",
  "proptest",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "stave-syntax"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "memmap2",
  "proptest",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "stave-target"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "syn"
@@ -694,7 +694,7 @@ checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "touch-fn"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "gen-corpus",
  "stave-syntax",

@@ -1,0 +1,33 @@
+//~ CHECK-ONLY
+// `requires` and `ensures` on an `unsafe` fn, free and in an impl: the clauses are checked like
+// those of a safe fn, the call needs `unsafe(..)`, and the clauses read only what a clause may.
+struct Buf { len: usize }
+
+impl Buf {
+    pub unsafe("i is below len") fn at(&self, i: usize) -> usize requires(i < self.len) ensures(result == i) {
+        return i;
+    }
+}
+
+unsafe("p is valid for reads of n bytes") fn first(p: *const u8, n: usize) -> u8 requires(n > 0) {
+    return unsafe("the caller guarantees n > 0 readable bytes") *p;
+}
+
+unsafe("p is valid for reads") fn read_or(p: *const u32, fallback: u32, ok: bool) -> u32
+    requires(fallback < 100)
+    ensures(ok || result == fallback) {
+    if ok {
+        return unsafe("the caller guarantees p is readable") *p;
+    }
+    return fallback;
+}
+
+fn main() -> i32 {
+    let x: u8 = 7;
+    let a = unsafe("x is one readable byte") first(&x as *const u8, 1);
+    let b = Buf.{ len: 4 };
+    let c = unsafe("2 is below 4") b.at(2);
+    let w: u32 = 5;
+    let d = unsafe("w is readable") read_or(&w as *const u32, 9, true);
+    return 0;
+}

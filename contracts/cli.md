@@ -354,3 +354,22 @@ cycle (recursion, or a drop cycle of a recursive type; a `rec fn` on no cycle do
 plus the bound of what it can call outside the cycles, every other stack gets the
 computed bound of what it can call (intrinsics.md "stack table"), and each stack has a guard page
 below it.
+
+**Reserved: C link inputs.** The per-target table `[target.<T>.link]` is reserved for the files a
+program links when it calls C. Its keys are fixed now; stage0 links no C object, so it reads none of
+them: a manifest with such a table is invalid (E1002, unknown key `link`, at the key in
+`stave.toml`).
+
+```toml
+[target.x86_64-linux.link]              # reserved, not read yet
+objects  = ["c/x86/fast.o"]             # object files, paths relative to the package
+archives = ["c/x86/libz.a"]             # static archives, paths relative to the package
+libs     = ["m"]                        # names searched in the sysroot only
+libc     = false                        # true: link the C runtime start-up (default false)
+```
+
+Link inputs are per target (objects are per architecture) and live in no other table. Tables merge
+as `[target.T.dependencies]` do (the arch table, then the level table) and lists concatenate. A
+link table on `gpu-sm86`, an unknown key, or a missing file will be E1002. The sysroot and the C
+driver come from the build machine (`stave build` options or the environment), never from the
+manifest.

@@ -303,9 +303,12 @@ list):
   `runtime.cpu.trace` (dispatch bodies, trace bit), and the allocator
   `runtime.alloc.{try_alloc, try_realloc, free}` (`try_alloc(size, alignment) -> *mut u8`,
   `unsafe try_realloc(p, old_size, alignment, new_size) -> *mut u8`, both null on failure, a
-  failed `try_realloc` leaving `p` unchanged; `unsafe free(p, size, alignment)`), replaced by the
-  same three fns of an `allocator` declaration's module; the trapping `runtime.alloc.{alloc,
-  realloc}` are derived from them (`OutOfMemory` on null) and are never replaced;
+  failed `try_realloc` leaving `p` unchanged; `unsafe free(p, size, alignment)`); the trapping
+  `runtime.alloc.{alloc, realloc}` are derived from them (`OutOfMemory` on null). Planned: an
+  `allocator` declaration's module provides `try_alloc`, `try_realloc`, and `free` in their place,
+  and `alloc` / `realloc` stay derived and are never replaced. Today the declaration is only
+  checked: the compiler keeps the module's `alloc`, `free`, and `realloc` as roots (entry points,
+  E0709) and std's calls go to `runtime.alloc`;
   `std.slice.copy_raw(dst: *mut u8, src: *const u8, n: usize)`, the native code of
   `copy_bytes`;
 - compiler-emitted symbols: `_start`, `__stave_main`, `__stave_signal`, `__stave_thread_start`,
