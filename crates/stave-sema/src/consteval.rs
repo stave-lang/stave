@@ -222,8 +222,8 @@ pub(crate) fn data_size<E: CEnv + ?Sized>(env: &mut E, t: TypeId) -> Result<(), 
 pub const MAX_VALUE_BYTES: u64 = 1 << 28;
 
 /// The most bytes the values of one fn instance may take together (its frame sum: parameters,
-/// bindings, every expression value but a place read in place, one copy per arm of a value
-/// `if` / `match`, each call's result, by-value receiver and arguments, the return value;
+/// bindings, every expression value but a place read in place, two slots for a value `if` /
+/// `match` (its result and the live arm), each call's result, by-value receiver and arguments, the return value;
 /// contracts/lang-details.md "Size limits"). A back end's frame holds at most 1 GiB. Its frame
 /// measures at most 1.5 times that sum (a filled local, a whole aggregate loaded to read a part
 /// of it) on both targets, debug and release; 16 MiB are kept for the back end's own slots and

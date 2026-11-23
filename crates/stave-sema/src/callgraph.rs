@@ -1417,6 +1417,8 @@ impl<'a> Walk<'a> {
     /// Glue node `i` of `t`: its `Drop` impl, then the glue of every part that needs dropping.
     fn expand_glue(&mut self, i: u32, t: TypeId) {
         let site = Site::At(self.nodes[i as usize].span);
+        // the glue's own parameter type: a refusal here is this node's ([`build`])
+        crate::drops::glue_param(&mut self.cx, t);
         let w = World { prog: self.prog, sigs: self.sigs };
         let glue = crate::drops::glue(&w, &mut self.cx, t);
         if let Some(k) = glue.method

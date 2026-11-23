@@ -283,11 +283,19 @@ pub(crate) const QUERY_DEPTH: u32 = crate::typedepth::MAX_TYPE_DEPTH;
 /// view-kind rule (a query that asks whether an impl could apply to some instance, or names the
 /// impl a view was refused by; never one that selects an impl).
 struct Query {
+    /// Coinductive goals in progress, and the index of each.
     active: Vec<(TypeId, DeclId)>,
+    active_at: FxHashMap<(TypeId, DeclId), usize>,
     low: usize,
+    /// Inductive goals in progress, and the index of each.
     goals: Vec<(TypeId, TraitRef)>,
+    goals_at: FxHashMap<(TypeId, TraitRef), usize>,
     goal_low: usize,
     memo: FxHashMap<(TypeId, DeclId), bool>,
+    /// Answers that used a goal still in progress further out: a positive one an assumed
+    /// coinductive goal, a negative one a cut inductive goal. The goal they used settles them
+    /// when it ends ([`Query::settle`]): kept if its answer is the one they assumed.
+    pending: Vec<((TypeId, DeclId), bool)>,
     any_kind: bool,
 }
 
@@ -295,10 +303,13 @@ impl Default for Query {
     fn default() -> Query {
         Query {
             active: Vec::new(),
+            active_at: FxHashMap::default(),
             low: usize::MAX,
             goals: Vec::new(),
+            goals_at: FxHashMap::default(),
             goal_low: usize::MAX,
             memo: FxHashMap::default(),
+            pending: Vec::new(),
             any_kind: false,
         }
     }
@@ -308,23 +319,43 @@ impl Query {
     /// Enters inductive goal `g`: `None` if it is in progress (it does not hold through this
     /// path), else the mark [`Query::leave_goal`] takes.
     fn enter_goal(&mut self, g: (TypeId, TraitRef)) -> Option<(usize, usize)> {
-        if let Some(i) = self.goals.iter().position(|x| *x == g) {
+        if let Some(&i) = self.goals_at.get(&g) {
             self.goal_low = self.goal_low.min(i);
             return None;
         }
         let me = self.goals.len();
+        self.goals_at.insert(g.clone(), me);
         self.goals.push(g);
         Some((me, std::mem::replace(&mut self.goal_low, usize::MAX)))
     }
 
     /// Leaves the goal entered with `mark`: whether its answer used no goal still in progress
-    /// further out (so a negative answer may be memoized).
+    /// further out (so a negative answer is final).
     fn leave_goal(&mut self, mark: (usize, usize)) -> bool {
         let (me, saved) = mark;
-        self.goals.truncate(me);
+        for g in self.goals.drain(me..) {
+            self.goals_at.remove(&g);
+        }
         let low = self.goal_low;
         self.goal_low = saved.min(if low < me { low } else { usize::MAX });
         low >= me
+    }
+
+    /// Enters coinductive goal `key`: `Err` (it holds through this path) if it is in progress.
+    fn enter_active(&mut self, key: (TypeId, DeclId)) -> Result<(), ()> {
+        if let Some(&i) = self.active_at.get(&key) {
+            self.low = self.low.min(i);
+            return Err(());
+        }
+        self.active_at.insert(key, self.active.len());
+        self.active.push(key);
+        Ok(())
+    }
+
+    fn leave_active(&mut self) {
+        if let Some(k) = self.active.pop() {
+            self.active_at.remove(&k);
+        }
     }
 
     /// For a goal kept in no stack (a tuple's Copy): the mark [`Query::own_low`] takes.
@@ -338,11 +369,109 @@ impl Query {
         self.goal_low = saved.min(low);
         low == usize::MAX
     }
+
+    /// Records answer `r` of a goal that ended (`key`: `None` for one not memoized): final
+    /// (`free_pos`: it used no assumed coinductive goal further out, `free_neg`: no cut
+    /// inductive goal further out; a positive answer needs the first, a negative one the second)
+    /// or pending. The pending answers recorded since `start` (below this goal) that assumed
+    /// this goal's answer wrongly are dropped: positives once a coinductive goal fails,
+    /// negatives once an inductive goal holds. A goal free of both is the outermost goal the rest
+    /// used, so they are final now: kept if they assumed its answer, else dropped (dropping only
+    /// costs a recomputation). Returns the final answers.
+    fn settle(
+        &mut self,
+        key: Option<(TypeId, DeclId)>,
+        r: bool,
+        free_pos: bool,
+        free_neg: bool,
+        start: usize,
+        coinductive: bool,
+    ) -> Vec<((TypeId, DeclId), bool)> {
+        let start = start.min(self.pending.len());
+        let mut below: Vec<((TypeId, DeclId), bool)> = self.pending.drain(start..).collect();
+        if coinductive && !r {
+            below.retain(|e| !e.1);
+        }
+        if !coinductive && r {
+            below.retain(|e| e.1);
+        }
+        let mut out = Vec::new();
+        if free_pos && free_neg {
+            out.extend(below.into_iter().filter(|e| if e.1 { coinductive && r } else { !coinductive && !r }));
+        } else {
+            self.pending.extend(below);
+        }
+        if let Some(key) = key {
+            if (r && free_pos) || (!r && free_neg) {
+                out.push((key, r));
+            } else {
+                self.pending.push((key, r));
+            }
+        }
+        for &(k, v) in &out {
+            self.memo.insert(k, v);
+        }
+        out
+    }
 }
 
 impl Query {
     fn any_kind() -> Query {
         Query { any_kind: true, ..Query::default() }
+    }
+}
+
+/// Final answers of trait queries about concrete types of the global type table, shared by
+/// every query of a checking run, so each (type, trait) is answered once ([`World::implements`]).
+/// Armed for a table by [`QueryCache::arm`]: only ids below the table's length at that time are
+/// kept (ids appended later may differ between later phases), and arming again (the table was
+/// renumbered) forgets every answer.
+#[derive(Default)]
+pub struct QueryCache {
+    limit: std::sync::atomic::AtomicU32,
+    map: std::sync::Mutex<FxHashMap<(TypeId, DeclId, bool), bool>>,
+}
+
+impl std::fmt::Debug for QueryCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("QueryCache")
+    }
+}
+
+impl QueryCache {
+    /// Keeps answers for the ids of a table of `len` types from now on, forgetting all before.
+    pub fn arm(&self, len: usize) {
+        self.lock().clear();
+        self.limit.store(len.min(u32::MAX as usize) as u32, std::sync::atomic::Ordering::Release);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, FxHashMap<(TypeId, DeclId, bool), bool>> {
+        self.map.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn holds<I: Interner + ?Sized>(&self, cx: &I, t: TypeId) -> bool {
+        !t.is_local()
+            && !t.is_none()
+            && (t.idx() as u64) < u64::from(self.limit.load(std::sync::atomic::Ordering::Acquire))
+            && !cx.has_params(t)
+    }
+
+    fn get<I: Interner + ?Sized>(&self, cx: &I, t: TypeId, tr: DeclId, any_kind: bool) -> Option<bool> {
+        if !self.holds(cx, t) {
+            return None;
+        }
+        self.lock().get(&(t, tr, any_kind)).copied()
+    }
+
+    fn put<I: Interner + ?Sized>(&self, cx: &I, answers: &[((TypeId, DeclId), bool)], any_kind: bool) {
+        let keep: Vec<_> = answers.iter().filter(|((t, _), _)| self.holds(cx, *t)).collect();
+        if keep.is_empty() {
+            return;
+        }
+        let mut m = self.lock();
+        for &&((t, d), v) in &keep {
+            m.insert((t, d, any_kind), v);
+        }
     }
 }
 
@@ -694,10 +823,13 @@ impl<'a> World<'a> {
             return self.is_copy_q(cx, t, env, q);
         }
         let key = (t, tr.trait_decl);
-        if tr.args.is_empty()
-            && let Some(&r) = q.memo.get(&key)
-        {
-            return r;
+        if tr.args.is_empty() {
+            if let Some(&r) = q.memo.get(&key) {
+                return r;
+            }
+            if let Some(r) = self.sigs.queries.get(&*cx, t, tr.trait_decl, q.any_kind) {
+                return r;
+            }
         }
         let derived = if tr.trait_decl.is_none() {
             None
@@ -710,26 +842,20 @@ impl<'a> World<'a> {
         };
         let auto = (tr.trait_decl == lang.send || tr.trait_decl == lang.sync || derived.is_some())
             && tr.trait_decl.is_some();
-        if auto {
-            // Send/Sync/Flat are coinductive: a type reached again while its own query is in
-            // progress (a recursive type) is assumed to implement them.
-            if let Some(i) = q.active.iter().position(|a| *a == key) {
-                q.low = q.low.min(i);
-                return true;
-            }
+        // Send/Sync/Flat/Frozen are coinductive: a type reached again while its own query is in
+        // progress (a recursive type) is assumed to implement them.
+        if auto && q.enter_active(key).is_err() {
+            return true;
         }
-        let me = q.active.len();
+        let me = if auto { q.active.len() - 1 } else { q.active.len() };
         let saved_low = std::mem::replace(&mut q.low, usize::MAX);
-        if auto {
-            q.active.push(key);
-        }
+        let start = q.pending.len();
         let mark = if auto {
-            Some((q.goals.len(), q.open_low()))
+            (q.goals.len(), q.open_low())
         } else {
             match q.enter_goal((t, tr.clone())) {
-                Some(m) => Some(m),
+                Some(m) => m,
                 None => {
-                    q.active.truncate(me);
                     q.low = saved_low;
                     return false;
                 }
@@ -747,20 +873,13 @@ impl<'a> World<'a> {
             self.find_impl_q(cx, t, tr, env, q).is_some()
         };
         if auto {
-            q.active.pop();
+            q.leave_active();
         }
-        let own = match mark {
-            Some(m) if auto => q.own_low(m.1),
-            Some(m) => q.leave_goal(m),
-            None => true,
-        };
-        // A positive result that used the assumption of a query further out holds only if that
-        // query succeeds, and so does a negative one that met an inductive goal in progress
-        // further out: neither is memoized.
+        let free_neg = if auto { q.own_low(mark.1) } else { q.leave_goal(mark) };
         let low = q.low;
-        if tr.args.is_empty() && (!r || low >= me) && (r || own) {
-            q.memo.insert(key, r);
-        }
+        let memo_key = tr.args.is_empty().then_some(key);
+        let done = q.settle(memo_key, r, low >= me, free_neg, start, auto);
+        self.sigs.queries.put(&*cx, &done, q.any_kind);
         q.low = saved_low.min(if low < me { low } else { usize::MAX });
         r
     }
@@ -1001,7 +1120,9 @@ impl<'a> World<'a> {
             return None;
         }
         let tr = TraitRef { trait_decl: decl, args: Vec::new() };
-        if self.implements(cx, t, &tr, env) {
+        // one query for the whole walk: each part's answer is computed once
+        let mut q = Query::default();
+        if self.implements_q(cx, t, &tr, env, &mut q) {
             return None;
         }
         let mut path = String::new();
@@ -1011,7 +1132,8 @@ impl<'a> World<'a> {
                 Ok(p) => p,
                 Err(why) => return Some(FlatWitness { path, part: cur, why }),
             };
-            let Some((seg, next)) = parts.into_iter().find(|&(_, c)| !self.implements(cx, c, &tr, env))
+            let Some((seg, next)) =
+                parts.into_iter().find(|&(_, c)| !self.implements_q(cx, c, &tr, env, &mut q))
             else {
                 break;
             };
@@ -1079,7 +1201,17 @@ impl<'a> World<'a> {
         q: &mut Query,
     ) -> Option<(DeclId, Vec<GArg>)> {
         let list = self.sigs.impls_by_trait.get(&tr.trait_decl)?;
-        for &i in list {
+        // only the impls with the type's head or with none can apply: their positions, in list
+        // order (so the first that applies is the same as in the whole list)
+        let by_head = &self.sigs.trait_impls_by_head;
+        let none = by_head.get(&(tr.trait_decl, None)).map_or(&[][..], |v| &v[..]);
+        let own = match self.head(&*cx, t) {
+            Some(h) => by_head.get(&(tr.trait_decl, Some(h))).map_or(&[][..], |v| &v[..]),
+            None => &[][..],
+        };
+        let mut positions: Vec<u32> = own.iter().chain(none).copied().collect();
+        positions.sort_unstable();
+        for i in positions.into_iter().filter_map(|k| list.get(k as usize).copied()) {
             let Some(imp) = self.sigs.impl_def(i) else { continue };
             if let Some(args) = self.impl_applies_q(cx, imp, t, env, q) {
                 // the trait args must match after substitution
@@ -1250,16 +1382,18 @@ impl<'a> World<'a> {
             TypeKind::Array { elem, .. } | TypeKind::Range { elem, .. } => self.is_copy_q(cx, elem, env, q),
             TypeKind::Tuple(ts) => {
                 let copy = self.sigs.lang.copy;
-                if let Some(&r) = q.memo.get(&(t, copy)) {
+                if let Some(r) = self.copy_known(cx, t, q) {
                     return r;
                 }
                 let low = std::mem::replace(&mut q.low, usize::MAX);
                 let mark = q.open_low();
+                let start = q.pending.len();
                 let r = ts.iter().all(|&x| self.is_copy_q(cx, x, env, q));
                 let own = q.own_low(mark);
-                if (!r || q.low == usize::MAX) && (r || own) {
-                    q.memo.insert((t, copy), r);
-                }
+                // not a goal of its own: what it used is settled by the goals that set it
+                let free_pos = q.low == usize::MAX;
+                let done = q.settle(Some((t, copy)), r, free_pos, own, start, false);
+                self.sigs.queries.put(&*cx, &done, q.any_kind);
                 q.low = q.low.min(low);
                 r
             }
@@ -1272,21 +1406,27 @@ impl<'a> World<'a> {
                 if copy.is_none() {
                     return false;
                 }
-                if let Some(&r) = q.memo.get(&(t, copy)) {
+                if let Some(r) = self.copy_known(cx, t, q) {
                     return r;
                 }
                 let tr = TraitRef { trait_decl: copy, args: Vec::new() };
                 let Some(mark) = q.enter_goal((t, tr.clone())) else { return false };
                 let low = std::mem::replace(&mut q.low, usize::MAX);
+                let start = q.pending.len();
                 let r = self.find_impl_q(cx, t, &tr, env, q).is_some();
                 let own = q.leave_goal(mark);
-                if (!r || q.low == usize::MAX) && (r || own) {
-                    q.memo.insert((t, copy), r);
-                }
+                let done = q.settle(Some((t, copy)), r, q.low == usize::MAX, own, start, false);
+                self.sigs.queries.put(&*cx, &done, q.any_kind);
                 q.low = q.low.min(low);
                 r
             }
         }
+    }
+
+    /// The known Copy answer for `t`: this query's, or the run's ([`QueryCache`]).
+    fn copy_known<I: Interner + ?Sized>(&self, cx: &I, t: TypeId, q: &Query) -> Option<bool> {
+        let copy = self.sigs.lang.copy;
+        q.memo.get(&(t, copy)).copied().or_else(|| self.sigs.queries.get(cx, t, copy, q.any_kind))
     }
 
     /// [`crate::kinds::is_view_in`]: a view in the scope of `env` (a `T: view` param counts).
@@ -1601,7 +1741,11 @@ pub(crate) fn check_impls(
     let mut impls: Vec<DeclId> =
         (0..sigs.decls.len() as u32).map(DeclId).filter(|&d| sigs.impl_def(d).is_some()).collect();
     impls.sort();
-    let mut seen: FxHashMap<DeclId, Vec<DeclId>> = FxHashMap::default();
+    // the impls seen so far, per trait and head (`None`: no head), each with its position: two
+    // impls with different heads never overlap, so each impl meets only those with its head or
+    // none (all of them for one without a head)
+    let mut seen: FxHashMap<(DeclId, Option<TypeHead>), Vec<(u32, DeclId)>> = FxHashMap::default();
+    let mut seen_all: FxHashMap<DeclId, Vec<(u32, DeclId)>> = FxHashMap::default();
     for d in impls {
         let Some(imp) = sigs.impl_def(d) else { continue };
         let Some(decl) = prog.decl(d) else { continue };
@@ -1837,8 +1981,16 @@ pub(crate) fn check_impls(
             out.extend(mk("E0903", None, &[("trait", &trait_path), ("type", &self_text)], impl_span, &[]));
             continue;
         }
-        let prev = seen.entry(tr.trait_decl).or_default();
-        for &o in prev.iter() {
+        let mut prev: Vec<(u32, DeclId)> = match imp.head {
+            Some(h) => {
+                let own = seen.get(&(tr.trait_decl, Some(h))).map_or(&[][..], |v| &v[..]);
+                let none = seen.get(&(tr.trait_decl, None)).map_or(&[][..], |v| &v[..]);
+                own.iter().chain(none).copied().collect()
+            }
+            None => seen_all.get(&tr.trait_decl).cloned().unwrap_or_default(),
+        };
+        prev.sort_unstable();
+        for &(_, o) in prev.iter() {
             let Some(other) = sigs.impl_def(o) else { continue };
             if tys.is_error_ty(other.self_ty) || tys.is_error_ty(imp.self_ty) {
                 continue;
@@ -1855,7 +2007,10 @@ pub(crate) fn check_impls(
                 break;
             }
         }
-        prev.push(d);
+        let all = seen_all.entry(tr.trait_decl).or_default();
+        let pos = all.len() as u32;
+        all.push((pos, d));
+        seen.entry((tr.trait_decl, imp.head)).or_default().push((pos, d));
     }
     out
 }

@@ -1026,3 +1026,53 @@ fn e0206_deref_names_the_reference_accessors() {
     assert!(got.iter().any(|(_, m, _)| *m == deref), "{got:?}");
     assert_eq!(got.len(), 5, "{got:?}");
 }
+
+/// Trait queries are answered once per (type, trait) and checking run: along a chain of 20,000
+/// structs linked by raw pointers, a `Frozen` query at the head (failing at the far end, or
+/// holding) and a `Copy` query over 20,000 structs with impls of their own take time linear in
+/// the chain. Answers found inside a cycle are kept only once the cycle's goal is settled: a
+/// mutual cycle is Sync when neither holds a `Cell` and is not when one does, whichever type is
+/// asked first.
+#[test]
+fn trait_queries_are_answered_once_per_type() {
+    let codes = |src: &str| -> Vec<String> {
+        let (p, tc) = mem(src);
+        let mut c: Vec<String> = tc.all_diagnostics(&p).iter().map(|d| d.code().to_string()).collect();
+        c.sort();
+        c
+    };
+    let chain = |n: usize, last: &str, copy: bool| -> String {
+        let mut s = String::from("import std.cell;\n");
+        for k in 1..n {
+            s += &format!("struct S{k} {{ pub p: *const S{}, pub b: u8 }}\n", k + 1);
+            if copy {
+                s += &format!("impl Copy for S{k} {{}}\n");
+            }
+        }
+        s += &format!("struct S{n} {{ pub {last} }}\n");
+        s
+    };
+    let none: Vec<String> = Vec::new();
+    let frozen = "fn need<T: Frozen>(t: &T) -> u8 { return 1u8; }\n\
+                  fn f(p: &S1) -> u8 { return need(p); }\nfn main() -> i32 { return 0; }\n";
+    assert_eq!(codes(&(chain(20_000, "v: u32", false) + frozen)), none);
+    assert_eq!(codes(&(chain(20_000, "c: cell.Cell<u32>", false) + frozen)), vec!["E1410".to_string()]);
+    let copy = "fn need<T: Copy>(t: &T) -> u8 { return 1u8; }\n\
+                fn f(p: &S1) -> u8 { return need(p); }\nfn main() -> i32 { return 0; }\n";
+    assert_eq!(codes(&(chain(20_000, "v: u32", true) + copy)), none);
+    let mutual = |cell: &str, a_first: bool| -> String {
+        let calls = if a_first { "need(&a) + need(&v)" } else { "need(&v) + need(&a)" };
+        format!(
+            "import std.vec;\nimport std.cell;\nstruct A {{ pub bs: vec.Vec<B> }}\n\
+             struct B {{ pub as_: vec.Vec<A>{cell} }}\nfn need<T: Sync>(t: &T) -> u8 {{ return 1u8; }}\n\
+             fn main() -> i32 {{\n    let a = A.{{ bs: vec.Vec::<B>.new() }};\n    \
+             let v = vec.Vec::<A>.new();\n    return (({calls}) as u8) as i32;\n}}\n"
+        )
+    };
+    let two = vec!["E0901".to_string(), "E0901".to_string()];
+    assert_eq!(codes(&mutual(", pub c: cell.Cell<u32>", true)), two);
+    assert_eq!(codes(&mutual(", pub c: cell.Cell<u32>", false)), two);
+    assert_eq!(codes(&mutual("", true)), none);
+    assert_eq!(codes(&mutual("", false)), none);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}

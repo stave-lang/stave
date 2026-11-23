@@ -217,7 +217,7 @@ pub struct TypedBody {
     pub internal: Vec<String>,
     /// The values the fn holds whole, by the node that makes or binds them (the decl's node
     /// for the return value), sorted: parameters and bindings, every expression value but a
-    /// place read in place (a value `if` / `match` once per arm; [`Ck::value_sizes`]), the
+    /// place read in place (a value `if` / `match` twice: result and live arm; [`Ck::value_sizes`]), the
     /// return value. Their types are checked against [`crate::consteval::MAX_VALUE_BYTES`] here
     /// for a concrete type and per instance for a generic one ([`instance_sizes`]).
     pub held: Vec<(u32, TypeId)>,
@@ -492,6 +492,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
         };
         jobs.push(Job { decl, item: d.item, node: d.node, kind });
     }
+    sigs_table.queries.arm(tys.len());
     let w = World { prog, sigs: &sigs_table };
     let results: Vec<BodyResult> = jobs
         .par_iter()
@@ -534,6 +535,8 @@ fn check_in_pool(prog: &Program) -> Typeck {
     bodies.par_iter_mut().for_each(|b| remap_body(b, &map));
     let mut sigs_table = sigs_table;
     remap_sigs(&mut sigs_table, &map_sig);
+    // the table was renumbered: answers about the old ids are gone
+    sigs_table.queries.arm(tys.len());
     diags.extend(data_total(prog, &sigs_table, &tys));
     let gated = crate::inherit::gate_bodies(prog, &sigs_table, &tys, &bodies, &brackets);
     diags.extend(gated.diagnostics);
@@ -601,17 +604,21 @@ fn check_in_pool(prog: &Program) -> Typeck {
 
 /// E0904 case `total`: the `static`s and `const`s of the program take more than
 /// [`crate::consteval::MAX_PROGRAM_DATA_BYTES`] together (each its type's bytes rounded up to
-/// its alignment), at the first one, in source order (file, then position), that passes it. Every `const` counts,
-/// read from an image or not; one without a value or a size has its own diagnostic.
+/// its alignment; every `const` counts, read from an image or not, used or not). Reported once,
+/// at the largest item of the program's own packages (the built-in packages' share is what their
+/// imports bring and cannot be changed there), with the next largest items as related spans.
+/// One without a value or a size has its own diagnostic.
 fn data_total(prog: &Program, sigs: &Sigs, tys: &TypeTable) -> Option<Diagnostic> {
     let mut cx = Overlay::new(tys);
     let mut sum = 0u64;
-    let mut items: Vec<(DeclId, &crate::decls::Decl)> = (0..prog.decls.len() as u32)
-        .filter_map(|k| prog.decl(DeclId(k)).map(|d| (DeclId(k), d)))
-        .filter(|(_, d)| matches!(d.kind, DeclKind::Const | DeclKind::Static))
-        .collect();
-    items.sort_by_key(|(_, d)| (d.name_span.file, d.name_span.offset));
-    for (id, d) in items {
+    // (bytes, built-in package, span, name), one per item with a size
+    let mut items: Vec<(u64, bool, Span, crate::ids::Sym)> = Vec::new();
+    for k in 0..prog.decls.len() as u32 {
+        let id = DeclId(k);
+        let Some(d) = prog.decl(id) else { continue };
+        if !matches!(d.kind, DeclKind::Const | DeclKind::Static) {
+            continue;
+        }
         let Some(c) = sigs.konst(id).filter(|c| c.value.is_some()) else { continue };
         if cx.has_params(c.ty) || cx.has_error(c.ty) {
             continue;
@@ -623,18 +630,19 @@ fn data_total(prog: &Program, sigs: &Sigs, tys: &TypeTable) -> Option<Diagnostic
         };
         let padded = bytes.checked_next_multiple_of(align.max(1)).unwrap_or(u64::MAX);
         sum = sum.saturating_add(padded);
-        if sum > crate::consteval::MAX_PROGRAM_DATA_BYTES {
-            let name = prog.strings.get(d.name).to_string();
-            return mk(
-                "E0904",
-                Some("total"),
-                &[("name", &name), ("bytes", &sum.to_string())],
-                d.name_span,
-                &[],
-            );
-        }
+        items.push((padded, crate::callgraph::in_builtin_package(prog, id), d.name_span, d.name));
     }
-    None
+    if sum <= crate::consteval::MAX_PROGRAM_DATA_BYTES {
+        return None;
+    }
+    // largest first; the program's own items before the built-in packages'; then source order
+    items.sort_by_key(|&(b, builtin, sp, _)| (builtin, std::cmp::Reverse(b), sp.file, sp.offset));
+    let (_, _, at, name) = items[0];
+    let name = prog.strings.get(name).to_string();
+    let mut rest: Vec<(u64, Span)> = items[1..].iter().map(|&(b, _, sp, _)| (b, sp)).collect();
+    rest.sort_by_key(|&(b, sp)| (std::cmp::Reverse(b), sp.file, sp.offset));
+    let related: Vec<(&str, Span)> = rest.iter().take(3).map(|&(_, sp)| ("other", sp)).collect();
+    mk("E0904", Some("total"), &[("name", &name), ("bytes", &sum.to_string())], at, &related)
 }
 
 /// The frame slots of a body's expression values ([`Ck::value_sizes`]). The back end gives every
@@ -778,8 +786,10 @@ impl<'a> Frame<'a> {
     }
 
     /// How many frame slots the value of expression node `n` takes: a place read in place
-    /// none, a value `if` one per arm, a value `match` one per arm, a chain ending in a call
-    /// counted with its call none, anything else one.
+    /// none; a value `if` or `match` two, whatever its arm count (the join's result, and the
+    /// value of the arm that is live into it: the arms' values are never live together, and
+    /// both back ends give them one slot; an arm that makes a value of its own counts it as
+    /// its own node); a chain ending in a call counted with its call none; anything else one.
     fn copies(&self, n: u32, counted_calls: &rustc_hash::FxHashSet<u32>) -> usize {
         let icx = self.icx;
         let a = icx.a(n);
@@ -789,10 +799,7 @@ impl<'a> Frame<'a> {
             Some(NodeKind::Unary) if icx.is(a, Term::KwUnsafe) => 0,
             // a dereference is loaded into a slot unless it is used as a place
             Some(NodeKind::Unary) if icx.is(a, Term::Star) => usize::from(!self.place_pos.contains(&n)),
-            Some(NodeKind::IfExpr) => 2,
-            Some(NodeKind::MatchExpr) => {
-                icx.kids_vec(n).iter().filter(|&&c| icx.kind(c) == Some(NodeKind::ExprArm)).count().max(1)
-            }
+            Some(NodeKind::IfExpr | NodeKind::MatchExpr) => 2,
             Some(NodeKind::Primary | NodeKind::Postfix) if self.is_place(n) => 0,
             Some(NodeKind::Postfix) => match self.steps(n).last() {
                 Some(Step::Call(k1, k2)) if counted_calls.contains(k1) || counted_calls.contains(k2) => 0,

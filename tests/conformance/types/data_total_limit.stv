@@ -1,12 +1,12 @@
 //~ CHECK-ONLY
 // All compile-time data of a program takes at most 2^30 bytes (contracts/lang-details.md "Size
 // limits"): every `static` and `const` counts, file data and zero fill alike, each rounded up to
-// its alignment. Fifteen zero statics of 2^26 bytes and one 8 MiB short of it stay under the
-// bound (the built-in packages' own consts, about 2 MiB, fit in the rest); the next item passes it and is E0904
-// case `total`, once, at that item. The per-item limit holds for each.
+// its alignment, used or not, the built-in packages' own too. Fifteen zero statics of 2^26 bytes
+// and one 8 MiB short of it stay under the bound; one more item passes it. E0904 case `total` is
+// reported once, at the program's largest item (the first of equal ones, in source order).
 type A = [u8; 67108864];
 
-static S0: A = [0; 67108864];
+static S0: A = [0; 67108864]; //~ ERROR E0904
 static S1: A = [0; 67108864];
 static S2: A = [0; 67108864];
 static S3: A = [0; 67108864];
@@ -22,7 +22,7 @@ static S12: A = [0; 67108864];
 static S13: A = [0; 67108864];
 static S14: A = [0; 67108864];
 static NEAR: [u8; 58720256] = [0; 58720256];
-static LAST: [u8; 16777216] = [1; 16777216]; //~ ERROR E0904
+static LAST: [u8; 16777216] = [1; 16777216];
 static AFTER: A = [0; 67108864];
 
 fn main() -> i32 {

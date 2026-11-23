@@ -52,6 +52,16 @@ fn let_deref(p: &[u8; 250000000]) -> u8 {
     return a[0];
 }
 
+// a value `match` takes its result and the live arm's value, whatever its arm count: 16 arms
+// over two locals of 40,000,000 bytes are 7 x 40,000,000 bytes (two fills, two bindings, the
+// result, the arm, the binding of the result)
+fn match16(k: u8) -> u8 {
+    let a = [1u8; 40000000];
+    let b = [2u8; 40000000];
+    let x = match k { 0u8 => a, 1u8 => b, 2u8 => a, 3u8 => b, 4u8 => a, 5u8 => b, 6u8 => a, 7u8 => b, 8u8 => a, 9u8 => b, 10u8 => a, 11u8 => b, 12u8 => a, 13u8 => b, 14u8 => a, _ => b };
+    return x[39999999];
+}
+
 fn main() -> i32 {
     return 0;
 }

@@ -341,6 +341,12 @@ pub struct Sigs {
     pub headless_impls: Vec<DeclId>,
     /// Trait impls per trait decl.
     pub impls_by_trait: FxHashMap<DeclId, Vec<DeclId>>,
+    /// Per trait decl and impl head (`None`: no head): the positions in
+    /// [`Sigs::impls_by_trait`] of its impls with that head, ascending. Only impls with the head
+    /// of a type, or with none, can apply to it.
+    pub trait_impls_by_head: FxHashMap<(DeclId, Option<TypeHead>), Vec<u32>>,
+    /// Final trait query answers of the current checking run ([`crate::traits::QueryCache`]).
+    pub queries: crate::traits::QueryCache,
 }
 
 impl Sigs {
@@ -1355,6 +1361,15 @@ impl<'p> SigBuilder<'p> {
         s.headless_impls.sort_by_key(item_of);
         for v in s.impls_by_trait.values_mut() {
             v.sort_by_key(item_of);
+        }
+        for (&tr, v) in &s.impls_by_trait {
+            for (k, &d) in v.iter().enumerate() {
+                let head = match s.decls.get(d.idx()) {
+                    Some(DeclSig::Impl(i)) => i.head,
+                    _ => None,
+                };
+                s.trait_impls_by_head.entry((tr, head)).or_default().push(k as u32);
+            }
         }
         (self.tys, s, self.diags)
     }

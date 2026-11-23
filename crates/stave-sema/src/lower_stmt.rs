@@ -939,7 +939,7 @@ impl<'a> FnCx<'a> {
 
     /// The drop glue of `t`: `fn(p: &mut T)`.
     pub fn lower_glue(&mut self, t: Ty) -> FnOut {
-        let pt = self.t_ref(true, t);
+        let pt = crate::drops::glue_param(&mut self.tys, t);
         self.fresh_env(&[pt], TypeId::NONE);
         let unit = self.t_unit();
         self.f.ret = unit;

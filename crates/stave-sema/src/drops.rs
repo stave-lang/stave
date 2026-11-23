@@ -222,6 +222,13 @@ pub struct Glue {
     pub parts: Parts,
 }
 
+/// The parameter of the drop glue of `t`: `&mut t`. The call graph builds it for every glue
+/// node, so a type too tall for it is E0005 at the drop that needs the glue, and lowering builds
+/// the same type.
+pub fn glue_param<I: Interner + ?Sized>(cx: &mut I, t: TypeId) -> TypeId {
+    cx.mk_ref(true, t)
+}
+
 /// The [`Glue`] of `t`.
 pub fn glue<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> Glue {
     let method = crate::mono::drop_method(w, cx, t);
