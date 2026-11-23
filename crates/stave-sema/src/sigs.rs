@@ -476,8 +476,30 @@ pub(crate) trait LowerHost: Interner {
     fn sig_width(&mut self, _span: Span, _t: TypeId, _features: u64) {}
 }
 
+thread_local! {
+    /// Nesting of [`lower_type`] calls on this thread.
+    static LOWERING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Lowers a `Type` or `TypeBase` node. `ret_pos`: directly after `->` (where `never` is legal).
+/// A written type taller than [`crate::types::MAX_TYPE_HEIGHT`] is E0005 case `type`, at the
+/// whole written type (the outermost one being lowered; the types holding the refused one are
+/// error types, so a type written with it is reported once).
 pub(crate) fn lower_type<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -> TypeId {
+    let before = h.refusals();
+    let outer = LOWERING.with(|c| {
+        c.set(c.get() + 1);
+        c.get() == 1
+    });
+    let t = lower_type_at(h, env, n, ret_pos);
+    LOWERING.with(|c| c.set(c.get() - 1));
+    if outer && h.refusals() > before {
+        too_deep(h, &env.icx, n);
+    }
+    t
+}
+
+fn lower_type_at<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -> TypeId {
     let icx = env.icx;
     // Iterative over `&`/`*` prefixes (unbounded chains).
     let mut wraps: Vec<(bool, bool)> = Vec::new(); // (is_ref, mutable)
@@ -1122,11 +1144,6 @@ pub(crate) struct SigBuilder<'p> {
     /// While the bounds of a generics list are lowered: the params in scope there (their const
     /// types for [`LowerHost::const_param_ty`]; the view env stays empty).
     bound_scope: Option<Vec<GenericParam>>,
-    layout_busy: Vec<TypeId>,
-    /// The layouts found so far. Only found ones: a `None` may come from the busy stack (a
-    /// cycle, or its limit) and not hold elsewhere. Types share components, so without it a
-    /// `(A, A)` nested k deep costs 2^k.
-    layout_memo: FxHashMap<TypeId, (u64, u64)>,
     /// Lowering the signature of a fn with `needs(...)`: no E0702 (crate::gates).
     ungated: bool,
     /// E0702 spans already reported.
@@ -1141,9 +1158,19 @@ impl Interner for SigBuilder<'_> {
     fn intern(&mut self, k: TypeKind) -> TypeId {
         self.tys.intern(k)
     }
+    fn refusals(&self) -> u32 {
+        self.tys.refusals()
+    }
 
     fn fixed_ty(&self, f: TypeId) -> TypeId {
         self.tys.fixed_ty(f)
+    }
+}
+
+impl crate::traits::LayoutEnv for SigBuilder<'_> {
+    fn adt_shape(&mut self, d: DeclId) -> Option<(bool, Vec<Vec<TypeId>>)> {
+        let adt = self.adt_def(d)?;
+        Some((adt.is_enum, adt.variants.iter().map(|v| v.fields.iter().map(|f| f.ty).collect()).collect()))
     }
 }
 
@@ -1224,8 +1251,6 @@ impl<'p> SigBuilder<'p> {
             lang: LangItems::default(),
             const_stack: Vec::new(),
             internal: Vec::new(),
-            layout_busy: Vec::new(),
-            layout_memo: FxHashMap::default(),
             cur_generics: Vec::new(),
             bound_scope: None,
             ungated: false,
@@ -2060,50 +2085,8 @@ impl<'p> SigBuilder<'p> {
         }
     }
 
-    /// Layout `(size, align)` of a concrete type, demand-driven.
-    pub fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        if let Some(&l) = self.layout_memo.get(&t) {
-            return Some(l);
-        }
-        if self.layout_busy.contains(&t) || self.layout_busy.len() > 4096 {
-            return None;
-        }
-        self.layout_busy.push(t);
-        let r = self.layout_inner(t);
-        self.layout_busy.pop();
-        if let Some(l) = r {
-            self.layout_memo.insert(t, l);
-        }
-        r
-    }
-
-    fn layout_inner(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        let k = self.tys.kind(t).clone();
-        Some(match k {
-            TypeKind::Adt { def, args } => {
-                let adt = self.adt_def(def)?;
-                let mut variant_layouts = Vec::new();
-                for v in &adt.variants {
-                    let mut fields = Vec::new();
-                    for f in &v.fields {
-                        let ft = self.tys.subst(f.ty, &args, None);
-                        fields.push(self.layout(ft)?);
-                    }
-                    variant_layouts.push(fields);
-                }
-                crate::traits::adt_layout(adt.is_enum, &variant_layouts)?
-            }
-            TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
-                if matches!(self.tys.kind(inner), TypeKind::Str | TypeKind::Slice { .. }) {
-                    (16, 8)
-                } else {
-                    (8, 8)
-                }
-            }
-            _ => {
-                let mut sub = |x: TypeId| self.layout(x);
-                crate::traits::scalar_layout(&k, &mut sub)?
-            }
-        })
+    /// Layout `(size, align)` of a concrete type ([`crate::traits::type_bytes`]).
+    pub fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout> {
+        crate::traits::type_bytes(self, t)
     }
 }

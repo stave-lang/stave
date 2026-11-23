@@ -977,13 +977,7 @@ impl<'a> FnCx<'a> {
                 }
             }
             Res::Decl(d) => match self.decl_kind(d) {
-                Some(crate::decls::DeclKind::Const) => {
-                    let Some(c) = self.g.sigs.konst(d) else { return self.fail_at(Some(tok), "const") };
-                    let (ty, Some(v)) = (c.ty, c.value.clone()) else {
-                        return self.fail_at(Some(tok), "const without a value");
-                    };
-                    self.const_val(&v, ty, tok)
-                }
+                Some(crate::decls::DeclKind::Const) => self.const_use(d, tok),
                 Some(crate::decls::DeclKind::Static) => self.static_place(d, tok),
                 Some(crate::decls::DeclKind::Fn | crate::decls::DeclKind::Method) => {
                     let end = icx.end_tok(node);
@@ -1030,6 +1024,24 @@ impl<'a> FnCx<'a> {
         let i = self.int(idx as i128);
         let p = Operand::Value(self.f.b.op(stave_ir::Op::Intrinsic(id), FnCx::ir(pt), &[i]));
         E::P(Place { base: Base::Mem(p, pt), proj: Vec::new(), ty, root: None })
+    }
+
+    /// The value of const `d`. One with more than [`crate::lower::CONST_INLINE_CELLS`] value
+    /// cells is read from its image (a read-only static), so the code does not grow with the
+    /// value; a smaller one is built in place.
+    pub fn const_use(&mut self, d: crate::ids::DeclId, tok: u32) -> E {
+        let Some(c) = self.g.sigs.konst(d) else { return self.fail_at(Some(tok), "const") };
+        let (ty, Some(v)) = (c.ty, c.value.clone()) else {
+            return self.fail_at(Some(tok), "const without a value");
+        };
+        if self.g.statics.contains_key(&d) {
+            let p = self.static_place(d, tok);
+            return match self.operand_of(p) {
+                Some(o) => E::V(o, ty),
+                None => E::Never,
+            };
+        }
+        self.const_val(&v, ty, tok)
     }
 
     /// A const value of type `ty`.
@@ -2228,9 +2240,10 @@ impl<'a> FnCx<'a> {
             }
             match res {
                 Res::Decl(d) if self.decl_kind(d) == Some(crate::decls::DeclKind::Const) => {
-                    let Some(c) = self.g.sigs.konst(d) else { return false };
-                    let (ty, Some(v)) = (c.ty, c.value.clone()) else { return false };
-                    self.const_val(&v, ty, tok)
+                    if self.g.sigs.konst(d).is_none_or(|c| c.value.is_none()) {
+                        return false;
+                    }
+                    self.const_use(d, tok)
                 }
                 Res::Decl(d) if self.decl_kind(d) == Some(crate::decls::DeclKind::Static) => {
                     self.static_place(d, tok)
@@ -2349,10 +2362,10 @@ impl<'a> FnCx<'a> {
 }
 
 /// Type lowering host for cast types (the signature-phase lowering over the body's overlay).
-struct TyHost<'x, 'a> {
-    tys: &'x mut crate::types::Overlay<'a>,
-    prog: &'a crate::Program,
-    sigs: &'a crate::sigs::Sigs,
+pub(crate) struct TyHost<'x, 'a> {
+    pub(crate) tys: &'x mut crate::types::Overlay<'a>,
+    pub(crate) prog: &'a crate::Program,
+    pub(crate) sigs: &'a crate::sigs::Sigs,
 }
 
 impl Interner for TyHost<'_, '_> {
@@ -2361,6 +2374,9 @@ impl Interner for TyHost<'_, '_> {
     }
     fn intern(&mut self, k: TypeKind) -> TypeId {
         self.tys.intern(k)
+    }
+    fn refusals(&self) -> u32 {
+        self.tys.refusals()
     }
     fn fixed_ty(&self, f: TypeId) -> TypeId {
         self.tys.fixed_ty(f)
@@ -2402,8 +2418,8 @@ impl crate::consteval::CEnv for TyHost<'_, '_> {
     fn adt_def(&mut self, d: crate::ids::DeclId) -> Option<crate::sigs::AdtDef> {
         self.sigs.adt(d).cloned()
     }
-    fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        crate::traits::layout_of(self.tys, self.sigs, t, 0)
+    fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout> {
+        crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: self.tys, sigs: self.sigs }, t)
     }
     fn lang(&self) -> &crate::sigs::LangItems {
         &self.sigs.lang

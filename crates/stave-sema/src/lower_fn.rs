@@ -709,7 +709,7 @@ impl<'a> FnCx<'a> {
 
     /// (size, align) of a concrete type (equal to stave-ir's layout rules).
     pub fn layout(&mut self, t: Ty) -> Option<(u64, u64)> {
-        crate::traits::layout_of(&mut self.tys, self.g.sigs, t, 0)
+        crate::traits::layout_of(&mut self.tys, self.g.sigs, t)
     }
 
     pub fn ir(t: Ty) -> stave_ir::TypeId {
@@ -2141,5 +2141,6 @@ fn empty_body() -> &'static TypedBody {
         stmt_ends: crate::temps::StmtEnds::default(),
         internal: Vec::new(),
         held: Vec::new(),
+        temps: Vec::new(),
     })
 }

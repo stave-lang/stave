@@ -1,0 +1,61 @@
+//~ CHECK-ONLY
+// The frame sum of a fn instance (contracts/lang-details.md "Size limits"): its parameters,
+// bindings, literals, one copy per arm of a value `if` / `match`, call results and by-value
+// arguments, and its return value take at most 704,643,072 bytes together (E0911 `frame`,
+// per instance of a generic fn). A filled local `let a = [e; n]` takes its fill and its binding.
+
+// 4 x 176160767 + three `u8` bindings + the `u8` result: the bound
+fn at_bound() -> u8 {
+    let a = [1u8; 176160767];
+    let b = [2u8; 176160767];
+    let p = 1u8;
+    let q = 2u8;
+    let r = 3u8;
+    return a[0] + b[176160766] + p + q + r;
+}
+
+// 4 x 176160767 + the result: 3 bytes under
+fn under_bound() -> u8 {
+    let a = [1u8; 176160767];
+    let b = [2u8; 176160767];
+    return a[0] + b[0];
+}
+
+// 4 x 176160768 + the result: 1 byte over
+fn over_bound() -> u8 { //~ ERROR E0911
+    let a = [1u8; 176160768];
+    let b = [2u8; 176160768];
+    return a[0] + b[0];
+}
+
+fn arg(x: [u8; 117440511]) -> u8 {
+    return x[0];
+}
+
+// three calls: each a literal, its by-value argument copy, and its `u8` result; the result
+fn args_under() -> u8 {
+    return arg([1u8; 117440511]) + arg([2u8; 117440511]) + arg([3u8; 117440511]);
+}
+
+// a value `if`: two literals, one copy per arm, the binding, the `bool` and the `u8`: the bound
+fn if_at(c: bool) -> u8 {
+    let a = if c then [1u8; 140928614] else [2u8; 140928614];
+    return a[0];
+}
+
+fn if_over(c: bool) -> u8 { //~ ERROR E0911
+    let a = if c then [1u8; 140928615] else [2u8; 140928615];
+    return a[0];
+}
+
+// per instance: 4 N + the result
+fn fill<const N: usize>() -> u8 { //~ ERROR E0911
+    let a = [1u8; N];
+    let b = [2u8; N];
+    return a[0] + b[0];
+}
+
+fn main() -> i32 {
+    let s = at_bound() + under_bound() + over_bound() + args_under() + if_at(true) + if_over(false);
+    return (s + fill::<176160767>() + fill::<176160768>()) as% i32;
+}

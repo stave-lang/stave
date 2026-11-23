@@ -410,8 +410,7 @@ pub fn run(root: &Path, lib: &Library, opts: &Options) -> Result<Output, Pipelin
 /// runs started from the items of a `par_iter` would nest on one stack without bound.
 pub fn run_on(pool: &rayon::ThreadPool, root: &Path, lib: &Library, opts: &Options) -> Output {
     if rayon::current_thread_index().is_some() && pool.current_thread_index().is_none() {
-        return std::thread::scope(|s| s.spawn(|| pool.install(|| run_inner(root, lib, opts))).join())
-            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        return stave_sema::pool::wait_off_pool(|| pool.install(|| run_inner(root, lib, opts)));
     }
     pool.install(|| run_inner(root, lib, opts))
 }

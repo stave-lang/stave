@@ -35,9 +35,6 @@ use crate::types::{ConstArg, GArg, Interner, Overlay, TypeId, TypeKind, TypeTabl
 /// type structure in the checker, lowering, layout, and the IR.
 pub const MAX_TYPE_DEPTH: u32 = stave_ir::types::MAX_TYPE_DEPTH as u32;
 
-/// Most distinct types one check measures; past it the type being checked is rejected.
-const TYPE_BUDGET: usize = 1 << 21;
-
 struct Walk<'a, 'g> {
     cx: Overlay<'g>,
     sigs: &'a Sigs,
@@ -53,7 +50,9 @@ struct Walk<'a, 'g> {
     queue: Vec<TypeId>,
     /// Types too deep whose parts and components are not.
     causes: FxHashSet<TypeId>,
-    over_budget: bool,
+    /// [`Walk::parts`] left out a field whose type after substitution would be taller than the
+    /// type table holds ([`crate::types::MAX_TYPE_HEIGHT`]): the holder is too deep.
+    tall_part: bool,
 }
 
 impl<'a, 'g> Walk<'a, 'g> {
@@ -67,7 +66,7 @@ impl<'a, 'g> Walk<'a, 'g> {
             seen: FxHashSet::default(),
             queue: Vec::new(),
             causes: FxHashSet::default(),
-            over_budget: false,
+            tall_part: false,
         }
     }
 
@@ -116,7 +115,15 @@ impl<'a, 'g> Walk<'a, 'g> {
                 let Some(adt) = self.sigs.adt(def) else { return Vec::new() };
                 let fields: Vec<TypeId> =
                     adt.variants.iter().flat_map(|v| v.fields.iter().map(|f| f.ty)).collect();
-                fields.into_iter().map(|f| self.cx.subst(f, &args, None)).collect()
+                let mut out = Vec::with_capacity(fields.len());
+                for f in fields {
+                    if crate::types::subst_height(&self.cx, f, &args) > MAX_TYPE_DEPTH {
+                        self.tall_part = true;
+                    } else {
+                        out.push(self.cx.subst(f, &args, None));
+                    }
+                }
+                out
             }
             _ => Vec::new(),
         }
@@ -142,7 +149,12 @@ impl<'a, 'g> Walk<'a, 'g> {
         }
         let mut d = k;
         let mut part_too_deep = false;
-        for p in self.parts(t) {
+        self.tall_part = false;
+        let parts = self.parts(t);
+        if std::mem::take(&mut self.tall_part) {
+            d = MAX_TYPE_DEPTH + 1;
+        }
+        for p in parts {
             let pd = self.depth(p);
             part_too_deep |= pd > MAX_TYPE_DEPTH;
             d = d.max(pd.saturating_add(1));
@@ -178,19 +190,11 @@ impl<'a, 'g> Walk<'a, 'g> {
     /// Measures `t` and everything it reaches. True if it reaches a type too deep whose parts
     /// and components are not, and no earlier check found that type.
     fn check(&mut self, t: TypeId) -> bool {
-        if self.over_budget {
-            return false;
-        }
         let before = self.causes.len();
         self.queue.push(t);
         while let Some(u) = self.queue.pop() {
             if !self.seen.insert(u) {
                 continue;
-            }
-            if self.seen.len() > TYPE_BUDGET {
-                self.over_budget = true;
-                self.queue.clear();
-                return true;
             }
             self.depth(u);
         }
@@ -320,9 +324,19 @@ pub(crate) fn check(
                             ts
                         }
                     };
+                    let mut tall = false;
                     for t in ts {
+                        // a type the table could not hold is too deep by itself
+                        if crate::types::subst_height(&w.cx, t, &inst.args) > MAX_TYPE_DEPTH {
+                            tall = true;
+                            break;
+                        }
                         let s = w.cx.subst(t, &inst.args, None);
                         roots.push(s);
+                    }
+                    if tall {
+                        report(at);
+                        continue;
                     }
                 }
                 for t in roots {

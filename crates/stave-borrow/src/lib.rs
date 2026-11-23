@@ -43,7 +43,6 @@ pub mod report;
 pub mod set;
 pub mod ty;
 
-use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -410,34 +409,7 @@ fn check_body_flow(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item:
 
 // ---------- big-stack workers (the builder recurses over expression nesting) ----------
 
-const STACK: usize = 512 << 20;
-
-thread_local! {
-    static BIG: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Runs `f` on big-stack workers, as many as the current rayon pool has (the caller's count).
+/// Runs `f` on the checker's big-stack workers ([`stave_sema::pool::on_big_stacks`]).
 fn on_big_stacks<R: Send>(f: impl FnOnce() -> R + Send) -> R {
-    if BIG.with(Cell::get) {
-        return f();
-    }
-    let n = rayon::current_num_threads().max(1);
-    let run = move || {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(n)
-            .stack_size(STACK)
-            .start_handler(|_| BIG.with(|b| b.set(true)))
-            .build();
-        match pool {
-            Ok(p) => p.install(f),
-            Err(_) => f(),
-        }
-    };
-    // a worker of another pool waiting in `install` would run that pool's other jobs on its own
-    // stack meanwhile; a plain thread waits without running anything
-    if rayon::current_thread_index().is_some() {
-        std::thread::scope(|s| s.spawn(run).join()).unwrap_or_else(|e| std::panic::resume_unwind(e))
-    } else {
-        run()
-    }
+    stave_sema::pool::on_big_stacks(f)
 }

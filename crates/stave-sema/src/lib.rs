@@ -82,7 +82,7 @@ mod diag;
 mod dump;
 mod ids;
 mod intern;
-mod pool;
+pub mod pool;
 mod recursion;
 mod scan;
 mod toml;

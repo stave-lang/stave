@@ -311,10 +311,18 @@ fn lower_in_pool(
     let sigs = &tc.sigs;
     let lang = LangFns::find(prog);
     let mut statics_list: Vec<DeclId> = Vec::new();
-    for (k, d) in prog.decls.iter().enumerate() {
-        let id = DeclId(k as u32);
-        if d.kind == DeclKind::Static && sigs.konst(id).is_some_and(|c| c.value.is_some()) {
-            statics_list.push(id);
+    {
+        let mut ov = crate::types::Overlay::new(&table);
+        let mut h = crate::lower_expr::TyHost { tys: &mut ov, prog, sigs };
+        for (k, d) in prog.decls.iter().enumerate() {
+            let id = DeclId(k as u32);
+            let Some(c) = sigs.konst(id).filter(|c| c.value.is_some()) else { continue };
+            let image = d.kind == DeclKind::Const
+                && !h.has_params(c.ty)
+                && crate::consteval::cells(&mut h, c.ty).is_some_and(|n| n > CONST_INLINE_CELLS);
+            if d.kind == DeclKind::Static || image {
+                statics_list.push(id);
+            }
         }
     }
     let statics: FxHashMap<DeclId, u32> =
@@ -1046,7 +1054,7 @@ fn assemble(
     let mut all_strs: Vec<Vec<u8>> = outs.iter().flat_map(|o| o.strs.iter().cloned()).collect();
     for &d in statics_list {
         if let Some(v) = sigs.konst(d).and_then(|c| c.value.as_ref()) {
-            str_bytes(v, &mut all_strs);
+            str_bytes(v, &mut all_strs, &mut FxHashSet::default());
         }
     }
     all_strs.sort_by(|a, b| {
@@ -1321,13 +1329,20 @@ fn ty_final_pure(tr: &Tr, fin: &[stave_ir::TypeId], t: u32) -> stave_ir::TypeId 
     }
 }
 
-/// The string bytes a const value holds, appended to `out`.
-fn str_bytes(v: &crate::consteval::Val, out: &mut Vec<Vec<u8>>) {
+/// The most value cells a const's value is built from in the code where it is used; a larger
+/// const is read from its image, a read-only static ([`crate::lower_expr`] `const_use`).
+pub(crate) const CONST_INLINE_CELLS: u64 = 64;
+
+/// The string bytes a const value holds, appended to `out`. A shared part (`seen`, by address)
+/// is visited once: the value's distinct parts, not its leaves.
+fn str_bytes(v: &crate::consteval::Val, out: &mut Vec<Vec<u8>>, seen: &mut FxHashSet<usize>) {
     use crate::consteval::Val;
     match v {
         Val::Str(s) => out.push(s.to_vec()),
-        Val::Agg(vs) | Val::Variant(_, vs) => vs.iter().for_each(|x| str_bytes(x, out)),
-        Val::Rep(v, _) => str_bytes(v, out),
+        Val::Agg(vs) | Val::Variant(_, vs) if seen.insert(vs.as_ptr() as usize) => {
+            vs.iter().for_each(|x| str_bytes(x, out, seen));
+        }
+        Val::Rep(v, _) if seen.insert(std::sync::Arc::as_ptr(v) as usize) => str_bytes(v, out, seen),
         _ => {}
     }
 }
@@ -1353,6 +1368,10 @@ fn write_val(
     use crate::consteval::Val;
     use stave_ir::layout::Shape;
     let Ok(l) = lay.get_layout(t) else { return };
+    // nothing to write; and a zero-size value may have any number of leaves
+    if l.size == 0 {
+        return;
+    }
     let put = |out: &mut ValOut<'_>, at: usize, n: usize, bits: u64| {
         for (k, byte) in bits.to_le_bytes().iter().enumerate().take(n.min(8)) {
             if let Some(x) = out.bytes.get_mut(at + k) {
@@ -1380,7 +1399,7 @@ fn write_val(
             put(out, off + 8, 8, s.len() as u64);
         }
         (Shape::Fields(fs), Val::Agg(vs)) => {
-            for ((fo, ft), fv) in fs.iter().zip(vs) {
+            for ((fo, ft), fv) in fs.iter().zip(vs.iter()) {
                 write_val(types, lay, *ft, fv, out, off + *fo as usize);
             }
         }
@@ -1422,7 +1441,7 @@ fn write_val(
         (Shape::Enum(vs), Val::Variant(vi, fs)) => {
             put(out, off, 4, *vi as u64);
             if let Some(fl) = vs.get(*vi as usize) {
-                for ((fo, ft), fv) in fl.iter().zip(fs) {
+                for ((fo, ft), fv) in fl.iter().zip(fs.iter()) {
                     write_val(types, lay, *ft, fv, out, off + *fo as usize);
                 }
             }

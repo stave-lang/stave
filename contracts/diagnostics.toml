@@ -1991,8 +1991,8 @@ fix = { description = "use a struct with one field per column, e.g. `struct Row 
 code = "E0911"
 severity = "error"
 area = "generics"
-rule = "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too. Case `size`: a parameter, binding, array or tuple literal, or return value of a fn whose type takes more than 2^28 bytes (contracts/lang-details.md, Size limits), once per type and fn, at its first binding. Case `instance`: the same in an instance of a generic fn, once per instance, at the generic fn, naming the instance"
-holes = { type = "type", bytes = "int", instance = "path" }
+rule = "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, array, tuple, or struct literal, value `if` / `match`, or return value of a fn whose type takes more than 2^28 bytes (contracts/lang-details.md, Size limits), once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, plus each call's result and by-value arguments) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it; once per instance, at the generic fn"
+holes = { type = "type", bytes = "int", instance = "path", fn = "path" }
 message = "`{type}` has no layout for `size_of` / `align_of`"
 labels = [{ at = "primary", text = "no size or alignment for this type" }]
 fix = { description = "ask for the size of a sized type nested at most 1000 levels deep" }
@@ -2006,6 +2006,16 @@ fix = { description = "keep a value this large behind a reference, or in a heap 
 message = "in `{instance}`, a value of type `{type}` takes {bytes} bytes, more than 268,435,456"
 labels = [{ at = "primary", text = "too large a value in this instance" }]
 fix = { description = "instantiate with a smaller type or length, or keep the value in a heap buffer (`vec.Vec`)" }
+
+[diag.cases.overflow]
+message = "in `{fn}`, the size of type `{type}` does not fit in 64 bits"
+labels = [{ at = "primary", text = "no value of this type can exist" }]
+fix = { description = "use a smaller array length or type argument" }
+
+[diag.cases.frame]
+message = "the values `{fn}` holds take {bytes} bytes together, more than 704,643,072"
+labels = [{ at = "primary", text = "too large a stack frame" }]
+fix = { description = "split the fn, or keep large values in a heap buffer (`vec.Vec`)" }
 
 [[diag]]
 code = "E1001"
