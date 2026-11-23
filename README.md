@@ -52,11 +52,15 @@ Examples and rewrites: [contracts/known-limits.md](contracts/known-limits.md).
   a spawned body on its one thread, at the join.
 - A `rec fn` cycle and the drop of a recursive value have no computed stack bound: they get
   `[run] stack` and trap `StackOverflow` past it. Signal handlers run on an alternate stack that no
-  bound counts. There is no GPU stack bound.
+  bound counts. There is no GPU stack bound. `stave test` runs every `test fn` on the default
+  8 MiB stack, not `[run] stack`: a test of a deep `rec fn` can trap where `stave run` does not,
+  and pass where `stave run` traps.
 - The effects of `runtime` functions come from a table in the compiler, and `io` leaves out the
   allocator's, a lock's and a thread's system calls. Effect checks (`without(..)`) run only on
   programs with no other error. The effect sets over-approximate: a value moved out is still
-  charged the drop where it was made.
+  charged the drop where it was made, and a call that cannot run still counts (after `return`,
+  after a call that never returns, after `break`, under `if false`):
+  `fn f(n: u32) -> u32 without(io) { return n; noisy(); }` is E1401; delete the dead call.
 
 **What the interpreter's checking does not see.** It runs the positive conformance programs and
 the fuzzer's programs with borrow tracking and a memory mode; it is the oracle for checker holes.
@@ -70,6 +74,8 @@ the fuzzer's programs with borrow tracking and a memory mode; it is the oracle f
   moved-out places).
 - Programs with `unsafe` need not run clean there, and the fuzzer builds programs from fixed
   classes of borrow constructs: a hole outside them is not found by it.
+- It does not read `[run] stack`: its call depth is fixed at 20,000, so a `rec fn` that recurses
+  30,000 deep runs natively and ends `StackOverflow` there.
 
 **Valid programs the checker rejects** (each has a rewrite)
 
@@ -83,10 +89,23 @@ the fuzzer's programs with borrow tracking and a memory mode; it is the oracle f
   view apart does not end a field's borrow: moving the borrowed value afterwards is E0501.
 - Calls through function values are as precise as their flow: some uses of a function-typed place
   make its calls reach every function value of its type, which can give a false effect, lock-rank,
-  recursion or stack-bound error. `c.select(f, g)` of two function items is one plain fn type.
+  recursion or stack-bound error. `c.select(f, g)` of two function items is one plain fn type. A
+  value read out of an array, a tuple or an `if` arm is such a use: with `fn b() { call(); }`
+  used as a value, `fn call() { let fs: [fn(); 1] = [a]; let f = fs[0]; f(); }` is a call cycle
+  (E1402); a closure (a `spawn` body, a `thread.join` arm) that calls such a value of its own fn
+  type is E1409. Bind the value to a plain local (`let f: fn() = a;`), give the table a fn type
+  unlike the closure's, or (E1402) mark the cycle `rec fn`.
+- One slot stands for the function field of every `iter.Map` of one instance type: a
+  `.map(loud)` over `&[u32]` that prints gives `io` to every other `Map<u32, u32>`, so a
+  `without(io)` fn that only maps a quiet fn is E1401. Map to another type, or loop by hand.
+- Generic code that stores what a `from copy it` call returns into a `&mut` view param is E0513
+  (`fn drain<T: view>(it: &mut iter.SliceIter<T>, out: &mut vec.Vec<&T> from copy it)` with
+  `out.push(x)` for `x` from `it.next()`); the same fn over `u32` is accepted. Write `from it`.
 - Generic code over masks or vectors (`T: Not` at `mask32x4`) is E0901. A vector type wider than
   the target's registers cannot be named in a fn without `needs(..)`, even as `Vec` element type.
-- The exhaustiveness search has a limit: a `match` past it is E0300 `limit`.
+- The exhaustiveness search has a limit: a `match` past it is E0300 `limit`. So is any `let` of
+  a struct or tuple with 2,000 fields or more in all (a nested struct counts as a field too),
+  even `let s = S.{ f0: 0, .. };` with a plain name; keep bulk data in an array or a `vec.Vec`.
 
 **Deliberate rules** (they reject programs that would run; each has a rewrite)
 
@@ -97,14 +116,23 @@ the fuzzer's programs with borrow tracking and a memory mode; it is the oracle f
   reads (E0505). A temporary ends with its statement, with no constant promotion:
   `let r = &f();` is E0501.
 - `Drop` impls only on a type of the same package (E0419), not overlapping a `Copy` impl (E0416),
-  and a `Drop` impl on a call cycle needs `rec fn drop`. Operator traits only on `Copy` types.
+  and a `Drop` impl on a call cycle needs `rec fn drop`. Operator traits only on `Copy` types, and
+  never on a fn type (E0420, `impl Add for fn(u32) -> u32`): put your own trait on it.
 - Two bounds of one trait on a param make a method call ambiguous (E0908). Const parameters are
   unsigned integers. A type nests at most 1,000 levels (E0005).
 
 **Targets and tooling**
 
 - Generated code is slow next to `-O2`: `--release` assigns registers and cleans up slice accesses,
-  but nothing is inlined, hoisted out of loops, or vectorized.
+  but nothing is inlined, hoisted out of loops, or vectorized. Two searches give up on huge
+  functions, with the same results and slower code: past 50 million block visits (10,000 locals
+  read after 4,000 `if`s; 5,000 are fine) the function keeps every value in its stack frame, and
+  in a loop body of more than 4,096 blocks (4,500 `if`s) a repeated `i = i + 8` is computed twice.
+- `check` accepts programs that `build` cannot: `dispatch fn main`, `fn main<T>()` (no `fn main`),
+  and `fn main(x: u32)` (`main` with parameters); write a plain `fn main()` that calls the
+  `dispatch fn`. On AArch64 a fn with a 256-bit vector param and `needs(avx2)` used as a value
+  (`sink(w)`) passes `check --target aarch64-linux` and fails to build (a written
+  `fn(f32x8) -> f32 needs(avx2)` type is E0702): call it, or use a 128-bit vector.
 - Linux only. No C interop yet: `extern "C"` imports check, but a program that reaches one cannot
   be built. `[target.<T>.link]` in `stave.toml` is reserved for C link inputs.
 - GPU: design only; no PTX back end, no kernel checks beyond the front end. The optimizer is not

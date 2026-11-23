@@ -40,6 +40,11 @@ The checker computes a stack size for every thread whose calls cannot reach a ca
 - Signal handlers, the panic report included, run on the alternate signal stack, which no bound
   counts.
 - There is no stack bound for the GPU target (it is design only).
+- `stave test` runs each `test fn` on the default 8 MiB stack and does not read `[run] stack`. With
+  `[run] stack = "64MiB"` and `rec fn depth(n: u64) -> u64`, `depth(400000)` runs under `stave run`
+  and traps `StackOverflow` in a `test fn`; with `[run] stack = "64KiB"` and `depth(50000)` the
+  program traps and the test passes. Keep a test's recursion within 8 MiB and run the deep case in
+  `main`.
 
 ### Effects and `without(..)`
 
@@ -55,6 +60,9 @@ program that does not run it.
 - A value that is moved out is still charged the drop where it was made. A fn that makes a
   `vec.Vec` and returns it is E1401 under `without(alloc)`: the drop of the local reaches
   `runtime.alloc.free`.
+- A call that cannot run still counts. Each of these is E1401, `noisy` being a fn that prints:
+  `fn f(n: u32) -> u32 without(io) { return n; noisy(); }`; the same after a call to a `-> never`
+  fn, after `break` in a loop, and `if false { noisy(); }`. Delete the dead call.
 
 ## 2. What the interpreter's checking does not see
 
@@ -83,6 +91,9 @@ programs under it: it is the oracle that finds checker holes. Its limits:
   and a drop of a moved-out place is reported only when the destructor's glue reads it.
 - Programs that contain `unsafe` are not required to run clean in `check`, and the fuzzer's
   programs come from fixed classes of borrow constructs: a hole outside them is not found by it.
+- The interpreter does not read `[run] stack`. Its call depth is fixed at 20,000 (a call past it
+  traps `StackOverflow`): `rec fn depth(n: u64) -> u64` with `depth(30000)` runs natively and exits
+  101 there.
 
 ## 3. Valid programs the checker rejects
 
@@ -109,13 +120,63 @@ programs under it: it is the oracle that finds checker holes. Its limits:
   moving `x` afterwards is E0501.
 - `c.select(f, g)` of two function items that deny an effect is a call result of the plain fn type:
   passing it where `fn() without(io)` is expected is E1403.
+- A fn value read out of an array, a tuple or the arms of an `if` is not followed: a call through it
+  reaches every function value of its type. Given `fn a() {}` and `fn b() { call(); }`, with `b`
+  used as a value somewhere (`let keep: fn() = b;`),
+  ```
+  fn call() {
+      let fs: [fn(); 1] = [a];
+      let f = fs[0];
+      f();
+  }
+  ```
+  is E1402 (`b -> call -> b`); with `fn call() without(trap)` and a trapping `b` it is E1401. A
+  closure that makes the call, when the closure has the fn type it calls, is a cycle through
+  itself, E1409:
+  ```
+  let c = fn() {
+      let fs: [fn(); 2] = [a, b];
+      let f = fs[0];
+      f();
+  };
+  ```
+  A `spawn` body and a `thread.join` arm are such closures (`spawn` captures no collection of fn
+  values: fn values are not `Sync`, E0802, so the collection is made inside the body). A fn item
+  that makes the call for the closure does not help. Rewrites: bind the value to a plain local
+  (`let f: fn() = a;` is followed), call by `if k { a(); } else { b(); }`, give the fns a param so
+  their type differs from the closure's (`[fn(u32); 2]` in a `fn()` closure). For the E1402 case,
+  also mark the cycle `rec fn`.
+- One slot stands for the function field of every `iter.Map` of one instance type: a
+  `.map(loud)` anywhere gives its fn to every other `Map<u32, u32>`, a dead one included. With
+  `fn loud(x: &u32) -> u32 { io.print("loud\n"); return *x; }` mapped in `main`,
+  `fn total(xs: &[u32]) -> u32 without(io)` that runs `for v in iter.iter(xs).map(quiet)` over a
+  quiet `fn quiet(x: &u32) -> u32` is E1401. `loud` returning `u64` (another instance) is
+  accepted, and so is `for x in iter.iter(xs) { s = s +% quiet(x); }`.
+- Generic code that stores what a `from copy` call returns, through a `&mut` view param, is
+  E0513 when the clause names the iterator by `copy`:
+  ```
+  fn drain<T: view>(it: &mut iter.SliceIter<T>, out: &mut vec.Vec<&T> from copy it) {
+      loop {
+          match it.next() {
+              Option.Some(x) => { out.push(x); }
+              Option.None => { return; }
+          }
+      }
+  }
+  ```
+  The same fn with `T` replaced by `u32` is accepted. Write `from it` (the caller keeps `it`
+  borrowed while `out` is used), or do not make the fn generic.
 - Generic code over masks or vectors: `T: Not` at `mask32x4` is E0901 (only ints, floats and
   `bool` have the built-in operator impls).
 - A vector type wider than the target's registers cannot be named in a fn without `needs(..)`,
   even as the element type of a `vec.Vec` (`vec.Vec::<f32x8>.new()`) or in a `match` on a value
   that holds one with only `_` arms (E0702).
 - The exhaustiveness search has a limit (patterns nested more than 2,000 levels, or over
-  1,000,000 search steps): a `match` past it is E0300 `limit`.
+  1,000,000 search steps): a `match` past it is E0300 `limit`. Every `let`, even one that binds a
+  plain name, is checked like a `match`: a struct or tuple with 2,000 fields or more in all (a
+  nested struct or tuple counts as a field) is E0300 at `let s = S.{ f0: 0, f1: 1, ... };` and at
+  `let (a0, a1, ..., a1999) = t;`; with 1,999 fields it is accepted, and a fn param of that type is accepted.
+  Keep bulk data in an array (`[u32; 5000]` in a tuple is accepted) or a `vec.Vec`.
 
 ## 4. Rules that are deliberate
 
@@ -140,6 +201,9 @@ that would run.
   value (E0909).
 - **Operator traits only on `Copy` types** (E0422); an operator copies its operands, so a generic
   one needs `T: Add + Copy`.
+- **No operator impl on a fn type** (E0420): the operator traits and fn types both belong to
+  `std`, so `impl Add for fn(u32) -> u32` is outside both packages. A trait of your own may be
+  implemented for a fn type: `impl Twice for fn(u32) -> u32` gives `f.twice(1)`.
 - **A call through a function value is as precise as its flow.** Any use of a function-typed place
   beyond a short list of harmless ones (a `&mut` lent to a helper, a method receiver, an `if` or
   `match` arm, an array or tuple element, a struct pattern) makes its calls reach every function
@@ -155,8 +219,27 @@ that would run.
 ## 5. Targets and tooling
 
 - Linux only.
+- `check` accepts some programs that `build` cannot build; the build exits 2 with a reason:
+  - `dispatch fn main() -> i32 { _ => m0, }` and `fn main<T>() -> i32 { return 0; }` build to "the
+    program has no `fn main` in its root module"; `fn main(x: u32) -> i32 { return 0; }` to
+    "`codegen` is not implemented yet: `main` with parameters". Write a plain `fn main() -> i32`
+    that returns `pick()` of a `dispatch fn pick() -> i32 { _ => base, }`.
+  - A fn with a 256-bit vector param and `needs(avx2)` used as a value builds on x86-64 only.
+    `fn w(v: f32x8) -> f32 needs(avx2)` with `sink(w)`, `fn sink<T: view>(x: T) -> u32`, passes
+    `check --target aarch64-linux`, and the AArch64 build fails with "reference to fn `main.w`
+    without a body". A written `fn(f32x8) -> f32 needs(avx2)` type is E0702 there. Call `w`
+    where the fn has `needs(avx2)`, or use `f32x4` (a value of it builds).
 - Generated code is slow next to `-O2`: `--release` assigns registers and cleans up slice
   accesses, but nothing is inlined, hoisted out of loops, or vectorized.
+- Two searches of `--release` give up on a huge function. The result is the same program, slower:
+  - Register assignment stops after 50 million block visits of its liveness walk and keeps every
+    value of the function in its stack frame (the speed of a debug build). A function of values
+    `let a0: u32 = n +% 1;`, each read at the end, then `if n == 7 { s = s +% 1; }` (a different
+    constant each) and a loop of 10^9 steps: 0.65 s with 500 values and 500 `if`s, 0.59 s with
+    5,000 and 4,000, 1.65 s with 10,000 and 4,000 (a debug build: 1.54 s). Split the function.
+  - The merge of a repeated loop step (`let nx = i + 8;` after the test `i + 8 <= n`) looks at
+    most 4,096 blocks for the loop head: with 4,096 `if`s between it and the back edge the
+    `add 8` appears once in the code, with 4,500 twice.
 - No C interop yet: `extern "C"` imports check, but a program that reaches one cannot be built
   (there is no C linker step), and `[target.<T>.link]` is reserved ([cli.md](cli.md)).
 - GPU: design only. There is no PTX back end and no kernel checks beyond the front end. The
