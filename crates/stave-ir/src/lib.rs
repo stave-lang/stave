@@ -19,6 +19,7 @@
 //! - [`traps`]: the instructions that give a function the `trap` effect.
 //! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
 //! - [`known`]: the compiler-known items ([`Known`]) functions are stamped with.
+//! - [`text`]: the IR text reader: text in, a verified module out.
 
 pub mod arith;
 pub mod borrowtrack;
@@ -39,6 +40,7 @@ pub mod mem;
 pub mod memcheck;
 pub mod print_checked;
 pub mod simd;
+pub mod text;
 pub mod traps;
 pub mod types;
 pub mod verify;
