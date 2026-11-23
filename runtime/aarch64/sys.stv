@@ -59,6 +59,9 @@ pub const NR_GETPID: usize = 172;
 pub const NR_CLONE: usize = 220;
 pub const NR_EXIT: usize = 93;
 
+// Byte offset of the u32 `st_mode` in this arch's `struct stat` (after st_dev, st_ino: two u64).
+pub const STAT_MODE_OFF: usize = 16;
+
 pub const NCALLS: usize = 36;
 
 // Indexed by call id (syscalls.list order).

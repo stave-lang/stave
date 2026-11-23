@@ -1,0 +1,122 @@
+// std.io directories and file writes, std.env.var: kinds of the test's own files (the run's
+// working directory is the package directory), a sorted read_dir, errors for a missing path, a
+// directory written as a file, and a file taken as a directory; then a create / write / read /
+// list / remove round trip under a /tmp directory named after the program path, and unset
+// environment variables.
+import std.env;
+import std.io;
+import std.mem;
+import std.string;
+import std.vec;
+
+fn kind_text(k: io.Kind) -> &str {
+    return match k {
+        io.Kind.File => "file",
+        io.Kind.Dir => "dir",
+        io.Kind.Other => "other",
+    };
+}
+
+fn show_kind(path: &str) {
+    match io.kind(path) {
+        Result.Ok(k) => {
+            let t = kind_text(k);
+            io.print(f"{path}: {t}\n");
+        }
+        Result.Err(e) => { io.print(f"{path}: err {e}\n"); }
+    }
+}
+
+fn less(a: &[u8], b: &[u8]) -> bool {
+    let n = if a.len() < b.len() then a.len() else b.len();
+    for i in 0..n {
+        if a[i] != b[i] { return a[i] < b[i]; }
+    }
+    return a.len() < b.len();
+}
+
+fn list(path: &str) {
+    match io.read_dir(path) {
+        Result.Ok(v) => {
+            let mut es = v;
+            // insertion sort by name: the kernel's order is unspecified
+            let mut i: usize = 1;
+            while i < es.len() {
+                let mut j = i;
+                while j > 0 && less(es.get_ref(j).name.as_slice(), es.get_ref(j - 1).name.as_slice()) {
+                    es.swap(j, j - 1);
+                    j = j - 1;
+                }
+                i = i + 1;
+            }
+            for k in 0..es.len() {
+                let e = es.get_ref(k);
+                let mut name = string.String.new();
+                for b in e.name.as_slice() { name.push(*b as char); }
+                let t = kind_text(e.kind);
+                io.print(f"  {name} {t}\n");
+            }
+        }
+        Result.Err(e) => { io.print(f"{path}: err {e}\n"); }
+    }
+}
+
+fn say(what: &str, r: Result<(), io.Error>) {
+    match r {
+        Result.Ok(_) => { io.print(f"{what}: ok\n"); }
+        Result.Err(e) => { io.print(f"{what}: err {e}\n"); }
+    }
+}
+
+fn dir_status(path: &str) -> Result<(), io.Error> {
+    let r = io.read_dir(path)?;
+    return Result.Ok(());
+}
+
+// FNV-1a of the program path: each leg's binary has its own path, so its own /tmp directory.
+fn scratch() -> string.String {
+    let p = env.arg(0).unwrap();
+    let mut h: u64 = 14695981039346656037;
+    for b in p.as_bytes() { h = (h ^ (*b as u64)) *% 1099511628211; }
+    return f"/tmp/stave-io-dirs-{h}";
+}
+
+fn main() -> i32 {
+    show_kind("src");
+    show_kind("src/main.stv");
+    show_kind("/dev/null");
+    show_kind("missing");
+    list(".");
+    say("write src", io.write_file("src", mem.str_bytes("x")));
+    say("mkdir stave.toml", io.create_dir_all("stave.toml"));
+    say("mkdir src", io.create_dir_all("src"));
+    say("list file", dir_status("stave.toml"));
+    say("list nul", dir_status("src\0"));
+
+    let d = scratch();
+    let a = f"{d}/a";
+    let sub = f"{d}/a/b";
+    let file = f"{d}/a/b/f.txt";
+    say("mkdir", io.create_dir_all(sub.as_str()));
+    say("mkdir again", io.create_dir_all(sub.as_str()));
+    say("write", io.write_file(file.as_str(), mem.str_bytes("hello\n")));
+    say("rewrite", io.write_file(file.as_str(), mem.str_bytes("hi\n")));
+    match io.read_to_string(file.as_str()) {
+        Result.Ok(s) => { io.print(s.as_str()); }
+        Result.Err(e) => { io.print(f"read: err {e}\n"); }
+    }
+    list(a.as_str());
+    list(sub.as_str());
+    say("rmdir full", io.remove_dir(sub.as_str()));
+    say("rm", io.remove_file(file.as_str()));
+    say("rmdir b", io.remove_dir(sub.as_str()));
+    say("rmdir a", io.remove_dir(a.as_str()));
+    say("rmdir d", io.remove_dir(d.as_str()));
+    let gone = io.kind(d.as_str()).is_err();
+    io.print(f"gone {gone}\n");
+
+    let unset = env.var("STAVE_IO_DIRS_SURELY_UNSET").is_none();
+    let nul = env.var("PATH\0").is_none();
+    io.print(f"unset {unset} nul {nul}\n");
+    return 0;
+}
