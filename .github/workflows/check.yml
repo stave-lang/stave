@@ -19,6 +19,7 @@ jobs:
       # A pull request that changes only *.md files skips the build and test steps; the job
       # still runs and succeeds, because the required status check is this job. Any other
       # diff, a push, an empty diff, or a diff that cannot be computed runs everything.
+      # LANG.md and contracts/ are read by tests and generators, so they count as code.
       - id: scope
         if: github.event_name == 'pull_request'
         env:
@@ -26,7 +27,8 @@ jobs:
         run: |
           if git fetch --no-tags --depth=1 origin "$BASE" &&
             files=$(git -c core.quotepath=off diff --name-only --no-renames "$BASE" HEAD) &&
-            [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qv '\.md$'; then
+            [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qv '\.md$' &&
+            ! printf '%s\n' "$files" | grep -qE '^(LANG\.md$|contracts/)'; then
             echo docs_only=true >> "$GITHUB_OUTPUT"
           fi
       # AArch64 programs built by the tests run under user-mode emulation.
