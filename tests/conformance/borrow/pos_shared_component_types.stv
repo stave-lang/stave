@@ -1,0 +1,71 @@
+//~ CHECK-ONLY
+// A value of a type whose components repeat (each type below doubles the one before: 2^17
+// leaves) holds no borrow unless a component is a reference: each distinct component type is
+// looked at once, however often it repeats.
+struct P<A, B> { pub a: A, pub b: B }
+impl<A: Copy, B: Copy> Copy for P<A, B> {}
+enum E<A, B> { L(A), R(B) }
+impl<A: Copy, B: Copy> Copy for E<A, B> {}
+
+type T0 = u8;
+type T1 = (T0, T0);
+type T2 = (T1, T1);
+type T3 = (T2, T2);
+type T4 = (T3, T3);
+type T5 = (T4, T4);
+type T6 = (T5, T5);
+type T7 = (T6, T6);
+type T8 = (T7, T7);
+type T9 = (T8, T8);
+type T10 = (T9, T9);
+type T11 = (T10, T10);
+type T12 = (T11, T11);
+type T13 = (T12, T12);
+type T14 = (T13, T13);
+type T15 = (T14, T14);
+type T16 = (T15, T15);
+type T17 = (T16, T16);
+type S0 = ();
+type S1 = P<S0, S0>;
+type S2 = P<S1, S1>;
+type S3 = P<S2, S2>;
+type S4 = P<S3, S3>;
+type S5 = P<S4, S4>;
+type S6 = P<S5, S5>;
+type S7 = P<S6, S6>;
+type S8 = P<S7, S7>;
+type S9 = P<S8, S8>;
+type S10 = P<S9, S9>;
+type S11 = P<S10, S10>;
+type S12 = P<S11, S11>;
+type S13 = P<S12, S12>;
+type S14 = P<S13, S13>;
+type S15 = P<S14, S14>;
+type S16 = P<S15, S15>;
+type S17 = P<S16, S16>;
+type V0 = ();
+type V1 = E<V0, V0>;
+type V2 = E<V1, V1>;
+type V3 = E<V2, V2>;
+type V4 = E<V3, V3>;
+type V5 = E<V4, V4>;
+type V6 = E<V5, V5>;
+type V7 = E<V6, V6>;
+type V8 = E<V7, V7>;
+type V9 = E<V8, V8>;
+type V10 = E<V9, V9>;
+type V11 = E<V10, V10>;
+type V12 = E<V11, V11>;
+type V13 = E<V12, V12>;
+type V14 = E<V13, V13>;
+type V15 = E<V14, V14>;
+type V16 = E<V15, V15>;
+type V17 = E<V16, V16>;
+
+fn tuple(x: T17) -> T17 { return x; }
+
+fn record(x: S17) -> S17 { return x; }
+
+fn variant(x: V17) -> V17 { return x; }
+
+fn main() { }

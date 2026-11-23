@@ -1088,17 +1088,17 @@ fix = { description = "make `{type}` Copy with `impl Copy for {type} {{}}`, if a
 code = "E0501"
 severity = "error"
 area = "borrow"
-rule = "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)"
+rule = "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check; `temporary-old`: the operand `e` of an `old(e)`, which ends where it is evaluated, at fn entry; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)"
 holes = { access = "text-literal", place = "place", loan = "text-literal", loaned = "place", stmt = "text-literal", bind = "text-literal", tref = "text-literal", later = "text-literal" }
 choices = { access = ["borrow mutably", "borrow", "move", "assign to", "drop"], loan = ["`&mut`", "`&`"], stmt = ["statement", "condition", "guard", "branch", "arm", "check", "loop"], bind = ["let t", "let mut t"], tref = ["&t", "&mut t"], later = ["later here", "here, in the next iteration"] }
 message = "cannot {access} `{place}`: it has a live {loan} borrow"
-labels = [{ at = "primary", text = "{access} here" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here" }]
+labels = [{ at = "primary", text = "{access} here" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used {later}" }]
 fix = { description = "end the borrow before this point: move the later use before it, or copy the value out first" }
 
 [diag.cases.thread]
 message = "cannot {access} `{place}`: it has a live {loan} borrow"
 labels = [{ at = "primary", text = "{access} here" }, { at = "loan", text = "{loan} borrow of `{loaned}` by the thread spawned here: it may use `{loaned}` until the scope is left" }]
-fix = { description = "leave the scope before this point (its threads are joined there), or use the place only inside the thread" }
+fix = { description = "{access} `{place}` after the `scope` that runs the thread: its threads are joined only where it is left, so a `scope` around an endless loop never ends the borrow (open the `scope` inside the loop body instead)" }
 
 [diag.cases.temporary]
 message = "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
@@ -1119,6 +1119,11 @@ fix = { description = "bind it with `let` before the `match`: `{bind} = {place};
 message = "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
 labels = [{ at = "primary", text = "temporary made here: it ends at the end of its {stmt}" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used {later}" }]
 fix = { description = "a contract clause binds no local: use the value `{place}`, not a borrow of it" }
+
+[diag.cases.temporary-old]
+message = "the temporary `{place}` ends with its `old(..)` operand at fn entry, but a {loan} borrow of it is used later"
+labels = [{ at = "primary", text = "temporary made here: it ends where the `old(..)` operand is evaluated, at fn entry" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used {later}" }]
+fix = { description = "compute the Copy value inside `old(..)`, so that no borrow of `{place}` is kept: `old(f(x).len())`, not `old(f(x).as_slice()).len()`" }
 
 [diag.cases.temporary-loop]
 message = "the iterator `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
@@ -1339,11 +1344,16 @@ fix = { description = "write `from {param}` instead of `from copy {param}`" }
 code = "E0601"
 severity = "error"
 area = "simd"
-rule = "chunk loop without a tail policy"
+rule = "chunk loop without a tail policy; case `element-loop`: a tail clause on a loop that is not a chunk loop (its annotation, as written, is no vector or reference to one: a range, an iterator, an element loop, also a generic `T`)"
 holes = { type = "type" }
 message = "chunk loop over `{type}` has no tail clause"
 labels = [{ at = "primary", text = "remaining elements are not handled" }]
 fix = { description = "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`" }
+
+[diag.cases.element-loop]
+message = "a tail clause on a loop that is not a chunk loop"
+labels = [{ at = "primary", text = "tail clause of an element loop: it visits every element, none is left over" }]
+fix = { description = "remove the tail clause; for a chunk loop, annotate the binding with a vector type written out (`for v: f32x8 in xs`), not a generic one" }
 
 [[diag]]
 code = "E0602"
