@@ -18,14 +18,14 @@
 //! as `T: Add`); `Send`/`Sync` structurally (an ADT is Send/Sync if its fields are), except for
 //! an ADT with an explicit `unsafe impl` of that trait: then only its impls decide (a failing
 //! bound, as in `unsafe impl<T: Sync> Sync for G<T>`, makes the instance not Sync). Recursive
-//! types are Send/Sync coinductively; a query nested past a fixed depth answers "no".
+//! types are Send/Sync coinductively ([`QUERY_DEPTH`]: every query ends).
 //!
 //! **Flat** is derived, never implemented (an impl is E1408 and is not consulted): a type is
 //! Flat iff it holds no reference, view, raw pointer, fn value, `std.cell.UnsafeCell`, or ADT
 //! with a `Drop` impl, recursively through struct fields, enum payloads, the type arguments of
 //! an ADT instance, and array, tuple, and range elements. `str` and slices are not Flat
 //! (unsized); a generic param is Flat only through a `Flat` bound. Recursive types are Flat
-//! coinductively, like Send/Sync; past the depth cutoff the answer is "no" (E1407 case `depth`).
+//! coinductively, like Send/Sync.
 //!
 //! **Frozen** is derived the same way (an impl is E1408): a type is Frozen iff nothing reachable
 //! from a value of it can change while the value is only shared: no `std.cell.UnsafeCell` and no
@@ -79,6 +79,9 @@ impl<I: Interner + ?Sized> Interner for WithSigs<'_, I> {
     }
     fn refusals(&self) -> u32 {
         self.cx.refusals()
+    }
+    fn claimed_mut(&mut self) -> &mut u32 {
+        self.cx.claimed_mut()
     }
     fn fixed_ty(&self, f: TypeId) -> TypeId {
         self.cx.fixed_ty(f)
@@ -262,28 +265,78 @@ pub fn adt_layout(is_enum: bool, variants: &[Vec<(u64, u64)>]) -> Result<(u64, u
     Ok((size, align))
 }
 
-/// Deepest type nesting a trait query descends: the type depth limit. Past it a type does not
-/// implement the trait: the conservative answer (not Copy: moved; not Send/Sync: rejected at the
-/// thread boundary; not Flat: rejected at the bound). Within one type the limit is not reached
-/// (E0005 case `type` rejects deeper types); a query that follows references through distinct
-/// types can reach it. Recursive types end earlier, by the coinductive Send/Sync rule ([`Query`]).
+/// The longest part path a Flat / Frozen witness names ([`World::derived_witness`]): the type
+/// depth limit, which no type of a checked program passes (E0005 case `type`).
+///
+/// A trait query itself has no depth limit: every step goes to a component of its type (a type
+/// argument, an element, a field) or to another goal on the same type (a blanket impl's bound),
+/// a goal reached again while in progress is cut ([`Query`]), and the types are finitely many
+/// ([`crate::types::MAX_TYPE_HEIGHT`]). So every query ends, with the answer the rules give.
 pub(crate) const QUERY_DEPTH: u32 = crate::typedepth::MAX_TYPE_DEPTH;
 
 /// State of one top-level trait query: the Send/Sync goals in progress (a goal reached again is
 /// assumed to hold), the lowest in-progress index an assumption used below the current goal
-/// (`usize::MAX`: none), and the results already known. `any_kind`: impl matching skips the
+/// (`usize::MAX`: none), and the results already known. The other goals (Copy, a trait with
+/// impls) are inductive: one reached again while in progress does not hold through that path
+/// (`goals`, `goal_low`: the same bookkeeping, so a negative answer that used it is not
+/// memoized). `any_kind`: impl matching skips the
 /// view-kind rule (a query that asks whether an impl could apply to some instance, or names the
 /// impl a view was refused by; never one that selects an impl).
 struct Query {
     active: Vec<(TypeId, DeclId)>,
     low: usize,
+    goals: Vec<(TypeId, TraitRef)>,
+    goal_low: usize,
     memo: FxHashMap<(TypeId, DeclId), bool>,
     any_kind: bool,
 }
 
 impl Default for Query {
     fn default() -> Query {
-        Query { active: Vec::new(), low: usize::MAX, memo: FxHashMap::default(), any_kind: false }
+        Query {
+            active: Vec::new(),
+            low: usize::MAX,
+            goals: Vec::new(),
+            goal_low: usize::MAX,
+            memo: FxHashMap::default(),
+            any_kind: false,
+        }
+    }
+}
+
+impl Query {
+    /// Enters inductive goal `g`: `None` if it is in progress (it does not hold through this
+    /// path), else the mark [`Query::leave_goal`] takes.
+    fn enter_goal(&mut self, g: (TypeId, TraitRef)) -> Option<(usize, usize)> {
+        if let Some(i) = self.goals.iter().position(|x| *x == g) {
+            self.goal_low = self.goal_low.min(i);
+            return None;
+        }
+        let me = self.goals.len();
+        self.goals.push(g);
+        Some((me, std::mem::replace(&mut self.goal_low, usize::MAX)))
+    }
+
+    /// Leaves the goal entered with `mark`: whether its answer used no goal still in progress
+    /// further out (so a negative answer may be memoized).
+    fn leave_goal(&mut self, mark: (usize, usize)) -> bool {
+        let (me, saved) = mark;
+        self.goals.truncate(me);
+        let low = self.goal_low;
+        self.goal_low = saved.min(if low < me { low } else { usize::MAX });
+        low >= me
+    }
+
+    /// For a goal kept in no stack (a tuple's Copy): the mark [`Query::own_low`] takes.
+    fn open_low(&mut self) -> usize {
+        std::mem::replace(&mut self.goal_low, usize::MAX)
+    }
+
+    /// Whether the answer since `open_low` used no inductive goal in progress.
+    fn own_low(&mut self, saved: usize) -> bool {
+        let low = self.goal_low;
+        self.goal_low = saved.min(low);
+        low == usize::MAX
     }
 }
 
@@ -313,7 +366,7 @@ pub enum NotFlat {
     Param,
     /// `str` or a slice: no by-value copy exists.
     Unsized,
-    /// The query reached its depth cutoff (fails closed).
+    /// The witness path passed [`QUERY_DEPTH`] parts (no type of a checked program has one).
     Depth,
     /// An ADT without a built signature: only after an earlier error, never reported.
     Unknown,
@@ -606,7 +659,7 @@ impl<'a> World<'a> {
         tr: &TraitRef,
         env: &[GenericParam],
     ) -> bool {
-        self.implements_q(cx, t, tr, env, 0, &mut Query::default())
+        self.implements_q(cx, t, tr, env, &mut Query::default())
     }
 
     fn implements_q<I: Interner + ?Sized>(
@@ -615,14 +668,10 @@ impl<'a> World<'a> {
         t: TypeId,
         tr: &TraitRef,
         env: &[GenericParam],
-        depth: u32,
         q: &mut Query,
     ) -> bool {
         if cx.is_error_ty(t) {
             return true;
-        }
-        if depth > QUERY_DEPTH {
-            return false;
         }
         let lang = &self.sigs.lang;
         if let TypeKind::Param(i) = cx.kind(t) {
@@ -642,7 +691,7 @@ impl<'a> World<'a> {
             return false;
         }
         if tr.trait_decl == lang.copy && lang.copy.is_some() {
-            return self.is_copy_q(cx, t, env, depth + 1, q);
+            return self.is_copy_q(cx, t, env, q);
         }
         let key = (t, tr.trait_decl);
         if tr.args.is_empty()
@@ -674,24 +723,42 @@ impl<'a> World<'a> {
         if auto {
             q.active.push(key);
         }
+        let mark = if auto {
+            Some((q.goals.len(), q.open_low()))
+        } else {
+            match q.enter_goal((t, tr.clone())) {
+                Some(m) => Some(m),
+                None => {
+                    q.active.truncate(me);
+                    q.low = saved_low;
+                    return false;
+                }
+            }
+        };
         let r = if let Some(d) = derived {
-            self.auto_derived(cx, t, tr, d, env, depth + 1, q)
+            self.auto_derived(cx, t, tr, d, env, q)
         } else if auto {
-            self.send_sync(cx, t, tr, env, depth + 1, q)
+            self.send_sync(cx, t, tr, env, q)
         } else if let Some(name) = lang.ops.iter().find(|(_, d)| **d == tr.trait_decl).map(|(n, _)| *n)
             && builtin_op_impl(cx, name, t)
         {
             true
         } else {
-            self.find_impl_q(cx, t, tr, env, depth + 1, q).is_some()
+            self.find_impl_q(cx, t, tr, env, q).is_some()
         };
         if auto {
             q.active.pop();
         }
+        let own = match mark {
+            Some(m) if auto => q.own_low(m.1),
+            Some(m) => q.leave_goal(m),
+            None => true,
+        };
         // A positive result that used the assumption of a query further out holds only if that
-        // query succeeds: it is not memoized. Negative results never depend on an assumption.
+        // query succeeds, and so does a negative one that met an inductive goal in progress
+        // further out: neither is memoized.
         let low = q.low;
-        if tr.args.is_empty() && (!r || low >= me) {
+        if tr.args.is_empty() && (!r || low >= me) && (r || own) {
             q.memo.insert(key, r);
         }
         q.low = saved_low.min(if low < me { low } else { usize::MAX });
@@ -707,10 +774,9 @@ impl<'a> World<'a> {
         t: TypeId,
         tr: &TraitRef,
         env: &[GenericParam],
-        depth: u32,
         q: &mut Query,
     ) -> bool {
-        if self.find_impl_q(cx, t, tr, env, depth, q).is_some() {
+        if self.find_impl_q(cx, t, tr, env, q).is_some() {
             return true;
         }
         if let TypeKind::Adt { def, .. } = cx.kind(t)
@@ -718,7 +784,7 @@ impl<'a> World<'a> {
         {
             return false;
         }
-        self.auto_send_sync(cx, t, tr, env, depth, q)
+        self.auto_send_sync(cx, t, tr, env, q)
     }
 
     /// Whether trait `trait_decl` has an impl whose self type is an instance of ADT `def`.
@@ -737,7 +803,6 @@ impl<'a> World<'a> {
         t: TypeId,
         tr: &TraitRef,
         env: &[GenericParam],
-        depth: u32,
         q: &mut Query,
     ) -> bool {
         let is_sync = tr.trait_decl == self.sigs.lang.sync;
@@ -746,7 +811,7 @@ impl<'a> World<'a> {
             TypeKind::Ref { mutable, inner } => {
                 // &T: Send iff T: Sync; &mut T: Send iff T: Send. Both Sync iff T: Sync.
                 let want = if !is_sync && !mutable { self.sigs.lang.sync } else { tr.trait_decl };
-                self.implements_q(cx, inner, &TraitRef { trait_decl: want, args: Vec::new() }, env, depth, q)
+                self.implements_q(cx, inner, &TraitRef { trait_decl: want, args: Vec::new() }, env, q)
             }
             TypeKind::Adt { def, args } => {
                 // UnsafeCell<T>: Send iff T: Send (its field), never Sync (crate::kinds)
@@ -757,7 +822,7 @@ impl<'a> World<'a> {
                 for v in &adt.variants {
                     for f in &v.fields {
                         let ft = cx.subst(f.ty, &args, None);
-                        if !self.implements_q(cx, ft, tr, env, depth, q) {
+                        if !self.implements_q(cx, ft, tr, env, q) {
                             return false;
                         }
                     }
@@ -767,7 +832,7 @@ impl<'a> World<'a> {
             k => {
                 let mut kids = Vec::new();
                 k.children(&mut kids);
-                kids.into_iter().all(|c| self.implements_q(cx, c, tr, env, depth, q))
+                kids.into_iter().all(|c| self.implements_q(cx, c, tr, env, q))
             }
         }
     }
@@ -781,11 +846,10 @@ impl<'a> World<'a> {
         tr: &TraitRef,
         d: Derived,
         env: &[GenericParam],
-        depth: u32,
         q: &mut Query,
     ) -> bool {
         match self.derived_parts(cx, t, d) {
-            Ok(parts) => parts.into_iter().all(|(_, c)| self.implements_q(cx, c, tr, env, depth, q)),
+            Ok(parts) => parts.into_iter().all(|(_, c)| self.implements_q(cx, c, tr, env, q)),
             Err(_) => false,
         }
     }
@@ -911,7 +975,7 @@ impl<'a> World<'a> {
 
     /// Why `t` is not `Flat` in the scope of `env` (`None`: it is): the first non-flat component
     /// in [`World::flat_parts`] order, reached by descending into the first failing component at
-    /// each level. [`NotFlat::Depth`] when the query failed at its depth cutoff only.
+    /// each level. [`NotFlat::Depth`] when the path passes [`QUERY_DEPTH`] parts.
     pub fn flat_witness<I: Interner + ?Sized>(
         &self,
         cx: &mut I,
@@ -1002,9 +1066,8 @@ impl<'a> World<'a> {
         t: TypeId,
         tr: &TraitRef,
         env: &[GenericParam],
-        depth: u32,
     ) -> Option<(DeclId, Vec<GArg>)> {
-        self.find_impl_q(cx, t, tr, env, depth, &mut Query::default())
+        self.find_impl_q(cx, t, tr, env, &mut Query::default())
     }
 
     fn find_impl_q<I: Interner + ?Sized>(
@@ -1013,13 +1076,12 @@ impl<'a> World<'a> {
         t: TypeId,
         tr: &TraitRef,
         env: &[GenericParam],
-        depth: u32,
         q: &mut Query,
     ) -> Option<(DeclId, Vec<GArg>)> {
         let list = self.sigs.impls_by_trait.get(&tr.trait_decl)?;
         for &i in list {
             let Some(imp) = self.sigs.impl_def(i) else { continue };
-            if let Some(args) = self.impl_applies_q(cx, imp, t, env, depth, q) {
+            if let Some(args) = self.impl_applies_q(cx, imp, t, env, q) {
                 // the trait args must match after substitution
                 let Some(itr) = &imp.trait_ref else { continue };
                 let ok = itr.args.len() == tr.args.len()
@@ -1045,9 +1107,8 @@ impl<'a> World<'a> {
         imp: &ImplDef,
         t: TypeId,
         env: &[GenericParam],
-        depth: u32,
     ) -> Option<Vec<GArg>> {
-        self.impl_applies_q(cx, imp, t, env, depth, &mut Query::default())
+        self.impl_applies_q(cx, imp, t, env, &mut Query::default())
     }
 
     /// [`World::impl_applies`] without the view-kind rule: the impl a view was refused by, for
@@ -1059,7 +1120,7 @@ impl<'a> World<'a> {
         t: TypeId,
         env: &[GenericParam],
     ) -> Option<Vec<GArg>> {
-        self.impl_applies_q(cx, imp, t, env, 0, &mut Query::any_kind())
+        self.impl_applies_q(cx, imp, t, env, &mut Query::any_kind())
     }
 
     /// The impl with a method `name` that would apply to `recv` (references peeled) if its params
@@ -1120,7 +1181,6 @@ impl<'a> World<'a> {
         imp: &ImplDef,
         t: TypeId,
         env: &[GenericParam],
-        depth: u32,
         q: &mut Query,
     ) -> Option<Vec<GArg>> {
         if cx.is_error_ty(imp.self_ty) {
@@ -1155,7 +1215,7 @@ impl<'a> World<'a> {
                     trait_decl: b.trait_decl,
                     args: b.args.iter().map(|&x| crate::mono::subst_garg(cx, x, &args)).collect(),
                 };
-                if !self.implements_q(cx, a, &b2, env, depth + 1, q) {
+                if !self.implements_q(cx, a, &b2, env, q) {
                     return None;
                 }
             }
@@ -1164,7 +1224,7 @@ impl<'a> World<'a> {
     }
 
     pub fn is_copy<I: Interner + ?Sized>(&self, cx: &mut I, t: TypeId, env: &[GenericParam]) -> bool {
-        self.is_copy_q(cx, t, env, 0, &mut Query::default())
+        self.is_copy_q(cx, t, env, &mut Query::default())
     }
 
     fn is_copy_q<I: Interner + ?Sized>(
@@ -1172,12 +1232,8 @@ impl<'a> World<'a> {
         cx: &mut I,
         t: TypeId,
         env: &[GenericParam],
-        depth: u32,
         q: &mut Query,
     ) -> bool {
-        if depth > QUERY_DEPTH {
-            return false;
-        }
         match cx.kind(t).clone() {
             TypeKind::Int { .. }
             | TypeKind::Float(_)
@@ -1191,17 +1247,17 @@ impl<'a> World<'a> {
             | TypeKind::Mask { .. } => true,
             TypeKind::Ref { mutable, .. } => !mutable,
             TypeKind::Str | TypeKind::Slice { .. } | TypeKind::SelfTy | TypeKind::ConstParam(_) => false,
-            TypeKind::Array { elem, .. } | TypeKind::Range { elem, .. } => {
-                self.is_copy_q(cx, elem, env, depth + 1, q)
-            }
+            TypeKind::Array { elem, .. } | TypeKind::Range { elem, .. } => self.is_copy_q(cx, elem, env, q),
             TypeKind::Tuple(ts) => {
                 let copy = self.sigs.lang.copy;
                 if let Some(&r) = q.memo.get(&(t, copy)) {
                     return r;
                 }
                 let low = std::mem::replace(&mut q.low, usize::MAX);
-                let r = ts.iter().all(|&x| self.is_copy_q(cx, x, env, depth + 1, q));
-                if !r || q.low == usize::MAX {
+                let mark = q.open_low();
+                let r = ts.iter().all(|&x| self.is_copy_q(cx, x, env, q));
+                let own = q.own_low(mark);
+                if (!r || q.low == usize::MAX) && (r || own) {
                     q.memo.insert((t, copy), r);
                 }
                 q.low = q.low.min(low);
@@ -1219,10 +1275,12 @@ impl<'a> World<'a> {
                 if let Some(&r) = q.memo.get(&(t, copy)) {
                     return r;
                 }
-                let low = std::mem::replace(&mut q.low, usize::MAX);
                 let tr = TraitRef { trait_decl: copy, args: Vec::new() };
-                let r = self.find_impl_q(cx, t, &tr, env, depth + 1, q).is_some();
-                if !r || q.low == usize::MAX {
+                let Some(mark) = q.enter_goal((t, tr.clone())) else { return false };
+                let low = std::mem::replace(&mut q.low, usize::MAX);
+                let r = self.find_impl_q(cx, t, &tr, env, q).is_some();
+                let own = q.leave_goal(mark);
+                if (!r || q.low == usize::MAX) && (r || own) {
                     q.memo.insert((t, copy), r);
                 }
                 q.low = q.low.min(low);
@@ -1334,7 +1392,7 @@ impl<'a> World<'a> {
                 (Some(f), Some(p)) => package_sees(self.prog, f, p),
                 _ => true,
             };
-            if imp.trait_ref.is_some() || !seen || self.impl_applies(cx, imp, c, env, 0).is_none() {
+            if imp.trait_ref.is_some() || !seen || self.impl_applies(cx, imp, c, env).is_none() {
                 continue;
             }
             out.extend(imp.methods.iter().copied());
@@ -1373,7 +1431,7 @@ impl<'a> World<'a> {
                 else {
                     continue;
                 };
-                if let Some(args) = self.impl_applies(cx, imp, c, env, 0) {
+                if let Some(args) = self.impl_applies(cx, imp, c, env) {
                     return Some(Ok(MethodRef::Impl { method: m, impl_decl: i, impl_args: args }));
                 }
             }
@@ -1392,7 +1450,7 @@ impl<'a> World<'a> {
                 else {
                     continue;
                 };
-                if let Some(args) = self.impl_applies(cx, imp, c, env, 0) {
+                if let Some(args) = self.impl_applies(cx, imp, c, env) {
                     // two impls of one trait (other trait args) for this type: the call names
                     // neither, so it is ambiguous; the labels then show the two impls' methods
                     let same = found.iter().any(|(t, _, _)| *t == tr.trait_decl);

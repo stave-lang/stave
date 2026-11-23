@@ -47,7 +47,8 @@ fn fn_value_compare_in_a_large_frame() {
     assert_eq!(words, [1, 0, 0, 1, 0, 1, 1, 0]);
 }
 
-/// Slot sizes add up past `u32`: rejected like any frame larger than 1 GiB, never wrapped.
+/// Slot sizes add up past `u32`: rejected like any frame larger than 1 GiB (a frame the checker's
+/// bound admits never gets there, so the error is an internal one), never wrapped.
 #[test]
 fn frame_size_overflow_is_rejected() {
     let mut p = Prog::new();
@@ -69,7 +70,7 @@ fn frame_size_overflow_is_rejected() {
         b.call(f, None, &[]);
     });
     let e = build_image(&p.m, &BuildConfig::new(None)).unwrap_err();
-    assert!(matches!(&e.kind, ErrorKind::Unsupported(s) if s.contains("larger than 1 GiB")), "{e}");
+    assert!(matches!(&e.kind, ErrorKind::BadIr(s) if s.contains("larger than 1 GiB")), "{e}");
     assert_eq!(e.func, Some(f));
 }
 

@@ -267,6 +267,7 @@ pub(crate) fn check(
         let mut v: Vec<(TypeId, u32)> =
             b.node_types.iter().enumerate().map(|(i, &t)| (t, b.lo + i as u32)).collect();
         v.extend(b.locals.iter().map(|&(n, t)| (t, n)));
+        v.extend(b.envs.iter().map(|&(n, t)| (t, n)));
         for s in &b.sites {
             v.extend(s.inst.args.iter().filter_map(|a| match a {
                 GArg::Type(t) => Some((*t, s.node)),
@@ -295,13 +296,7 @@ pub(crate) fn check(
     };
     let mut generic_types: FxHashMap<DeclId, Vec<TypeId>> = FxHashMap::default();
     for (n, node) in graph.nodes.iter().enumerate() {
-        let at = graph
-            .in_start
-            .get(n)
-            .and_then(|&s| graph.in_edges.get(s as usize))
-            .filter(|_| graph.in_start.get(n + 1).is_some_and(|&e| e > graph.in_start[n]))
-            .and_then(|&e| graph.out.get(e as usize))
-            .map_or(node.span, |e| e.site);
+        let at = graph.site_of(n);
         match &node.kind {
             NodeKind::Fn { inst, .. } if !inst.args.is_empty() => {
                 let mut roots: Vec<TypeId> = inst

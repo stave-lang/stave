@@ -493,7 +493,7 @@ pub(crate) fn lower_type<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_p
     });
     let t = lower_type_at(h, env, n, ret_pos);
     LOWERING.with(|c| c.set(c.get() - 1));
-    if outer && h.refusals() > before {
+    if outer && crate::types::claim_refusals(h, before) {
         too_deep(h, &env.icx, n);
     }
     t
@@ -1167,6 +1167,9 @@ impl Interner for SigBuilder<'_> {
     fn refusals(&self) -> u32 {
         self.tys.refusals()
     }
+    fn claimed_mut(&mut self) -> &mut u32 {
+        self.tys.claimed_mut()
+    }
 
     fn fixed_ty(&self, f: TypeId) -> TypeId {
         self.tys.fixed_ty(f)
@@ -1530,6 +1533,7 @@ impl<'p> SigBuilder<'p> {
         };
         let saved = std::mem::replace(&mut self.cur_generics, env);
         let saved_scope = self.bound_scope.take();
+        let start = self.tys.refusals();
         let sig = match decl.kind {
             DeclKind::Fn | DeclKind::Method | DeclKind::TraitMethod => self.build_fn(d),
             DeclKind::Struct | DeclKind::Enum => self.build_adt(d),
@@ -1539,6 +1543,10 @@ impl<'p> SigBuilder<'p> {
             DeclKind::TypeAlias => self.build_alias(d),
             _ => DeclSig::None,
         };
+        // the declaration owns what its signature interned outside a written type
+        if crate::types::claim_refusals(&mut self.tys, start) {
+            self.diags.extend(mk("E0005", Some("type"), &[], decl.name_span, &[]));
+        }
         self.cur_generics = saved;
         self.bound_scope = saved_scope;
         self.sigs[d.idx()] = sig;

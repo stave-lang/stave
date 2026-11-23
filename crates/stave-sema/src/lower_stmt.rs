@@ -769,17 +769,15 @@ impl<'a> FnCx<'a> {
         if caps.is_empty() {
             return None;
         }
-        let mut elems = Vec::with_capacity(caps.len());
+        let mut tys = Vec::with_capacity(caps.len());
         let mut locals = Vec::with_capacity(caps.len());
         for c in &caps {
             let l = *self.by_node.get(&c.binding)?;
             let t = self.locals[l].ty;
-            let rt = self.t_ref(true, t);
-            elems.push(rt);
-            locals.push((l, rt));
+            tys.push(t);
+            locals.push((l, self.t_ref(true, t)));
         }
-        let tup = self.tys.intern(TypeKind::Tuple(elems.into_boxed_slice()));
-        let pt = self.t_ref(true, tup);
+        let (tup, pt) = crate::closures::env_type(&mut self.tys, &tys);
         Some((tup, pt, locals))
     }
 

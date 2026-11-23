@@ -717,6 +717,16 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
 }
 
 fn finish_job(mut cx: FnCx<'_>, out: FnOut, name: Option<(stave_diag::FileId, u32)>) -> JobOut {
+    // the checker reported every type too tall for an instance (E0005 case `type`), so lowering
+    // never builds one: its error type would be lowered as a value
+    if cx.tys.refused > 0 && cx.err.is_none() {
+        cx.err = Some(crate::lower_fn::LowerError {
+            kind: crate::lower_fn::LowerErrorKind::Internal,
+            func: cx.path.clone(),
+            at: String::from("?"),
+            msg: "lowering built a type taller than the type height limit".into(),
+        });
+    }
     let mut funcs = vec![out];
     let mut cl = std::mem::take(&mut cx.outs);
     cl.sort_by_key(|f| f.closure);

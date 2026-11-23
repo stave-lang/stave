@@ -2324,7 +2324,7 @@ impl<'a> FnCx<'a> {
         let disp = self.g.sigs.lang.display;
         let w = self.g.world();
         let Some((imp, iargs)) =
-            w.find_impl(&mut self.tys, d, &TraitRef { trait_decl: disp, args: Vec::new() }, &[], 0)
+            w.find_impl(&mut self.tys, d, &TraitRef { trait_decl: disp, args: Vec::new() }, &[])
         else {
             self.fail_at(Some(tok), "no Display impl for an f-string hole");
             return false;
@@ -2377,6 +2377,9 @@ impl Interner for TyHost<'_, '_> {
     }
     fn refusals(&self) -> u32 {
         self.tys.refusals()
+    }
+    fn claimed_mut(&mut self) -> &mut u32 {
+        self.tys.claimed_mut()
     }
     fn fixed_ty(&self, f: TypeId) -> TypeId {
         self.tys.fixed_ty(f)

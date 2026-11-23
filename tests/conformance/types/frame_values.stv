@@ -1,0 +1,57 @@
+//~ CHECK-ONLY
+// The frame sum counts every value a fn makes (contracts/lang-details.md "Size limits"): each
+// expression that is not a place read in place, each call's result and arguments, whatever the
+// callee (a fn item, a fn value, a closure, a built-in such as `select`). A dereference loaded
+// for an assignment, an argument, or an operand is a value of its own; one read in place (a
+// part of it, a borrow, a binding it initializes) is not. Past 704,643,072 bytes: E0911 `frame`.
+
+fn id(a: [u8; 200000000]) -> u8 {
+    return a[0];
+}
+
+// two fn-value calls: per call the loaded `*p`, the argument, the result
+fn fn_value_args(p: &[u8; 200000000]) -> u8 { //~ ERROR E0911
+    let f: fn([u8; 200000000]) -> u8 = id;
+    return f(*p) + f(*p);
+}
+
+// one fn-value call: under the bound
+fn fn_value_arg(p: &[u8; 200000000]) -> u8 {
+    let f: fn([u8; 200000000]) -> u8 = id;
+    return f(*p);
+}
+
+// three closure calls, each result 250,000,000 bytes
+fn closure_results() -> u8 { //~ ERROR E0911
+    let mk = fn() -> [u8; 250000000] { return [1u8; 250000000]; };
+    return mk()[0] + mk()[1] + mk()[2];
+}
+
+// `select` of two loaded dereferences: the operands, their copies, the result
+fn selects(p: &[u8; 150000000], q: &[u8; 150000000], c: bool) -> u8 { //~ ERROR E0911
+    return c.select(*p, *q)[0];
+}
+
+// a dereference assigned: loaded first
+fn assign_deref(p: &[u8; 180000000]) -> u8 { //~ ERROR E0911
+    let mut a = [0u8; 180000000];
+    a = *p;
+    a = *p;
+    return a[0];
+}
+
+// read in place: parts and borrows of a dereference take no slot
+fn in_place(p: &[u8; 300000000]) -> u8 {
+    let r = &*p;
+    return (*p)[0] + p[1] + r[2] + (*p)[3];
+}
+
+// a binding initialized from a dereference is loaded into the binding
+fn let_deref(p: &[u8; 250000000]) -> u8 {
+    let a = *p;
+    return a[0];
+}
+
+fn main() -> i32 {
+    return 0;
+}

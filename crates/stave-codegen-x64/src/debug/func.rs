@@ -861,8 +861,9 @@ impl<'a, 'm> Cg<'a, 'm> {
         } else {
             end.div_ceil(u64::from(al)) * u64::from(al)
         };
+        // the checker's frame bound (E0911 case `frame`) admits no such frame: a compiler bug
         if end > (1 << 30) {
-            return Err(unsup("stack frame larger than 1 GiB"));
+            return Err(bad("stack frame larger than 1 GiB, past the checker's frame bound"));
         }
         self.frame = end as u32;
         Ok(-(end as i32))
@@ -2054,7 +2055,7 @@ impl<'a, 'm> Cg<'a, 'm> {
     /// stack-argument area cannot jump the guard page. Uses `S0`.
     fn sub_rsp_probed(&mut self, n: u32) -> Res<()> {
         if n > (1 << 30) {
-            return Err(unsup("stack argument area larger than 1 GiB"));
+            return Err(bad("stack argument area larger than 1 GiB, past the checker's frame bound"));
         }
         let pages = n / 4096;
         if pages <= 8 {

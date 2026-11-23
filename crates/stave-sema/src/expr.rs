@@ -649,7 +649,7 @@ impl<'a> Ck<'a> {
             })
         } else {
             let tref = TraitRef { trait_decl: tr, args: Vec::new() };
-            let Some((imp, args)) = self.w.find_impl(&mut self.tys, t, &tref, genv, 0) else {
+            let Some((imp, args)) = self.w.find_impl(&mut self.tys, t, &tref, genv) else {
                 self.e0206(tok, t);
                 return Ty::ERR;
             };
@@ -1813,7 +1813,7 @@ impl<'a> Ck<'a> {
         // the use of the method, a call or a fn value, reaches the site check, which names the
         // unmet bound (E0414, E0901, E0910, E1407) instead of failing inference (E0202).
         self.w
-            .impl_applies(&mut self.tys, idef, t, genv, 0)
+            .impl_applies(&mut self.tys, idef, t, genv)
             .or_else(|| self.w.impl_applies_but_views(&mut self.tys, idef, t, genv))
             .or_else(|| self.w.impl_head_args(&mut self.tys, idef, t))
     }
@@ -2699,6 +2699,9 @@ impl<'a> Ck<'a> {
         hint: Option<TypeId>,
     ) {
         let mut pending: Vec<(usize, Ty)> = Vec::new();
+        // an argument of the error type has its diagnostic, and the params it would have
+        // decided are not reported again
+        let mut arg_err = false;
         for (i, &a) in args.iter().enumerate() {
             let Some(&p) = params.get(i) else {
                 // past the params only through `...` (the arity check rejects the rest)
@@ -2725,6 +2728,7 @@ impl<'a> Ck<'a> {
                         if x != ids::ERROR && x != ids::NEVER {
                             self.infer(p, x, binds);
                         }
+                        arg_err |= x == ids::ERROR || self.tys.has_error(x);
                         pending.push((i, Ty::T(x)));
                     }
                 }
@@ -2755,7 +2759,7 @@ impl<'a> Ck<'a> {
             self.note_reborrow(a, t2, want);
         }
         if binds.iter().any(|b| b.is_none()) {
-            if !lit_err {
+            if !lit_err && !arg_err {
                 self.e0202_infer(at);
             }
             for b in binds.iter_mut() {
@@ -2917,6 +2921,7 @@ impl<'a> Ck<'a> {
 
     /// A call `(args)` on state `st`.
     fn call(&mut self, n: u32, st: St, paren: u32, args: &[u32], hint: Option<TypeId>) -> Ty {
+        self.call_args.push((paren, args.to_vec()));
         let icx = self.icx;
         let ctok = self.callee_tok(n, paren);
         let cspan = icx.tok_span(ctok);
@@ -3652,6 +3657,7 @@ impl<'a> Ck<'a> {
         args: &[u32],
         hint: Option<TypeId>,
     ) -> Ty {
+        self.call_args.push((seg, args.to_vec()));
         let icx = self.icx;
         let recv = self.force(recv);
         let name = icx.sym(seg);

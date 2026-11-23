@@ -111,7 +111,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0005",
         severity: Severity::Error,
         area: "lex-parse",
-        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type, at the first signature, field, alias, value, or call that reaches it",
+        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type at the first signature, field, alias, value, or call that reaches it, and at each expression, statement, or declaration whose checking asks for a type past the limit",
         retired: false,
         located: true,
         holes: &[],
@@ -4920,7 +4920,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0904",
         severity: Severity::Error,
         area: "generics",
-        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself, through its initializer or its type (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `generic`: `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter (its value is known per instance only). Case `size`: an array literal of a const-expr (a `const` or `static` initializer: compile-time data) whose type takes more than 2^26 bytes (contracts/lang-details.md, Size limits); a `[e; n]` in a fn body is a fill at run time and has no such limit",
+        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself, through its initializer or its type (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `generic`: `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter (its value is known per instance only). Case `size`: an array literal of a const-expr (a `const` or `static` initializer: compile-time data) whose type takes more than 2^26 bytes (contracts/lang-details.md, Size limits); a `[e; n]` in a fn body is a fill at run time and has no such limit. Case `total`: the `static`s and `const`s of the program take more than 2^30 bytes together (file data and zero fill, each rounded up to its alignment), at the first one in source order that passes the bound",
         retired: false,
         located: true,
         holes: &[
@@ -4987,6 +4987,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "fill the array at run time (a `[e; n]` in a fn body has no size limit), or use a heap buffer (`vec.Vec`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "total",
+                message: "the `static`s and `const`s of the program take {bytes} bytes together, more than 1,073,741,824",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` passes the program's data limit" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "allocate the large buffers at run time (`vec.Vec`), or make the statics smaller",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -5232,7 +5244,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, array, tuple, or struct literal, value `if` / `match`, or return value of a fn whose type takes more than 2^28 bytes (contracts/lang-details.md, Size limits), once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, plus each call's result and by-value arguments) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it; once per instance, at the generic fn",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, expression value (all but a place read in place: contracts/lang-details.md, Size limits), or return value of a fn whose type takes more than 2^28 bytes, once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, one copy per arm of a value `if` / `match`, plus each call's result, by-value receiver, and arguments, whatever the callee) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it; once per instance, at the generic fn",
         retired: false,
         located: true,
         holes: &[
@@ -6492,7 +6504,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1407",
         severity: Severity::Error,
         area: "effects",
-        rule: "`Flat` demanded by a bound, type not `Flat`: names the first non-flat component and its path (field chain); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        rule: "`Flat` demanded by a bound, type not `Flat`: names the first non-flat component and its path (field chain); case `self` when the type itself is the component; case `depth` when the path to that component is longer than the type depth limit",
         retired: false,
         located: true,
         holes: &[
@@ -6601,7 +6613,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1410",
         severity: Severity::Error,
         area: "effects",
-        rule: "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        rule: "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` when the path to that component is longer than the type depth limit",
         retired: false,
         located: true,
         holes: &[

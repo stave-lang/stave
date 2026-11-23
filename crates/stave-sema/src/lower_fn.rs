@@ -2142,5 +2142,6 @@ fn empty_body() -> &'static TypedBody {
         internal: Vec::new(),
         held: Vec::new(),
         temps: Vec::new(),
+        envs: Vec::new(),
     })
 }

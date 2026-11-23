@@ -368,12 +368,12 @@ fn type_helpers_on_the_canonical_table() {
     assert!(b.locals.iter().any(|&(_, lt)| lt == wu8));
     let world = World { prog: &p, sigs: &tc.sigs };
     let (imp, iargs) =
-        world.find_impl(&mut t, wu8, &TraitRef { trait_decl: tr, args: Vec::new() }, &[], 0).expect("impl");
+        world.find_impl(&mut t, wu8, &TraitRef { trait_decl: tr, args: Vec::new() }, &[]).expect("impl");
     assert_eq!(p.decl(imp).map(|d| d.kind), Some(stave_sema::DeclKind::Impl));
     assert_eq!(iargs, vec![GArg::Type(u8t)]);
     let imp_def = tc.sigs.impl_def(imp).expect("impl sig");
-    assert_eq!(world.impl_applies(&mut t, imp_def, wu8, &[], 0), Some(vec![GArg::Type(u8t)]));
-    assert_eq!(world.impl_applies(&mut t, imp_def, u8t, &[], 0), None);
+    assert_eq!(world.impl_applies(&mut t, imp_def, wu8, &[]), Some(vec![GArg::Type(u8t)]));
+    assert_eq!(world.impl_applies(&mut t, imp_def, u8t, &[]), None);
     // layout: Option<u8> (tag + payload) then u8
     let lx = stave_sema::traits::layout_of(&mut t, &tc.sigs, sx).expect("layout");
     let lw = stave_sema::traits::layout_of(&mut t, &tc.sigs, wu8).expect("layout");
