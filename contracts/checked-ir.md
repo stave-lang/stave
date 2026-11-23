@@ -1,61 +1,220 @@
-# Contract: canonical checked IR (v0.3, `--dump=ir`)
+# Contract: canonical checked IR and its text (v0.4, `--dump=lir|ir|opt`, `stave ir`)
 
-The checked IR is the SSA IR as built by lowering: after type check, borrow
-check, and monomorphization, before any optimization pass. Values carry Stave types (canonical type
-ids). Layout lowering to the machine types of `IrFunc` comes after this point and is not
-compared. Both compilers print exactly this text; the stage1 gate compares the bytes (stage-gates `ir`).
-It is printed only for a build with no error diagnostics; with errors, `ir.txt` is not written. UTF-8, one `\n` per line, single spaces,
-no trailing spaces, no blank lines.
+The checked IR is the SSA IR as built by lowering: after type check, borrow check, and
+monomorphization. Values carry Stave types (canonical type ids). The back ends lay out the
+checked IR themselves; no other IR lies between it and machine code. Both compilers print it as
+one text and read that text back: its syntax is [ir-text.ebnf](ir-text.ebnf) (the only place
+for syntax), its meaning is this file (the only place for semantics). The stage1 gate compares
+the printed bytes (stage-gates `lir`, `ir`, `opt`). A dump is printed only for a build with no
+error diagnostics; with errors, its file is not written.
 
-## Text (sketch)
+## Levels and forms
+
+| Level | The module after | Dump |
+|---|---|---|
+| `lowered` | lowering and the IR verifier, before the removal of proven checks ("Bounds checks") | `lir` |
+| `checked` | the removal of the checks that have a witness: the input of the interpreter and of both back ends | `ir` |
+| `opt` | the release passes, then the IR verifier and the bounds audit on their output; release builds only | `opt` |
+
+Each level is printed from the canonical module of that point ("Canonical module"), so ids of
+one level do not correspond to those of another.
+
+The **gate form** is what the dumps hold. The **emit form** (`stave ir emit`) is the gate form
+plus the stack section: the `runstack`, `truncated`, `node` and `edge` lines, and the `nodes`
+attribute of fn headers. Deleting those lines and that attribute from the emit form gives the
+gate form byte for byte. The stack section is not in a gate: its node numbers are the front
+end's call-graph order, which no contract fixes.
+
+## Text
+
+- ASCII, one `\n` after every line, no blank lines, no comments, no trailing spaces. Lines of
+  instructions and terminators begin with two spaces, every other line in column 1.
+- Tokens are separated by one space, except where the spellings below join them.
+- A path (of a decl, fn, static, or site) prints bare when it has the `Word` shape of
+  ir-text.ebnf, else as a string. A string prints between double quotes with the `strings` dump
+  escape rule (stage-gates.md), so every byte of the text is printable ASCII.
+- The reader also accepts runs of spaces and tabs between tokens and at either end of a line,
+  `#` comments, and blank lines; `stave ir fmt` prints the canonical text.
+
+Spellings, `<x>` a field, `[..]` present only with its datum, `{..}` repeated zero or more times:
+
+| Line | Spelling |
+|---|---|
+| header | `stave.ir 4 "<target>" <mode> <level>` |
+| decl | `decl d<D> struct\|enum <path>` |
+| type | `type t<T> <key>` (TypeKey text, below) |
+| shape | `shape t<T> struct{ t<F>}` or `shape t<T> enum{ \|{ t<F>}}` (`shape t7 enum \| \| t3`) |
+| string | `str s<S> "<bytes>"` |
+| site | `site <row> "<file>" <line> <col> <fn path>` |
+| static | `static <i> t<T> <path>` |
+| static bytes | `data <i> <offset> x<hex>` (two lowercase hex digits per byte) |
+| address word | `ref <i> <offset> s<S> <addend>` or `ref <i> <offset> static <j> <addend>` |
+| entry | `main @<inst>` |
+| cell | `cell d<D>` |
+| run stack | `runstack <bytes>` |
+| incomplete graph | `truncated` |
+| call-graph node | `node <n>[ rec]` |
+| call-graph edge | `edge <from> <to> call\|indirect\|spawn` |
+| fn header | `fn @<inst> <path>[<<arg>{,<arg>}>](<t>{, <t>})[ -> t<R>][ needs(<f>{, <f>})][ symbol "<sym>"][ variadic][ known][ altstack][ unbuilt][ site <row>][ nodes <n>{ <n>}][ {]` |
+| block header | `b<N>(<param>{, <param>}):`, a param `%<v>: t<T>` |
+| instruction | `  [%<v> = ]<op> t<T>\|()[ <operand>]..[ !<row>]` |
+| terminator | `  br <target>`, `  cbr <o> <target> <target>`, `  switch <o>{ <int>:<target>} _:<target>`, `  ret[ <o>]`, `  unreachable`; a target `b<N>(<o>{, <o>})` |
+| end of body | `}` |
+| claim | `claim @<inst> pre[ checked] <a> <= <b> <w>` or `claim @<inst> post <a> <= <b> <w>` |
+
+Operands: `%<v>` a value; a decimal int constant (`bool` as `0`/`1`, `char` as its code point;
+the operand position gives its type); a float constant as `0x` and its IEEE bits in lowercase hex,
+4 digits for f16, 8 for f32, 16 for f64, and `bf16 0x` with 4 digits for bf16 (the digit count
+and the prefix give the format); `s<S>` the `&str` of string S; `@<inst>` a fn item (a direct
+callee, or a fn value with a null environment); `t<T>` a type operand. Constants are inline
+operands, never values.
 
 ```
-IrFile  = TypeLine* Func* ;
-TypeLine= "type " TId " " TypeKey "\n" ;          (* every type a printed instance uses, by T *)
-TypeKey = variant (" " field)* ;                  (* canonical type key, fields in key order:
-                                                     `int s 32`, `ref mut t4`, `adt d17 t4`, `fntype t4 -> t2 avx2` *)
-Func    = "fn @" Inst " " Path ("<" GArg ("," GArg)* ">")? Needs? " {" "\n" Block+ "}" "\n" ;
-Needs   = " needs(" Feature (", " Feature)* ")" ;  (* the fn's own needs, as `fntype` prints them *)
-GArg    = TId | IntC ;                            (* type arg, or const generic arg in decimal (as in `adt` keys) *)
-Block   = Blk "(" (Val ": " TId ("," " " Val ": " TId)*)? "):" "\n" InstL* Term ;
-InstL   = "  " (Val " = ")? Op " " (TId | "()") (" " Operand)* "\n" ;   (* result type; `()` if none *)
-Term    = "  " ( "br " Target | "cbr " Operand " " Target " " Target
-               | "switch " Operand (" " IntC ":" Target)* " _:" Target
-               | "ret" (" " Operand)? | "unreachable" ) "\n" ;
-Target  = Blk "(" (Operand (", " Operand)*)? ")" ;
-Operand = Val | IntC | FloatC | SId | "@" Inst | TId ;
-Val = "%" Nat ; Blk = "b" Nat ; TId = "t" Nat ; SId = "s" Nat ; Inst = Nat ("." Nat)* (".u")? ;
-IntC = "-"? Nat ; FloatC = "0x" Hex ;             (* floats as their exact IEEE bits *)
+stave.ir 4 "x86_64-linux-v2" debug checked
+type t0 int s 32
+type t1 bool
+site 0 "src/app.stv" 1 4 app.max
+fn @0 app.max(t0, t0) -> t0 site 0 {
+b0(%0: t0, %1: t0):
+  %2 = gt t1 %0 %1
+  cbr %2 b1() b2()
+b1():
+  ret %0
+b2():
+  ret %1
+}
 ```
 
-- `Op` names are the stave-ir `Op` names (scalar ops plus one per simd-ops portable op).
-  Trapping operations (overflow, bounds, division, `tail exact`) are single instructions and create
-  no blocks.
-- `Path` is the module path and item name joined by `.`; a method is `<head>.<name>`, `<head>` =
-  the impl's self-type ADT path (`main.Counter.bump`), or the impl's module path plus a built-in
-  type name (`std.core.str.fmt`); drop glue is `drop_glue` with its type as the one generic arg
-  (`fn @200 drop_glue<t135>`). Strings appear only as `s` ids.
-- Constants are inline operands, never values: ints in decimal (`bool` as `0`/`1`, `char` as its
-  code point), floats as `0x` + their IEEE bits in lowercase hex, zero-padded to the format's
-  width (4 digits for f16/bf16, 8 for f32, 16 for f64), strings as `s<S>`, fn items as `@<inst>`,
-  types as `t<T>`.
-- An instruction with no result prints `()` as its type (`store () %3 %1`).
+## Sections
 
-**Ids** (v0.3; the dump's ids are local to the printed module, never the `types` dump's or other
-stages' numbering, except `d<D>`):
+A file is these sections in this order; each kind of line has one section.
 
-- `t<T>`: the rank, in the canonical type-key order, among the types
-  the printed functions use (the `type` lines' set below); dense from `t0`. Instance types such as
-  `Pair<u16>` exist only here. `d<D>` in `adt` keys is the canonical decl id D.
+1. The header, once, first.
+2. `decl` lines, by ascending D.
+3. `type` lines, `t0` up, dense.
+4. `shape` lines, by ascending T.
+5. `str` lines, `s0` up, dense.
+6. `site` lines, row 0 up, dense.
+7. Per static, `0` up, dense: its `static` line, its `data` lines by ascending offset, its `ref`
+   lines by ascending offset.
+8. `main`, then `cell`, each at most once.
+9. The stack section (emit form only): `runstack` and `truncated`, each at most once; `node`
+   lines, `0` up, dense; `edge` lines by ascending (from, to).
+10. Per fn, by instance id ("Ids"): its header; with a body, the body's blocks (each a block
+    header, its instructions, one terminator) and `}`; then its `claim` lines, the `pre` rows
+    then the `post` rows, each in the summary's order.
+
+**Header.** `4` is this contract's version (v0.4); a reader refuses any other. `<target>` is the
+canonical name of the target the lowering ran for (`x86_64-linux-v2`, `aarch64-linux+sve`, ...;
+`x86_64-linux` prints as `x86_64-linux-v2`): lowering depends on it (`unbuilt`, dispatch arms,
+the `cpu_baseline` constant, the root set). `<mode>` is `debug` or `release` (the root set, and
+whether the release passes run). `<level>`: "Levels and forms"; `opt` only with `release`.
+
+**decl.** One line per decl a `d<D>` of the file names (`adt` keys, `cell`): its kind and its
+decl path. The kind of a decl equals that of the shapes of its `adt` types.
+
+**type.** Every type of the module, by id; no two lines have equal keys. The key's components
+name `type` lines and never form a cycle (a recursive ADT recurses only through its shape).
+
+**shape.** The monomorphized shape of an `adt` type: `struct` and its field types in field
+order, or `enum` and one `|` group per variant in variant index order, each holding the
+variant's field types in order. A type without a shape line has no shape: an aggregate op on it,
+or its layout, is a verify error.
+
+**str.** The bytes of string constant S. They are read-only program data.
+
+**site.** Row `<row>` of the site table (intrinsics.md "site table", same rows in the same
+order): the file path diagnostics use, the 1-based line, the 1-based column in bytes, and the
+checked-IR path of the enclosing fn. `!<row>` and the header's `site <row>` name rows.
+
+**static, data, ref.** Static `<i>` (the index `intrinsic.static_addr <i>` takes, below) has type T
+and its decl path. Its initial bytes are as many as T's layout size, zero except where `data` lines
+say otherwise. A `data` line holds the bytes at `<offset>`. Canonically the bytes are cut into
+64-byte blocks at offsets 0, 64, 128, ...; each block with a nonzero byte prints one `data` line,
+from its first to its last nonzero byte. A `ref` line is an address word: the 8 bytes at `<offset>`
+(zero in the initial bytes) hold, in the image, the address of the first byte of string `s<S>` or of
+static `<j>`, plus `<addend>`, at most the target's size. The address-word rules are those of "Ids"
+`intrinsic.static_addr`.
+
+**main.** The program's `fn main` (the fn whose path is the root module's `main` item path,
+the first in instance order), which `__stave_main` calls (intrinsics.md). Absent for a library.
+
+**cell.** The decl of `std.cell.UnsafeCell` when the program has one: the bytes of such a value
+are not read-only behind a `&`. Absent: no field behind a `&` parameter is read as one value
+("Bounds checks").
+
+**Stack section.** What the stack bound (cli.md, intrinsics.md "stack table") reads besides the
+module and the frame sizes. `runstack`: the root package's `[run] stack` in bytes (absent: not
+set). `truncated`: the call graph is incomplete (an instantiation chain too deep, too many
+instances), so no stack has a bound. `node <n>`:
+call-graph node n; `rec`: the node of a `rec fn`. `edge`: the call-graph edge from node `<from>`
+to node `<to>` (at most one per pair): `spawn` a `spawn` edge, `indirect` a call through a fn
+value, `call` every other kind (a call, a dispatch arm, a member, a drop). A fn header's
+`nodes`: the nodes the fn stands for, ascending; absent: none. A module loaded without the
+section builds with an empty stack table: every stack gets the `[run] stack` default.
+
+**fn header.** Every fn of the module, with or without a body.
+
+- `@<inst>`: "Ids". `<path>`: the module path and item name joined by `.`; a method is
+  `<head>.<name>`, `<head>` = the impl's self-type ADT path (`main.Counter.bump`), or the impl's
+  module path plus a built-in type name (`std.core.str.fmt`); drop glue is `drop_glue` with its
+  type as the one generic argument (`fn @200 drop_glue<t135>(t140) {`); closures: "Closures".
+- `<..>`: the instance's generic arguments, `t<T>` or a decimal const argument.
+- `(..)`: the param types. `-> t<R>`: the return type; absent: the fn returns no value (`ret`
+  without an operand). A fn that returns a value of the unit type prints `-> t<unit>`.
+- `needs(..)`: the fn's own features ("Types and fntype").
+- `symbol "<sym>"`: the link symbol of an `extern "C"` import or export, unmangled.
+- `variadic`: an `extern "C"` import declared with `...` (`call`, below).
+- `known`: the fn is an instance of the compiler-known item (stave-ir `Known`; intrinsics.md
+  "Paths fixed by the compiler") whose path is the fn's path. Stages find known fns by this
+  mark, never by path; a fn without it is never known, whatever its path.
+- `altstack`: the fn runs on its thread's alternate signal stack (intrinsics.md "Alternate
+  stack").
+- `unbuilt`: the target does not build the fn (its features belong to another arch); its body is
+  a trap, or absent where the target cannot pass its params or return value.
+- `site <row>`: the site of the fn's name token (the PC-table row).
+- `{`: the fn has a body; without it the fn is declared only (an `extern "C"` import, an
+  `unbuilt` fn without a body).
+
+**Body.** `b0` is the entry; its params are the fn's params, with the header's types. Op names
+are the stave-ir `Op` names (scalar ops, one per simd-ops portable op, `intrinsic.<name>`); the
+sections "Ops" below give their operands and meaning. Trapping operations (overflow, bounds,
+division, `tail exact`) are single instructions and create no blocks. An instruction defines
+its result value exactly when it prints a result type; an instruction with no result prints
+`()` there (`store () %3 %1`). `!<row>`: the instruction's site, absent when it has none;
+lowering gives one to every trapping instruction, every call, and every `store` of a user
+assignment. Terminators have no site.
+
+**claim.** The summary the witness checker certified for the fn ("Contracts across calls"),
+rows only: `<a> <= <b> + <w>` over the terms `zero`, `p <i>` (int param i), `lenp <i>` (the
+length of slice param i), `result` (the int result), `lenresult` (the length of the slice
+result). `pre` rows are what a call proves of its arguments; `checked` marks a `pre` row that
+reads a `requires` check of the fn, which is also a fact about the arguments after a call.
+`post` rows hold at every reachable `ret`. The proofs are not printed. A fn that states nothing
+has no `claim` line; at level `lowered` no fn has one.
+
+## Ids
+
+The ids are local to the printed module, never the `types` dump's or another stage's numbering,
+except `d<D>`.
+
+- `t<T>`: dense from `t0` over every type of the module. The *P* set comes first: the closure over
+  key components of the types the fns with a body use (their signatures and type arguments, block
+  param and value types, instruction result types, type operands), ranked in the canonical
+  type-key order. The *S* set follows: the module's other types (those only shapes, statics, or
+  bodiless fns' signatures reach), ranked the same way. A module holds no type outside P and S.
+  Instance types such as `Pair<u16>` exist only here. `d<D>` in `adt` keys is the canonical decl
+  id D.
 - `@<inst>`: the rank of the instance among the build's instances (the root set's closure,
   below), ordered by (decl D, generic args by `t<T>`), drop glue after every decl instance, ordered
   by its type; closures `@<enclosing>.<k>`; the unchecked entry of `@<n>` (Contracts, below) is
-  `@<n>.u`, printed after `@<n>` and its closures, with the path of `@<n>`. Bodiless instances (`extern "C"` imports) take ids but are not printed, so printed ids may have gaps;
-  calls still name them (`call t2 @0 %1`). Ids differ between debug and `--release` (different
-  root sets).
+  `@<n>.u`, ordered after `@<n>` and its closures, with the path of `@<n>`. Bodiless instances
+  (`extern "C"` imports) have ids like every other. Ids differ between debug and `--release`
+  (different root sets).
 - `s<S>`: the rank of the string constant among the module's distinct string constants by
   (xxHash32 seed 0 over the bytes, bytes), like interned strings; literals are not interned
   strings, so these ids are not the `strings` dump's S.
+- Site rows: canonical order (fn instance id, then source offset), intrinsics.md "site table".
 - `intrinsic.static_addr <i>` (contracts/intrinsics.md): `i` is the rank of the decl by D among
   the program's `static` and `static mut` decls (one sequence over both forms).
   Every static occupies at least one byte in the image (a zero-size static gets one zero
@@ -66,9 +225,63 @@ stages' numbering, except `d<D>`):
   the length. The image holds the resolved addresses (a static binary: link-time constants, no
   dynamic relocation); the interpreter writes them before the program starts. A load of such a
   word is a pointer to read-only program data, like a string operand.
+- `%<v>` and `b<N>`: per fn, dense in print order ("Order").
 - `intrinsic.copy_bytes () %dst %src %n` (contracts/intrinsics.md "Untyped copy"): operands
   `*mut u8`, `*const u8`, `usize`, no result. A copy of `n` bytes with their initialization,
   not a `load` or `store` of any type: the IR's one untyped memory access.
+
+## Canonical module
+
+At every printed point the driver canonicalizes the module before it prints, builds, or runs
+it: fns in instance-id order (a fn's index is its rank), unreachable blocks deleted, blocks and
+values numbered densely in print order, one constant-pool entry per constant operand in print
+order, intrinsic names numbered by first use in print order. The interpreter and the back ends
+get this module. Then `read(print(m))` equals `m`, and `print(read(t))` equals `t` for every
+printed `t`.
+
+The text leaves out what no consumer of a lowered module reads: the borrow side table (only the
+interpreter's tracked lowering has it, which is never printed), the witnesses of removed checks,
+and the proofs inside summaries (only their rows are printed). Equality of modules ignores those
+parts.
+
+## Loading
+
+A reader (`stave ir`, each compiler's IR library) loads a file in this order; a failure at any
+step stops before the next.
+
+1. **Lines.** Each line is lexed and parsed with ir-text.ebnf. An error prints
+   `FILE:LINE:COL: error: MSG` on stderr, one per bad line, at most 100.
+2. **Structure.** One sequential pass checks "Sections" and the rules below, errors as in step 1:
+   - ids of a dense section run from 0 without gaps; ascending sections have no repeats;
+   - every `t<T>`, `s<S>`, site row, static index, `d<D>`, node number, and `@<inst>` names an
+     existing line; each `@<inst>` heads one fn; fn headers may come in any order (they are
+     sorted by instance id);
+   - a body begins with block `b0`; block labels and values are unique within their fn, with any
+     numbers (they are renumbered in text order: blocks by their headers, values by their
+     definitions); every value and block a fn names is its own; a block is its header, its
+     instructions, and one terminator, and `}` follows the last block's terminator;
+   - `claim` lines follow the body of the fn they name; none at level `lowered`;
+   - a `known` mark names a known item by the fn's path; `data` bytes lie inside their static
+     and do not overlap; `opt` only with `release`.
+3. **Verification.** The IR verifier on the type table, shapes and statics, then on every fn with
+   a body (fns in parallel). An error prints `FILE:LINE: verify: MSG`, at the line of the
+   instruction, terminator, block, or fn it is about (a module error: the line of the `type` or
+   `static` it names, else line 1). On loaded text the verifier also requires every
+   `intrinsic.<name>` to be an intrinsic of intrinsics.md with its operand and result types, and
+   a `known` fn to have its item's signature.
+4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds
+   checks"); it computes the summaries. A contract check that fails whenever reached is reported
+   as in step 3.
+5. **Audit.** The bounds audit of every fn, reading calls by the loaded `claim` rows (level
+   `checked` or `opt`) or the computed ones (`lowered`); an unguarded access is reported as in
+   step 3.
+
+Loaded `claim` rows are assumptions: the audit trusts them as it trusts the computed summaries,
+and the text holds no proof to check them by. A forged row can let the audit accept an access
+without a check, so building from IR text is a developer path, not a safety boundary.
+
+Every failure of steps 1-5 is an error in the input (exit 1), except a witness the witness
+checker refuses in step 4, which is a compiler bug (exit 3).
 
 ## Ops (scalar set, stave-ir `Op`)
 
@@ -104,7 +317,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
 | `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap panic.unsupported_cpu panic.deadlock panic.contract` (lowering emits no `panic.contract`: a false clause calls the runtime, see Contracts) |
 
-GPU ops (`gpu.<name>`, gpu-ops.md) extend this list when their lowering lands.
+GPU ops (`gpu.<name>`, gpu-ops.md) extend this list, and ir-text.ebnf, when their lowering lands.
 
 **Vector and mask ops** (one per simd-ops.md portable op; full table in stave-ir `simd`). Lane-wise
 ops take the lane semantics of the scalar op; V = the vector result type, M = `mask W n`:
@@ -168,31 +381,19 @@ spaces. Component types print as `t<T>` (canonical type id); decls as `d<D>`.
 | `FnType{params, ret, features}` | `fntype` then ` t<T>` per param, ` -> t<T>`, then ` <feature>` per feature in contracts/simd-ops.md §Features order | `fntype t4 t5 -> t2 avx2` |
 | `Vec{lane, n}` | `vec t<T> <n>` or `vec t<T> n` (sizeless) | `vec t3 8` |
 | `Mask{width, n}` | `mask <W> <n>` or `mask <W> n` | `mask 32 8` |
-| `Param(idx)`, `ConstParam(idx)` | `param <idx>`, `constparam <idx>` | `param 0` |
-| `Never` | `never` (return type of a fn that never returns) | |
+| `Param(idx)`, `ConstParam(idx)` | `param <idx>`, `constparam <idx>` (`types` dump only) | `param 0` |
+| `Never` | `never` (return type of a fn that never returns; `types` dump only) | |
 
-There is no key for the error type: nothing of error type is printed (IR is not printed with
-errors; the `types` dump rule is in stage-gates.md).
-
-```
-type t3 int s 32
-type t9 bool
-fn @41 app.max {
-b0(%0: t3, %1: t3):
-  %2 = gt t9 %0 %1
-  cbr %2 b1() b2()
-b1():
-  ret %0
-b2():
-  ret %1
-}
-```
+The IR has no generic types and no `never` (lowering makes a `-> never` fn type's return the
+unit type), so the IR text has no `param`, `constparam`, or `never` key. There is no key for the
+error type: nothing of error type is printed (IR is not printed with errors; the `types` dump
+rule is in stage-gates.md).
 
 ## Order
 
-1. `type` lines by canonical type id T. Functions by canonical instance id (Ids
-   above). A closure or `spawn` body is a function `@<enclosing>.<k>` (k = its source order within
-   the enclosing body), printed directly after the enclosing function.
+1. Lines by "Sections". Functions by canonical instance id (Ids above). A closure or `spawn`
+   body is a function `@<enclosing>.<k>` (k = its source order within the enclosing body),
+   printed directly after the enclosing function.
 2. Blocks: `b0` is the entry, and its params are the fn params. The other blocks are numbered by a
    preorder walk of the body's control-flow nesting: on reaching a construct, the walk numbers its
    blocks in the order below, then walks the construct's parts in source order.
@@ -339,21 +540,19 @@ b2():
 
 ## Types and fntype
 
-- `type` lines list the transitive closure, over key components, of every type a printed function
-  references: its signature (param, return, and type-argument types), its block-param and value
-  types, its instruction result types, and its type operands. By canonical id T.
+- `type` lines list every type of the module, by canonical id T (the P and S sets, "Ids").
 - `fntype` prints only the features not implied by another member of the set (the set is closed
   under implication: `needs(avx2)` prints `avx2`, not `sse42 avx avx2`), in contracts/simd-ops.md
   §Features order. In the canonical type order a feature set compares as its `u64` bitset (bit i
   = the i-th feature of §Features) read as a number.
-- A fn header prints the fn's `needs(..)` (the same feature list, comma-separated) when they are
-  not empty: `fn @3 main.sum_v3 needs(avx2) {`. A closure has the needs of its fn and prints them
-  too; the target baseline is never printed.
+- A fn header prints the fn's `needs(..)` (the same feature list, comma-separated) when they are not
+  empty: `fn @3 main.sum_v3(t4) -> t2 needs(avx2) {`. A closure has the needs of its fn and prints
+  them too; the target baseline is never printed.
 
 ## Closures
 
-A closure or `spawn` body is a function `@<enclosing>.<k>` whose `Path` is the enclosing fn's
-path (`fn @7.0 app.apply` after `fn @7 app.apply`); `k` numbers the closure literals and `spawn`
+A closure or `spawn` body is a function `@<enclosing>.<k>` whose path is the enclosing fn's
+path (`@7.0` after `@7`, both `app.apply`); `k` numbers the closure literals and `spawn`
 bodies of the enclosing body together, by the position of their `fn` / `spawn` token (nested
 bodies included). Captures (stave-sema `closures.rs`): every outer local used in the body, by
 reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.md §8).
