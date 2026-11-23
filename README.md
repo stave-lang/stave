@@ -18,8 +18,8 @@ optimizer rules, planned diagnostics); they say so where they do.
   parallel. There is no libc and no external linker: the compiler writes the static ELF itself.
 - **SIMD first.** Vector types, chunk loops with a mandatory tail, and CPU dispatch are language
   constructs checked by the type system, not intrinsics and not a hope that a loop
-  auto-vectorizes. *Status: partly type-checked; vector code generation on x86-64 and AArch64;
-  `dispatch` functions do not build yet.*
+  auto-vectorizes. *Status: vector code generation on x86-64 and AArch64; a `dispatch`
+  function picks its arm from the CPU features read at start.*
 - **The GPU as a runtime target.** Whole programs run on the GPU, not only kernels: heap,
   recursion, function values, and I/O through a thin host shim. First target: PTX for NVIDIA.
   *Status: design.*
@@ -32,16 +32,17 @@ optimizer rules, planned diagnostics); they say so where they do.
 
 ## Known limits
 
+Stave is pre-alpha.
+
 - Memory safety is the aim, not yet a guarantee: the borrow checker is young, and soundness bugs
   are expected. A safe program that corrupts memory is a compiler bug; please report it.
-- Generated code is slow next to `-O2`: `--release` assigns registers and cleans up slice accesses,
-  but nothing is inlined, hoisted out of loops, or vectorized.
-- The borrow checker's memory use grows quadratically with the number of borrows in one function.
-- Linux only. No C interop yet (`extern "C"` imports cannot be linked).
-- "Safe code cannot deadlock" covers ranked locks and thread joins only. Not covered: a file wait
-  (`std.io` read, write, open: the `block` effect) on a pipe or FIFO whose other end this process
-  holds, a loop that spins on `try_lock` or an atomic until another thread acts (livelock), and a
-  panic report stuck on a full stderr pipe. The table is in [std/README.md](std/README.md).
+- The checker is stricter than the rules need: some valid programs are rejected.
+- Generated code is slow next to `-O2`: nothing is inlined, hoisted out of loops, or vectorized.
+- "Safe code cannot deadlock" covers ranked locks and thread joins only.
+- Linux only. No C interop yet.
+
+The full list, with examples and rewrites, is in
+[contracts/known-limits.md](contracts/known-limits.md).
 
 ## Roadmap
 
@@ -127,8 +128,8 @@ fn main() -> i32 {
 }
 ```
 
-SIMD (design: this type-checks in part; stage0 builds vector types and chunk loops, a
-`dispatch fn` not yet): vector types, chunk loops with a mandatory tail, and runtime CPU dispatch:
+SIMD (stage0 builds this): vector types, chunk loops with a mandatory tail, and runtime CPU
+dispatch:
 
 ```stave
 fn sum_base(xs: &[f32]) -> f32 {

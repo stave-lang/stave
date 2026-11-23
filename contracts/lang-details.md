@@ -550,6 +550,17 @@ type whose fields hide a `T` (behind an integer or a byte pointer) to T's Flat a
 both are derived and never implemented (E1408); counting only fields would make such types Flat
 with no way out. Whether a marker param should stop counting is open.
 
+## §4 Feature names
+
+Each architecture owns its feature names (contracts/simd-ops.md "Features"): `sse42` to `avx512bf16`
+and the groups `v3` / `v4` belong to x86-64, `neon`, `fp16`, `dotprod`, `bf16`, `sve`, and `sve2` to
+AArch64, and `cuda` to every target. The set of names is the target's, not the language's: another
+target may bring its own. A fn whose `needs` names a feature the target's architecture does not own
+is not built for that target: its body is not checked, a `dispatch` arm that names it is dropped
+from the arm chain, and no call of it runs there. A name no target has is E0708. Code that must
+build on both architectures keeps the specialised bodies behind a `dispatch` whose `_` arm needs
+nothing.
+
 ## §4 Features of generic instances
 
 An instance of a generic fn or method (one per generic and type arguments) is compiled with the
@@ -605,10 +616,10 @@ generics that only borrow one.
 
 An entry point runs where no call written in the program names it, so on any CPU of the target:
 the start code calls `main` of the root package, `stave test` each `test fn` (with parameters:
-once per generated input), foreign code an `extern "C"` export, the runtime the `alloc` / `free` /
-`realloc` of the `allocator` declaration's module, and start code, the backend's stubs (signal
-handler, thread start), and code lowering inserts the fns the compiler knows by path
-(contracts/intrinsics.md "Paths fixed by the compiler"). None declares `needs` (E0709; a `test fn`:
+once per generated input), foreign code an `extern "C"` export, the `alloc` / `free` / `realloc`
+of the `allocator` declaration's module (roots of a release build; no call binds to them yet), and
+start code, the backend's stubs (signal handler, thread start), and code lowering inserts the fns
+the compiler knows by path (contracts/intrinsics.md "Paths fixed by the compiler"). None declares `needs` (E0709; a `test fn`:
 case `test`), and neither does a trait method (a call through a bound names no impl). Every other
 way code runs has a typed call site the feature rules check: a direct call (E0704), a fn value or
 closure of a type with `needs` (E0704 case `value`, E0707: a thread's body, a `Once` or `with_lock`

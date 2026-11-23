@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// A call of an `unsafe` fn whose arguments make its `requires` false whenever it is reached is
+// E0218, inside `unsafe(..)` as for a safe fn.
+unsafe("p is valid for reads of n bytes") fn first(p: *const u8, n: usize) -> u8 requires(n > 0) {
+    return unsafe("the caller guarantees n > 0 readable bytes") *p;
+}
+
+fn empty(p: *const u8) -> u8 {
+    return unsafe("p is readable") first(p, 0); //~ ERROR E0218
+}
+
+fn open(p: *const u8, n: usize) -> u8 {
+    return unsafe("p is valid for n bytes") first(p, n);
+}
+
+fn main() -> i32 {
+    let x: u8 = 1;
+    let a = empty(&x as *const u8) + open(&x as *const u8, 1);
+    return 0;
+}

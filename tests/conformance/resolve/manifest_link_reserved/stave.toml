@@ -1,0 +1,6 @@
+name = "manifest_link_reserved"
+kind = "bin"
+version = "0.1.0"
+
+[target.x86_64-linux.link] #~ ERROR E1002
+objects = ["c/fast.o"]
