@@ -90,7 +90,23 @@ that calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> nev
 the `signal_handler_addr()` intrinsic. A SIGSEGV with `si_addr` in `[guard_lo, guard_hi)` reports
 `StackOverflow` at the faulting fn's name token (PC table); any other SIGSEGV/SIGBUS re-raises with
 the default action. Frames larger than `runtime.config.GUARD` (64 KiB) must be probed page by page
-by the prologue, or an overflow can jump the guard.
+by the prologue, or an overflow can jump the guard. A fn on a call cycle that calls other code
+off its cycle reads its reserve below its frame at entry every 60 KiB (contracts/intrinsics.md
+"reserve table"), which needs a guard of at least 64 KiB on every stack.
+
+**Alternate stacks.** Each thread has, above its stack, a report stack and a signal stack
+(`sigaltstack`), each over a guard page (`runtime.panic.alt_len`). The trap entries above and
+`abort` run on the report stack: the compiler's entry of each moves the stack pointer to the
+block's `alt_top` unless it is already in that stack or `alt_size` is 0 (contracts/intrinsics.md
+"Alternate stack"). So a trap at any depth reports without stack below the trapping frame; a
+trap during the report stays there and exits in `begin`; a fault during the report (one that
+runs past its guard) ends the process in `on_signal` with exit 101, and so does a second entry of
+`on_signal` on one thread (a fault in the handler itself). A fault that is no stack overflow
+gets the default action: SIGSEGV/SIGBUS reset, the signal raised again, then a fault of the
+handler's own thread, so the process is killed by a signal, never a normal exit. The report blocks SIGPIPE, so
+a write to a closed stderr keeps exit 101. `runtime.panic.install` writes main's two words,
+`runtime.thread.start` a thread's, before any user code runs on it; a thread whose
+`sigaltstack` fails panics in `runtime.thread.entry` before its body.
 
 **Tables** (read-only data; little-endian; addresses from `site_table()`, `pc_table()`, and
 `stack_table()`):

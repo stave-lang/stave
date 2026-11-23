@@ -509,8 +509,10 @@ in the caller's checked IR. That IR is lowered for the nodes the checks reach, a
 them, so every build mode traps at the same instructions. **Guarantees.** No run of a fn with
 `without(D)`, or of a value of `fn(..) without(D)`, performs an effect of D: every op it runs
 belongs to a node on a path of edges from it, and that node has the op's effect on its own. For
-`trap`: no panic but `StackOverflow`, which no instruction raises; it needs a call cycle (itself
-`trap`) or a wrong stack bound. **What would break it.** A missing edge (a write of a fn-typed place
+`trap`: no panic but `StackOverflow`, which no instruction raises; it is raised only in the entry
+of a member of a cycle of the stack bound's graph (itself `trap`, as a call-cycle member or a
+node whose set reaches one), never in code on no cycle, or else the stack bound is wrong (The
+stack bound, below). **What would break it.** A missing edge (a write of a fn-typed place
 the flow misses): the denied effect runs in a callee the set never sees. A conversion that
 checks fewer values than its expression can have (the last arm of a value `if` only). A boundary fn whose body
 does more than its row, an import whose `without` is false, and an IR built differently from the one
@@ -632,9 +634,10 @@ needs `rec`, and so does one that pops or clears children of its own type; on a 
 glue the built-in fns (`Vec.drop`, `Vec.clear` of the user type) are there only through that impl
 and need no marker. **What would break it.** A missing edge (a fn-value write the flow misses): a
 cycle the check never sees. A built-in `Drop` impl that drops a value it makes. Neither kind of
-cycle has a stack bound: a stack that reaches one keeps `[run] stack`.
+cycle has a stack bound: a stack that reaches one gets `[run] stack` above what runs outside the
+cycles, and each member probes the stack below it (The stack bound).
 
-## The stack bound: a bounded stack is never overrun
+## The stack bound: code on no cycle never overruns a stack
 
 **Assumes.** The bound's graph is the call graph without `Spawn` edges (a spawn body runs on its own
 stack), plus a node per lowered function the call graph has none for and each direct call of the
@@ -644,17 +647,51 @@ bound for a node that calls C code, for one with a fn-value call but no such edg
 call while some function made into a value has no node; the call in `runtime.thread.run_queued` is
 left out: it runs a queued spawn body at the join only in an image without a stack table, the IR
 interpreter; natively a failed thread creation panics, so no spawn body runs on the joiner's
-stack), or for one on or above a cycle. A node with a trap stub
-adds twice the depth of `runtime.panic.trap`, which holds while nothing `runtime.panic.begin`
-reaches has a trap stub (checked; else no bound). Main's stack and each thread start function's get
-the bound plus 4 KiB, rounded up to the page, above a 64 KiB `PROT_NONE` guard; an unbounded stack
-gets `[run] stack`. **Guarantees.** The frames live at once on a thread are the nodes of one path of
-the bound's graph from its start, so a bounded thread never reaches its guard; a stack that reaches
-a cycle keeps `[run] stack` and traps `StackOverflow` at the guard. **What would break it.** A
-fn-value call whose real target the call graph misses (a fn-value write the flow misses): the bound
-counts the target it shows, and a bigger frame or a recursion behind the real one runs into the
-guard of a stack the build summary calls bounded. A frame larger than the backend reports, and stack
-use outside frames beyond the 4 KiB margin (signal handlers run on the alternate stack).
+stack), or for one on or above a cycle. The panic report entries (`runtime.panic.trap` and the
+other `-> never` report fns) run on the thread's alternate signal stack: their entry moves the
+stack pointer there before it touches the stack (contracts/intrinsics.md "Alternate stack"), so
+on a user stack their node weighs 16 bytes (the return address) and has no out-edges, and a node
+with a trap stub adds 16 bytes; the report's own depth there is twice the deepest entry or
+`on_signal`, which holds while nothing `runtime.panic.begin` reaches has a trap stub (checked;
+else no bound for the report or for any trapping stack). A *member* is a node whose strongly connected
+component is a cycle; every member is `trap` (a call-cycle member, or a node of a drop cycle, whose
+set holds its `Vec.drop`'s cycle `trap`). A member's *reserve* is the most its callees off its
+component can use (another member counted as the 16 bytes its call puts down before that member's
+entry runs) and its own trap stub's 16 bytes. A function *probes* when one of its member nodes
+makes a call other than a direct call of a node with code in its own component or of a report
+entry (a node without code, such as a fn-type table through which an untracked fn-value call
+goes, stands for the call, and its targets count below the caller), or has a call whose targets
+are not known; it probes the largest of its members' reserves: its entry, after the frame, reads one word at most every 60 KiB from the stack
+pointer down to the reserve below the frame's lowest byte, and that byte; each node of such a function adds the
+reserve as a leaf, which the bound and every reserve above it count (repeated until no reserve
+grows). Main's stack and each thread start function's get the bound plus 4 KiB, rounded up to the
+page, above a `PROT_NONE` guard of `runtime.config.GUARD` (64 KiB, rounded up to the page:
+`runtime.start.entry` maps main's, `runtime.thread.start` each thread's; a test keeps the probe's
+stride a page below it); a stack that reaches a cycle gets `[run] stack` plus its
+acyclic bound (each component one node: its largest weight and leaf, the callees of all its
+members) plus 4 KiB; one that reaches an unresolved node gets `[run] stack`. **Guarantees.** The
+frames live at once on a thread are the nodes of one path of the bound's graph from its start. On
+a bounded stack that path is at most the bound, so the guard is never reached. On another stack,
+if no member is on the path, the path is one of the acyclic bound, which fits; else let `x` be the
+last member on it. What is below `x` is off every cycle. If `x`'s function probes, its entry found
+`frame + reserve` bytes above the guard (each read is at most a guard width below a written stack
+byte or an earlier read, so the first one below the stack is in the guard), and what is below is
+at most the reserve. If it does not, all that is below `x` is a report entry, which writes only
+the return address `x`'s call instruction pushes (in `x`'s code) and then runs on the alternate
+stack; `x`'s own frame is paged by its prologue, so its first byte past the stack is in the guard,
+in `x`'s code. So `StackOverflow` is raised
+only in the entry or frame of a member, and every `without(trap)` fn and what it calls run without
+it. **What would break it.** A fn-value call whose real target the call graph misses (a fn-value
+write the flow misses): the bound counts the target it shows, and a bigger frame or a recursion
+behind the real one runs into the guard of a stack the build summary calls bounded. A frame larger
+than the backend reports, and stack use outside frames beyond the 4 KiB margin (signal handlers and
+the report run on the alternate stacks). A report deeper than its stack faults in the guard below
+it and ends the process (exit 101, no report line); the run suite keeps it within
+`runtime.config.REPORT_STACK` and the signal handler within half of `runtime.config.ALTSTACK`. A guard narrower than the probe's stride plus a page. Below a member, an unresolved node counts what is known of it (its frame
+and its resolved callees), C code and an unresolved fn-value target count nothing: their frames
+can reach the guard below the member. A function with a member node and an acyclic node below its
+own reserve: the repetition stops after 8 rounds with the reserve it has. A cycle of the bound's
+graph whose members have no `trap` (one only lowering's added edges close; none is known).
 
 ## Threads of a `scope`: their captures stay borrowed until the join
 

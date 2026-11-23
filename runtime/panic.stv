@@ -19,7 +19,12 @@
 // - a false `requires` clause calls `requires_failed(clause)`, located at the user site, which
 //   user code stores before every call that can reach one; a false `ensures` clause calls
 //   `ensures_failed(site, clause)`, located at the return;
-// - the compiler's C-ABI stub `__stave_signal(sig, info, uctx)` calls `on_signal`.
+// - the compiler's C-ABI stub `__stave_signal(sig, info, uctx)` calls `on_signal`;
+// - `trap`, `trap_msg`, `trap_err`, `requires_failed`, `ensures_failed` and `abort` run on the
+//   thread's alternate signal stack: the compiler's entry of each moves there first unless it is
+//   there already (the block's `alt_top`/`alt_size`, contracts/intrinsics.md "Alternate stack"),
+//   so a report needs no stack where it was raised, and one raised during a report or in the
+//   signal handler stays below it.
 //
 // Site table (read-only data, address from `site_table()`; contracts/intrinsics.md is the source
 // of truth for both layouts), all little-endian:
@@ -252,7 +257,13 @@ fn begin() {
     }
 }
 
+// The first line of every report, after begin.
 fn head(l: &mut Line, kind: u32, site: u32) {
+    // a write to a pipe without a reader then fails with EPIPE instead of ending the process by
+    // SIGPIPE: the exit status stays the panic's
+    let set: [u64; 1] = [os.SIGPIPE_SET];
+    let none = 0usize as *mut u64;
+    let r = unsafe("set is one sigset word; blocking SIGPIPE changes no memory") os.rt_sigprocmask(os.SIG_BLOCK, &set as *const [u64; 1] as *const u64, none);
     l.lit("panic: ");
     put_kind(l, kind);
     l.lit(" at ");
@@ -366,27 +377,63 @@ pub fn site_for_pc(pc: usize) -> u32 {
 }
 
 // ---- signals ----
-// Installs main's alternate signal stack and the process-wide SIGSEGV/SIGBUS handler. Called
-// by runtime.start.entry before main. Returns false if a call failed.
+// A thread's alternate stacks: alt_len(page) bytes, bottom to top
+//     [guard page][report: config.REPORT_STACK][guard page][signal: config.ALTSTACK]
+// (sizes rounded up to the page). A report or a signal handler that runs too deep faults in a
+// guard instead of writing past its stack; on_signal ends the process then.
+pub fn alt_len(page: usize) -> usize {
+    return page + round_up(config.REPORT_STACK, page) + page + round_up(config.ALTSTACK, page);
+}
+
+// The top of the report stack of the region at base.
+pub fn report_top(base: usize, page: usize) -> usize {
+    return base + page + round_up(config.REPORT_STACK, page);
+}
+
+// The bottom of the signal stack of the region at base.
+pub fn signal_base(base: usize, page: usize) -> usize {
+    return report_top(base, page) + page;
+}
+
+// Makes the two guard pages of the region at base PROT_NONE. Returns false if a call failed.
+pub unsafe("base..base+alt_len(page) is a fresh read-write mapping no object and no thread uses yet")
+fn alt_guards(base: usize, page: usize) -> bool {
+    let a = unsafe("the bottom page of the region holds no object (this fn's obligation)") os.mprotect(base, page, os.PROT_NONE);
+    let b = unsafe("the page below the signal stack holds no object (this fn's obligation)") os.mprotect(report_top(base, page), page, os.PROT_NONE);
+    return a >= 0 && b >= 0;
+}
+
+// Installs main's alternate stacks and the process-wide SIGSEGV/SIGBUS handler. Called by
+// runtime.start.entry before main. Returns false if a call failed.
 pub unsafe("called before main, while no thread other than the start thread exists")
 fn install() -> bool {
     let st = state.get();
-    let size = round_up(config.ALTSTACK, state.page_size());
+    let page = state.page_size();
+    let len = alt_len(page);
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS;
-    let p = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, size, prot, flags, -1, 0);
+    let p = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, len, prot, flags, -1, 0);
     if p < 0 { return false; }
     let base = p as% usize;
+    if !unsafe("base..base+len is the fresh mapping above") alt_guards(base, page) { return false; }
+    let sig = signal_base(base, page);
+    let size = round_up(config.ALTSTACK, page);
     unsafe("st is runtime.state.STATE; no other thread exists yet (this fn's obligation)") {
-        (*st).altstack = base;
+        (*st).altstack = sig;
         (*st).altstack_size = size;
     }
-    if !unsafe("base..base+size is the fresh mapping above, used for nothing else and never unmapped; size is config.ALTSTACK rounded up") set_altstack(base, size) { return false; }
+    if !unsafe("sig..sig+size is the signal stack of the fresh region above, used for nothing else and never unmapped, with a guard page below it; size is config.ALTSTACK rounded up") set_altstack(sig, size) { return false; }
+    unsafe("st is runtime.state.STATE; main_block is the calling thread's, main's, and no other thread exists yet") {
+        (*st).main_block.alt_top = report_top(base, page);
+        (*st).main_block.alt_size = round_up(config.REPORT_STACK, page);
+    }
     let none = 0usize as *mut u64;
     let h = unsafe("intrinsic: address of the compiler-emitted __stave_signal stub") signal_handler_addr() as u64;
     // The restorer is never used: the handler either exits or re-raises with the default
-    // action. x86-64 still requires SA_RESTORER and a non-zero address.
-    let act: [u64; 4] = [h, os.SA_SIGINFO | os.SA_ONSTACK | os.SA_RESTORER, h, 0];
+    // action. x86-64 still requires SA_RESTORER and a non-zero address. SA_NODEFER: a fault in
+    // the report the handler starts reaches the handler again (which ends the process) instead
+    // of a blocked SIGSEGV killing it.
+    let act: [u64; 4] = [h, os.SA_SIGINFO | os.SA_ONSTACK | os.SA_RESTORER | os.SA_NODEFER, h, 0];
     let ap = &act as *const [u64; 4] as *const u64;
     let r1 = unsafe("act is the kernel's four-word struct sigaction; handler and restorer are the compiler's __stave_signal stub, an SA_SIGINFO handler that never returns") os.rt_sigaction(os.SIGSEGV, ap, none);
     let r2 = unsafe("act is the kernel's four-word struct sigaction; handler and restorer are the compiler's __stave_signal stub, an SA_SIGINFO handler that never returns") os.rt_sigaction(os.SIGBUS, ap, none);
@@ -395,7 +442,7 @@ fn install() -> bool {
 
 // The calling thread's alternate signal stack (per thread; runtime.thread calls it for each
 // new thread). Returns false if the call failed.
-pub unsafe("base..base+size is used only as the calling thread's signal stack and stays mapped while it runs; size holds the kernel's signal frame and the handler's stack use (on_signal and the panic report, which no stack bound counts; config.ALTSTACK suffices), since nothing guards the region's bottom: a thread's altstack lies directly above its stack")
+pub unsafe("base..base+size is used only as the calling thread's signal stack, stays mapped while it runs, and has a guard page below it; size holds the kernel's signal frame and on_signal's stack use before it moves to the report's stack")
 fn set_altstack(base: usize, size: usize) -> bool {
     let ss: [u64; 3] = [base as u64, 0, size as u64];
     let none = 0usize as *mut u64;
@@ -427,19 +474,39 @@ fn round_up(x: usize, page: usize) -> usize {
 // token (PC table). Any other fault is not a panic: the default action runs.
 pub unsafe("sig, info, uctx are the arguments the kernel passed to an SA_SIGINFO handler")
 fn on_signal(sig: usize, info: usize, uctx: usize) -> never {
+    // Entered again on this thread (SA_NODEFER): a fault in the handler itself or in the report
+    // it started. Running it again would fault again (a handler past its stack restarts at the
+    // top and overruns at the same depth: no end), so the process ends here, before anything
+    // else uses the stack.
+    let b = state.block();
+    let again = unsafe("b is this thread's block; only this thread uses it") (*b).in_signal;
+    if again != 0 { os.exit_group(EXIT_PANIC); }
+    unsafe("b is this thread's block; only this thread uses it") { (*b).in_signal = 1; }
+    // A fault while this thread reports (its report overran the report stack into the guard,
+    // or any other): the report cannot finish, and a second one would start over.
+    let st = state.get();
+    let w = unsafe("st is runtime.state.STATE; only the field address is taken") &(*st).panicking as *const u32;
+    let p = unsafe("w is the panicking word of the state block") atomic.load_u32(w);
+    if p == (thread_id() +% 1) as% u32 { os.exit_group(EXIT_PANIC); }
     // siginfo_t.si_addr is at offset 16 on x86-64 and AArch64
     let addr = unsafe("info is the kernel's siginfo_t") ld64(info + 16) as usize;
     if sig == (os.SIGSEGV as% usize) && in_guard(addr) {
         let pc = unsafe("uctx is the kernel's ucontext_t for this handler") os.signal_pc(uctx);
         trap(KIND_STACK_OVERFLOW, site_for_pc(pc));
     }
-    // Default action: restore SIG_DFL, unblock the signal, raise it again.
+    // Default action: restore SIG_DFL for both signals, unblock them, raise the signal again.
+    // kill is process-directed: another thread may take it while this one runs on, so this
+    // thread then faults itself (address 0 is never mapped): a fault is delivered to the
+    // faulting thread before its next instruction, so the process ends by a signal, never by
+    // the exit below.
     let none = 0usize as *mut u64;
     let dfl: [u64; 4] = [0, 0, 0, 0];
     let sig32 = sig as% i32;
     let r = unsafe("dfl is the kernel's four-word struct sigaction for SIG_DFL") os.rt_sigaction(sig32, &dfl as *const [u64; 4] as *const u64, none);
-    let set: [u64; 1] = [1u64 << ((sig as u64) - 1)];
+    let r1 = unsafe("dfl is the kernel's four-word struct sigaction for SIG_DFL") os.rt_sigaction(os.SIGSEGV, &dfl as *const [u64; 4] as *const u64, none);
+    let set: [u64; 1] = [os.FAULT_SET];
     let r2 = unsafe("set is one sigset word") os.rt_sigprocmask(os.SIG_UNBLOCK, &set as *const [u64; 1] as *const u64, none);
     let r3 = os.kill(os.getpid(), sig32);
+    let z = unsafe("address 0 is never mapped: the read faults, with SIGSEGV's default action") atomic.load_u64(0usize as *const u64);
     os.exit_group(128 + sig32);
 }

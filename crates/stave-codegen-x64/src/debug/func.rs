@@ -298,6 +298,34 @@ pub(crate) struct Cg<'a, 'm> {
     /// Most bytes the code puts below the frame at once: a call's stack arguments, the return
     /// address of a call into a compiler helper, the `push` of `call_on_stack`.
     pub(crate) below: u32,
+    /// The reserve-table word (symbol, byte offset) of a function that probes its reserve at
+    /// entry.
+    reserve: Option<(SymbolId, i32)>,
+}
+
+/// The entry of a fn on the alternate stack ([`stave_ir::Func::alt_stack`]), before anything
+/// touches the stack: unless `rsp` is on the thread's alternate signal stack already, or the
+/// thread has none yet, `rsp` moves to its top with a copy of the return address, so the
+/// function's frame and everything it calls lie there and the stack it was called on gets
+/// nothing below the call's return address. Reads the thread's block (`fs:[0]`, then
+/// [`stave_obj::stub::BLOCK_ALT_TOP`] and [`stave_obj::stub::BLOCK_ALT_SIZE`]); `S0`, `S1`.
+fn alt_entry(p: &mut Asm) -> Res<()> {
+    let skip = p.new_label();
+    // mov r11, fs:[0] (r11 is S0)
+    p.raw(&[0x64, 0x4C, 0x8B, 0x1C, 0x25, 0, 0, 0, 0]);
+    p.mov_rm(Size::Q, S1, Mem::base(S0, stave_obj::stub::BLOCK_ALT_SIZE as i32))?;
+    p.alu_ri(AluOp::Cmp, Size::Q, S1, 0)?;
+    p.jcc(Cond::E, skip)?;
+    p.mov_rm(Size::Q, S0, Mem::base(S0, stave_obj::stub::BLOCK_ALT_TOP as i32))?;
+    // top - rsp below the size: on the alternate stack
+    p.alu_rr(AluOp::Sub, Size::Q, S0, RSP);
+    p.alu_rr(AluOp::Cmp, Size::Q, S0, S1);
+    p.jcc(Cond::B, skip)?;
+    p.mov_rm(Size::Q, S1, Mem::base(RSP, 0))?;
+    p.alu_rr(AluOp::Add, Size::Q, RSP, S0);
+    p.push(S1);
+    p.bind(skip)?;
+    Ok(())
 }
 
 pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<(FuncCode, StackUse)> {
@@ -644,6 +672,12 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<(FuncCode, Stac
         yused: release && ywide,
         vpool: Vec::new(),
         below: 0,
+        reserve: match (cx.reserve_sym, cx.reserve_slots.get(fid.index())) {
+            (Some(sym), Some(&k)) if k != u32::MAX => {
+                Some((sym, i32::try_from(u64::from(k) * 8).map_err(|_| unsup("reserve table over 2 GiB"))?))
+            }
+            _ => None,
+        },
     };
     let fs = cx.fn_sites.get(fid.index()).copied().unwrap_or(Site::NONE);
     cg.run(fs)
@@ -2566,6 +2600,10 @@ impl<'a, 'm> Cg<'a, 'm> {
             return Err(bad("body has no entry block"));
         }
         let abi = self.abi_of(&f.params, f.ret)?;
+        if f.alt_stack && abi.args.iter().any(|l| matches!(l, Loc::Stack(_))) {
+            // its entry leaves the stack its caller put them on
+            return Err(unsup("stack arguments of a fn that runs on the alternate stack"));
+        }
         self.ret_abi = abi.ret.clone();
         let params = b.params(stave_ir::Block(0));
         if params.len() != abi.args.len() {
@@ -3395,6 +3433,9 @@ impl<'a, 'm> Cg<'a, 'm> {
         if let Some(Some((file, line, col))) = self.cx.lines.get(fn_site.0 as usize) {
             p.line(*file, *line, *col);
         }
+        if self.f.alt_stack {
+            alt_entry(&mut p)?;
+        }
         p.push(RBP);
         if self.realign {
             // The return address and the caller's `rbp` are copied below the aligned boundary,
@@ -3436,6 +3477,28 @@ impl<'a, 'm> Cg<'a, 'm> {
         }
         if self.realign {
             p.mov_mr(Size::Q, Mem::base(RBP, -8), S1)?;
+        }
+        if let Some((sym, off)) = self.reserve {
+            // Read the reserve below the frame's lowest byte, from `rsp` down in steps of at most
+            // `PROBE_STRIDE`, so a stack too short for what runs below faults here, in the guard.
+            // `S0`: the lowest byte; `S1`: the read address.
+            p.mov_rm(Size::Q, S0, Mem::rip_sym(sym, off))?;
+            if self.below > 0 {
+                p.alu_ri(AluOp::Add, Size::Q, S0, i64::from(self.below))?;
+            }
+            p.mov_rr(Size::Q, S1, RSP);
+            p.alu_rr(AluOp::Sub, Size::Q, S1, S0);
+            p.mov_rr(Size::Q, S0, S1);
+            p.mov_rr(Size::Q, S1, RSP);
+            let (top, test) = (p.new_label(), p.new_label());
+            p.jmp(test)?;
+            p.bind(top)?;
+            p.alu_mi(AluOp::Cmp, Size::Q, Mem::base(S1, 0), 0)?;
+            p.bind(test)?;
+            p.alu_ri(AluOp::Sub, Size::Q, S1, stave_obj::stub::PROBE_STRIDE as i64)?;
+            p.alu_rr(AluOp::Cmp, Size::Q, S1, S0);
+            p.jcc(Cond::A, top)?;
+            p.alu_mi(AluOp::Cmp, Size::Q, Mem::base(S0, 0), 0)?;
         }
         for (k, g) in saved.iter().enumerate() {
             p.mov_mr(Size::Q, Mem::base(RBP, save_off(k)), *g)?;

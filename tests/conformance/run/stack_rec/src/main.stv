@@ -1,9 +1,6 @@
-//~ EXIT 101
-//~ STDERR-CONTAINS "panic: StackOverflow"
-//~ RESOURCE-LIMIT
 // stack_bound's call chain with `f4` a `rec fn` that calls itself (never at run time): main
-// reaches a call cycle, so its stack has no computed bound and keeps `[run] stack` (64 KiB),
-// which the chain (eight frames of 32 KiB) overflows: the guard page traps.
+// reaches a call cycle, so its stack has no computed bound; it gets `[run] stack` (64 KiB) plus
+// the bound of the chain with the cycle collapsed, and the chain (eight frames of 32 KiB) runs.
 import std.io;
 
 fn f0(x: u64) -> u64 {

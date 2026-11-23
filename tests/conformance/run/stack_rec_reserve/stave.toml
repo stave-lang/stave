@@ -1,0 +1,5 @@
+name = "stack_rec_reserve"
+kind = "bin"
+
+[run]
+stack = "64KiB"
