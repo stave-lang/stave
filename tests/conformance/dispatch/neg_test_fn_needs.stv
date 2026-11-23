@@ -1,0 +1,35 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+//~ TARGET aarch64-linux
+// E0709 case `test`: a `test fn` is an entry point (the harness runs it on any CPU of the
+// target), so it cannot declare `needs`, with or without params or `rec`, on either arch.
+test fn plain() needs(avx2) { //~ ERROR E0709
+}
+
+test fn with_params(n: u32) needs(fma) requires(n < 4) { //~ ERROR E0709
+}
+
+test rec fn recursive(n: u32) needs(sve) requires(n < 4) { //~ ERROR E0709
+    if n > 0 {
+        recursive(n - 1);
+    }
+}
+
+// A plain fn and an inherent method may have `needs`.
+fn wide(x: u32) -> u32 needs(avx2) {
+    return x;
+}
+
+struct S {
+    x: u32,
+}
+
+impl S {
+    fn wide(&self) -> u32 needs(avx2) {
+        return self.x;
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

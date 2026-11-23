@@ -132,11 +132,11 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0702 | vector type wider than the target's register; in a fn body, a value (written or inferred type) holding a vector wider than the registers of the fn's `needs` plus the target baseline. Case `inherited`: a generic instance (or a drop) holds such a vector for a type argument, and no feature of the target holds it |
 | E0703 | vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern "C"` signatures: E0804) |
 | E0704 | callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it. Case `drops`: the same, where the instance only drops a vector through a container. Case `value`: the callee is a fn value whose type has `needs(..)` |
-| E0705 | dispatch arm signature differs from the dispatch signature |
+| E0705 | dispatch arm signature differs from the dispatch signature, or the arm target is not a fn with a body. Case `dispatch`: the target is a `dispatch fn` |
 | E0706 | dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features |
 | E0707 | fn value coercion would drop features not proven where it happens (by the `needs` of the enclosing fn or the target baseline) |
 | E0708 | unknown feature name, or a feature not owned by any arch (`cuda` is owned by x86-64, AArch64, and `gpu-sm86`) |
-| E0709 | `main`, a trait method, or an `extern` export declares `needs` |
+| E0709 | an entry point (`main`, a `test fn`, an `extern` export, an allocator fn, a runtime entry fn: code that runs with no typed call site, on any CPU of the target) or a trait method declares `needs`. Case `test`: a `test fn` |
 | E0710 | sizeless vector used without `needs(sve)`. Planned |
 | E0711 | sizeless vector as an ADT field. Planned |
 | E0712 | sizeless vector as an array element. Planned |

@@ -1532,11 +1532,16 @@ fix = { description = "add `needs({feature})` to the caller, or make the call in
 code = "E0705"
 severity = "error"
 area = "features"
-rule = "dispatch arm signature differs from the dispatch signature"
-holes = { expected = "type", found = "type" }
+rule = "dispatch arm signature differs from the dispatch signature, or the arm target is not a fn with a body. Case `dispatch`: the target is a `dispatch fn`"
+holes = { expected = "type", found = "type", target = "path" }
 message = "dispatch arm has type `{found}`, expected `{expected}`"
 labels = [{ at = "primary", text = "this arm's function" }, { at = "dispatch", text = "dispatch signature" }]
 fix = { description = "give the arm's function the type `{expected}` (the dispatch signature, with needs = dispatch needs + the arm's features)" }
+
+[diag.cases.dispatch]
+message = "dispatch arm names `dispatch fn` `{target}`: an arm target is a fn with a body"
+labels = [{ at = "primary", text = "a `dispatch fn`" }, { at = "dispatch", text = "this dispatch" }]
+fix = { description = "name the arms of `{target}` in this dispatch directly, each fn that has the features of its arm" }
 
 [[diag]]
 code = "E0706"
@@ -1577,12 +1582,16 @@ fix = { description = "correct the feature name (`stave lowering --target T` lis
 code = "E0709"
 severity = "error"
 area = "features"
-rule = "`main`, a trait method, or an `extern` export declares `needs`"
+rule = "an entry point (`main`, a `test fn`, an `extern` export, an allocator fn, a runtime entry fn: code that runs with no typed call site, on any CPU of the target) or a trait method declares `needs`. Case `test`: a `test fn`"
 holes = { what = "text-literal" }
-choices = { what = ["`main`", "a trait method", "an `extern` export"] }
+choices = { what = ["`main`", "a trait method", "an `extern` export", "a `test fn`", "an allocator fn", "a runtime entry fn"] }
 message = "{what} cannot declare `needs`"
 labels = [{ at = "primary", text = "`needs` here" }]
 fix = { description = "remove `needs(...)` here, and call the feature-specific code through a `dispatch` function" }
+
+[diag.cases.test]
+labels = [{ at = "primary", text = "`needs` here: the harness runs this test on any CPU" }]
+fix = { description = "remove `needs(...)`: move the body to a fn with `needs(...)` and call it through a `dispatch` fn whose `_` arm returns without it (the test then passes on a CPU without the features)" }
 
 [[diag]]
 code = "E0710"

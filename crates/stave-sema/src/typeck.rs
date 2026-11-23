@@ -459,15 +459,11 @@ fn check_in_pool(prog: &Program) -> Typeck {
         }
         let kind = match d.kind {
             DeclKind::Fn | DeclKind::Method => {
-                if d.flags.has(DeclFlags::EXTERN_IMPORT) || d.flags.has(DeclFlags::DISPATCH) {
+                if !d.has_body() {
                     continue;
                 }
                 // A fn needing another arch's features is not compiled on this arch.
-                if let Some(sig) = sigs_table.fn_sig(decl)
-                    && let Some(fs) = stave_target::FeatureSet::from_bits(sig.features)
-                    && !fs.is_empty()
-                    && !fs.is_owned_by(target_arch)
-                {
+                if sigs_table.fn_sig(decl).is_some_and(|sig| !sig.built_on(target_arch)) {
                     continue;
                 }
                 JobKind::Fn
@@ -2280,11 +2276,13 @@ impl<'a> Ck<'a> {
     /// code of a fn with those features, so the caller must have them as for a direct call.
     pub fn value_features_ok(&mut self, at: Span, t: TypeId, features: u64) {
         let missing = features & !self.proven_features();
-        let Some(f) = stave_target::FeatureSet::from_bits(missing).and_then(|fs| fs.iter().next()) else {
+        // the missing features no other missing one implies, as for a direct call
+        let names = crate::types::feature_names(missing);
+        if names.is_empty() {
             return;
-        };
+        }
         let ty = self.show(t);
-        let d = mk("E0704", Some("value"), &[("fn_type", &ty), ("feature", f.name())], at, &[]);
+        let d = mk("E0704", Some("value"), &[("fn_type", &ty), ("feature", &names.join(", "))], at, &[]);
         self.report(d);
     }
 }
