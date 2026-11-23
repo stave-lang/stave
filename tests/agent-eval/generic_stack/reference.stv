@@ -1,0 +1,61 @@
+import std.io;
+import std.vec;
+
+struct Stack<T> { items: vec.Vec<T> }
+
+impl<T> Stack<T> {
+    fn new() -> Stack<T> {
+        return Self.{ items: vec.Vec::<T>.new() };
+    }
+
+    fn push(&mut self, x: T) {
+        self.items.push(x);
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        return self.items.pop();
+    }
+
+    fn peek(&self) -> Option<&T> from self {
+        let n = self.items.len();
+        if n == 0 {
+            return Option.None;
+        }
+        return Option.Some(self.items.get_ref(n - 1));
+    }
+
+    fn len(&self) -> usize {
+        return self.items.len();
+    }
+}
+
+struct Job { id: u32, cost: u32 }
+
+fn main() -> i32 {
+    let mut s = Stack::<u32>.new();
+    s.push(10);
+    s.push(20);
+    s.push(30);
+    match s.peek() {
+        Option.Some(t) => { io.print(f"top {t}\n"); }
+        Option.None => { io.print("no top\n"); }
+    }
+    loop {
+        match s.pop() {
+            Option.Some(v) => { io.print(f"pop {v}\n"); }
+            Option.None => { break; }
+        }
+    }
+    io.print("empty\n");
+    let mut jobs = Stack::<Job>.new();
+    jobs.push(Job.{ id: 1, cost: 5 });
+    jobs.push(Job.{ id: 2, cost: 8 });
+    jobs.push(Job.{ id: 3, cost: 2 });
+    match jobs.pop() {
+        Option.Some(j) => { io.print(f"job {j.id} cost {j.cost}\n"); }
+        Option.None => { io.print("no job\n"); }
+    }
+    let left = jobs.len();
+    io.print(f"left {left}\n");
+    return 0;
+}

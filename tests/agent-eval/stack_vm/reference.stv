@@ -1,0 +1,112 @@
+import std.io;
+import std.vec;
+
+enum Ins { Push(i64), Add, Dup, Swap, Over, Dec, Jz(usize), Jmp(usize), Print, Halt }
+
+impl Copy for Ins {}
+
+enum VmErr { Underflow(usize), BadJump { to: usize, at: usize } }
+
+fn pop(st: &mut vec.Vec<i64>, pc: usize) -> Result<i64, VmErr> {
+    return match st.pop() {
+        Option.Some(v) => Result.Ok(v),
+        Option.None => Result.Err(VmErr.Underflow(pc)),
+    };
+}
+
+fn jump(prog: &[Ins], to: usize, at: usize) -> Result<usize, VmErr> {
+    if to >= prog.len() {
+        return Result.Err(VmErr.BadJump.{ to: to, at: at });
+    }
+    return Result.Ok(to);
+}
+
+fn run(prog: &[Ins]) -> Result<u32, VmErr> {
+    let mut st = vec.Vec::<i64>.new();
+    let mut pc: usize = 0;
+    let mut steps: u32 = 0;
+    loop {
+        if pc >= prog.len() {
+            return Result.Ok(steps);
+        }
+        let at = pc;
+        steps = steps + 1;
+        pc = pc + 1;
+        match prog[at] {
+            Ins.Push(v) => { st.push(v); }
+            Ins.Add => {
+                let y = pop(&mut st, at)?;
+                let x = pop(&mut st, at)?;
+                st.push(x + y);
+            }
+            Ins.Dup => {
+                let x = pop(&mut st, at)?;
+                st.push(x);
+                st.push(x);
+            }
+            Ins.Swap => {
+                let y = pop(&mut st, at)?;
+                let x = pop(&mut st, at)?;
+                st.push(y);
+                st.push(x);
+            }
+            Ins.Over => {
+                let y = pop(&mut st, at)?;
+                let x = pop(&mut st, at)?;
+                st.push(x);
+                st.push(y);
+                st.push(x);
+            }
+            Ins.Dec => {
+                let x = pop(&mut st, at)?;
+                st.push(x - 1);
+            }
+            Ins.Jz(t) => {
+                let x = pop(&mut st, at)?;
+                if x == 0 {
+                    pc = jump(prog, t, at)?;
+                }
+            }
+            Ins.Jmp(t) => { pc = jump(prog, t, at)?; }
+            Ins.Print => {
+                let x = pop(&mut st, at)?;
+                io.print(f"{x}\n");
+            }
+            Ins.Halt => { return Result.Ok(steps); }
+        }
+    }
+}
+
+fn report(r: Result<u32, VmErr>) {
+    match r {
+        Result.Ok(n) => { io.print(f"ok after {n} steps\n"); }
+        Result.Err(VmErr.Underflow(pc)) => { io.print(f"error: stack underflow at {pc}\n"); }
+        Result.Err(VmErr.BadJump.{ to, at }) => { io.print(f"error: bad jump to {to} at {at}\n"); }
+    }
+}
+
+fn main() -> i32 {
+    let p1: [Ins; 15] = [
+        Ins.Push(0),
+        Ins.Push(5),
+        Ins.Dup,
+        Ins.Jz(12),
+        Ins.Dup,
+        Ins.Print,
+        Ins.Swap,
+        Ins.Over,
+        Ins.Add,
+        Ins.Swap,
+        Ins.Dec,
+        Ins.Jmp(2),
+        Ins.Swap,
+        Ins.Print,
+        Ins.Halt,
+    ];
+    report(run(&p1[0..15]));
+    let p2: [Ins; 2] = [Ins.Push(1), Ins.Add];
+    report(run(&p2[0..2]));
+    let p3: [Ins; 1] = [Ins.Jmp(7)];
+    report(run(&p3[0..1]));
+    return 0;
+}

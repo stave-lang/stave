@@ -746,6 +746,24 @@ pub(crate) struct RetCx {
     pub is_never: bool,
 }
 
+/// The conversion an E0201 fix names (registry cases of E0201).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MismatchFix {
+    /// Plain `as` (the base fix).
+    Cast,
+    /// `as%`, `as|`, or `as~` (case `cast-marked`).
+    Marked(&'static str),
+    Some,
+    Ok,
+    UnwrapOption,
+    UnwrapResult,
+    Borrow,
+    BorrowMut,
+    Deref,
+    /// No conversion applies (case `no-cast`).
+    None,
+}
+
 /// The per-body checker.
 pub(crate) struct Ck<'a> {
     pub w: World<'a>,
@@ -1492,14 +1510,101 @@ impl<'a> Ck<'a> {
         let found = self.show_ty(got);
         let operand = self.icx.node_text(n).to_string();
         let roles: Vec<(&str, Span)> = why.map(|s| ("expected", s)).into_iter().collect();
-        let d = mk(
-            "E0201",
-            None,
-            &[("expected", &expected), ("found", &found), ("operand", &operand)],
-            self.icx.node_span(n),
-            &roles,
-        );
+        let fix = self.mismatch_fix(got, want);
+        let mut holes =
+            vec![("expected", expected.as_str()), ("found", found.as_str()), ("operand", operand.as_str())];
+        let case = match fix {
+            MismatchFix::Cast => None,
+            MismatchFix::Marked(op) => {
+                holes.push(("cast", op));
+                Some("cast-marked")
+            }
+            MismatchFix::Some => Some("some"),
+            MismatchFix::Ok => Some("ok"),
+            MismatchFix::UnwrapOption => Some("unwrap-option"),
+            MismatchFix::UnwrapResult => Some("unwrap-result"),
+            MismatchFix::Borrow => Some("borrow"),
+            MismatchFix::BorrowMut => Some("borrow-mut"),
+            MismatchFix::Deref => Some("deref"),
+            MismatchFix::None => Some("no-cast"),
+        };
+        let d = mk("E0201", case, &holes, self.icx.node_span(n), &roles);
         self.report(d);
+    }
+
+    /// The conversion an E0201 fix names for a value of type `got` where `want` is required.
+    /// The cast forms come from the cast table itself ([`Ck::cast_result`]): plain `as` only
+    /// where it gives `want`, else the first marked form that does; a form `as?` never fits (it
+    /// gives an `Option`). With none of the shapes below the fix names no conversion.
+    fn mismatch_fix(&mut self, got: Ty, want: TypeId) -> MismatchFix {
+        let (option, result) = (self.sigs.lang.option, self.sigs.lang.result);
+        let payload = |tys: &Overlay<'a>, t: TypeId, def: DeclId| match tys.kind(t) {
+            TypeKind::Adt { def: d, args } if *d == def && !def.is_none() => match args.first() {
+                Some(GArg::Type(p)) => Some(*p),
+                _ => None,
+            },
+            _ => None,
+        };
+        let (want_opt, want_res) = (payload(&self.tys, want, option), payload(&self.tys, want, result));
+        let t = match got {
+            Ty::T(t) => t,
+            Ty::Lit(g) => {
+                // A literal fits a payload of its own kind (an int literal is never a float).
+                let float = self.lit_root(g).1.float;
+                let fits = |tys: &Overlay<'a>, p: TypeId| {
+                    if float { tys.is_float(p) } else { tys.int(p).is_some() }
+                };
+                if want_opt.is_some_and(|p| fits(&self.tys, p)) {
+                    return MismatchFix::Some;
+                }
+                if want_res.is_some_and(|p| fits(&self.tys, p)) {
+                    return MismatchFix::Ok;
+                }
+                return MismatchFix::None;
+            }
+        };
+        let fits = |ck: &mut Self, from: TypeId, to: TypeId| from == to || ck.coercible(from, to).is_some();
+        if let Some(p) = want_opt
+            && fits(self, t, p)
+        {
+            return MismatchFix::Some;
+        }
+        if let Some(p) = want_res
+            && fits(self, t, p)
+        {
+            return MismatchFix::Ok;
+        }
+        if let Some(p) = payload(&self.tys, t, option)
+            && fits(self, p, want)
+        {
+            return MismatchFix::UnwrapOption;
+        }
+        if let Some(p) = payload(&self.tys, t, result)
+            && fits(self, p, want)
+        {
+            return MismatchFix::UnwrapResult;
+        }
+        if let TypeKind::Ref { mutable, inner } = self.tys.kind(want).clone() {
+            let r = self.tys.intern(TypeKind::Ref { mutable, inner: t });
+            if inner == t || fits(self, r, want) {
+                return if mutable { MismatchFix::BorrowMut } else { MismatchFix::Borrow };
+            }
+        }
+        if let TypeKind::Ref { inner, .. } = self.tys.kind(t).clone() {
+            let genv = self.genv();
+            if inner == want && self.w.is_copy(&mut self.tys, want, genv) {
+                return MismatchFix::Deref;
+            }
+        }
+        if self.cast_result(Term::KwAs as u8, t, want) == Some(want) {
+            return MismatchFix::Cast;
+        }
+        for (op, text) in [(Term::AsPercent, "as%"), (Term::AsPipe, "as|"), (Term::AsTilde, "as~")] {
+            if self.cast_result(op as u8, t, want) == Some(want) {
+                return MismatchFix::Marked(text);
+            }
+        }
+        MismatchFix::None
     }
 
     /// Checks node `n` against `want` (hint + coercion).
@@ -2014,7 +2119,7 @@ impl<'a> Ck<'a> {
                     let roles: Vec<(&str, Span)> = rc.span.map(|s| ("expected", s)).into_iter().collect();
                     let d = mk(
                         "E0201",
-                        None,
+                        Some("no-cast"),
                         &[("expected", &expected), ("found", "()"), ("operand", "return")],
                         icx.tok_span(icx.a(s)),
                         &roles,

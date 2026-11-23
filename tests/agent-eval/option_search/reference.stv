@@ -1,0 +1,23 @@
+import std.io;
+
+fn first_multiple(xs: &[u32], k: u32) -> Option<usize> {
+    for i in 0..xs.len() {
+        if xs[i] % k == 0 {
+            return Option.Some(i);
+        }
+    }
+    return Option.None;
+}
+
+fn main() -> i32 {
+    let xs: [u32; 5] = [7, 11, 14, 22, 35];
+    let ks: [u32; 4] = [11, 5, 4, 7];
+    for j in 0..ks.len() {
+        let k = ks[j];
+        match first_multiple(&xs[0..5], k) {
+            Option.Some(i) => { io.print(f"{k}: index {i}\n"); }
+            Option.None => { io.print(f"{k}: none\n"); }
+        }
+    }
+    return 0;
+}

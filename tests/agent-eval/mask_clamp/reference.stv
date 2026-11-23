@@ -1,0 +1,31 @@
+import std.io;
+
+fn main() -> i32 {
+    let mut xs: [i32; 21] = [0; 21];
+    for i in 0..xs.len() {
+        let k = i as% i32;
+        xs[i] = (k * 7) % 23 - 11;
+    }
+    let lo = i32x4.splat(-5);
+    let hi = i32x4.splat(5);
+    let mut changed: u32 = 0;
+    for v: &mut i32x4 in &mut xs {
+        let out = (*v < lo) | (*v > hi);
+        changed = changed + (out.to_bits().popcount() as u32);
+        *v = v.max(lo).min(hi);
+    } tail masked (v, m) {
+        let out = m & ((*v < lo) | (*v > hi));
+        changed = changed + (out.to_bits().popcount() as u32);
+        *v = v.max(lo).min(hi);
+    }
+    for i in 0..xs.len() {
+        let x = xs[i];
+        if i > 0 {
+            io.print(" ");
+        }
+        io.print(f"{x}");
+    }
+    io.print("\n");
+    io.print(f"changed {changed}\n");
+    return 0;
+}

@@ -5,7 +5,7 @@ members = [
     "crates/stave-target", "crates/stave-ir", "crates/stave-opt", "crates/stave-codegen-x64", "crates/stave-codegen-a64",
     "crates/stave-obj", "crates/stave-driver", "crates/stave-cli",
     "tools/ll1gen", "tools/diaggen", "tools/gen-tables", "tools/gen-corpus", "tools/touch-fn",
-    "tools/lang-budget", "tools/fuzz-classes",
+    "tools/lang-budget", "tools/fuzz-classes", "tools/agent-eval",
 ]
 
 [workspace.package]
@@ -40,6 +40,7 @@ stave-codegen-x64 = { path = "crates/stave-codegen-x64" }
 stave-codegen-a64 = { path = "crates/stave-codegen-a64" }
 stave-obj = { path = "crates/stave-obj" }
 stave-driver = { path = "crates/stave-driver" }
+agent-eval = { path = "tools/agent-eval" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
