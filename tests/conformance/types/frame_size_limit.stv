@@ -1,0 +1,63 @@
+//~ CHECK-ONLY
+// The frame sum of a fn instance (contracts/lang-details.md "Size limits"): its parameters,
+// bindings, every expression value but a place read in place, one copy per arm of a value
+// `if` / `match`, each call's result and arguments, and its return value take at most
+// 704,643,072 bytes together (E0911 `frame`, per instance of a generic fn). A filled local
+// `let a = [e; n]` takes its fill and its binding. The small values (indexes, element reads,
+// sums, the result) add the last few bytes each count below names.
+
+// 4 x 176160759 + 36 bytes of small values: the bound
+fn at_bound() -> u8 {
+    let a = [1u8; 176160759];
+    let b = [2u8; 176160759];
+    return a[0] + b[0];
+}
+
+// 4 x 176160757 + 42 bytes: 2 bytes under
+fn under_bound() -> u8 {
+    let a = [1u8; 176160757];
+    let b = [2u8; 176160757];
+    let p = 1u8;
+    let q = 2u8;
+    let r = 3u8;
+    return a[0] + b[176160756] + p + q + r;
+}
+
+// 4 x 176160760 + 36 bytes: 4 bytes over
+fn over_bound() -> u8 { //~ ERROR E0911
+    let a = [1u8; 176160760];
+    let b = [2u8; 176160760];
+    return a[0] + b[0];
+}
+
+fn arg(x: [u8; 117440506]) -> u8 {
+    return x[0];
+}
+
+// three calls: each a literal, the argument copy passed, and its `u8` result
+fn args_under() -> u8 {
+    return arg([1u8; 117440506]) + arg([2u8; 117440506]) + arg([3u8; 117440506]);
+}
+
+// a value `if`: two literals, one copy per arm, the binding, and the small values
+fn if_under(c: bool) -> u8 {
+    let a = if c then [1u8; 140928608] else [2u8; 140928608];
+    return a[0];
+}
+
+fn if_over(c: bool) -> u8 { //~ ERROR E0911
+    let a = if c then [1u8; 140928615] else [2u8; 140928615];
+    return a[0];
+}
+
+// per instance: 4 N + 36 bytes
+fn fill<const N: usize>() -> u8 { //~ ERROR E0911
+    let a = [1u8; N];
+    let b = [2u8; N];
+    return a[0] + b[0];
+}
+
+fn main() -> i32 {
+    let s = at_bound() + under_bound() + over_bound() + args_under() + if_under(true) + if_over(false);
+    return (s + fill::<176160759>() + fill::<176160760>()) as% i32;
+}

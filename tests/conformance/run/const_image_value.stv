@@ -1,0 +1,59 @@
+//~ STDOUT const_image_value.stdout
+//~ EXIT 0
+// A const of more than 64 value cells is read from its image (a read-only static) where
+// it is used, so the code does not grow with the value: a tuple const of 2^20 leaves.
+import std.io;
+type T0 = u8;
+const C0: T0 = 1;
+type T1 = (T0, T0);
+const C1: T1 = (C0, C0);
+type T2 = (T1, T1);
+const C2: T2 = (C1, C1);
+type T3 = (T2, T2);
+const C3: T3 = (C2, C2);
+type T4 = (T3, T3);
+const C4: T4 = (C3, C3);
+type T5 = (T4, T4);
+const C5: T5 = (C4, C4);
+type T6 = (T5, T5);
+const C6: T6 = (C5, C5);
+type T7 = (T6, T6);
+const C7: T7 = (C6, C6);
+type T8 = (T7, T7);
+const C8: T8 = (C7, C7);
+type T9 = (T8, T8);
+const C9: T9 = (C8, C8);
+type T10 = (T9, T9);
+const C10: T10 = (C9, C9);
+type T11 = (T10, T10);
+const C11: T11 = (C10, C10);
+type T12 = (T11, T11);
+const C12: T12 = (C11, C11);
+type T13 = (T12, T12);
+const C13: T13 = (C12, C12);
+type T14 = (T13, T13);
+const C14: T14 = (C13, C13);
+type T15 = (T14, T14);
+const C15: T15 = (C14, C14);
+type T16 = (T15, T15);
+const C16: T16 = (C15, C15);
+type T17 = (T16, T16);
+const C17: T17 = (C16, C16);
+type T18 = (T17, T17);
+const C18: T18 = (C17, C17);
+type T19 = (T18, T18);
+const C19: T19 = (C18, C18);
+type T20 = (T19, T19);
+const C20: T20 = (C19, C19);
+const SMALL: (u8, u16) = (3, 4);
+
+fn main() -> i32 {
+    let c = C20;
+    let x = c.0.1.0.1.0.1.0.1.0.1.0.1.0.1.0.1.0.1.0.1;
+    let s = SMALL;
+    let y = C20.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1;
+    let s0 = s.0;
+    let s1 = s.1;
+    io.print(f"{x} {y} {s0} {s1}\n");
+    return 0;
+}

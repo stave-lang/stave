@@ -1,0 +1,35 @@
+//~ CHECK-ONLY
+// Every literal of a const-expr has its type before anything is evaluated: an unsuffixed
+// literal takes the type of its chain (`200 + 100 - 100u8` is `u8` throughout), so a const keeps
+// the error its run-time twin traps with. `MIN / -1` and `MIN % -1` trap like division by zero.
+const CHAIN: bool = 200 + 100 - 100u8 == 200u8; //~ ERROR E0203
+const PAREN: bool = (200 + 100) - 100u8 == 200u8; //~ ERROR E0203
+const MUL: bool = 16 * 16 / 2u8 == 128u8; //~ ERROR E0203
+const U64: bool = 18446744073709551615 + 1 - 1u64 == 18446744073709551615u64; //~ ERROR E0203
+const I64: bool = 9223372036854775807 + 1 - 1i64 == 9223372036854775807i64; //~ ERROR E0203
+const IN_IF: u8 = if 200 + 100 - 100u8 == 200u8 then 1 else 2; //~ ERROR E0203
+const IN_AND: bool = true && 200 + 100 - 100u8 == 200u8; //~ ERROR E0203
+const CAST: u16 = (200 + 100 - 100u8) as u16; //~ ERROR E0203
+const ARM: bool = (if true then 200 + 100 else 1) - 100u8 == 200u8; //~ ERROR E0203
+const REM8: i8 = -128i8 % -1i8; //~ ERROR E0203
+const REM64: i64 = (-9223372036854775807i64 - 1i64) % -1i64; //~ ERROR E0203
+const REM_PENDING: bool = (-2147483648) % (-1) == 0i32; //~ ERROR E0203
+const DIV16: i16 = -32768i16 / -1i16; //~ ERROR E0203
+const NEG_MIN: bool = -(-128) == 0i8; //~ ERROR E0203
+const SHIFT_SUM: u8 = 1 << (4 + 4u8); //~ ERROR E0205
+const EMPTY: [u8; 0] = [];
+const FROM_EMPTY: u8 = EMPTY[0]; //~ ERROR E0203
+
+fn divisor(v: i32x4) -> i32x4 {
+    return v.div_const(-2147483648i32 % -1i32 + 1i32); //~ ERROR E0203
+}
+
+// Stay accepted: an arm not taken and an operand `&&` / `||` does not reach are typed, not
+// evaluated, as at run time.
+const LAZY_IF: u8 = if true then 7 else 200 + 100;
+const LAZY_AND: bool = false && 200 + 100 == 44u8;
+const LAZY_OR: bool = true || 1u8 / 0 == 0;
+
+fn main() -> i32 {
+    return 0;
+}

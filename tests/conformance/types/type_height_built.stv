@@ -1,0 +1,63 @@
+//~ CHECK-ONLY
+// A type 1,000 high is the tallest a program may have (contracts/lang-details.md "Size limits"):
+// an expression that would build one a level higher, with no type written, is E0005 case `type`
+// at that expression, once: a borrow, a tuple, a variant, a closure capturing it, a borrowed
+// scrutinee, a generic call on a borrow, and struct literals nested past the limit.
+struct W<T> {
+    pub v: T,
+}
+
+type A0<T> = W<T>;
+type A1<T> = A0<A0<T>>;
+type A2<T> = A1<A1<T>>;
+type A3<T> = A2<A2<T>>;
+type A4<T> = A3<A3<T>>;
+type A5<T> = A4<A4<T>>;
+type A6<T> = A5<A5<T>>;
+type A7<T> = A6<A6<T>>;
+type A8<T> = A7<A7<T>>;
+type A9<T> = A8<A8<T>>;
+
+// 999 `W` levels over `u8`
+type H = A9<A8<A7<A6<A5<A2<A1<A0<u8>>>>>>>>;
+
+fn look<T>(t: &T) -> u8 {
+    return 0;
+}
+
+fn by_ref(x: H) -> u8 {
+    let r = &x; //~ ERROR E0005
+    return 0;
+}
+
+fn by_tuple(x: H) -> u8 {
+    let t = (x, 1u8); //~ ERROR E0005
+    return 0;
+}
+
+fn by_variant(x: H) -> u8 {
+    let o = Option.Some(x); //~ ERROR E0005
+    return 0;
+}
+
+fn by_match(x: H) -> u8 {
+    match &x { //~ ERROR E0005
+        _ => {
+            return 0;
+        }
+    }
+}
+
+fn by_generic(x: H) -> u8 {
+    return look(&x); //~ ERROR E0005
+}
+
+// the tallest itself is fine
+fn whole(x: H) -> H {
+    let y = x;
+    return y;
+}
+
+fn main() -> i32 {
+    return 0;
+}

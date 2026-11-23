@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// Impl heads that share components (2^20 leaves) are unified exactly: these two heads differ
+// in their first element (`u8` / `u16`), so a Copy and a Drop impl may both exist (no E0416).
+type D0<T> = T;
+type D1<T> = D0<(T, T)>;
+type D2<T> = D1<(T, T)>;
+type D3<T> = D2<(T, T)>;
+type D4<T> = D3<(T, T)>;
+type D5<T> = D4<(T, T)>;
+type D6<T> = D5<(T, T)>;
+type D7<T> = D6<(T, T)>;
+type D8<T> = D7<(T, T)>;
+type D9<T> = D8<(T, T)>;
+type D10<T> = D9<(T, T)>;
+type D11<T> = D10<(T, T)>;
+type D12<T> = D11<(T, T)>;
+type D13<T> = D12<(T, T)>;
+type D14<T> = D13<(T, T)>;
+type D15<T> = D14<(T, T)>;
+type D16<T> = D15<(T, T)>;
+type D17<T> = D16<(T, T)>;
+type D18<T> = D17<(T, T)>;
+type D19<T> = D18<(T, T)>;
+type D20<T> = D19<(T, T)>;
+struct W<T> { pub v: T }
+impl<T: Copy> Copy for W<(u8, D20<T>)> {}
+impl<T> Drop for W<(u16, D20<T>)> { fn drop(&mut self) {} }
+fn main() -> i32 { return 0; }

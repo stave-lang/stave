@@ -58,6 +58,36 @@ reference for what a program may write and what it means.
   same limit and answers the rejecting side past it (not Copy, not Send / Sync / Flat / Frozen, no
   layout: E0911, needs a drop).
 
+## §2 Size limits
+
+Each limit is decided in one place; every reader of a size takes a size past `u64` as a reject.
+
+| limited | bound | diagnostic | decided in |
+|---|---|---|---|
+| height of a type (a type is one level above its tallest component; written, from an alias, or built by substitution) | 1,000 | E0005 `type` | the type table: a taller type is never interned (the error type); the refusal is reported at the span that owned it (the written type, expression, statement, body, declaration, or call-graph instance being checked), and `typedepth` reports instances whose body types would pass it. A closure's environment `&mut (&mut T0, ..)` is such a type too (`closures::env_type`), so a capture more than 997 high is E0005 |
+| bytes of a type | `u64` | E0911 `overflow` (a value of it) | `traits::type_bytes`, the one size function |
+| compile-time data: every tuple, array, struct, or variant value a const-expr builds (so every `const` and `static`) | 2^26 bytes | E0904 `size`, at the literal | `consteval::data_size`, on the literal's type before the value is built |
+| all compile-time data of a program: every `static` and `const` (file data and zero fill, each rounded up to its alignment) | 2^30 bytes | E0904 `total`, at the program's largest one (unused `const`s count; so do the built-in packages') | `typeck::data_total` |
+| a value a fn holds: parameter, binding, array / tuple / struct literal, value `if` / `match`, return value | 2^28 bytes | E0911 `size` (concrete), `instance` (per instance) | `typeck::frame_of` |
+| frame sum of a fn instance: its parameters, bindings, and return value; every expression value but a place read in place (a local, `self`, a `static`, a part of a place, a dereference that is borrowed, assigned to, split into parts, or initializes a binding), two slots for a value `if` / `match` (its result and the live arm, whatever the arm count); each call's result, by-value receiver, and arguments, whatever the callee (fn item, method, fn value, closure, built-in) | 704,643,072 bytes | E0911 `frame`, per instance naming it | `typeck::frame_of` |
+
+- `[e; n]` is one value repeated, in const evaluation (never `n` values) and in a fn body (a
+  fill at run time: `e` once, stored into each element; no count limit of its own). A const
+  used twice is one value (`(C, C)` costs a step, not a copy), so doubling consts stop at the
+  data limit without building it. An all-zero `static` takes no file bytes; a const of more
+  than 64 value cells is read from its image where it is used.
+- Reason: const evaluation and the image hold compile-time data. Both targets reach a static
+  PC-relatively from code laid out before all data: x86-64 by a `rel32` (±2 GiB), AArch64 by
+  `ADRP` (±4 GiB); half of the x86-64 range is kept for code and the rest of the image, so the
+  program's data bound is 2^30 bytes on both. A back end keeps each value of
+  a fn in a slot of its frame, and a frame holds at most 1 GiB: the measured frames are at most
+  1.5 times the frame sum (a filled local, a whole aggregate loaded to read a part), on x86-64
+  and AArch64, debug and release, so the frame bound is (1 GiB - 16 MiB) / 1.5. A trait query
+  has no depth limit: a goal met again while in progress is cut, and the types are finite. The
+  height bound makes the types of a program finitely many, so every walk over them with a
+  visited set ends; polymorphic recursion (`P<T>` holding a `P<(T, T)>`) grows one level per
+  instance and stops there.
+
 ## §2 Contracts
 
 - A false `requires` panics at the call: the last call user code made into a fn with contracts, a

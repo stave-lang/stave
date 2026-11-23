@@ -1,0 +1,61 @@
+//~ STDOUT drop_doubled_head.stdout
+//~ EXIT 0
+// A Drop impl whose head shares components (`W<D20<T>>`: 2^20 leaves) is matched exactly
+// (once per pair of distinct components), so it runs at scope end like any other.
+import std.io;
+type D0<T> = T;
+type D1<T> = D0<(T, T)>;
+type D2<T> = D1<(T, T)>;
+type D3<T> = D2<(T, T)>;
+type D4<T> = D3<(T, T)>;
+type D5<T> = D4<(T, T)>;
+type D6<T> = D5<(T, T)>;
+type D7<T> = D6<(T, T)>;
+type D8<T> = D7<(T, T)>;
+type D9<T> = D8<(T, T)>;
+type D10<T> = D9<(T, T)>;
+type D11<T> = D10<(T, T)>;
+type D12<T> = D11<(T, T)>;
+type D13<T> = D12<(T, T)>;
+type D14<T> = D13<(T, T)>;
+type D15<T> = D14<(T, T)>;
+type D16<T> = D15<(T, T)>;
+type D17<T> = D16<(T, T)>;
+type D18<T> = D17<(T, T)>;
+type D19<T> = D18<(T, T)>;
+type D20<T> = D19<(T, T)>;
+fn dbl<T: Copy>(x: T) -> (T, T) { return (x, x); }
+fn mk() -> D20<()> {
+    let a0 = ();
+    let a1 = dbl(a0);
+    let a2 = dbl(a1);
+    let a3 = dbl(a2);
+    let a4 = dbl(a3);
+    let a5 = dbl(a4);
+    let a6 = dbl(a5);
+    let a7 = dbl(a6);
+    let a8 = dbl(a7);
+    let a9 = dbl(a8);
+    let a10 = dbl(a9);
+    let a11 = dbl(a10);
+    let a12 = dbl(a11);
+    let a13 = dbl(a12);
+    let a14 = dbl(a13);
+    let a15 = dbl(a14);
+    let a16 = dbl(a15);
+    let a17 = dbl(a16);
+    let a18 = dbl(a17);
+    let a19 = dbl(a18);
+    let a20 = dbl(a19);
+    return a20;
+}
+struct W<T> { pub v: T }
+impl<T> Drop for W<D20<T>> {
+    fn drop(&mut self) { io.print("dropped\n"); }
+}
+fn main() -> i32 {
+    let w = W.{ v: mk() };
+    let _ = &w;
+    io.print("end of main\n");
+    return 0;
+}

@@ -83,7 +83,8 @@ fn fused_compare_operand_used_later_in_the_block() {
     assert_eq!(words, [14, 99, 9]);
 }
 
-/// Slot sizes add up past `u32`: rejected like any frame of 16 MiB or more, never wrapped.
+/// Slot sizes add up past `u32`: rejected like any frame larger than 1 GiB (a frame the checker's
+/// bound admits never gets there, so the error is an internal one), never wrapped.
 #[test]
 fn frame_size_overflow_is_rejected() {
     let mut p = Prog::new();
@@ -105,8 +106,84 @@ fn frame_size_overflow_is_rejected() {
         b.call(f, None, &[]);
     });
     let e = build_image(&p.m, &BuildConfig::new(None)).unwrap_err();
-    assert!(matches!(&e.kind, ErrorKind::Unsupported(s) if s.contains("16 MiB")), "{e}");
+    assert!(matches!(&e.kind, ErrorKind::BadIr(s) if s.contains("larger than 1 GiB")), "{e}");
     assert_eq!(e.func, Some(f));
+}
+
+/// Frames past 16 MiB, beyond two `add` immediates: slot, value home, parameter, and
+/// return-pointer offsets from `sp` are formed with `mov` + extended-register `add`. Both ends of
+/// every slot are written and read back; ten parameters (two on the stack) and an indirect
+/// return go through homes above the slots. Runs under `qemu-aarch64 -s` (the harness runtime
+/// has no stack of its own).
+#[test]
+fn frames_over_16_mib_run() {
+    let cases: [(&str, &[u64]); 2] =
+        [("big26", &[1_000_000, 1_000_000, 8_000_000, 8_000_000, 8_000_000]), ("big200", &[200 << 20])];
+    for (name, sizes) in cases {
+        let mut p = Prog::new();
+        let t = p.t;
+        let pu8 = p.m.types.ref_(true, t.u8);
+        let ret = p.m.types.array(t.u64, 4);
+        let tys: Vec<_> = sizes
+            .iter()
+            .map(|&n| {
+                let a = p.m.types.array(t.u8, n);
+                p.m.types.ref_(true, a)
+            })
+            .collect();
+        let f = p.func("app.big", &[t.u64; 10], Some(ret), |b, _| {
+            let ps: Vec<_> = (0..10).map(|k| b.param(k).unwrap()).collect();
+            let mut ends = Vec::new();
+            for (k, (&pt, &n)) in tys.iter().zip(sizes).enumerate() {
+                let s = b.slot(pt);
+                for (j, i) in [0, n - 1].into_iter().enumerate() {
+                    let idx = b.int(i128::from(i));
+                    let e = b.op(Op::ElemAddr, pu8, &[s.into(), idx]);
+                    let v = b.int((2 * k + j + 1) as i128);
+                    b.store(e, v);
+                    ends.push(e);
+                }
+            }
+            let mut acc = ps[0];
+            for &p in &ps[1..] {
+                acc = b.binary(Op::AddWrap, t.u64, acc, p);
+            }
+            for e in ends {
+                let x = b.load(t.u8, e);
+                let xw = b.cast(CastKind::Exact, t.u64, x);
+                acc = b.binary(Op::AddWrap, t.u64, acc, xw);
+            }
+            let seven = b.int(7);
+            let r = b.op(Op::Make, ret, &[acc.into(), ps[9].into(), ps[0].into(), seven]);
+            b.ret(Some(r.into()));
+        });
+        p.set_main(|b, p| {
+            let args: Vec<Operand> = (1..=10).map(|k| b.int(k * 1000)).collect();
+            let r = b.call(f, Some(ret), &args).unwrap();
+            for k in 0..4 {
+                let i = b.int(k);
+                let x = b.binary(Op::Get, t.u64, r, i);
+                p.out(b, x, t.u64);
+            }
+        });
+        let ends = 2 * sizes.len() as u64;
+        let want: Vec<u8> =
+            [55_000 + ends * (ends + 1) / 2, 10_000, 1000, 7].iter().flat_map(|w| w.to_le_bytes()).collect();
+        for release in [false, true] {
+            let cfg = BuildConfig { release, ..BuildConfig::new(None) };
+            let img = build_image(&p.m, &cfg).unwrap_or_else(|e| panic!("{name}: codegen: {e}"));
+            if !have("qemu-aarch64") {
+                eprintln!("SKIP running AArch64 ELF: no qemu-aarch64");
+                continue;
+            }
+            let path = tmp(name);
+            img.write_file(&path).unwrap();
+            let out =
+                output_retry(std::process::Command::new("qemu-aarch64").args(["-s", "320M"]).arg(&*path));
+            assert_eq!(out.status.code(), Some(0), "{name} release={release}: stderr {:?}", out.stderr);
+            assert_eq!(out.stdout, want, "{name} release={release}");
+        }
+    }
 }
 
 /// A function with more than 1 MiB of code: `b.cond` to its trap stub (and blocks) is out of

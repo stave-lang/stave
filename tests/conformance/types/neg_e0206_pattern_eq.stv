@@ -1,0 +1,51 @@
+//~ CHECK-ONLY
+// A literal pattern tests `==`, so its type must have `==`: `&str` and `str` have none
+// (E0206 case `pattern`, as `s == "a"` is E0206). Int, char, bool, and float literals and their
+// ranges stay patterns.
+fn stmt_arm(s: &str) -> u32 {
+    match s {
+        "a" => { return 1; } //~ ERROR E0206
+        _ => { return 2; }
+    }
+}
+
+fn value_arm(s: &str) -> u32 {
+    return match s { "a" => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn or_arm(s: &str) -> u32 {
+    return match s { "a" | "b" => 1u32, _ => 2u32 }; //~ ERROR E0206
+    //~^ ERROR E0206
+}
+
+fn range_arm(s: &str) -> u32 {
+    return match s { "a".."c" => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn nested(t: (&str, u32)) -> u32 {
+    return match t { ("a", n) => n, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn unsized_str(s: &str) -> u32 {
+    return match *s { "a" => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn ints(x: u8) -> u32 {
+    return match x { 0 => 0u32, 1..=9 => 1u32, _ => 2u32 };
+}
+
+fn chars(c: char) -> u32 {
+    return match c { 'a'..='z' => 1u32, '_' => 2u32, _ => 3u32 };
+}
+
+fn floats(x: f64) -> u32 {
+    return match x { 1.5 => 1u32, 2.0..3.0 => 2u32, _ => 3u32 };
+}
+
+fn bools(b: bool) -> u32 {
+    return match b { true => 1u32, false => 0u32 };
+}
+
+fn main() -> i32 {
+    return 0;
+}

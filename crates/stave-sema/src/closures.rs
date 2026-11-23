@@ -116,6 +116,16 @@ pub fn closure_kind(icx: &ItemCx<'_>, m: u32) -> Option<ClosureKind> {
     }
 }
 
+/// The environment of a closure capturing locals of types `caps` (each by `&mut`, the mode
+/// aside): the tuple `(&mut T0, &mut T1, ..)` and the `&mut` to it the body receives. The checker
+/// builds it for every closure ([`crate::typeck::TypedBody::envs`]), so a capture too tall for
+/// the type table is E0005 there, and lowering builds the same type.
+pub fn env_type<I: Interner + ?Sized>(cx: &mut I, caps: &[TypeId]) -> (TypeId, TypeId) {
+    let elems: Vec<TypeId> = caps.iter().map(|&t| cx.mk_ref(true, t)).collect();
+    let tup = cx.intern(crate::types::TypeKind::Tuple(elems.into_boxed_slice()));
+    (tup, cx.mk_ref(true, tup))
+}
+
 /// The closure bodies inside the body at `root` (a fn decl node), in `@<enclosing>.<k>` order,
 /// with their captures. `tys`: the table `tb`'s types live in.
 pub fn closures<I: Interner + ?Sized>(
@@ -259,16 +269,16 @@ fn parents(icx: &ItemCx<'_>, lo: u32, root: u32) -> (u32, Vec<u32>) {
 /// outside a shared reference, a raw pointer, or a fn type.
 fn may_hold_mut<I: Interner + ?Sized>(prog: &crate::Program, tys: &I, t: TypeId) -> bool {
     let mut stack = vec![t];
-    let mut seen: Vec<TypeId> = Vec::new();
+    // each distinct component once (exact; types share components)
+    let mut seen: rustc_hash::FxHashSet<TypeId> = rustc_hash::FxHashSet::default();
     let mut kids = Vec::new();
     while let Some(x) = stack.pop() {
-        if x.is_none() || seen.len() > 4096 {
+        if x.is_none() {
             return true;
         }
-        if seen.contains(&x) {
+        if !seen.insert(x) {
             continue;
         }
-        seen.push(x);
         match tys.kind(x) {
             TypeKind::Ref { mutable: true, .. } | TypeKind::Param(_) | TypeKind::SelfTy | TypeKind::Error => {
                 return true;

@@ -97,6 +97,46 @@ struct Memo {
     drop: FxHashMap<TypeId, bool>,
     view: FxHashMap<TypeId, bool>,
     deep: FxHashMap<TypeId, bool>,
+    /// [`Tys::may_hold_fn`].
+    fns: FxHashMap<TypeId, bool>,
+    /// [`Tys::reaches_mut`], by (type, below a reference).
+    muts: FxHashMap<(TypeId, bool), bool>,
+}
+
+/// The answer of a reachability search ([`Tys::reaches_mut`], [`Tys::may_hold_fn`]) for every
+/// state it settled: a hit and the states on the path to it reach one; when there is no hit,
+/// every state visited reaches none (all it reaches was visited). So each state is searched
+/// once per run, whichever state asks first.
+fn settle_search<S: Copy + Eq + std::hash::Hash>(
+    root: S,
+    hit: Option<S>,
+    parent: &FxHashMap<S, S>,
+    seen: &rustc_hash::FxHashSet<S>,
+    mut put: impl FnMut(S, bool),
+) -> bool {
+    match hit {
+        Some(mut x) => {
+            put(x, true);
+            while x != root {
+                match parent.get(&x) {
+                    Some(&p) => {
+                        x = p;
+                        put(x, true);
+                    }
+                    None => break,
+                }
+            }
+            put(root, true);
+            true
+        }
+        None => {
+            for &x in seen {
+                put(x, false);
+            }
+            put(root, false);
+            false
+        }
+    }
 }
 
 thread_local! {
@@ -190,117 +230,167 @@ impl<'a> Tys<'a> {
 
     /// `below`: whether `t` itself counts as found below a reference.
     fn reaches_mut(&mut self, t: TypeId, below: bool) -> bool {
-        if self.is_unknown(t) {
-            return true;
-        }
-        if let TypeKind::Ref { inner, .. } = self.ov.kind(t) {
-            let inner = *inner;
-            if !self.ref_like(inner) {
-                return false;
-            }
+        let root = (t, below);
+        if let Some(&b) = self.memo(t).muts.get(&root) {
+            return b;
         }
         let sigs = self.sigs;
         let env = self.env;
-        // (type, below a reference)
-        let mut stack = vec![(t, below)];
-        let mut seen: Vec<(TypeId, bool)> = Vec::new();
+        // states (type, below a reference), each searched once
+        let mut stack = vec![root];
+        let mut seen: rustc_hash::FxHashSet<(TypeId, bool)> = rustc_hash::FxHashSet::default();
+        let mut parent: FxHashMap<(TypeId, bool), (TypeId, bool)> = FxHashMap::default();
         let mut kids = Vec::new();
-        while let Some((x, below)) = stack.pop() {
-            if self.is_unknown(x) || seen.len() > 4096 {
-                return true;
+        let mut next: Vec<(TypeId, bool)> = Vec::new();
+        let mut hit = None;
+        while let Some(st) = stack.pop() {
+            let (x, below) = st;
+            if self.is_unknown(x) {
+                hit = Some(st);
+                break;
             }
+            if st != root
+                && let Some(&b) = self.memo(x).muts.get(&st)
+            {
+                if b {
+                    hit = Some(st);
+                    break;
+                }
+                continue;
+            }
+            if !seen.insert(st) {
+                continue;
+            }
+            next.clear();
             if let TypeKind::Ptr { inner, .. } = self.kind(x)
                 && self.ref_like(inner)
             {
                 // unsafe code makes a `&mut` from it: it stands for one
                 if below {
-                    return true;
+                    hit = Some(st);
+                    break;
                 }
-                if !seen.contains(&(x, below)) {
-                    seen.push((x, below));
-                    stack.push((inner, true));
-                }
-                continue;
-            }
-            if !self.ref_like(x) || seen.contains(&(x, below)) {
-                continue;
-            }
-            seen.push((x, below));
-            match self.kind(x) {
-                TypeKind::Ref { mutable, inner } => {
-                    if below && mutable && self.ref_like(inner) {
-                        return true;
+                next.push((inner, true));
+            } else if self.ref_like(x) {
+                match self.kind(x) {
+                    TypeKind::Ref { mutable, inner } => {
+                        if below && mutable && self.ref_like(inner) {
+                            hit = Some(st);
+                            break;
+                        }
+                        next.push((inner, true));
                     }
-                    stack.push((inner, true));
-                }
-                TypeKind::Ptr { .. } => {}
-                TypeKind::Param(i) => {
-                    if env.get(i as usize).is_some_and(|g| g.view) {
-                        return true;
-                    }
-                }
-                TypeKind::Fn { ret, .. } => stack.push((ret, below)),
-                TypeKind::Adt { def, args } => {
-                    for a in args.iter() {
-                        if let GArg::Type(a) = a {
-                            stack.push((*a, below));
+                    TypeKind::Ptr { .. } => {}
+                    TypeKind::Param(i) => {
+                        if env.get(i as usize).is_some_and(|g| g.view) {
+                            hit = Some(st);
+                            break;
                         }
                     }
-                    if let Some(a) = sigs.adt(def).filter(|a| a.is_view) {
-                        for f in a.variants.iter().flat_map(|v| v.fields.iter()) {
-                            let ft = self.ov.subst(f.ty, &args, None);
-                            stack.push((ft, below));
+                    TypeKind::Fn { ret, .. } => next.push((ret, below)),
+                    TypeKind::Adt { def, args } => {
+                        for a in args.iter() {
+                            if let GArg::Type(a) = a {
+                                next.push((*a, below));
+                            }
+                        }
+                        if let Some(a) = sigs.adt(def).filter(|a| a.is_view) {
+                            for f in a.variants.iter().flat_map(|v| v.fields.iter()) {
+                                let ft = self.ov.subst(f.ty, &args, None);
+                                next.push((ft, below));
+                            }
                         }
                     }
+                    k => {
+                        kids.clear();
+                        k.children(&mut kids);
+                        next.extend(kids.iter().map(|&c| (c, below)));
+                    }
                 }
-                k => {
-                    kids.clear();
-                    k.children(&mut kids);
-                    stack.extend(kids.iter().map(|&c| (c, below)));
+            }
+            for &c in &next {
+                if c != root {
+                    parent.entry(c).or_insert(st);
                 }
+                stack.push(c);
             }
         }
-        false
+        let mut answers = Vec::new();
+        let r = settle_search(root, hit, &parent, &seen, |s, b| answers.push((s, b)));
+        for (s, b) in answers {
+            self.memo(s.0).muts.insert(s, b);
+        }
+        r
     }
 
     /// Whether a value of `t` can be or reach a fn value: through references, raw pointers,
     /// elements, fields, and type arguments (unknown types and generic params: yes). Only a
     /// fn value points to a closure environment ([`crate::cfg::Local::env`]).
     pub fn may_hold_fn(&mut self, t: TypeId) -> bool {
+        if let Some(&b) = self.memo(t).fns.get(&t) {
+            return b;
+        }
         let sigs = self.sigs;
         let mut stack = vec![t];
-        let mut seen: Vec<TypeId> = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut parent: FxHashMap<TypeId, TypeId> = FxHashMap::default();
         let mut kids = Vec::new();
+        let mut next = Vec::new();
+        let mut hit = None;
         while let Some(x) = stack.pop() {
-            if self.is_unknown(x) || seen.len() > 4096 {
-                return true;
+            if self.is_unknown(x) {
+                hit = Some(x);
+                break;
             }
-            if seen.contains(&x) {
+            if x != t
+                && let Some(&b) = self.memo(x).fns.get(&x)
+            {
+                if b {
+                    hit = Some(x);
+                    break;
+                }
                 continue;
             }
-            seen.push(x);
+            if !seen.insert(x) {
+                continue;
+            }
+            next.clear();
             match self.kind(x) {
-                TypeKind::Fn { .. } | TypeKind::Param(_) => return true,
+                TypeKind::Fn { .. } | TypeKind::Param(_) => {
+                    hit = Some(x);
+                    break;
+                }
                 TypeKind::Adt { def, args } => {
                     for a in args.iter() {
                         if let GArg::Type(a) = a {
-                            stack.push(*a);
+                            next.push(*a);
                         }
                     }
                     if let Some(a) = sigs.adt(def) {
                         for f in a.variants.iter().flat_map(|v| v.fields.iter()) {
-                            stack.push(self.ov.subst(f.ty, &args, None));
+                            next.push(self.ov.subst(f.ty, &args, None));
                         }
                     }
                 }
                 k => {
                     kids.clear();
                     k.children(&mut kids);
-                    stack.extend_from_slice(&kids);
+                    next.extend_from_slice(&kids);
                 }
             }
+            for &c in &next {
+                if c != t {
+                    parent.entry(c).or_insert(x);
+                }
+                stack.push(c);
+            }
         }
-        false
+        let mut answers = Vec::new();
+        let r = settle_search(t, hit, &parent, &seen, |s, b| answers.push((s, b)));
+        for (s, b) in answers {
+            self.memo(s).fns.insert(s, b);
+        }
+        r
     }
 
     /// Whether `t` is Copy (unknown types: yes, so nothing is reported for them).
@@ -350,29 +440,36 @@ impl<'a> Tys<'a> {
     /// may be both a view and not Copy. Such a destructor can read and write what the references
     /// point to, so the drop is an access of everything the value reaches, not only of its own
     /// storage. A value that holds no reference reaches nothing borrowed through its destructor;
-    /// fn values and references have no drop glue. Unknown types and types past the depth bound:
-    /// yes.
+    /// fn values and references have no drop glue. Unknown types: yes.
     pub fn drop_reaches_refs(&mut self, t: TypeId) -> bool {
         if let Some(&b) = self.memo(t).deep.get(&t) {
             return b;
         }
-        let r = self.drop_reaches_d(t, 0, &mut Vec::new());
+        let mut met = false;
+        let r = self.drop_reaches_d(t, &mut Vec::new(), &mut met);
         self.memo(t).deep.insert(t, r);
         r
     }
 
-    /// `on`: the types being walked (a type met again reaches nothing new). Only the answer of
-    /// the outermost type is kept: an inner one may have met a type still being walked.
-    fn drop_reaches_d(&mut self, t: TypeId, depth: u32, on: &mut Vec<TypeId>) -> bool {
-        if self.is_unknown(t) || depth >= stave_sema::typedepth::MAX_TYPE_DEPTH {
+    /// `on`: the types being walked (a type met again reaches nothing new); `met`: set when one
+    /// was met. The answer of a type whose walk met none is final and kept, so each type is
+    /// walked once; the outermost answer is kept by the caller. Fields are walked by value, so
+    /// the recursion is as deep as the type.
+    fn drop_reaches_d(&mut self, t: TypeId, on: &mut Vec<TypeId>, met: &mut bool) -> bool {
+        if self.is_unknown(t) {
             return true;
         }
-        if !self.ref_like(t) || !self.needs_drop(t) || on.contains(&t) {
+        if on.contains(&t) {
+            *met = true;
+            return false;
+        }
+        if !self.ref_like(t) || !self.needs_drop(t) {
             return false;
         }
         if let Some(&b) = self.memo(t).deep.get(&t) {
             return b;
         }
+        let outer_met = std::mem::replace(met, false);
         on.push(t);
         let r = match self.kind(t) {
             TypeKind::Adt { def, args } => {
@@ -384,17 +481,21 @@ impl<'a> Tys<'a> {
                         .unwrap_or_default();
                     fields.into_iter().any(|f| {
                         let ft = self.ov.subst(f, &args, None);
-                        self.drop_reaches_d(ft, depth + 1, on)
+                        self.drop_reaches_d(ft, on, met)
                     })
                 }
             }
-            TypeKind::Tuple(ts) => ts.iter().any(|&x| self.drop_reaches_d(x, depth + 1, on)),
-            TypeKind::Array { elem, .. } => self.drop_reaches_d(elem, depth + 1, on),
+            TypeKind::Tuple(ts) => ts.iter().any(|&x| self.drop_reaches_d(x, on, met)),
+            TypeKind::Array { elem, .. } => self.drop_reaches_d(elem, on, met),
             // ref-like and with drop glue: a view-bounded param that is not Copy, or a type
             // this walk does not take apart
             _ => true,
         };
         on.pop();
+        if !*met {
+            self.memo(t).deep.insert(t, r);
+        }
+        *met |= outer_met;
         r
     }
 

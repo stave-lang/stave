@@ -188,6 +188,12 @@ pub struct ConstDef {
     pub ty: TypeId,
     /// `None` if the initializer is not a valid const-expr (diagnosed).
     pub value: Option<Val>,
+    /// Without a value and without a diagnostic of the evaluation: the one the body checker
+    /// reports if it reports no error in the initializer (`consteval` module doc).
+    pub deferred: Option<Diagnostic>,
+    /// The types const evaluation decided for the scalar literal and operator nodes of the
+    /// initializer (`consteval::Evaluated::types`).
+    pub types: Vec<(u32, TypeId)>,
 }
 
 /// A type alias.
@@ -335,6 +341,12 @@ pub struct Sigs {
     pub headless_impls: Vec<DeclId>,
     /// Trait impls per trait decl.
     pub impls_by_trait: FxHashMap<DeclId, Vec<DeclId>>,
+    /// Per trait decl and impl head (`None`: no head): the positions in
+    /// [`Sigs::impls_by_trait`] of its impls with that head, ascending. Only impls with the head
+    /// of a type, or with none, can apply to it.
+    pub trait_impls_by_head: FxHashMap<(DeclId, Option<TypeHead>), Vec<u32>>,
+    /// Final trait query answers of the current checking run ([`crate::traits::QueryCache`]).
+    pub queries: crate::traits::QueryCache,
 }
 
 impl Sigs {
@@ -477,8 +489,30 @@ pub(crate) trait LowerHost: Interner {
     fn sig_width(&mut self, _span: Span, _t: TypeId, _features: u64) {}
 }
 
+thread_local! {
+    /// Nesting of [`lower_type`] calls on this thread.
+    static LOWERING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Lowers a `Type` or `TypeBase` node. `ret_pos`: directly after `->` (where `never` is legal).
+/// A written type taller than [`crate::types::MAX_TYPE_HEIGHT`] is E0005 case `type`, at the
+/// whole written type (the outermost one being lowered; the types holding the refused one are
+/// error types, so a type written with it is reported once).
 pub(crate) fn lower_type<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -> TypeId {
+    let before = h.refusals();
+    let outer = LOWERING.with(|c| {
+        c.set(c.get() + 1);
+        c.get() == 1
+    });
+    let t = lower_type_at(h, env, n, ret_pos);
+    LOWERING.with(|c| c.set(c.get() - 1));
+    if outer && crate::types::claim_refusals(h, before) {
+        too_deep(h, &env.icx, n);
+    }
+    t
+}
+
+fn lower_type_at<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -> TypeId {
     let icx = env.icx;
     // Iterative over `&`/`*` prefixes (unbounded chains).
     let mut wraps: Vec<(bool, bool)> = Vec::new(); // (is_ref, mutable)
@@ -1122,12 +1156,13 @@ pub(crate) struct SigBuilder<'p> {
     pub lang: LangItems,
     /// Const evaluation stack (cycle reporting).
     const_stack: Vec<DeclId>,
+    /// Internal errors of const evaluation.
+    pub internal: Vec<String>,
     /// The generics of the decl being built ([`LowerHost::view_env`]).
     cur_generics: Vec<GenericParam>,
     /// While the bounds of a generics list are lowered: the params in scope there (their const
     /// types for [`LowerHost::const_param_ty`]; the view env stays empty).
     bound_scope: Option<Vec<GenericParam>>,
-    layout_busy: Vec<TypeId>,
     /// Lowering the signature of a fn with `needs(...)`: no E0702 (crate::gates).
     ungated: bool,
     /// E0702 spans already reported.
@@ -1144,9 +1179,22 @@ impl Interner for SigBuilder<'_> {
     fn intern(&mut self, k: TypeKind) -> TypeId {
         self.tys.intern(k)
     }
+    fn refusals(&self) -> u32 {
+        self.tys.refusals()
+    }
+    fn claimed_mut(&mut self) -> &mut u32 {
+        self.tys.claimed_mut()
+    }
 
     fn fixed_ty(&self, f: TypeId) -> TypeId {
         self.tys.fixed_ty(f)
+    }
+}
+
+impl crate::traits::LayoutEnv for SigBuilder<'_> {
+    fn adt_shape(&mut self, d: DeclId) -> Option<(bool, Vec<Vec<TypeId>>)> {
+        let adt = self.adt_def(d)?;
+        Some((adt.is_enum, adt.variants.iter().map(|v| v.fields.iter().map(|f| f.ty).collect()).collect()))
     }
 }
 
@@ -1226,7 +1274,7 @@ impl<'p> SigBuilder<'p> {
             diags: Vec::new(),
             lang: LangItems::default(),
             const_stack: Vec::new(),
-            layout_busy: Vec::new(),
+            internal: Vec::new(),
             cur_generics: Vec::new(),
             bound_scope: None,
             ungated: false,
@@ -1313,6 +1361,15 @@ impl<'p> SigBuilder<'p> {
         s.headless_impls.sort_by_key(item_of);
         for v in s.impls_by_trait.values_mut() {
             v.sort_by_key(item_of);
+        }
+        for (&tr, v) in &s.impls_by_trait {
+            for (k, &d) in v.iter().enumerate() {
+                let head = match s.decls.get(d.idx()) {
+                    Some(DeclSig::Impl(i)) => i.head,
+                    _ => None,
+                };
+                s.trait_impls_by_head.entry((tr, head)).or_default().push(k as u32);
+            }
         }
         (self.tys, s, self.diags)
     }
@@ -1501,6 +1558,7 @@ impl<'p> SigBuilder<'p> {
         };
         let saved = std::mem::replace(&mut self.cur_generics, env);
         let saved_scope = self.bound_scope.take();
+        let start = self.tys.refusals();
         let sig = match decl.kind {
             DeclKind::Fn | DeclKind::Method | DeclKind::TraitMethod => self.build_fn(d),
             DeclKind::Struct | DeclKind::Enum => self.build_adt(d),
@@ -1510,6 +1568,10 @@ impl<'p> SigBuilder<'p> {
             DeclKind::TypeAlias => self.build_alias(d),
             _ => DeclSig::None,
         };
+        // the declaration owns what its signature interned outside a written type
+        if crate::types::claim_refusals(&mut self.tys, start) {
+            self.diags.extend(mk("E0005", Some("type"), &[], decl.name_span, &[]));
+        }
         self.cur_generics = saved;
         self.bound_scope = saved_scope;
         self.sigs[d.idx()] = sig;
@@ -1962,6 +2024,9 @@ impl<'p> SigBuilder<'p> {
         let kids = icx.kids_vec(decl.node);
         let ty_node = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
         let init = kids.iter().copied().find(|&c| icx.is_expr(c));
+        // A const's type is part of it: a use of the const in its own type is a cycle
+        // (E0904 through `ensure`), like a use in its initializer.
+        self.const_stack.push(d);
         let ty = match ty_node {
             Some(t) => lower_type(self, &env, t, false),
             None => ids::ERROR,
@@ -1979,15 +2044,18 @@ impl<'p> SigBuilder<'p> {
             self.diags.extend(crate::kinds::e0413(is_static, &name, &tname, sp));
             e0413 = true;
         }
-        // The value: cycles report E0904 through `ensure` (InProgress).
-        self.const_stack.push(d);
-        // Publish the type before evaluating (a self-reference sees the type, not the value).
-        let value = match init {
-            Some(e) if ty != ids::ERROR && !e0413 => consteval::eval_item_const(self, &env, e, ty),
+        // An erroneous type was reported where it was made: no value, nothing to defer.
+        let ev = match init {
+            Some(e) if !self.tys.has_error(ty) && !e0413 => {
+                Some(consteval::eval_item_const(self, &env, e, ty))
+            }
             _ => None,
         };
         self.const_stack.pop();
-        let c = ConstDef { ty, value };
+        let c = match ev {
+            Some(ev) => ConstDef { ty, value: ev.value, deferred: ev.deferred, types: ev.types },
+            None => ConstDef { ty, value: None, deferred: None, types: Vec::new() },
+        };
         if is_static { DeclSig::Static(c) } else { DeclSig::Const(c) }
     }
 
@@ -2048,44 +2116,8 @@ impl<'p> SigBuilder<'p> {
         }
     }
 
-    /// Layout `(size, align)` of a concrete type, demand-driven.
-    pub fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        if self.layout_busy.contains(&t) || self.layout_busy.len() > 4096 {
-            return None;
-        }
-        self.layout_busy.push(t);
-        let r = self.layout_inner(t);
-        self.layout_busy.pop();
-        r
-    }
-
-    fn layout_inner(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        let k = self.tys.kind(t).clone();
-        Some(match k {
-            TypeKind::Adt { def, args } => {
-                let adt = self.adt_def(def)?;
-                let mut variant_layouts = Vec::new();
-                for v in &adt.variants {
-                    let mut fields = Vec::new();
-                    for f in &v.fields {
-                        let ft = self.tys.subst(f.ty, &args, None);
-                        fields.push(self.layout(ft)?);
-                    }
-                    variant_layouts.push(fields);
-                }
-                crate::traits::adt_layout(adt.is_enum, &variant_layouts)?
-            }
-            TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
-                if matches!(self.tys.kind(inner), TypeKind::Str | TypeKind::Slice { .. }) {
-                    (16, 8)
-                } else {
-                    (8, 8)
-                }
-            }
-            _ => {
-                let mut sub = |x: TypeId| self.layout(x);
-                crate::traits::scalar_layout(&k, &mut sub)?
-            }
-        })
+    /// Layout `(size, align)` of a concrete type ([`crate::traits::type_bytes`]).
+    pub fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout> {
+        crate::traits::type_bytes(self, t)
     }
 }

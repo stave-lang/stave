@@ -350,7 +350,7 @@ pub(crate) fn resolve_trait_method<I: Interner + ?Sized>(
         return Some(Resolved::BuiltinOp(op));
     }
     let tr = TraitRef { trait_decl, args: trait_args.to_vec() };
-    let (imp, impl_args) = w.find_impl(cx, self_ty, &tr, &[], 0)?;
+    let (imp, impl_args) = w.find_impl(cx, self_ty, &tr, &[])?;
     let idef = w.sigs.impl_def(imp)?;
     let m = idef.methods.iter().copied().find(|&m| w.prog.decl(m).is_some_and(|d| d.name == name))?;
     let mut args = impl_args;
@@ -365,7 +365,7 @@ pub(crate) fn drop_method<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: Ty
     if drop.is_none() {
         return None;
     }
-    let (imp, args) = w.find_impl(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[], 0)?;
+    let (imp, args) = w.find_impl(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[])?;
     if !own_package(w, imp, def) {
         return None;
     }
@@ -454,7 +454,10 @@ fn has_params<I: Interner + ?Sized>(cx: &mut I, t: TypeId) -> bool {
 /// lock ranks of drops, the const rule (E0413). Memoized in `memo` (answers under one `env`).
 ///
 /// This is reachability over containment edges (ADT fields, tuple and array elements), walked
-/// with an explicit stack, so the answer is exact for a type within the type depth bound.
+/// with an explicit stack and a visited set: it ends on the finite set of types the interner
+/// accepts (a type past the height limit is refused there, E0005, and has no parts here). Every
+/// answer it records is final: a type found to reach a `Drop` impl does, and a search that ended
+/// without one visited everything reachable.
 pub fn needs_drop<I: Interner + ?Sized>(
     w: &World<'_>,
     cx: &mut I,
@@ -467,15 +470,8 @@ pub fn needs_drop<I: Interner + ?Sized>(
     }
     let mut seen: FxHashSet<TypeId> = FxHashSet::default();
     seen.insert(t);
-    let mut stack = vec![(t, 0u32)];
-    while let Some((u, depth)) = stack.pop() {
-        // Unreachable for a checked type (E0005 case `type`); past it glue is assumed, so the
-        // walk ends on a type that grows without bound (polymorphic recursion in a rejected
-        // program the borrow checker still reads)
-        if depth >= crate::typedepth::MAX_TYPE_DEPTH {
-            memo.insert(t, true);
-            return true;
-        }
+    let mut stack = vec![t];
+    while let Some(u) = stack.pop() {
         // memo `false`: nothing reachable from `u` has a Drop impl; `true`: something does
         match memo.get(&u) {
             Some(false) => continue,
@@ -505,7 +501,7 @@ pub fn needs_drop<I: Interner + ?Sized>(
         };
         for x in inner {
             if seen.insert(x) {
-                stack.push((x, depth + 1));
+                stack.push(x);
             }
         }
     }

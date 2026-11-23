@@ -327,6 +327,10 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
         DeclKind::Const => {
             let Some(c) = ck.sigs.konst(d) else { return Pat::Err };
             let ct = c.ty;
+            if ct != ids::ERROR && !ck.tys.has_error(ct) && !crate::expr::scalar_eq(ck.tys.kind(ct)) {
+                no_eq_pattern(ck, p, ct);
+                return Pat::Err;
+            }
             if pt != ct && ct != ids::ERROR && pt != ids::ERROR {
                 mismatch_pat(ck, p, ct, t);
                 return Pat::Err;
@@ -349,6 +353,16 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
             sub_err(ck, &kids)
         }
     }
+}
+
+/// E0206 case `pattern`: pattern `p` tests `==` on `t`, which has none.
+fn no_eq_pattern(ck: &mut Ck<'_>, p: u32, t: TypeId) {
+    let tn = ck.show(t);
+    // a string has no parts to compare in a guard: its bytes do (`std.mem.str_bytes`)
+    let (inner, _) = ck.tys.peel_refs(t);
+    let case = if matches!(ck.tys.kind(inner), TypeKind::Str) { "pattern-str" } else { "pattern" };
+    let d = mk("E0206", Some(case), &[("op", "=="), ("type", &tn)], ck.icx.node_span(p), &[]);
+    ck.report(d);
 }
 
 fn tuple_placeholder(ck: &mut Ck<'_>, n: usize) -> TypeId {
@@ -476,6 +490,10 @@ fn literal_pattern(ck: &mut Ck<'_>, p: u32, kids: &[u32], t: TypeId, mode: Mode)
         if let Ty::Lit(g) = found {
             let _ = ck.fix(g, ids::ERROR);
         }
+        return Pat::Err;
+    }
+    if !crate::expr::scalar_eq(ck.tys.kind(pt)) {
+        no_eq_pattern(ck, p, pt);
         return Pat::Err;
     }
     // ranges of int literals: range-check each end
@@ -628,6 +646,43 @@ const SEARCH_STEPS: u32 = 1_000_000;
 struct Search {
     steps: u32,
     exceeded: bool,
+    /// Whether a type has a value ([`inhabited`]), per type.
+    inhabited: rustc_hash::FxHashMap<TypeId, bool>,
+}
+
+/// Describes every type reachable from `t` through fields and payloads once, so each one's
+/// constructors are interned whatever the search visits; the types share components, so this
+/// is linear in the distinct types, not in the leaves.
+fn describe_all(ck: &mut Ck<'_>, t: TypeId) {
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut todo = vec![t];
+    while let Some(t) = todo.pop() {
+        if !seen.insert(t) {
+            continue;
+        }
+        match desc(ck, t) {
+            Desc::Enum(vs) => todo.extend(vs.into_iter().flatten()),
+            Desc::Single(fs) => todo.extend(fs),
+            _ => {}
+        }
+    }
+}
+
+/// Whether type `t` has a value: an enum with a variant whose fields all have one, a struct or
+/// tuple whose fields all have one, any other type. Memoised in `s` (a type met again while it
+/// is being decided counts as inhabited: a by-value cycle has no layout anyway).
+fn inhabited(ck: &mut Ck<'_>, t: TypeId, s: &mut Search) -> bool {
+    if let Some(&b) = s.inhabited.get(&t) {
+        return b;
+    }
+    s.inhabited.insert(t, true);
+    let b = match desc(ck, t) {
+        Desc::Enum(vs) => vs.iter().any(|fs| fs.iter().all(|&f| inhabited(ck, f, s))),
+        Desc::Single(fs) => fs.iter().all(|&f| inhabited(ck, f, s)),
+        _ => true,
+    };
+    s.inhabited.insert(t, b);
+    b
 }
 
 fn useful(ck: &mut Ck<'_>, rows: &[Vec<Pat>], v: &[Pat], tys: &[TypeId], depth: u32, s: &mut Search) -> bool {
@@ -674,6 +729,16 @@ fn useful(ck: &mut Ck<'_>, rows: &[Vec<Pat>], v: &[Pat], tys: &[TypeId], depth: 
             let f = fields.clone();
             try_ctor(ck, s, c, Some(&f))
         }
+        // No row tests a constructor here and the type has a value: splitting by constructor
+        // would only add columns of wildcards, so the rows' tails decide (each distinct type
+        // under a wildcard is then visited once, not once per path to it).
+        Pat::Wild | Pat::Err
+            if rows.iter().all(|r| matches!(r.first(), Some(Pat::Wild | Pat::Err)))
+                && inhabited(ck, t0, s) =>
+        {
+            let def: Vec<Vec<Pat>> = rows.iter().map(|r| r[1..].to_vec()).collect();
+            useful(ck, &def, &v[1..], rest_tys, depth + 1, s)
+        }
         Pat::Wild | Pat::Err => match &d {
             Desc::Enum(vs) => {
                 let n = vs.len() as u32;
@@ -710,10 +775,12 @@ fn has_err(p: &Pat) -> bool {
     }
 }
 
-/// E0300 case `limit` at `node` for a match (or `let`/`for` pattern) on `t`.
-fn too_large(ck: &mut Ck<'_>, node: u32, t: TypeId) {
+/// E0300 case `limit` at `node` for a match on `t`; case `limit-split` where a final `_` arm
+/// would not help: a `let`/`for` pattern, or a match that ends with an unguarded `_` arm.
+fn too_large(ck: &mut Ck<'_>, node: u32, t: TypeId, split_only: bool) {
     let tn = ck.show(t);
-    let d = mk("E0300", Some("limit"), &[("type", &tn)], ck.icx.node_span(node), &[]);
+    let case = if split_only { "limit-split" } else { "limit" };
+    let d = mk("E0300", Some(case), &[("type", &tn)], ck.icx.node_span(node), &[]);
     ck.report(d);
 }
 
@@ -823,6 +890,7 @@ pub(crate) fn check_match(ck: &mut Ck<'_>, scrut: u32, t: TypeId, rows: &[Row]) 
     if t == ids::ERROR || ck.tys.has_error(t) || rows.iter().any(|r| has_err(&r.pat)) {
         return true;
     }
+    describe_all(ck, t);
     let tys = [t];
     let mut prev: Vec<Vec<Pat>> = Vec::new();
     let mut prev_nodes: Vec<u32> = Vec::new();
@@ -866,7 +934,8 @@ pub(crate) fn check_match(ck: &mut Ck<'_>, scrut: u32, t: TypeId, rows: &[Row]) 
     }
     let open = useful(ck, &prev, &[Pat::Wild], &tys, 0, s);
     if s.exceeded {
-        too_large(ck, scrut, t);
+        let ends_wild = rows.last().is_some_and(|r| !r.guarded && matches!(r.pat, Pat::Wild));
+        too_large(ck, scrut, t, ends_wild);
         return false;
     }
     if open {
@@ -888,13 +957,14 @@ pub(crate) fn irrefutable(ck: &mut Ck<'_>, node: u32, p: &Pat, t: TypeId) {
     if t == ids::ERROR || ck.tys.has_error(t) || has_err(p) {
         return;
     }
+    describe_all(ck, t);
     let s = &mut Search::default();
     let open = useful(ck, &[vec![p.clone()]], &[Pat::Wild], &[t], 0, s);
     if s.exceeded {
-        too_large(ck, node, t);
+        too_large(ck, node, t, true);
     } else if open {
         let tn = ck.show(t);
-        let d = mk("E0300", None, &[("type", &tn)], ck.icx.node_span(node), &[]);
+        let d = mk("E0300", Some("let"), &[("type", &tn)], ck.icx.node_span(node), &[]);
         ck.report(d);
     }
 }

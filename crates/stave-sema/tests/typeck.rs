@@ -368,15 +368,15 @@ fn type_helpers_on_the_canonical_table() {
     assert!(b.locals.iter().any(|&(_, lt)| lt == wu8));
     let world = World { prog: &p, sigs: &tc.sigs };
     let (imp, iargs) =
-        world.find_impl(&mut t, wu8, &TraitRef { trait_decl: tr, args: Vec::new() }, &[], 0).expect("impl");
+        world.find_impl(&mut t, wu8, &TraitRef { trait_decl: tr, args: Vec::new() }, &[]).expect("impl");
     assert_eq!(p.decl(imp).map(|d| d.kind), Some(stave_sema::DeclKind::Impl));
     assert_eq!(iargs, vec![GArg::Type(u8t)]);
     let imp_def = tc.sigs.impl_def(imp).expect("impl sig");
-    assert_eq!(world.impl_applies(&mut t, imp_def, wu8, &[], 0), Some(vec![GArg::Type(u8t)]));
-    assert_eq!(world.impl_applies(&mut t, imp_def, u8t, &[], 0), None);
+    assert_eq!(world.impl_applies(&mut t, imp_def, wu8, &[]), Some(vec![GArg::Type(u8t)]));
+    assert_eq!(world.impl_applies(&mut t, imp_def, u8t, &[]), None);
     // layout: Option<u8> (tag + payload) then u8
-    let lx = stave_sema::traits::layout_of(&mut t, &tc.sigs, sx, 0).expect("layout");
-    let lw = stave_sema::traits::layout_of(&mut t, &tc.sigs, wu8, 0).expect("layout");
+    let lx = stave_sema::traits::layout_of(&mut t, &tc.sigs, sx).expect("layout");
+    let lw = stave_sema::traits::layout_of(&mut t, &tc.sigs, wu8).expect("layout");
     assert!(lw.0 > lx.0, "{lx:?} {lw:?}");
 }
 
@@ -541,8 +541,8 @@ fn contract_diagnostics_name_the_shared_state() {
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 
-/// The Flat check stops at the type depth limit and fails closed (E1407 case `depth`); the type
-/// itself is past the limit (E0005 case `type`).
+/// A type past the type height limit is never created: E0005 case `type` where it is written,
+/// and no `Flat` check runs on it.
 #[test]
 fn flat_depth_cutoff_fails_closed() {
     let nest = |n: usize| format!("{}u32{}", "W<".repeat(n), ">".repeat(n));
@@ -556,12 +556,7 @@ fn flat_depth_cutoff_fails_closed() {
     let mut got: Vec<String> =
         tc.all_diagnostics(&p).iter().map(|d| format!("{} {}", d.code(), d.message())).collect();
     got.sort();
-    assert_eq!(got.len(), 2, "{got:?}");
-    assert_eq!(got[0], "E0005 type nested deeper than 1000 levels");
-    // the type text is elided in the middle (`W<W<..>>`)
-    assert!(got[1].starts_with("E1407 `W<W<"), "{}", got[1]);
-    let tail = ">>` is not `Flat`: it nests deeper than 1000 levels, the limit of the `Flat` check";
-    assert!(got[1].ends_with(tail), "{}", got[1]);
+    assert_eq!(got, vec!["E0005 type nested deeper than 1000 levels".to_string()]);
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 
@@ -653,6 +648,81 @@ fn e0105_in_a_pattern_says_name_the_field_once() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(got[0].0, "field `n` of `main.H` is named twice in one pattern");
     assert!(got[0].1.starts_with("name `n` once") && !got[0].1.contains("rename"), "{got:?}");
+}
+
+/// Polymorphic recursion at `(T, T)` doubles the type argument per level (2^k leaves, k + 1
+/// distinct types): it reaches E0902 as promptly as linear growth, as the type walks visit each
+/// distinct type once. The bound is generous for a loaded CI host; a tree walk needs 2^64 steps.
+#[test]
+fn doubling_instance_chain_is_e0902_promptly() {
+    let src = "rec fn f<T: Copy>(x: T, n: u32) -> u32 {\n\
+         if n == 0 { return 0; }\n\
+         return f::<(T, T)>((x, x), n - 1);\n}\n\
+         fn main() -> i32 { let a = f(1u32, 3); return 0; }\n";
+    let start = std::time::Instant::now();
+    let (_, tc) = mem(src);
+    let codes: Vec<&str> = tc.diagnostics.iter().map(|d| d.code()).collect();
+    assert_eq!(codes, ["E0902"], "{codes:?}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
+}
+
+/// The (code, message, fix) of every error of `src`.
+fn texts(src: &str) -> Vec<(&'static str, String, String)> {
+    let (_, tc) = mem(src);
+    tc.diagnostics
+        .iter()
+        .filter(|d| d.severity() == stave_diag::Severity::Error)
+        .map(|d| {
+            (d.code(), d.message().to_string(), d.fix().map_or(String::new(), |f| f.description.clone()))
+        })
+        .collect()
+}
+
+/// Each fix can be followed: the `&str` pattern fix compares bytes (a `&str` has no `==`), a
+/// `let` pattern and a match ending in `_` are not told to add a `_` arm, a generic `size_of`
+/// length says why it has no value, an empty array has no index range, and the shift range is
+/// a number.
+#[test]
+fn fixes_that_apply() {
+    let t = texts(
+        "fn f(s: &str) -> u32 { match s { \"a\" => { return 1; } _ => { return 2; } } }\nfn main() -> i32 { return f(\"a\") as% i32; }\n",
+    );
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0206" && t[0].2.contains("mem.str_bytes(s).eq(mem.str_bytes(\"a\"))"), "{t:?}");
+    let t = texts(
+        "fn f(o: Option<u32>) -> u32 { let Option.Some(x) = o; return x; }\nfn main() -> i32 { return f(Option.None) as% i32; }\n",
+    );
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0300" && !t[0].2.contains("`_` arm"), "{t:?}");
+    let t = texts(
+        "fn f<T>() -> usize { let a = [0u8; size_of::<T>()]; return a.len(); }\nfn main() -> i32 { return f::<u32>() as% i32; }\n",
+    );
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0904" && t[0].1.contains("type parameter") && !t[0].1.contains("outside"), "{t:?}");
+    let t = texts("const E: [u8; 0] = [];\nconst X: u8 = E[0];\nfn main() -> i32 { return X as i32; }\n");
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0203" && !t[0].2.contains("-1"), "{t:?}");
+    let t = texts("const K: i32 = -1;\nconst S: i32 = 1i32 >> K;\nfn main() -> i32 { return S; }\n");
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0205" && t[0].2.contains("by 0 to 31,"), "{t:?}");
+}
+
+/// A field given twice in a struct literal is E0105 `literal-field`: a literal renames nothing,
+/// so the text says to remove one of the two values.
+#[test]
+fn e0105_in_a_literal_says_remove_one_value() {
+    let src = "struct H { n: u32, d: u32 }\n\
+         fn main() -> i32 { let h = H.{ n: 1u32, n: 3u32, d: 2u32 }; return h.d as% i32; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> = tc
+        .diagnostics
+        .iter()
+        .filter(|d| d.code() == "E0105")
+        .map(|d| (d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "field `n` of `main.H` is given twice in one struct literal");
+    assert!(got[0].1.starts_with("give `n` once") && !got[0].1.contains("rename"), "{got:?}");
 }
 
 /// The E0908 fixes name each trait instance as the calling module does: a trait of this module
@@ -955,4 +1025,54 @@ fn e0206_deref_names_the_reference_accessors() {
     let deref = "`*` cannot dereference `MutexGuard<u64, 1>`: it is no reference or raw pointer";
     assert!(got.iter().any(|(_, m, _)| *m == deref), "{got:?}");
     assert_eq!(got.len(), 5, "{got:?}");
+}
+
+/// Trait queries are answered once per (type, trait) and checking run: along a chain of 20,000
+/// structs linked by raw pointers, a `Frozen` query at the head (failing at the far end, or
+/// holding) and a `Copy` query over 20,000 structs with impls of their own take time linear in
+/// the chain. Answers found inside a cycle are kept only once the cycle's goal is settled: a
+/// mutual cycle is Sync when neither holds a `Cell` and is not when one does, whichever type is
+/// asked first.
+#[test]
+fn trait_queries_are_answered_once_per_type() {
+    let codes = |src: &str| -> Vec<String> {
+        let (p, tc) = mem(src);
+        let mut c: Vec<String> = tc.all_diagnostics(&p).iter().map(|d| d.code().to_string()).collect();
+        c.sort();
+        c
+    };
+    let chain = |n: usize, last: &str, copy: bool| -> String {
+        let mut s = String::from("import std.cell;\n");
+        for k in 1..n {
+            s += &format!("struct S{k} {{ pub p: *const S{}, pub b: u8 }}\n", k + 1);
+            if copy {
+                s += &format!("impl Copy for S{k} {{}}\n");
+            }
+        }
+        s += &format!("struct S{n} {{ pub {last} }}\n");
+        s
+    };
+    let none: Vec<String> = Vec::new();
+    let frozen = "fn need<T: Frozen>(t: &T) -> u8 { return 1u8; }\n\
+                  fn f(p: &S1) -> u8 { return need(p); }\nfn main() -> i32 { return 0; }\n";
+    assert_eq!(codes(&(chain(20_000, "v: u32", false) + frozen)), none);
+    assert_eq!(codes(&(chain(20_000, "c: cell.Cell<u32>", false) + frozen)), vec!["E1410".to_string()]);
+    let copy = "fn need<T: Copy>(t: &T) -> u8 { return 1u8; }\n\
+                fn f(p: &S1) -> u8 { return need(p); }\nfn main() -> i32 { return 0; }\n";
+    assert_eq!(codes(&(chain(20_000, "v: u32", true) + copy)), none);
+    let mutual = |cell: &str, a_first: bool| -> String {
+        let calls = if a_first { "need(&a) + need(&v)" } else { "need(&v) + need(&a)" };
+        format!(
+            "import std.vec;\nimport std.cell;\nstruct A {{ pub bs: vec.Vec<B> }}\n\
+             struct B {{ pub as_: vec.Vec<A>{cell} }}\nfn need<T: Sync>(t: &T) -> u8 {{ return 1u8; }}\n\
+             fn main() -> i32 {{\n    let a = A.{{ bs: vec.Vec::<B>.new() }};\n    \
+             let v = vec.Vec::<A>.new();\n    return (({calls}) as u8) as i32;\n}}\n"
+        )
+    };
+    let two = vec!["E0901".to_string(), "E0901".to_string()];
+    assert_eq!(codes(&mutual(", pub c: cell.Cell<u32>", true)), two);
+    assert_eq!(codes(&mutual(", pub c: cell.Cell<u32>", false)), two);
+    assert_eq!(codes(&mutual("", true)), none);
+    assert_eq!(codes(&mutual("", false)), none);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }

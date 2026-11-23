@@ -111,7 +111,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0005",
         severity: Severity::Error,
         area: "lex-parse",
-        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type, at the first signature, field, alias, value, or call that reaches it",
+        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type at the first signature, field, alias, value, or call that reaches it, and at each expression, statement, or declaration whose checking asks for a type past the limit",
         retired: false,
         located: true,
         holes: &[],
@@ -863,7 +863,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0105",
         severity: Severity::Error,
         area: "resolve",
-        rule: "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration",
+        rule: "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `literal-field`: the struct literal; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration",
         retired: false,
         located: true,
         holes: &[
@@ -880,6 +880,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rename this `{name}`, or remove one of the two declarations",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "literal-field",
+                message: "field `{name}` of `{scope}` is given twice in one struct literal",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` given again here" },
+                    LabelTemplate { at: "first", text: "`{name}` first given here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "give `{name}` once: remove one of the two values",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1352,7 +1365,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0203",
         severity: Severity::Error,
         area: "types",
-        rule: "literal out of range for its type",
+        rule: "literal out of range for its type; also overflow, division by zero, `MIN / -1`, and `MIN % -1` of an operation a const-expr evaluates (each in the operation's own type: a literal takes it from its chain), and case `index`: a const-expr index past the end of its const array; case `index-empty`: an index into an empty const array",
         retired: false,
         located: true,
         holes: &[
@@ -1382,6 +1395,30 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a value within the finite range of `{type}`, or use `f64`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "index",
+                message: "index `{literal}` is out of range for `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "past the end of the const array" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "index from {min} to {max}",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "index-empty",
+                message: "index `{literal}` into the empty array `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "the const array has no elements" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "an array of length 0 has no element to read: index a longer array, or remove the index",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1430,12 +1467,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0205",
         severity: Severity::Error,
         area: "types",
-        rule: "constant shift amount >= bit width",
+        rule: "constant shift amount >= bit width; also an amount outside `0..bits` that a const-expr evaluates; case `negative`: a negative amount in a const-expr",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "amount", kind: HoleKind::Int, choices: &[] },
             Hole { name: "bits", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "last", kind: HoleKind::Int, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
@@ -1451,13 +1489,25 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[],
                 }),
             },
+            Shape {
+                case: "negative",
+                message: "shift amount {amount} is negative",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "shift by {amount}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "shift `{type}` by 0 to {last}, or use `<<%` to mask the amount of a left shift",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
         ],
     },
     Entry {
         code: "E0206",
         severity: Severity::Error,
         area: "types",
-        rule: "operator not defined for type (e.g. `+%` on a float); case `ref-operand`: an operand of reference type; cases `deref`, `deref-read`, `deref-write`, `deref-accessors`: unary `*` on a value that is no reference or raw pointer, the fix naming the type's methods that take `&self` / `&mut self` alone and return a reference",
+        rule: "operator not defined for type (e.g. `+%` on a float); case `ref-operand`: an operand of reference type; cases `deref`, `deref-read`, `deref-write`, `deref-accessors`: unary `*` on a value that is no reference or raw pointer, the fix naming the type's methods that take `&self` / `&mut self` alone and return a reference; case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a const of a struct, enum, tuple, or array type); case `pattern-str`: the same for a string literal or `&str` const pattern",
         retired: false,
         located: true,
         holes: &[
@@ -1524,6 +1574,30 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "`{type}` gives a `&mut` from its method `{get_mut}`: `let r = {operand}.{get_mut}();`, then `*r` for every read and write",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern",
+                message: "this pattern tests `==`, which is not defined for `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`==` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the value with a name or take it apart with a struct, tuple, or variant pattern, and compare its parts in a guard (`x if x.a == 1 =>`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern-str",
+                message: "this pattern tests `==`, which is not defined for `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`==` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the string with a name and compare its bytes in a guard: `s if mem.str_bytes(s).eq(mem.str_bytes(\"a\")) =>` (`import std.mem;`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2102,7 +2176,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0219",
         severity: Severity::Error,
         area: "types",
-        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `next-shape`: the source type's `next` (a generic type's from its bounds; of two ambiguous ones, when neither fits) is not exactly `fn next(&mut self) -> Option<T>`: another receiver, other params, generic params of its own, or another result (the call itself is then checked as `recv.next()` is: E0704, E0106, E0803, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without a `next`), and a range or iterator as a chunk source",
+        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `next-shape`: the source type's `next` (a generic type's from its bounds; of two ambiguous ones, when neither fits) is not exactly `fn next(&mut self) -> Option<T>`: another receiver, other params, generic params of its own, or another result (the call itself is then checked as `recv.next()` is: E0704, E0106, E0803, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a range of a non-integer type such as `char`, a reference to one; a struct, enum, or generic type without a `next`), and a range or iterator as a chunk source",
         retired: false,
         located: true,
         holes: &[
@@ -2175,10 +2249,10 @@ pub(super) static ENTRIES: &[Entry] = &[
                 case: "not-source",
                 message: "`{place}` is not a `for` source",
                 labels: &[
-                    LabelTemplate { at: "primary", text: "not a range, an array value, a reference to an array or slice, or an iterator" },
+                    LabelTemplate { at: "primary", text: "not an integer range, an array value, a reference to an array or slice, or an iterator" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "iterate a range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice",
+                    description: "iterate an integer range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2213,7 +2287,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0300",
         severity: Severity::Error,
         area: "patterns",
-        rule: "non-exhaustive match. Case `limit`: the exhaustiveness check of the match exceeds its search limit (patterns nested more than 2,000 levels deep, or over 1,000,000 search steps); the match is rejected",
+        rule: "non-exhaustive match. Case `let`: a `let` or `for` pattern that does not cover every value. Case `limit`: the exhaustiveness check of the match exceeds its search limit (patterns nested more than 2,000 levels deep, or over 1,000,000 search steps); the match is rejected. Case `limit-split`: the same where a final `_` arm is no help (a `let` or `for` pattern, a match ending with an unguarded `_` arm)",
         retired: false,
         located: true,
         holes: &[
@@ -2233,6 +2307,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "let",
+                message: "pattern does not cover every value of `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "some values of `{type}` do not match" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a pattern every value matches (a name, `_`, or a tuple or struct pattern of such), or a `match` with arms for the other values",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "limit",
                 message: "match on `{type}` is too large to check for exhaustiveness",
                 labels: &[
@@ -2240,6 +2326,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "split the match: match on fewer or less deeply nested values at a time, or add a final `_` arm",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "limit-split",
+                message: "pattern on `{type}` is too large to check for exhaustiveness",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "exhaustiveness check limit exceeded" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "split the pattern: take the value apart in steps, matching fewer or less deeply nested values at a time",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4886,12 +4984,14 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0904",
         severity: Severity::Error,
         area: "generics",
-        rule: "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value",
+        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself, through its initializer or its type (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `generic`: `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter (its value is known per instance only). Case `size`: an array literal of a const-expr (a `const` or `static` initializer: compile-time data) whose type takes more than 2^26 bytes (contracts/lang-details.md, Size limits); a `[e; n]` in a fn body is a fill at run time and has no such limit. Case `total`: the `static`s and `const`s of the program take more than 2^30 bytes together (file data and zero fill, each rounded up to its alignment; every `const` counts, used or not; the built-in packages' own count too), once, at the largest item of the program's own packages, with the next three largest as related spans",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "bytes", kind: HoleKind::Int, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
-            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["a call", "a loop", "a non-const item"] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["a call", "a loop", "a non-const item", "an expression outside the const-expr forms"] },
         ],
         shapes: &[
             Shape {
@@ -4927,6 +5027,43 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "split the expression into several consts",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "generic",
+                message: "`{name}::<{type}>()` depends on a type parameter: it has no value where the const-expr is checked",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "known per instance only" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a concrete type, or pass the length as a const generic parameter (`<const N: usize>`) and use `N`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "size",
+                message: "compile-time data of type `{type}` takes {bytes} bytes, more than 67,108,864",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too large for a const-expr" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "fill the array at run time (a `[e; n]` in a fn body has no size limit), or use a heap buffer (`vec.Vec`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "total",
+                message: "the `static`s and `const`s of the program take {bytes} bytes together, more than 1,073,741,824",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` is the largest of the program's own" },
+                    LabelTemplate { at: "other", text: "another of the largest" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "allocate the large buffers at run time (`vec.Vec`), or make the statics smaller",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -5172,10 +5309,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, expression value (all but a place read in place: contracts/lang-details.md, Size limits), or return value of a fn whose type takes more than 2^28 bytes, once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, two slots for a value `if` / `match` (its result and the live arm, whatever the arm count), plus each call's result, by-value receiver, and arguments, whatever the callee) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it; once per instance, at the generic fn",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "bytes", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "instance", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
@@ -5187,6 +5327,54 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "ask for the size of a sized type nested at most 1000 levels deep",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "frame",
+                message: "the values `{fn}` holds take {bytes} bytes together, more than 704,643,072",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too large a stack frame" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "split the fn, or keep large values in a heap buffer (`vec.Vec`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "instance",
+                message: "in `{instance}`, a value of type `{type}` takes {bytes} bytes, more than 268,435,456",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too large a value in this instance" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "instantiate with a smaller type or length, or keep the value in a heap buffer (`vec.Vec`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "overflow",
+                message: "in `{fn}`, the size of type `{type}` does not fit in 64 bits",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no value of this type can exist" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a smaller array length or type argument",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "size",
+                message: "a value of type `{type}` takes {bytes} bytes, more than 268,435,456",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too large a value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "keep a value this large behind a reference, or in a heap buffer (`vec.Vec`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -6381,7 +6569,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1407",
         severity: Severity::Error,
         area: "effects",
-        rule: "`Flat` demanded by a bound, type not `Flat`: names the first non-flat component and its path (field chain); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        rule: "`Flat` demanded by a bound, type not `Flat`: names the first non-flat component and its path (field chain); case `self` when the type itself is the component; case `depth` when the path to that component is longer than the type depth limit",
         retired: false,
         located: true,
         holes: &[
@@ -6490,7 +6678,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1410",
         severity: Severity::Error,
         area: "effects",
-        rule: "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        rule: "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` when the path to that component is longer than the type depth limit",
         retired: false,
         located: true,
         holes: &[

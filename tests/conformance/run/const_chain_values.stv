@@ -1,0 +1,50 @@
+//~ STDOUT const_chain_values.stdout
+//~ EXIT 0
+// Every literal and operator of a const-expr is evaluated in the type the checker gives it (a
+// literal takes its chain's), never in a wider one, so each const is the value the same
+// expression has at run time: the twins below compute it with nothing folded.
+import std.io;
+
+const SAT: bool = 250 +| 10 -| 5u8 == 250u8;
+const SAT_CAST: u16 = (250 +| 10 -| 5u8) as u16;
+const WRAP: bool = 250 +% 10 + 1u8 == 5u8;
+const WSHL: bool = 1 <<% 9 >> 0u8 == 2u8;
+const U32_SAT: bool = 4294967295 +| 1 -| 1u32 == 4294967295u32;
+const WMUL: bool = (-128) *% (-128) *| 1i8 == 0i8;
+const LAZY_IF: u8 = if true then 7 else 200 + 100;
+const LAZY_OR: bool = true || 1u8 / 0 == 0;
+// a struct literal with a turbofish, then a field read of it
+const TURBO: u16 = W::<u16>.{ v: 65535 }.v;
+
+struct W<T> {
+    pub v: T,
+}
+
+impl<T: Copy> Copy for W<T> {}
+
+fn id8(x: u8) -> u8 {
+    return x;
+}
+
+fn id32(x: u32) -> u32 {
+    return x;
+}
+
+fn idi8(x: i8) -> i8 {
+    return x;
+}
+
+fn main() -> i32 {
+    let sat = id8(250) +| id8(10) -| id8(5) == 250u8;
+    let sat_cast = (id8(250) +| id8(10) -| id8(5)) as u16;
+    let wrap = id8(250) +% id8(10) + id8(1) == 5u8;
+    let wshl = id8(1) <<% id8(9) >> id8(0) == 2u8;
+    let u32_sat = id32(4294967295) +| id32(1) -| id32(1) == 4294967295u32;
+    let wmul = idi8(-128) *% idi8(-128) *| idi8(1) == 0i8;
+    let (a, b, c, d, e, f, g, h) = (SAT, SAT_CAST, WRAP, WSHL, U32_SAT, WMUL, LAZY_IF, LAZY_OR);
+    io.print(f"{a} {b} {c} {d} {e} {f} {g} {h}\n");
+    io.print(f"{sat} {sat_cast} {wrap} {wshl} {u32_sat} {wmul}\n");
+    let t = TURBO;
+    io.print(f"{t}\n");
+    return 0;
+}

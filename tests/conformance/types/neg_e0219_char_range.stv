@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// A `for` over a range counts an integer: a range of `char` is no `for` source (E0219 case
+// `not-source`), though it is a pattern.
+fn chars() -> u32 {
+    let mut s = 0u32;
+    for c in 'a'..'d' { s += c as u32; } //~ ERROR E0219
+    for c in 'a'..='d' { s += c as u32; } //~ ERROR E0219
+    return s;
+}
+
+fn ints() -> u32 {
+    let mut s = 0u32;
+    for i in 0u8..=3u8 { s += i as u32; }
+    for i in 0u32..4 { s += i; }
+    return s;
+}
+
+fn char_pattern(c: char) -> u32 {
+    return match c { 'a'..'d' => 1u32, _ => 0u32 };
+}
+
+fn main() -> i32 {
+    return 0;
+}
