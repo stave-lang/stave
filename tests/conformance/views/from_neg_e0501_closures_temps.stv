@@ -52,7 +52,6 @@ fn src_temp_view(zero: &u32) -> usize {
         if i == 0 {
             set_link(&mut l, &mut mk_pick(zero)); //~ ERROR E0501
 //~^ ERROR E0501
-//~^^ ERROR E0501
         }
         i = i + 1;
     }
@@ -81,7 +80,6 @@ fn by_value_temp(zero: &u32) -> u32 {
             by_value(&mut k, Link.{ to: &mut mk_pick(zero) }, &next(i)); //~ ERROR E0501
 //~^ ERROR E0501
 //~^^ ERROR E0501
-//~^^^ ERROR E0501
         }
         i = i + 1;
     }
