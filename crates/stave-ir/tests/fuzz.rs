@@ -1,4 +1,5 @@
-//! Robustness: random (mostly malformed) IR never panics the verifier, printer, or interpreter,
+//! Robustness: random (mostly malformed) IR never panics the verifier, printer, interpreter, or
+//! canonical renumbering (whose result on valid IR is valid, prints the same, and is a fixed point),
 //! and with a random witness never panics the witness checker;
 //! random well-typed straight-line integer programs agree with a direct evaluation.
 
@@ -214,10 +215,20 @@ proptest! {
     #[test]
     fn random_bodies_never_panic(body in arb_body()) {
         let m = module_with(body);
-        let _ = stave_ir::verify_module(&m);
-        let _ = stave_ir::print_checked(&m);
+        let valid = stave_ir::verify_module(&m).is_ok();
+        let text = stave_ir::print_checked(&m);
         let cfg = Config { max_steps: 10_000, ..Config::default() };
         let _ = interp::run(&m, stave_ir::FuncId(0), vec![], host(), cfg);
+        let mut c = m.clone();
+        stave_ir::canon::canonicalize(&mut c);
+        if valid {
+            // The canonical form of valid IR is valid, prints the same, and is a fixed point.
+            prop_assert!(stave_ir::verify_module(&c).is_ok());
+            prop_assert_eq!(stave_ir::print_checked(&c), text);
+            let mut again = c.clone();
+            stave_ir::canon::canonicalize(&mut again);
+            prop_assert_eq!(again, c);
+        }
     }
 
     #[test]

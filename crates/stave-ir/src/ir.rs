@@ -796,8 +796,10 @@ pub enum DataTarget {
     Static(u32),
 }
 
-/// A whole program (or the part of it being printed / run).
-#[derive(Clone, Debug, Default)]
+/// A whole program (or the part of it being printed / run). Equality is structural: two
+/// modules are equal when every table is, row by row (compare canonical modules,
+/// [`crate::canon::canonicalize`]).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Module {
     pub types: TypeTable,
     pub funcs: Vec<Func>,

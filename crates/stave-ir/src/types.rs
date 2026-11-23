@@ -274,6 +274,13 @@ pub struct TypeTable {
     map: FxHashMap<TypeKey, TypeId>,
 }
 
+/// Structural: the same keys and shapes by id (`map` is derived from `keys`).
+impl PartialEq for TypeTable {
+    fn eq(&self, other: &TypeTable) -> bool {
+        self.keys == other.keys && self.shapes == other.shapes
+    }
+}
+
 impl TypeTable {
     pub fn new() -> TypeTable {
         TypeTable::default()
