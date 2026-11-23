@@ -54,7 +54,9 @@
 //!   never allocates callee-saved registers;
 //!   every frame saves `x29, x30` with `stp x29, x30, [sp, #-16]!; mov x29, sp`.
 //! - `sp` is 16-byte aligned at every call. Frames larger than 4 KiB are probed page by page in
-//!   the prologue (runtime/README.md, guard page).
+//!   the prologue (runtime/README.md, guard page); a function with a
+//!   [`Codegen::reserve_slots`] slot then reads its reserve below the frame
+//!   (contracts/intrinsics.md "reserve table").
 //! - Reserved scratch registers: `x15` (data), `x16` (IP0: indirect call target, copy source),
 //!   `x17` (IP1: address computation, copy destination), `v30`, `v31`. Allocatable: `x0–x7`,
 //!   `x9–x14`, `v0–v7`, `v16–v29`.

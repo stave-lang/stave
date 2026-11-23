@@ -374,6 +374,7 @@ fn x64(
         _ => Failure::Internal { stage, message: e.to_string() },
     };
     let image = image_options(Machine::X86_64, release);
+    let graph = stack.map(|s| stack::graph(m, s));
     let o = stave_codegen_x64::Options {
         image: image.clone(),
         main: Some(main),
@@ -382,6 +383,7 @@ fn x64(
         threads: threads.unwrap_or(0),
         release,
         features: baseline,
+        reserve_slots: graph.as_ref().map_or_else(Vec::new, |g| g.slots().to_vec()),
         ..stave_codegen_x64::Options::default()
     };
     let t0 = Instant::now();
@@ -389,10 +391,12 @@ fn x64(
     let e = stave_codegen_x64::emit_module(m, &o, &mut b).map_err(|e| classify(Stage::Codegen, e))?;
     let codegen_ms = ms(t0);
     prof::mark("codegen");
-    let report = stack.map(|s| stack::compute(m, s, &e.stack, main));
+    let report = stack.zip(graph.as_ref()).map(|(s, g)| stack::compute(g, m, s, &e.stack, main));
     if let Some(r) = &report {
-        b.define_rodata(e.stack_table, r.table(&e.func_syms))
-            .map_err(|e| Failure::Internal { stage: Stage::Link, message: e.to_string() })?;
+        let link_err =
+            |e: stave_obj::ObjError| Failure::Internal { stage: Stage::Link, message: e.to_string() };
+        b.define_rodata(e.stack_table, r.table(&e.func_syms)).map_err(link_err)?;
+        b.define_rodata(e.reserve_table, r.reserve_table()).map_err(link_err)?;
         prof::mark("stack");
     }
     let t1 = Instant::now();
@@ -416,7 +420,9 @@ fn a64(
     let t0 = Instant::now();
     let mut b = ImageBuilder::new(Machine::Aarch64, image_options(Machine::Aarch64, release));
     let syms = prepare(&mut b, m, Some(main)).map_err(|e| classify(Stage::Codegen, e))?;
-    let cg = Codegen::new(m, &syms).release(release);
+    let graph = stack.map(|s| stack::graph(m, s));
+    let slots = graph.as_ref().map_or_else(Vec::new, |g| g.slots().to_vec());
+    let cg = Codegen::new(m, &syms).release(release).reserve_slots(&slots);
     let ids: Vec<FuncId> =
         (0..m.funcs.len()).filter(|&i| m.funcs[i].body.is_some()).map(|i| FuncId(i as u32)).collect();
     let codes: Vec<Result<(FuncCode, StackUse), Error>> =
@@ -434,13 +440,14 @@ fn a64(
     }
     let codegen_ms = ms(t0);
     prof::mark("codegen");
-    let report = stack.map(|s| stack::compute(m, s, &uses, main));
-    let table = match &report {
-        Some(r) => r.table(&syms.funcs),
-        None => stave_obj::stub::stack_table(0, 0, &[]),
+    let report = stack.zip(graph.as_ref()).map(|(s, g)| stack::compute(g, m, s, &uses, main));
+    let (table, reserve) = match &report {
+        Some(r) => (r.table(&syms.funcs), r.reserve_table()),
+        None => (stave_obj::stub::stack_table(0, 0, &[]), stave_obj::stub::reserve_table(&[])),
     };
-    b.define_rodata(syms.stack_table, table)
-        .map_err(|e| Failure::Internal { stage: Stage::Link, message: e.to_string() })?;
+    let link_err = |e: stave_obj::ObjError| Failure::Internal { stage: Stage::Link, message: e.to_string() };
+    b.define_rodata(syms.stack_table, table).map_err(link_err)?;
+    b.define_rodata(syms.reserve_table, reserve).map_err(link_err)?;
     prof::mark("stack");
     let t1 = Instant::now();
     let img = b.link().map_err(|e| Failure::Internal { stage: Stage::Link, message: e.to_string() })?;
