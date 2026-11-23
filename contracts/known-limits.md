@@ -42,8 +42,8 @@ The checker computes a stack size for every thread whose calls cannot reach a ca
   stack, per thread, each with a guard page below. The build keeps the report's depth within its
   stack and the handler's own use within half of the signal stack; the size of the kernel's
   signal frame depends on the CPU and is not checked. A frame that does not fit the signal stack
-  ends the process by SIGSEGV; a handler or a report that runs past its stack ends it with exit
-  101 and no report line.
+  ends the process by SIGSEGV; a handler that runs past its stack ends it with exit 101 and no
+  report line.
 - A stack overflow inside the compiler-made drop of a recursive value can be reported without a
   function: `panic: StackOverflow at <unknown>:0:0 in <unknown> (thread 0)`. Which fn the report
   names depends on where the stack ends: the same program can name `std.vec.Vec.drop` or
