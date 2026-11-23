@@ -1,9 +1,9 @@
 # Known limits
 
 What the compiler does not guarantee, what it rejects without need, and what it rejects on
-purpose. The README lists each item in one line; this file adds the example and the rewrite. A
-safe program that breaks a guarantee below, or is rejected for no good reason, and is not listed
-here is a bug.
+purpose. The README lists the items in short; this file has all of them, with the example and the
+rewrite. A safe program that breaks a guarantee below, or is rejected for no good reason, and is
+not listed here is a bug.
 
 ## 1. Guarantees and where they have gaps
 
@@ -37,8 +37,17 @@ The checker computes a stack size for every thread whose calls cannot reach a ca
 - A `rec fn` cycle, and the drop of a recursive value, have no bound. Their stack is `[run] stack`,
   and the program traps `StackOverflow` (exit 101) when it is exceeded. How deep a recursive value
   can be dropped is a run-time limit.
-- Signal handlers, the panic report included, run on the alternate signal stack, which no bound
-  counts.
+- Signal handlers and the panic report run on stacks of their own that no bound counts: the
+  handler and the kernel's signal frame on a 32 KiB signal stack, the report on a 64 KiB report
+  stack, per thread, each with a guard page below. The build keeps the report's depth within its
+  stack and the handler's own use within half of the signal stack; the size of the kernel's
+  signal frame depends on the CPU and is not checked. A frame that does not fit the signal stack
+  ends the process by SIGSEGV; a handler or a report that runs past its stack ends it with exit
+  101 and no report line.
+- A stack overflow inside the compiler-made drop of a recursive value can be reported without a
+  function: `panic: StackOverflow at <unknown>:0:0 in <unknown> (thread 0)`. Which fn the report
+  names depends on where the stack ends: the same program can name `std.vec.Vec.drop` or
+  `std.vec.Vec.truncate` on another target or in the other build. The exit code is 101 as always.
 - There is no stack bound for the GPU target (it is design only).
 - `stave test` runs each `test fn` on the default 8 MiB stack and does not read `[run] stack`. With
   `[run] stack = "64MiB"` and `rec fn depth(n: u64) -> u64`, `depth(400000)` runs under `stave run`
@@ -66,10 +75,10 @@ program that does not run it.
 
 ## 2. What the interpreter's checking does not see
 
-`stave` can run a program in the IR interpreter with borrow tracking (a tag per reference, a
-permission per byte) and a memory mode (use after free, double free, out of bounds, uninitialised
-reads). `check` runs the positive conformance programs under it and the fuzzer runs generated
-programs under it: it is the oracle that finds checker holes. Its limits:
+The test harness and the fuzzer run programs in the IR interpreter with borrow tracking (a tag per
+reference, a permission per byte) and a memory mode (use after free, double free, out of bounds,
+uninitialised reads). `check` runs the positive conformance programs under it and the fuzzer runs
+generated programs under it: it is the oracle that finds checker holes. Its limits:
 
 - A verdict covers the run it saw: this input, this schedule. Other inputs and interleavings are
   not judged. A broken `from` clause is reported only for a call that breaks it, and not through
@@ -91,9 +100,12 @@ programs under it: it is the oracle that finds checker holes. Its limits:
   and a drop of a moved-out place is reported only when the destructor's glue reads it.
 - Programs that contain `unsafe` are not required to run clean in `check`, and the fuzzer's
   programs come from fixed classes of borrow constructs: a hole outside them is not found by it.
-- The interpreter does not read `[run] stack`. Its call depth is fixed at 20,000 (a call past it
-  traps `StackOverflow`): `rec fn depth(n: u64) -> u64` with `depth(30000)` runs natively and exits
-  101 there.
+- The interpreter does not read `[run] stack`. It has two limits of its own, both trap
+  `StackOverflow` (exit 101, the same report line as a native overflow): 20,000 live frames, and
+  8 MiB for the slots of all live frames together. `rec fn depth(n: u64) -> u64` with
+  `depth(30000)` runs natively and exits 101 there; a fn with `let mut a: [u8; 9000000] = [0;
+  9000000];` runs natively and traps there, and so do two nested calls that hold 4,300,000 bytes
+  each.
 
 ## 3. Valid programs the checker rejects
 
@@ -107,19 +119,43 @@ programs under it: it is the oracle that finds checker holes. Its limits:
   `vec.Vec<MutexGuard<..>>` blocks the lock that is pushed into it; a closure that takes the guard
   out of a captured `Option` and drops it leaves its caller holding it; an array
   `[E.G(guard), E.K(l)]` is judged as if the guard could be held while `l` drops, though elements
-  drop in index order.
+  drop in index order. Release a guard by moving it: `mem.drop(g)`, or a `match` whose every arm
+  moves the `Option` (`other => { mem.drop(other); }` in place of `Option.None => {}`). Make a
+  `vec.Vec` of guards after the lock is taken (`let g = m.lock(); v.push(g);`), and keep a guard
+  and a value whose drop locks in separate locals of their own types, the guard declared last.
 - A closure that passes a closure to a helper `fn call_ref(f: fn() -> &u64) -> &u64 from f`, which
   calls it, is E1409 (a call cycle through the closure literal).
 - A closure that returns what an inner closure returns is E0512 when that is a reference to a
   function value or a view struct with a function-valued field (even a closure without captures):
   the type may hold a function value, so the inner closure's environment loan rides on the result.
-- A view keeps every loan ever stored into it, also after a field is overwritten:
-  `put(&mut h, &f()); h.r = &x; ok(h.r);` is E0501 `temporary` (`put` stores its second argument).
-- A pattern that takes a view apart and drops a borrowing field (`match gv { GV.{ a, w: _ } => .. }`
-  with `w` a view that has a `Drop` impl and borrows `x`) does not end the borrow for the checker:
-  moving `x` afterwards is E0501.
-- `c.select(f, g)` of two function items that deny an effect is a call result of the plain fn type:
-  passing it where `fn() without(io)` is expected is E1403.
+- A view keeps every loan stored into it, also after the field that held it is overwritten:
+  `h.r = &z; h.r = &x; z = 4; ok(h.r);` is E0501 (`cannot assign to z`), and
+  `put(&mut h, &f()); h.r = &x; ok(h.r);` is E0501 `temporary` (`put` stores its second
+  argument). A reference local that is rebound (`r = &x;`) lets go. Assign the whole view:
+  `h = H.{ r: &x };`.
+- A `match` that moves its scrutinee in some arms only leaves it in place in the others, holding
+  every loan its type can hold, also in a variant that holds none: with `o` an `Option` of a view
+  that has a `Drop` impl and borrows `x`, `match o { Option.Some(w) => { .. } Option.None => {} }`
+  and then moving `x` is E0501. Move it in every arm: `other => { mem.drop(other); }`.
+- Dropping a value whose type has a destructor that can reach a reference counts as an access to
+  every reference the value holds, also one no destructor reaches. With `view struct W { r: &mut
+  P }` that has `impl Drop` and `view struct H { w: W, r: &mut P }`,
+  `fn f(h: H) -> &mut P from h { return &mut *h.r; }` is E0501 `cannot drop h`; with
+  `w: vec.Vec<u32>` (no reference behind the drop) it is accepted. Take the value apart and
+  return the field itself: `let H.{ w: _, r } = h; return r;`.
+- A `&mut` to a view with drop glue stored into a container counts as stored into that view as
+  well: after `root.kids.push(&mut leaf);` with `view struct N { v: i64, kids: vec.Vec<&mut N> }`,
+  `leaf` holds a borrow of itself, and its drop at the end of the fn is E0501 `cannot drop leaf`,
+  also after `mem.drop(root)`. The same holds without recursion (`vec.Vec<&mut L>`, `L` a view
+  with a `vec.Vec` field); a child type without drop glue (`next: Option<&mut N>`) or `&`
+  children (`vec.Vec<&N>`) are accepted. Keep the nodes in one `vec.Vec<N>` and name children by
+  index (`kids: vec.Vec<u32>`).
+- `c.select(f, g)` of two function items is a call result, which has the plain fn type: where
+  `fn() without(io)` is expected, `run(c.select(p1, p2))` is E1403 even when neither prints, though
+  `run(p1)` and `run(if c then p1 else p2)` are accepted. Bind each item to a local of the wanted
+  type first (`let a: fn() -> u32 without(io) = p1;`) and select between the locals. A value
+  `if` or `select` that mixes an item with the clause and one without is E0201: convert the one
+  without it alone first.
 - A fn value read out of an array, a tuple or the arms of an `if` is not followed: a call through it
   reaches every function value of its type. Given `fn a() {}` and `fn b() { call(); }`, with `b`
   used as a value somewhere (`let keep: fn() = b;`),
@@ -146,6 +182,11 @@ programs under it: it is the oracle that finds checker holes. Its limits:
   (`let f: fn() = a;` is followed), call by `if k { a(); } else { b(); }`, give the fns a param so
   their type differs from the closure's (`[fn(u32); 2]` in a `fn()` closure). For the E1402 case,
   also mark the cycle `rec fn`.
+  The value need not come from a collection: a fn value that a call returns is not followed either.
+  With `fn pick() -> fn() -> u64`, the closure `fn() -> u64 { let g = pick(); return g(); }` is a
+  cycle through itself, E1409; the same body in a fn item is accepted. Of the rewrites above, the
+  plain local does not apply when the value really comes from `pick`: give the closure a different
+  type, or move the body into a fn item.
 - One slot stands for the function field of every `iter.Map` of one instance type: a
   `.map(loud)` anywhere gives its fn to every other `Map<u32, u32>`, a dead one included. With
   `fn loud(x: &u32) -> u32 { io.print("loud\n"); return *x; }` mapped in `main`,
@@ -166,17 +207,29 @@ programs under it: it is the oracle that finds checker holes. Its limits:
   ```
   The same fn with `T` replaced by `u32` is accepted. Write `from it` (the caller keeps `it`
   borrowed while `out` is used), or do not make the fn generic.
-- Generic code over masks or vectors: `T: Not` at `mask32x4` is E0901 (only ints, floats and
-  `bool` have the built-in operator impls).
-- A vector type wider than the target's registers cannot be named in a fn without `needs(..)`,
-  even as the element type of a `vec.Vec` (`vec.Vec::<f32x8>.new()`) or in a `match` on a value
-  that holds one with only `_` arms (E0702).
+- Generic code over masks or vectors: only ints, floats and `bool` have the built-in operator
+  impls, so `T: Not + Copy` at `mask32x4` or `u32x4`, and `T: Add + Copy` at `f32x4`, are E0901.
+  The operators work on the vector or mask directly; for generic code write a trait of your own
+  and implement it for each type
+  (`impl Inv for mask32x4 { fn inv(self) -> mask32x4 { return ~self; } }`).
+- A vector type wider than the target's registers cannot be named in a fn whose `needs(..)` do not
+  cover it, nor in a struct or enum field: `vec.Vec::<f32x8>.new()` in a plain fn is E0702 at the
+  type argument, although the `Vec` holds no vector by value. Put `needs(avx2)` on the fn and reach
+  it by a `dispatch`, or build for `x86_64-linux-v3`. On AArch64 no feature covers 256 bits.
 - The exhaustiveness search has a limit (patterns nested more than 2,000 levels, or over
   1,000,000 search steps): a `match` past it is E0300 `limit`. Every `let`, even one that binds a
   plain name, is checked like a `match`: a struct or tuple with 2,000 fields or more in all (a
   nested struct or tuple counts as a field) is E0300 at `let s = S.{ f0: 0, f1: 1, ... };` and at
-  `let (a0, a1, ..., a1999) = t;`; with 1,999 fields it is accepted, and a fn param of that type is accepted.
-  Keep bulk data in an array (`[u32; 5000]` in a tuple is accepted) or a `vec.Vec`.
+  `let (a0, a1, ..., a1999) = t;`; with 1,999 fields it is accepted, and a fn param of that type
+  is accepted. Keep bulk data in an array (`[u32; 5000]` in a tuple is accepted) or a `vec.Vec`.
+- The frame of a fn is limited to 704,643,072 bytes: E0911 when the values it holds (parameters,
+  bindings, every expression value but a place read in place, two slots for a value `if` / `match`,
+  each call's result, receiver and arguments) take more together. A back end's frame holds 1 GiB
+  and measures up to 1.5 times that sum for some shapes (a local filled from an array literal, an
+  array passed by value), and the bound allows for that for every shape. A fn whose frame is
+  smaller than 1.5 times its sum can be rejected although it would run: `let a: [u8; N] = if c
+  then [1; N] else [2; N];` is rejected from N = 140,929,000 and its frame is the sum, 5N + 44
+  bytes. Keep a large array in a `vec.Vec`, or in a part of the fn that is split off.
 
 ## 4. Rules that are deliberate
 
@@ -196,6 +249,16 @@ that would run.
 - **A `match` guard only reads**: no move, no assignment, no `&mut` borrow, no `?` (E0505).
 - **A temporary ends with its statement; there is no constant promotion.** `let r = &f();` is
   E0501: write `let t = f(); let r = &t;`. `&4u32` cannot be returned.
+- **A write through a reference to a temporary is not an error.** An assignment to a temporary or
+  a `const` (`mk().x = 1`, `C.x = 1`, `arr()[0] = 5`) is E0503, but a write through a `&mut` of
+  one is accepted and lost with the value at the end of the statement: `hh().pm().x = 1` (its
+  destructor sees the new value), `*&mut C.x = 1` and `C.set(2)` (the const keeps its value).
+  Bind the value first: `let mut t = hh(); t.pm().x = 1;`.
+- **Each cast of a `&mut` to a raw pointer is a new reborrow.** `m as *mut T` is `&mut *m`, so
+  two casts of one `m` are two exclusive borrows: after `let p = m as *mut u32; let q = m as *mut
+  u32;`, a write through `q` (or through `m`) makes `p` unusable, and using `p` is undefined
+  behaviour that borrow tracking reports. The compiler accepts it and the native program runs.
+  Cast once and copy the pointer: `let q = p;`.
 - **`Drop` impls only on a struct or enum of the same package** (E0419). A `Drop` impl may not
   overlap a `Copy` impl by head (E0416), even if no instance is both. A destructor is no function
   value (E0909).
@@ -204,11 +267,13 @@ that would run.
 - **No operator impl on a fn type** (E0420): the operator traits and fn types both belong to
   `std`, so `impl Add for fn(u32) -> u32` is outside both packages. A trait of your own may be
   implemented for a fn type: `impl Twice for fn(u32) -> u32` gives `f.twice(1)`.
-- **A call through a function value is as precise as its flow.** Any use of a function-typed place
-  beyond a short list of harmless ones (a `&mut` lent to a helper, a method receiver, an `if` or
-  `match` arm, an array or tuple element, a struct pattern) makes its calls reach every function
-  value of the same type. With `without(..)`, a lock rank, `rec` or the stack bound this can give
-  a false error.
+- **A call through a function value is as precise as its flow.** A function-typed place is
+  followed only while every use of it is one of: its declaration, a plain assignment to it, a copy
+  of its value as a callee, a call argument, a `let` initializer, the source of an assignment, a
+  struct-literal field, or a returned value. Any other use (a borrow `&x` / `&mut x`, a method
+  receiver, an operator operand, an `if` or `match` arm, an array or tuple element, a struct
+  pattern) makes its calls reach every function value of the same type. With `without(..)`, a
+  lock rank, `rec` or the stack bound this can give a false error.
 - **A method call on a param with two bounds of one trait is ambiguous** (E0908):
   `U: Conv<u32> + Conv<u64>` needs `Conv::<u64>.c(a)`.
 - **Const parameters are unsigned integers** (E0201), and a const argument has the type of its

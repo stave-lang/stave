@@ -32,9 +32,19 @@ optimizer rules, planned diagnostics); they say so where they do.
 
 ## Known limits
 
-Stave is pre-alpha. This list is meant to be complete: a safe program that breaks a guarantee
-below, or is rejected for no good reason, and is not listed here is a bug; please report it.
-Examples and rewrites: [contracts/known-limits.md](contracts/known-limits.md).
+Stave is pre-alpha. This is a selection. The full list, with examples and rewrites, is
+[contracts/known-limits.md](contracts/known-limits.md); it is meant to be complete: a safe program
+that breaks a guarantee there, or is rejected for no good reason, and is not listed there is a
+bug; please report it.
+
+The checker was hardened in three rounds of adversarial testing: hand-written probes and generated
+programs over closures and threads, patterns, moves and drops, views, traits, function values, and
+the verification rules (effects, recursion, stack bound, lock ranks, contracts). The rounds found
+27, 21, and 3 root causes of programs that `check` accepted and that then misbehaved (memory
+errors, data races, deadlocks, a denied effect or trap that ran, a crash on a CPU without a
+feature), plus a compiler hang and 4 internal errors after a passing `check`; each was fixed and
+the fixes were reviewed. The third round was the last, so its fixes were not hunted again: holes
+of the same kinds may remain, and the first round ran without the interpreter's borrow tracking.
 
 **Guarantees and their gaps**
 
@@ -51,10 +61,10 @@ Examples and rewrites: [contracts/known-limits.md](contracts/known-limits.md).
 - Lock-order tracking at run time and an interpreter scheduler are not built: the interpreter runs
   a spawned body on its one thread, at the join.
 - A `rec fn` cycle and the drop of a recursive value have no computed stack bound: they get
-  `[run] stack` and trap `StackOverflow` past it. Signal handlers run on an alternate stack that no
-  bound counts. There is no GPU stack bound. `stave test` runs every `test fn` on the default
-  8 MiB stack, not `[run] stack`: a test of a deep `rec fn` can trap where `stave run` does not,
-  and pass where `stave run` traps.
+  `[run] stack` and trap `StackOverflow` past it. Signal handlers and the panic report run on
+  stacks of their own that no bound counts. There is no GPU stack bound. `stave test` runs every
+  `test fn` on the default 8 MiB stack, not `[run] stack`: a test of a deep `rec fn` can trap
+  where `stave run` does not, and pass where `stave run` traps.
 - The effects of `runtime` functions come from a table in the compiler, and `io` leaves out the
   allocator's, a lock's and a thread's system calls. Effect checks (`without(..)`) run only on
   programs with no other error. The effect sets over-approximate: a value moved out is still
@@ -74,8 +84,9 @@ the fuzzer's programs with borrow tracking and a memory mode; it is the oracle f
   moved-out places).
 - Programs with `unsafe` need not run clean there, and the fuzzer builds programs from fixed
   classes of borrow constructs: a hole outside them is not found by it.
-- It does not read `[run] stack`: its call depth is fixed at 20,000, so a `rec fn` that recurses
-  30,000 deep runs natively and ends `StackOverflow` there.
+- It does not read `[run] stack`: its call depth is fixed at 20,000 and the slots of all live
+  frames together are limited to 8 MiB, so a `rec fn` that recurses 30,000 deep runs natively and
+  ends `StackOverflow` there.
 
 **Valid programs the checker rejects** (each has a rewrite)
 
@@ -85,16 +96,19 @@ the fuzzer's programs with borrow tracking and a memory mode; it is the oracle f
 - A closure that passes a closure to a helper that calls it is E1409; a closure that returns what
   an inner closure returns is E0512 when that is a reference to a function value or a view with
   a function-valued field.
-- A view keeps every loan stored into it after a field is overwritten, and a pattern that takes a
-  view apart does not end a field's borrow: moving the borrowed value afterwards is E0501.
+- A view keeps every loan stored into it after a field is overwritten, and a `match` that moves a
+  view in some arms only keeps its loans in the others: moving the borrowed value afterwards is
+  E0501. Dropping a value that has a destructor reaching a reference counts as an access to every
+  reference it holds.
 - Calls through function values are as precise as their flow: some uses of a function-typed place
   make its calls reach every function value of its type, which can give a false effect, lock-rank,
-  recursion or stack-bound error. `c.select(f, g)` of two function items is one plain fn type. A
-  value read out of an array, a tuple or an `if` arm is such a use: with `fn b() { call(); }`
-  used as a value, `fn call() { let fs: [fn(); 1] = [a]; let f = fs[0]; f(); }` is a call cycle
-  (E1402); a closure (a `spawn` body, a `thread.join` arm) that calls such a value of its own fn
-  type is E1409. Bind the value to a plain local (`let f: fn() = a;`), give the table a fn type
-  unlike the closure's, or (E1402) mark the cycle `rec fn`.
+  recursion or stack-bound error. `c.select(f, g)` of two function items is a call result of the
+  plain fn type, so it is E1403 where a `without(..)` fn type is expected. A value read out of an
+  array, a tuple or an `if` arm is such a use: with `fn b() { call(); }` used as a value,
+  `fn call() { let fs: [fn(); 1] = [a]; let f = fs[0]; f(); }` is a call cycle (E1402); a closure
+  (a `spawn` body, a `thread.join` arm) that calls such a value of its own fn type is E1409. Bind
+  the value to a plain local (`let f: fn() = a;`), give the table a fn type unlike the closure's,
+  or (E1402) mark the cycle `rec fn`.
 - One slot stands for the function field of every `iter.Map` of one instance type: a
   `.map(loud)` over `&[u32]` that prints gives `io` to every other `Map<u32, u32>`, so a
   `without(io)` fn that only maps a quiet fn is E1401. Map to another type, or loop by hand.
@@ -106,6 +120,8 @@ the fuzzer's programs with borrow tracking and a memory mode; it is the oracle f
 - The exhaustiveness search has a limit: a `match` past it is E0300 `limit`. So is any `let` of
   a struct or tuple with 2,000 fields or more in all (a nested struct counts as a field too),
   even `let s = S.{ f0: 0, .. };` with a plain name; keep bulk data in an array or a `vec.Vec`.
+- A fn whose values take more than 704,643,072 bytes together is E0911, a bound that allows for
+  a frame of 1.5 times that sum and so can reject a fn that would run.
 
 **Deliberate rules** (they reject programs that would run; each has a rewrite)
 
@@ -118,6 +134,9 @@ the fuzzer's programs with borrow tracking and a memory mode; it is the oracle f
 - `Drop` impls only on a type of the same package (E0419), not overlapping a `Copy` impl (E0416),
   and a `Drop` impl on a call cycle needs `rec fn drop`. Operator traits only on `Copy` types, and
   never on a fn type (E0420, `impl Add for fn(u32) -> u32`): put your own trait on it.
+- A write through a `&mut` to a temporary is accepted and lost at the end of the statement. Each
+  cast of a `&mut` to a raw pointer is a new reborrow: a write through one makes a pointer cast
+  earlier from the same `&mut` unusable.
 - Two bounds of one trait on a param make a method call ambiguous (E0908). Const parameters are
   unsigned integers. A type nests at most 1,000 levels (E0005).
 
