@@ -1,0 +1,17 @@
+import std.io;
+
+fn main() -> i32 {
+    let mut n: u64 = 27;
+    let mut steps: u32 = 0;
+    let mut peak = n;
+    while n != 1 {
+        n = if n % 2 == 0 then n / 2 else 3 * n + 1;
+        if n > peak {
+            peak = n;
+        }
+        steps = steps + 1;
+    }
+    io.print(f"steps {steps}\n");
+    io.print(f"peak {peak}\n");
+    return 0;
+}

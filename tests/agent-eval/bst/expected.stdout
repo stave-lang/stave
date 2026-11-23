@@ -1,0 +1,4 @@
+inorder: 20 30 35 40 45 50 60 65 70 80
+height 4
+has 65: true
+has 66: false

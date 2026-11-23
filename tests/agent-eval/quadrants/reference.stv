@@ -1,0 +1,23 @@
+import std.io;
+
+fn classify(p: (i32, i32)) -> &str {
+    return match p {
+        (0, 0) => "origin",
+        (0, _) => "y axis",
+        (_, 0) => "x axis",
+        (x, y) if x > 0 && y > 0 => "I",
+        (x, y) if x < 0 && y > 0 => "II",
+        (x, y) if x < 0 && y < 0 => "III",
+        _ => "IV",
+    };
+}
+
+fn main() -> i32 {
+    let pts: [(i32, i32); 7] = [(0, 0), (0, 5), (-3, 0), (2, 3), (-1, 4), (-2, -2), (5, -1)];
+    for i in 0..pts.len() {
+        let (x, y) = pts[i];
+        let c = classify(pts[i]);
+        io.print(f"({x}, {y}) {c}\n");
+    }
+    return 0;
+}

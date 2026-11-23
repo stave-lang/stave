@@ -1,0 +1,25 @@
+import std.io;
+
+fn main() -> i32 {
+    let xs: [i32; 8] = [3, -7, 12, 5, 12, -1, 0, 9];
+    let mut max = xs[0];
+    let mut max_at: usize = 0;
+    let mut min = xs[0];
+    let mut min_at: usize = 0;
+    let mut sum: i32 = 0;
+    for i in 0..xs.len() {
+        if xs[i] > max {
+            max = xs[i];
+            max_at = i;
+        }
+        if xs[i] < min {
+            min = xs[i];
+            min_at = i;
+        }
+        sum = sum + xs[i];
+    }
+    io.print(f"max {max} at {max_at}\n");
+    io.print(f"min {min} at {min_at}\n");
+    io.print(f"sum {sum}\n");
+    return 0;
+}

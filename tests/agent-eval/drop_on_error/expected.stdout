@@ -1,0 +1,18 @@
+do 1
+do 2
+undo 1
+failed at 2
+do 1
+do 2
+do 3
+all done
+undo 3
+undo 2
+undo 1
+ok 6
+do 1
+do 2
+do 3
+undo 2
+undo 1
+failed at 3
