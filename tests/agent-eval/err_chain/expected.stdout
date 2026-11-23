@@ -1,0 +1,10 @@
+order 1 x4: ok 100
+order 2 x5: out of stock (want 5, have 3)
+order 9 x1: no item 9
+order 2 x3: too large 300
+order 3 x20: ok 140
+order 1 x6: ok 150
+order 1 x1: out of stock (want 1, have 0)
+batch ok 205
+batch failed: no item 9
+stock: 0 2 14

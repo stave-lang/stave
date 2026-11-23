@@ -1,0 +1,26 @@
+import std.io;
+import std.mem;
+import std.vec;
+
+struct Buffers { front: vec.Vec<u32>, back: vec.Vec<u32> }
+
+fn main() -> i32 {
+    let mut b = Buffers.{ front: vec.Vec::<u32>.new(), back: vec.Vec::<u32>.new() };
+    for i in 1u32..=5 {
+        b.back.push(i);
+    }
+    let f0 = b.front.len();
+    let b0 = b.back.len();
+    io.print(f"front {f0} back {b0}\n");
+    mem.swap(&mut b.front, &mut b.back);
+    let f1 = b.front.len();
+    let b1 = b.back.len();
+    io.print(f"front {f1} back {b1}\n");
+    let taken = mem.replace(&mut b.front, vec.Vec::<u32>.new());
+    let n = taken.len();
+    let sum = taken.as_slice().sum();
+    io.print(f"taken {n} sum {sum}\n");
+    let f2 = b.front.len();
+    io.print(f"front {f2}\n");
+    return 0;
+}

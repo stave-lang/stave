@@ -100,6 +100,10 @@ Each limit is decided in one place; every reader of a size takes a size past `u6
 - Clauses that compare int params, slice param lengths, and constants also hold across calls: a
   direct call that proves every `requires` of its callee skips them, a call that always fails a
   clause is E0218, and after a call its callee's `requires` and such `ensures` are known.
+- Effects: a kept `ensures` check gives its fn `trap`; a kept `requires` check gives `trap` to the
+  callers that do not prove it, not to its fn: `requires(..) without(trap)` means no trap when
+  called inside the precondition, and such a fn is no value of a fn type that denies `trap`
+  (E1403).
 
 ## §2 Deny clause: `block` and `park`
 
@@ -411,6 +415,13 @@ and fn ABI are unchanged, and it has no effect (`without`).
   the `*mut` cast (E0503 behind a `&`). A `*const T` stored first and cast later is accepted
   by the checker; a write through the pointer made from it is reported by borrow tracking (the
   pointer carries the `&` tag of the read, M7).
+
+## §3 Reasons
+
+- Slice methods of `std.slice` are SIMD inside: regular code, explicit SIMD stays in std, no
+  auto-vectorization cliffs.
+- Release builds treat `&mut T` as noalias and `&T` (T `Frozen`) as read-only: borrow rules
+  become free optimizer facts.
 
 ## §3 Unspecified results
 

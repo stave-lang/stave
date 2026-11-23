@@ -414,8 +414,13 @@ fn mismatch_pat(ck: &mut Ck<'_>, p: u32, found: TypeId, want: TypeId) {
     }
     let (e, f) = (ck.show(want), ck.show(found));
     let text = ck.icx.node_text(p).to_string();
-    let d =
-        mk("E0201", None, &[("expected", &e), ("found", &f), ("operand", &text)], ck.icx.node_span(p), &[]);
+    let d = mk(
+        "E0201",
+        Some("no-cast"),
+        &[("expected", &e), ("found", &f), ("operand", &text)],
+        ck.icx.node_span(p),
+        &[],
+    );
     ck.report(d);
 }
 

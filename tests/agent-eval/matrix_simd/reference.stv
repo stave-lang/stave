@@ -1,0 +1,27 @@
+import std.io;
+
+fn main() -> i32 {
+    let a: [i32; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let b: [i32; 16] = [1, 0, 0, 1, 0, 2, 0, 0, 0, 0, 3, 0, 1, 0, 0, 4];
+    let mut c: [i32; 16] = [0; 16];
+    for i in 0usize..4 {
+        let mut row = i32x4.splat(0);
+        for k in 0usize..4 {
+            let s = i32x4.splat(a[i * 4 + k]);
+            let bk = i32x4.load(&b[0..16], k * 4);
+            row = row +% (s *% bk);
+        }
+        row.store(&mut c[0..16], i * 4);
+    }
+    let mut trace: i32 = 0;
+    for i in 0usize..4 {
+        let c0 = c[i * 4];
+        let c1 = c[i * 4 + 1];
+        let c2 = c[i * 4 + 2];
+        let c3 = c[i * 4 + 3];
+        io.print(f"{c0} {c1} {c2} {c3}\n");
+        trace = trace + c[i * 4 + i];
+    }
+    io.print(f"trace {trace}\n");
+    return 0;
+}

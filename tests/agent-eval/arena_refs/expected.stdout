@@ -1,0 +1,3 @@
+sum x 15
+sum y 25
+after reset: 42

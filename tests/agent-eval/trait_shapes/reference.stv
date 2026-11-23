@@ -1,0 +1,50 @@
+import std.io;
+
+trait Shape {
+    fn area(&self) -> u64;
+}
+
+struct Square { side: u64 }
+
+struct Tri { base: u64, height: u64 }
+
+impl Shape for Square {
+    fn area(&self) -> u64 {
+        return self.side * self.side;
+    }
+}
+
+impl Shape for Tri {
+    fn area(&self) -> u64 {
+        return self.base * self.height / 2;
+    }
+}
+
+fn total<T: Shape>(xs: &[T]) -> u64 {
+    let mut t: u64 = 0;
+    for i in 0..xs.len() {
+        t = t + xs[i].area();
+    }
+    return t;
+}
+
+fn main() -> i32 {
+    let sq: [Square; 2] = [Square.{ side: 3 }, Square.{ side: 5 }];
+    let tr: [Tri; 2] = [Tri.{ base: 4, height: 6 }, Tri.{ base: 10, height: 3 }];
+    for i in 0..sq.len() {
+        let a = sq[i].area();
+        let s = sq[i].side;
+        io.print(f"square {s}: {a}\n");
+    }
+    for i in 0..tr.len() {
+        let a = tr[i].area();
+        let b = tr[i].base;
+        let h = tr[i].height;
+        io.print(f"triangle {b}x{h}: {a}\n");
+    }
+    let ts = total(&sq[0..2]);
+    let tt = total(&tr[0..2]);
+    io.print(f"squares total {ts}\n");
+    io.print(f"triangles total {tt}\n");
+    return 0;
+}

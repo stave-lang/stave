@@ -530,7 +530,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         let text = icx.node_text(n).to_string();
         let d = mk(
             "E0201",
-            None,
+            Some("no-cast"),
             &[("expected", expected), ("found", found), ("operand", &text)],
             icx.node_span(n),
             &[],

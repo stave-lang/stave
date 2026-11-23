@@ -1316,6 +1316,32 @@ impl<'a> World<'a> {
         Lookup::NotFound
     }
 
+    /// The methods of the inherent impls that apply to exactly type `c` (impls of the packages
+    /// `from` sees, as in method lookup), in declaration order.
+    pub fn inherent_methods<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        c: TypeId,
+        env: &[GenericParam],
+        from: Option<crate::PackageId>,
+    ) -> Vec<DeclId> {
+        let mut out = Vec::new();
+        let Some(head) = self.head(cx, c) else { return out };
+        let Some(list) = self.sigs.impls_by_head.get(&head) else { return out };
+        for &i in list {
+            let Some(imp) = self.sigs.impl_def(i) else { continue };
+            let seen = match (from, package_of(self.prog, i)) {
+                (Some(f), Some(p)) => package_sees(self.prog, f, p),
+                _ => true,
+            };
+            if imp.trait_ref.is_some() || !seen || self.impl_applies(cx, imp, c, env, 0).is_none() {
+                continue;
+            }
+            out.extend(imp.methods.iter().copied());
+        }
+        out
+    }
+
     /// Methods named `name` of exactly type `c`: inherent first, then trait impls.
     #[allow(clippy::type_complexity)]
     fn lookup_at<I: Interner + ?Sized>(

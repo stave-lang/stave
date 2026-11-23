@@ -1043,10 +1043,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0201",
         severity: Severity::Error,
         area: "types",
-        rule: "mismatched types, with no implicit conversion",
+        rule: "mismatched types, with no implicit conversion; cases `fn-arms`, `fn-arms-wanted`: value `if` / `match` arms of fn types that differ only in `needs` or `without`; the fix names a form that converts (cases `cast-marked`, `some`, `ok`, `unwrap-option`, `unwrap-result`, `borrow`, `borrow-mut`, `deref`), plain `as` only where the cast table admits it, else case `no-cast`",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "cast", kind: HoleKind::TextLiteral, choices: &["as%", "as|", "as~"] },
+            Hole { name: "common", kind: HoleKind::Type, choices: &[] },
             Hole { name: "count", kind: HoleKind::Int, choices: &[] },
             Hole { name: "expected", kind: HoleKind::Type, choices: &[] },
             Hole { name: "found", kind: HoleKind::Type, choices: &[] },
@@ -1082,6 +1084,51 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "borrow",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it: `&{operand}`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "&{operand}" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "borrow-mut",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it mutably: `&mut {operand}`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "&mut {operand}" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "cast-marked",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "convert explicitly: `{operand} {cast} {expected}` (plain `as` from `{found}` can lose information, E0204; `as%` wraps or truncates, `as|` saturates, `as~` rounds)",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "{operand} {cast} {expected}" },
+                    ],
+                }),
+            },
+            Shape {
                 case: "const-arg",
                 message: "`{operand}` is not a const generic argument",
                 labels: &[
@@ -1101,6 +1148,60 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare it with an unsigned integer type: `const {operand}: usize`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "copy the value out: `*{operand}`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "*{operand}" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "fn-arms",
+                message: "the arms have different fn types: `{expected}` and `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "give the value a fn type both arms convert to: `let f: {common} = ..;` (`as` converts no fn value)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "fn-arms-wanted",
+                message: "arm of type `{found}` is not usable as `{expected}`: a fn item arm gains a `without` clause only alone",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "convert the arm alone first: `let g: {expected} = {operand};`, then use `g` as the arm (`as` converts no fn value)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "no-cast",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write a value of type `{expected}` here, or change what requires `{expected}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1142,6 +1243,36 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "ok",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "wrap the value: `Result.Ok({operand})`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "Result.Ok({operand})" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "some",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "wrap the value: `Option.Some({operand})`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "Option.Some({operand})" },
+                    ],
+                }),
+            },
+            Shape {
                 case: "type-args",
                 message: "`{operand}` takes {count} generic arguments, found {given}",
                 labels: &[
@@ -1149,6 +1280,32 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give exactly {count} generic arguments",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "unwrap-option",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the value out: `{operand}.unwrap()` (panics `Unwrap` on `Option.None`), `{operand}?` in a fn returning `Option`, or `match {operand} {{ Option.Some(v) => v, Option.None => .. }}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "unwrap-result",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the value out: `{operand}.unwrap()` (panics `Unwrap` on `Result.Err`), `{operand}?` in a fn returning `Result` of the same error type, or `match {operand} {{ Result.Ok(v) => v, Result.Err(e) => .. }}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1350,11 +1507,14 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0206",
         severity: Severity::Error,
         area: "types",
-        rule: "operator not defined for type (e.g. `+%` on a float). Case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a const of a struct, enum, tuple, or array type); case `pattern-str`: the same for a string literal or `&str` const pattern",
+        rule: "operator not defined for type (e.g. `+%` on a float); case `ref-operand`: an operand of reference type; cases `deref`, `deref-read`, `deref-write`, `deref-accessors`: unary `*` on a value that is no reference or raw pointer, the fix naming the type's methods that take `&self` / `&mut self` alone and return a reference; case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a const of a struct, enum, tuple, or array type); case `pattern-str`: the same for a string literal or `&str` const pattern",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "get", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "get_mut", kind: HoleKind::Name, choices: &[] },
             Hole { name: "op", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "operand", kind: HoleKind::Source, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
@@ -1366,6 +1526,54 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use an operator that `{type}` defines (floats: plain `+ - * /`), or convert the operands with `as` first",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref",
+                message: "`*` cannot dereference `{type}`: it is no reference or raw pointer",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{operand}` is a value already: use it without `*`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref-accessors",
+                message: "`*` cannot dereference `{type}`: it is no reference or raw pointer",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{type}` gives a `&` from its method `{get}` and a `&mut` from `{get_mut}`: read `*{operand}.{get}()`; to change the value, `let r = {operand}.{get_mut}();`, then `*r` for every read and write (`*r = *r + 1;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref-read",
+                message: "`*` cannot dereference `{type}`: it is no reference or raw pointer",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{type}` gives a `&` from its method `{get}`: read `*{operand}.{get}()`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref-write",
+                message: "`*` cannot dereference `{type}`: it is no reference or raw pointer",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{type}` gives a `&mut` from its method `{get_mut}`: `let r = {operand}.{get_mut}();`, then `*r` for every read and write",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1390,6 +1598,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "bind the string with a name and compare its bytes in a guard: `s if mem.str_bytes(s).eq(mem.str_bytes(\"a\")) =>` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "ref-operand",
+                message: "operator `{op}` is not defined for `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{type}` is a reference: apply `{op}` to the value behind it (`*a {op} *b`; the bindings of a `match` on a reference are references)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1438,11 +1658,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0208",
         severity: Severity::Error,
         area: "types",
-        rule: "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern",
+        rule: "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern; case `reserved`: a type-relative name reserved for a built-in stage0 does not compile (`TxN.load_first_fault`)",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "added", kind: HoleKind::Pattern, choices: &[] },
+            Hole { name: "mask", kind: HoleKind::Type, choices: &[] },
             Hole { name: "missing", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
@@ -1492,6 +1713,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "name each field, `f: _` for one the pattern ignores: add `{added}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "reserved",
+                message: "`{type}.{name}` is reserved: first-fault loads are not available yet",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "reserved name" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "load the lanes in bounds with a masked load: `{type}.load_masked(s, i, {mask}.first_n(s.len() -| i))` (inactive lanes read 0)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

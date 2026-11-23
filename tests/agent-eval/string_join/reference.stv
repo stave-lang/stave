@@ -1,0 +1,30 @@
+import std.io;
+import std.string;
+
+fn main() -> i32 {
+    let words: [&str; 4] = ["alpha", "beta", "gamma", "delta"];
+    let mut s = string.String.new();
+    for i in 0..words.len() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(words[i]);
+    }
+    io.print(s.as_str());
+    io.print("\n");
+    let n = words.len();
+    let bytes = s.len();
+    io.print(f"{n} words, {bytes} bytes\n");
+    let mut r = string.String.new();
+    let mut i = words.len();
+    while i > 0 {
+        i = i - 1;
+        r.push_str(words[i]);
+        if i > 0 {
+            r.push_str(", ");
+        }
+    }
+    io.print(r.as_str());
+    io.print("\n");
+    return 0;
+}
