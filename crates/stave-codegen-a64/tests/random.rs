@@ -54,3 +54,14 @@ fn debug_seed() {
     println!("{}", stave_ir::print_checked(&p.m));
     check(&p, "dbg");
 }
+
+/// [`debug_seed`] for the stress shape: `STAVE_SEED=<n> cargo test --test random
+/// debug_stress_seed -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn debug_stress_seed() {
+    let seed: u64 = std::env::var("STAVE_SEED").unwrap().parse().unwrap();
+    let p = program_stress(seed);
+    println!("{}", stave_ir::print_checked(&p.m));
+    check(&p, "dbg");
+}
