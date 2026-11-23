@@ -151,7 +151,8 @@ impl Prog {
         let out_f64 = m.declare(inst(), "rt.out_f64", vec![t.f64], None);
         let out_f32 = m.declare(inst(), "rt.out_f32", vec![t.f32], None);
         let out_str = m.declare(inst(), "rt.out_str", vec![t.str_ref], None);
-        let entry = m.declare(inst(), "runtime.start.entry", vec![t.pu8], None);
+        let sp = m.types.ptr(false, t.usize);
+        let entry = m.declare(inst(), "runtime.start.entry", vec![sp], None);
         let trap = m.declare(inst(), "runtime.panic.trap", vec![t.u32, t.u32], None);
         let main = m.declare(inst(), "app.main", vec![], None);
         m.funcs[entry.index()].known = Some(stave_ir::Known::StartEntry);
@@ -225,7 +226,8 @@ impl Prog {
         b.unreachable();
         self.m.define(self.trap, b.finish().unwrap());
         // entry
-        let mut b = FuncBuilder::new(&[t.pu8]);
+        let sp = self.m.funcs[self.entry.index()].params.clone();
+        let mut b = FuncBuilder::new(&sp);
         b.call(self.main, None, &[]);
         let nr = b.int(94);
         let code = b.int(0);
@@ -316,7 +318,24 @@ pub fn trap_bytes(kind: PanicKind, site: u32) -> Vec<u8> {
     v
 }
 
+/// `m` with a placeholder site row for every site it names: the tests use sites as labels the
+/// trap reports, and a module that verifies names only rows of its site table.
+pub fn with_sites(m: &Module) -> Module {
+    let mut m = m.clone();
+    let named = m.funcs.iter().flat_map(|f| {
+        let insts = f.body.as_ref().map_or(&[][..], |b| &b.insts.site[..]);
+        insts.iter().copied().chain([f.name_site])
+    });
+    let need = named.filter(|s| *s != stave_ir::Site::NONE).map(|s| s.0 as usize + 1).max().unwrap_or(0);
+    while m.sites.len() < need {
+        let line = m.sites.len() as u32 + 1;
+        m.sites.push(stave_ir::SiteInfo { file: "t.stv".into(), line, col: 1, func: "t".into() });
+    }
+    m
+}
+
 pub fn interp(m: &Module, entry: FuncId) -> Run {
+    let m = &with_sites(m);
     let mut it = Interp::new(m, BufferHost::new(SyscallAbi::Aarch64), Config::default())
         .unwrap_or_else(|e| panic!("verify: {e:?}"));
     let sp = it.process_stack(&[b"prog"], &[]).unwrap();

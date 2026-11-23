@@ -718,6 +718,7 @@ fn program_shaped(seed: u64, nf: Option<usize>, stress: bool) -> Prog {
             }
         }
     });
+    p.m = super::with_sites(&p.m);
     if let Err(e) = verify_module(&p.m) {
         panic!("generator produced invalid IR (seed {seed}): {:?}", &e[..e.len().min(3)]);
     }

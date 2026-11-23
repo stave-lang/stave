@@ -1342,7 +1342,16 @@ impl<'m, H: Host> Interp<'m, H> {
                         return Err(malformed("enum value arity"));
                     }
                     // Zero the whole enum first, so the bytes beyond this variant are deterministic.
-                    self.mem.write(addr, &vec![0u8; l.size as usize]).map_err(&fault)?;
+                    // in pieces: a size beyond any memory faults on its first unmapped piece
+                    // instead of allocating the zeros
+                    const PIECE: usize = 1 << 16;
+                    static ZEROS: [u8; PIECE] = [0; PIECE];
+                    let mut done = 0u64;
+                    while done < l.size {
+                        let n = (l.size - done).min(PIECE as u64);
+                        self.mem.write(addr.wrapping_add(done), &ZEROS[..n as usize]).map_err(&fault)?;
+                        done += n;
+                    }
                     self.mem.write_uint(addr, 4, tag).map_err(&fault)?;
                     for (&(off, ft), fv) in fs.iter().zip(vs[1..].iter()) {
                         stack.push((ft, addr.wrapping_add(off), fv, depth + 1));

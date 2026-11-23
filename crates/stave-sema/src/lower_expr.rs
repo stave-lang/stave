@@ -1025,7 +1025,7 @@ impl<'a> FnCx<'a> {
         let Some(c) = self.g.sigs.konst(d) else { return self.fail_at(Some(tok), "static") };
         let ty = c.ty;
         let pt = self.t_ptr(true, ty);
-        let id = self.intrinsic("static_addr");
+        let id = self.intrinsic(stave_ir::intrinsics::STATIC_ADDR);
         let i = self.int(idx as i128);
         let p = Operand::Value(self.f.b.op(stave_ir::Op::Intrinsic(id), FnCx::ir(pt), &[i]));
         E::P(Place { base: Base::Mem(p, pt), proj: Vec::new(), ty, root: None })

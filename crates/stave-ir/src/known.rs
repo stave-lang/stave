@@ -5,6 +5,8 @@
 //! their entry ([`crate::Func::known`]); later stages ask for an entry, never for a path. A user
 //! item spelled like one is an ordinary item everywhere.
 
+use crate::intrinsics::ITy;
+
 macro_rules! known_items {
     ($($v:ident = $module:literal $name:literal $(. $method:literal)?;)*) => {
         /// A compiler-known item.
@@ -191,6 +193,26 @@ pub fn reports_on_alt_stack(k: Known) -> bool {
             | Known::RequiresFailed
             | Known::EnsuresFailed
     )
+}
+
+/// The signature (params, result) of a known item that code generation or the interpreter calls
+/// or enters with an argument list of its own (the start stub, the trap and signal reports, the
+/// thread stubs, `cpu_init`, `copy_bytes`, the checked allocator); `None` for the others, which
+/// are only ever called by IR calls. A result of `()` is no result; `-> never` is none either.
+pub fn abi_signature(k: Known) -> Option<(&'static [ITy], ITy)> {
+    use ITy::*;
+    Some(match k {
+        Known::StartEntry => (&[ConstPtrUsize], Unit),
+        Known::Trap => (&[U32, U32], Unit),
+        Known::OnSignal => (&[Usize, Usize, Usize], Unit),
+        Known::ThreadEntry => (&[Usize], Usize),
+        Known::CpuInit => (&[], Unit),
+        Known::CopyRaw => (&[MutPtrU8, ConstPtrU8, Usize], Unit),
+        Known::TryAlloc => (&[Usize, Usize], MutPtrU8),
+        Known::Free => (&[MutPtrU8, Usize, Usize], Unit),
+        Known::TryRealloc => (&[MutPtrU8, Usize, Usize, Usize], MutPtrU8),
+        _ => return None,
+    })
 }
 
 /// Whether `f` is the fn a failed `requires` check calls.

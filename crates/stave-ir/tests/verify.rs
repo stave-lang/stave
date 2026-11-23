@@ -272,7 +272,7 @@ fn intrinsic_signatures() {
     });
     has(&m, "intrinsic.syscall2: argument 1");
     has(&m, "intrinsic.syscall2: wrong result type");
-    has(&m, "empty intrinsic name");
+    has(&m, "unknown intrinsic ``");
 }
 
 #[test]
@@ -420,8 +420,10 @@ fn bad_type_table() {
     assert!(m.canonicalize_types().is_err());
 }
 
+/// A type that contains itself by value is a verifier error, used or not; the interpreter, which
+/// verifies what it runs, refuses it before running.
 #[test]
-fn infinite_struct_is_a_layout_error() {
+fn infinite_struct_is_rejected() {
     let mut m = Module::new();
     let s = m.types.intern(TypeKey::Adt { def: stave_ir::DeclId(1), args: vec![] });
     m.types.set_shape(s, stave_ir::AdtShape::structure(vec![s]));
@@ -430,12 +432,134 @@ fn infinite_struct_is_a_layout_error() {
         b.slot(ps);
         b.ret(None);
     });
-    assert!(verify_module(&m).is_ok());
+    has(&m, "type contains itself without indirection");
     let (r, _) = stave_ir::interp::run(&m, f, vec![], host(), stave_ir::Config::default());
-    assert!(
-        matches!(r, Err(stave_ir::InterpError::Layout { err: stave_ir::layout::LayoutError::Infinite, .. })),
-        "{r:?}"
-    );
+    assert!(matches!(r, Err(stave_ir::InterpError::Verify(_))), "{r:?}");
+}
+
+/// A vector type's lane is an int or float lane type and its count a power of two in 2..=64; a
+/// type whose size overflows `u64` is an error even unused.
+#[test]
+fn vector_shapes_and_sizes() {
+    use stave_ir::Lanes;
+    let base = || {
+        let mut m = Module::new();
+        let u8t = m.types.u8();
+        (m, u8t)
+    };
+    let (mut m, u8t) = base();
+    m.types.intern(TypeKey::Vec { lane: u8t, n: Lanes::Fixed(16) });
+    assert!(errs(&m).is_empty(), "{:#?}", errs(&m));
+    let (mut m, u8t) = base();
+    let huge = m.types.array(u8t, 1 << 62);
+    m.types.intern(TypeKey::Vec { lane: huge, n: Lanes::Fixed(8) });
+    has(&m, "not a vector or mask shape");
+    let (mut m, u8t) = base();
+    m.types.intern(TypeKey::Vec { lane: u8t, n: Lanes::Fixed(3) });
+    has(&m, "not a vector or mask shape");
+    let (mut m, _) = base();
+    m.types.intern(TypeKey::Mask { width: 12, n: Lanes::Fixed(4) });
+    has(&m, "not a vector or mask shape");
+    let (mut m, u8t) = base();
+    let big = m.types.array(u8t, 1 << 62);
+    m.types.array(big, 8);
+    has(&m, "size overflows u64");
+}
+
+/// Every site is `Site::NONE` or a row of the site table: the fn's name site and each
+/// instruction's.
+#[test]
+fn sites_in_range() {
+    use stave_ir::{Site, SiteInfo};
+    let mut m = Module::new();
+    m.sites.push(SiteInfo { file: "a.stv".into(), line: 1, col: 1, func: "t.f".into() });
+    let f = define(&mut m, &[0], "t.f", &[], None, |b, _| {
+        b.set_site(Site(0));
+        b.inst(Op::FenceStream, None, &[]);
+        b.ret(None);
+    });
+    m.funcs[f.index()].name_site = Site(0);
+    assert!(errs(&m).is_empty(), "{:#?}", errs(&m));
+    let mut bad = m.clone();
+    bad.funcs[f.index()].name_site = Site(1);
+    has(&bad, "name site 1 out of range");
+    let mut bad = m.clone();
+    bad.funcs[f.index()].body.as_mut().unwrap().insts.site[0] = Site(7);
+    has(&bad, "inst 0: site 7 out of range");
+}
+
+/// A fn stamped as a known item that a back end or the interpreter calls on its own has that
+/// item's signature, and only a panic report entry runs on the alternate stack.
+#[test]
+fn known_signatures() {
+    use stave_ir::Known;
+    let mut m = Module::new();
+    let u32t = m.types.u32();
+    let usize_t = m.types.usize();
+    let trap = define_known(&mut m, &[0], Known::Trap, &[u32t, u32t], None, |b, _| {
+        b.panic(stave_ir::PanicKind::Assert);
+        b.unreachable();
+    });
+    let ent = define_known(&mut m, &[1], Known::ThreadEntry, &[usize_t], Some(usize_t), |b, _| {
+        let x = b.param(0).unwrap();
+        b.ret(Some(x.into()));
+    });
+    assert!(errs(&m).is_empty(), "{:#?}", errs(&m));
+    let mut ok = m.clone();
+    ok.funcs[trap.index()].alt_stack = false;
+    assert!(errs(&ok).is_empty(), "{:#?}", errs(&ok));
+    let mut bad = m.clone();
+    bad.funcs[ent.index()].alt_stack = true;
+    has(&bad, "alt_stack is true for `runtime.thread.entry`");
+    let mut bad = m.clone();
+    bad.funcs[trap.index()].params = vec![usize_t, u32t];
+    has(&bad, "`runtime.panic.trap` must have the signature");
+    let mut bad = m.clone();
+    bad.funcs[ent.index()].known = Some(Known::CpuInit);
+    has(&bad, "`runtime.cpu.init` must have the signature");
+    let mut bad = m.clone();
+    bad.funcs[ent.index()].ret = None;
+    has(&bad, "`runtime.thread.entry` must have the signature");
+}
+
+/// Each operand and switch case belongs to one span at most.
+#[test]
+fn shared_spans() {
+    let mut m = Module::new();
+    let i32t = m.types.i32();
+    define(&mut m, &[0], "t.f", &[i32t], Some(i32t), |b, _| {
+        let x = b.param(0).unwrap();
+        let y = b.binary(Op::Add, i32t, x, x);
+        let z = b.binary(Op::Add, i32t, y, x);
+        b.ret(Some(z.into()));
+    });
+    assert!(errs(&m).is_empty(), "{:#?}", errs(&m));
+    let body = m.funcs[0].body.as_mut().unwrap();
+    body.insts.args[1] = body.insts.args[0];
+    has(&m, "operand span shared");
+}
+
+/// The constants of `check.bounds` fit `u64`; an element index constant fits 64 bits.
+#[test]
+fn index_constants_fit_a_word() {
+    let mut m = Module::new();
+    let u8t = m.types.u8();
+    let p = m.types.ptr(false, u8t);
+    let one = |k: i128| {
+        let mut m = m.clone();
+        define(&mut m, &[0], "t.f", &[p], None, |b, _| {
+            let x = b.param(0).unwrap();
+            let (i, n) = (b.int(k), b.int(1));
+            b.inst(Op::BoundsCheck, None, &[i, n]);
+            let i = b.int(k);
+            b.op(Op::ElemAddr, p, &[x.into(), i]);
+            b.ret(None);
+        });
+        m
+    };
+    assert!(errs(&one(u64::MAX as i128)).is_empty(), "{:#?}", errs(&one(u64::MAX as i128)));
+    has(&one(1 << 64), "check.bounds operands must be unsigned ints");
+    has(&one(1 << 64), "element index must be an int (a constant in 64 bits)");
 }
 
 #[test]
@@ -622,4 +746,72 @@ fn static_size_and_alignment() {
     bad(Static { path: "t.short".into(), ty: pair, init: vec![0; 8], refs: Vec::new() }, "8 initial bytes");
     bad(Static { path: "t.long".into(), ty: u8t, init: vec![0; 2], refs: Vec::new() }, "2 initial bytes");
     bad(Static { path: "t.byte_words".into(), ty: bytes, init: vec![0; 16], refs }, "aligned to 1");
+}
+
+/// An intrinsic instruction is checked against the one table: a name the table lacks, one
+/// without a checked signature, and a wrong arity, operand, or result are errors.
+#[test]
+fn intrinsic_table() {
+    let mut m = Module::new();
+    let usize_t = m.types.usize();
+    let u32t = m.types.u32();
+    let u64t = m.types.u64();
+    let cpu = m.types.tuple(vec![u32t; 4]);
+    let one = |name: &str, ty: Option<stave_ir::TypeId>, n: usize| {
+        let mut m = m.clone();
+        let id = m.intrinsic(name);
+        define(&mut m, &[0], "t.f", &[], None, |b, _| {
+            let args: Vec<Operand> = (0..n).map(|_| b.int(1)).collect();
+            b.intrinsic(id, ty, &args);
+            b.ret(None);
+        });
+        m
+    };
+    for m in [one("cpuid", Some(cpu), 2), one("atomic_cas_u64", Some(u64t), 3), one("cpu_init", None, 0)] {
+        assert!(errs(&m).is_empty(), "{:#?}", errs(&m));
+    }
+    assert!(errs(&one("ccall12", Some(usize_t), 13)).is_empty());
+    has(&one("frobnicate", Some(usize_t), 0), "unknown intrinsic `frobnicate`");
+    has(&one("syscall7", Some(usize_t), 8), "unknown intrinsic `syscall7`");
+    has(&one("syscall03", Some(usize_t), 4), "unknown intrinsic `syscall03`");
+    has(&one("tid_x", Some(u32t), 0), "no checked signature");
+    has(&one("cpu_baseline", Some(u64t), 0), "lowering replaces it");
+    has(&one("cpu_init", Some(u64t), 0), "intrinsic.cpu_init: must have no result");
+    has(&one("main_addr", None, 0), "intrinsic.main_addr: wrong result type");
+    has(&one("call_on_stack", Some(usize_t), 2), "intrinsic.call_on_stack: 2 arguments, expected 3");
+    has(&one("cpuid", Some(cpu), 1), "intrinsic.cpuid: 1 arguments, expected 2");
+    has(&one("cpuid", Some(usize_t), 2), "intrinsic.cpuid: wrong result type");
+}
+
+/// `static_addr <i>`: one int constant naming an existing static, and a raw-pointer result to
+/// its type.
+#[test]
+fn static_addr_operands() {
+    use stave_ir::Static;
+    let mut m = Module::new();
+    let u64t = m.types.u64();
+    let u32t = m.types.u32();
+    let pu64 = m.types.ptr(true, u64t);
+    let pu32 = m.types.ptr(true, u32t);
+    let ru64 = m.types.ref_(true, u64t);
+    m.statics.push(Static { path: "t.S".into(), ty: u64t, init: vec![0; 8], refs: Vec::new() });
+    let one = |k: i128, ty, extra: bool| {
+        let mut m = m.clone();
+        let id = m.intrinsic(stave_ir::intrinsics::STATIC_ADDR);
+        define(&mut m, &[0], "t.f", &[], None, |b, _| {
+            let mut args = vec![b.int(k)];
+            if extra {
+                args.push(b.int(0));
+            }
+            b.intrinsic(id, Some(ty), &args);
+            b.ret(None);
+        });
+        m
+    };
+    assert!(errs(&one(0, pu64, false)).is_empty(), "{:#?}", errs(&one(0, pu64, false)));
+    has(&one(1, pu64, false), "static 1 out of range");
+    has(&one(-1, pu64, false), "static -1 out of range");
+    has(&one(0, pu32, false), "must be a raw pointer to t");
+    has(&one(0, ru64, false), "must be a raw pointer to t");
+    has(&one(0, pu64, true), "2 operands, expected 1");
 }

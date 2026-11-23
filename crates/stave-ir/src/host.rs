@@ -178,7 +178,11 @@ impl BufferHost {
             let (src, pos): (&[u8], usize) = if fd == 0 {
                 (&self.stdin, self.stdin_pos)
             } else {
-                match usize::try_from(fd - 3).ok().and_then(|k| self.open.get(k)).and_then(|o| o.as_ref()) {
+                match usize::try_from(fd.wrapping_sub(3))
+                    .ok()
+                    .and_then(|k| self.open.get(k))
+                    .and_then(|o| o.as_ref())
+                {
                     Some((d, p)) => (d, *p),
                     None => return SysResult::Ret(EBADF),
                 }
@@ -190,7 +194,7 @@ impl BufferHost {
             }
             if fd == 0 {
                 self.stdin_pos += k;
-            } else if let Some(Some((_, p))) = self.open.get_mut((fd - 3) as usize) {
+            } else if let Some(Some((_, p))) = self.open.get_mut(fd.wrapping_sub(3) as usize) {
                 *p += k;
             }
             SysResult::Ret(k as u64)
@@ -207,7 +211,7 @@ impl BufferHost {
                 None => SysResult::Ret(ENOENT),
             }
         } else if nr == n.close {
-            match usize::try_from((a[0] as i64) - 3).ok().and_then(|k| self.open.get_mut(k)) {
+            match usize::try_from((a[0] as i64).wrapping_sub(3)).ok().and_then(|k| self.open.get_mut(k)) {
                 Some(slot @ Some(_)) => {
                     *slot = None;
                     SysResult::Ret(0)
@@ -230,7 +234,7 @@ impl BufferHost {
             if a[3] & MAP_ANONYMOUS == 0 || a[1] == 0 {
                 return SysResult::Ret(EINVAL);
             }
-            let len = a[1].div_ceil(4096) * 4096;
+            let Some(len) = a[1].div_ceil(4096).checked_mul(4096) else { return SysResult::Ret(ENOMEM) };
             SysResult::Ret(mem.alloc(len, 4096).unwrap_or(ENOMEM))
         } else if nr == n.munmap {
             if mem.free(a[0]) { SysResult::Ret(0) } else { SysResult::Ret(EINVAL) }
@@ -240,7 +244,7 @@ impl BufferHost {
             if flags & MREMAP_MAYMOVE == 0 || new_len == 0 {
                 return SysResult::Ret(EINVAL);
             }
-            let len = new_len.div_ceil(4096) * 4096;
+            let Some(len) = new_len.div_ceil(4096).checked_mul(4096) else { return SysResult::Ret(ENOMEM) };
             let Some(new) = mem.alloc(len, 4096) else { return SysResult::Ret(ENOMEM) };
             let keep = old_len.min(len);
             let bytes = mem.read(old, keep).map(|b| b.to_vec()).unwrap_or_default();
