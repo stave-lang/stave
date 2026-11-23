@@ -743,6 +743,10 @@ pub struct Func {
     /// pointer there unless it is there already (contracts/intrinsics.md "Alternate stack").
     /// Set by lowering from [`crate::known::reports_on_alt_stack`]; not printed.
     pub alt_stack: bool,
+    /// The target does not build the fn: `features` belong to another arch. Its body is a trap
+    /// or, where the target cannot pass its params or return, absent. Set by lowering; not
+    /// printed.
+    pub unbuilt: bool,
 }
 
 /// A source site row (contracts/intrinsics.md site table): what a [`Site`] indexes in
@@ -849,6 +853,7 @@ impl Module {
             variadic: false,
             known: None,
             alt_stack: false,
+            unbuilt: false,
         });
         id
     }

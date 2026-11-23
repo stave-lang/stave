@@ -82,8 +82,8 @@
 //! feature the function lacks, vectors wider than 256 bits outside K mode, the ops K mode does
 //! not lower (`simd::k`), conversions *to* f16 / bf16,
 //! alignment above the widest vector, intrinsics outside the x86-64 table, references to
-//! functions without a body (C imports need an external linker). Stack overflow is detected by the
-//! runtime's guard page, not by an inline check; a function with an
+//! functions without a body (`stave_ir::link::bodiless_reference` says why each has none).
+//! Stack overflow is detected by the runtime's guard page, not by an inline check; a function with an
 //! [`Options::reserve_slots`] slot reads its reserve below its frame at entry, so the guard
 //! faults there. When `ObjectImage::patch_func` moves a function,
 //! its PC-table row follows it (`Abs64Body`) but keeps its position, so the table is no longer
@@ -264,10 +264,10 @@ impl fmt::Display for Error {
                 Ok(())
             }
             Error::Unsupported { func, what } => {
-                write!(f, "x86-64 debug backend: unsupported{}: {what}", at(func))
+                write!(f, "x86-64 backend: unsupported{}: {what}", at(func))
             }
             Error::Malformed { func, what } => {
-                write!(f, "x86-64 debug backend: malformed IR{}: {what}", at(func))
+                write!(f, "x86-64 backend: malformed IR{}: {what}", at(func))
             }
             Error::Encode { func, err } => write!(f, "x86-64 encoder{}: {err}", at(func)),
             Error::Obj(e) => write!(f, "ELF writer: {e}"),
@@ -411,12 +411,9 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
                 if let Operand::Func(g) = o
                     && func_sym.get(g.index()).copied().flatten().is_none()
                 {
-                    let path = m.func(*g).map_or("?", |x| x.path.as_str());
                     return Err(Error::Unsupported {
                         func: Some(*f),
-                        what: format!(
-                            "reference to fn `{path}` without a body (extern imports need a C linker)"
-                        ),
+                        what: stave_ir::link::bodiless_reference(m, *g),
                     });
                 }
             }

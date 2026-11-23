@@ -987,3 +987,50 @@ fn param_from_is_checked_with_the_signature() {
     assert_eq!(c, 1, "{err}");
     assert!(err.contains("E0514"), "{err}");
 }
+
+/// A program that reaches a fn without a body cannot be built (exit 2) on any native target, in
+/// either build mode. The text names the backend that reported and why the fn has no body: an
+/// `extern "C"` import, or a fn the target does not build (it needs another arch's features).
+#[test]
+fn bodiless_reference_names_backend_and_reason() {
+    let d = tmp("bodiless");
+    let (imp, unb) = (d.join("import"), d.join("unbuilt"));
+    std::fs::create_dir_all(&imp).unwrap();
+    std::fs::create_dir_all(&unb).unwrap();
+    std::fs::write(
+        imp.join("main.stv"),
+        "unsafe(\"abs is int abs(int)\") extern \"C\" {\n    fn abs(x: i32) -> i32 without(alloc, io, lock, block);\n}\n\
+         fn main() -> i32 {\n    let r = unsafe(\"abs has no preconditions\") abs(-3);\n    return r;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        unb.join("main.stv"),
+        "fn w(v: f32x8) -> f32 needs(avx2) { return v.reduce_add(); }\n\
+         fn sink<T: view>(x: T) -> u32 { return 0; }\n\
+         fn main() -> i32 {\n    let k = sink(w);\n    return 0;\n}\n",
+    )
+    .unwrap();
+    let import = "reference to fn `main.abs` without a body (extern imports need a C linker)";
+    let unbuilt = "reference to fn `main.w`, which this target does not build: it needs(avx2), features of another arch";
+    let cases = [
+        (&imp, "x86_64-linux", "x86-64", import),
+        (&imp, "aarch64-linux", "aarch64", import),
+        (&unb, "aarch64-linux", "aarch64", unbuilt),
+    ];
+    for (dir, target, backend, reason) in cases {
+        let p = dir.join("main.stv").display().to_string();
+        let (c, _, err) = stave_in(dir, &["check", &p, "--target", target]);
+        assert_eq!(c, 0, "{target}: {err}");
+        for mode in [None, Some("--release")] {
+            let mut args = vec!["build", p.as_str(), "--target", target];
+            args.extend(mode);
+            let (c, _, err) = stave_in(dir, &args);
+            assert_eq!(c, 2, "{target} {mode:?}: {err}");
+            let head = format!(
+                "stave: `codegen` is not implemented yet for this program: {backend} backend: unsupported in fn #"
+            );
+            let line = err.lines().next().unwrap_or_default();
+            assert!(line.starts_with(&head) && line.ends_with(reason), "{target} {mode:?}: {err}");
+        }
+    }
+}

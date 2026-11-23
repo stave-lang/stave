@@ -25,6 +25,25 @@ pub fn text_order(m: &Module) -> Vec<FuncId> {
     order
 }
 
+/// Why a static image cannot hold a reference to function `g`, which has no body (or no such
+/// function exists): the text both backends report. The reason is read from how the function
+/// lost its body, [`crate::Func::unbuilt`] before an `extern "C"` import's symbol.
+pub fn bodiless_reference(m: &Module, g: FuncId) -> String {
+    let Some(f) = m.func(g) else { return format!("reference to fn #{} without a body", g.0) };
+    let path = &f.path;
+    if f.unbuilt {
+        let needs: Vec<&str> = f.features.maximal().into_iter().map(|x| x.name()).collect();
+        format!(
+            "reference to fn `{path}`, which this target does not build: it needs({}), features of another arch",
+            needs.join(", ")
+        )
+    } else if f.symbol.is_some() {
+        format!("reference to fn `{path}` without a body (extern imports need a C linker)")
+    } else {
+        format!("reference to fn `{path}` without a body")
+    }
+}
+
 /// Per `FuncId`: the symbol name of each function in `fns` (`None` for the others). An
 /// `extern "C"` function is named by its [`crate::Func::symbol`] (a C name has no `.`, so it never
 /// meets a path); any other function by its path, or `path@instance` when another function of
