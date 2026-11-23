@@ -1450,19 +1450,19 @@ impl<'a> FnCx<'a> {
         let Some(iter) = kids.iter().copied().find(|&c| icx.is_expr(c)) else { return };
         let Some(body) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block)) else { return };
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
-        if let Some(bt) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type)) {
-            let t = self.lower_type(bt);
-            let vt = match self.kind(t) {
-                TypeKind::Ref { inner, .. } => inner,
-                _ => t,
-            };
-            if matches!(self.kind(vt), TypeKind::Vector { .. }) {
-                self.chunk_loop(f, pat, t, iter, body, tail);
+        // chunk loop or element loop: the type checker decided it on the definition; an
+        // instance whose `T` is a vector still runs an element loop
+        if self.tb().is_chunk_loop(f) {
+            let Some(bt) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type)) else {
+                self.fail(f, "a chunk loop without its annotation");
                 return;
-            }
+            };
+            let t = self.lower_type(bt);
+            self.chunk_loop(f, pat, t, iter, body, tail);
+            return;
         }
         if tail.is_some() {
-            self.unsupported(f, "a tail clause on an element loop is not supported");
+            self.fail(f, "a tail clause on an element loop (E0601 `element-loop` at check)");
             return;
         }
         let it_ty = self.nty(iter);

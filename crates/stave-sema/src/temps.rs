@@ -42,8 +42,10 @@ pub enum Bound {
     Branch,
     /// The body of an arm of a value `match`.
     Arm,
-    /// A check of a contract clause, or the operand of an `old(e)`.
+    /// A check of a contract clause.
     Clause,
+    /// The operand `e` of an `old(e)`, evaluated at fn entry.
+    Old,
 }
 
 /// The statement of every node of one body, by node index from the body's first node.
@@ -72,7 +74,7 @@ impl StmtEnds {
                 }
             }
             for &(_, e) in &c.olds {
-                mark(&mut bound, e, Bound::Clause);
+                mark(&mut bound, e, Bound::Old);
             }
         }
         let mut of = vec![NONE; n];

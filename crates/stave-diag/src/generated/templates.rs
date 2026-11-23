@@ -2731,7 +2731,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
-        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)",
+        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check; `temporary-old`: the operand `e` of an `old(e)`, which ends where it is evaluated, at fn entry; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)",
         retired: false,
         located: true,
         holes: &[
@@ -2751,7 +2751,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[
                     LabelTemplate { at: "primary", text: "{access} here" },
                     LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
-                    LabelTemplate { at: "use", text: "borrow used later here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
                 ],
                 fix: Some(FixTemplate {
                     description: "end the borrow before this point: move the later use before it, or copy the value out first",
@@ -2830,6 +2830,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "temporary-old",
+                message: "the temporary `{place}` ends with its `old(..)` operand at fn entry, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "temporary made here: it ends where the `old(..)` operand is evaluated, at fn entry" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "compute the Copy value inside `old(..)`, so that no borrow of `{place}` is kept: `old(f(x).len())`, not `old(f(x).as_slice()).len()`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "thread",
                 message: "cannot {access} `{place}`: it has a live {loan} borrow",
                 labels: &[
@@ -2837,7 +2851,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` by the thread spawned here: it may use `{loaned}` until the scope is left" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "leave the scope before this point (its threads are joined there), or use the place only inside the thread",
+                    description: "{access} `{place}` after the `scope` that runs the thread: its threads are joined only where it is left, so a `scope` around an endless loop never ends the borrow (open the `scope` inside the loop body instead)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3392,7 +3406,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0601",
         severity: Severity::Error,
         area: "simd",
-        rule: "chunk loop without a tail policy",
+        rule: "chunk loop without a tail policy; case `element-loop`: a tail clause on a loop that is not a chunk loop (its annotation, as written, is no vector or reference to one: a range, an iterator, an element loop, also a generic `T`)",
         retired: false,
         located: true,
         holes: &[
@@ -3407,6 +3421,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "element-loop",
+                message: "a tail clause on a loop that is not a chunk loop",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "tail clause of an element loop: it visits every element, none is left over" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the tail clause; for a chunk loop, annotate the binding with a vector type written out (`for v: f32x8 in xs`), not a generic one",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
