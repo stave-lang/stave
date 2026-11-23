@@ -300,18 +300,38 @@ fn thread_child_stack_is_aligned() {
     }
 }
 
-/// A call of a fn without a body (an `extern "C"` import) is rejected as unsupported before
-/// anything is linked, at the calling fn, as on x86-64.
+/// A call of a fn without a body is rejected as unsupported before anything is linked, at the
+/// calling fn, as on x86-64. The text gives the reason the fn has no body: an `extern "C"`
+/// import, a fn the target does not build (its features belong to another arch), or neither.
 #[test]
 fn reference_to_bodiless_fn_is_unsupported() {
-    let mut p = Prog::new();
-    let t = p.t;
-    let ext = p.declare("app.puts", &[t.u64], Some(t.u64));
-    p.set_main(|b, _| {
-        let x = b.int(1);
-        b.call(ext, Some(t.u64), &[x]);
-    });
-    let e = build_image(&p.m, &BuildConfig::new(Some(p.main))).unwrap_err();
-    assert!(matches!(&e.kind, ErrorKind::Unsupported(s) if s.contains("`app.puts` without a body")), "{e}");
-    assert_eq!(e.func, Some(p.main));
+    let avx2 = stave_target::FeatureSet::of(stave_target::Feature::Avx2);
+    let cases: [(Option<&str>, bool, &str); 3] = [
+        (Some("puts"), false, "reference to fn `app.puts` without a body (extern imports need a C linker)"),
+        (
+            None,
+            true,
+            "reference to fn `app.puts`, which this target does not build: it needs(avx2), features of another arch",
+        ),
+        (None, false, "reference to fn `app.puts` without a body"),
+    ];
+    for (symbol, unbuilt, want) in cases {
+        let mut p = Prog::new();
+        let t = p.t;
+        let ext = p.declare("app.puts", &[t.u64], Some(t.u64));
+        let f = &mut p.m.funcs[ext.index()];
+        f.symbol = symbol.map(String::from);
+        f.unbuilt = unbuilt;
+        if unbuilt {
+            f.features = avx2;
+        }
+        p.set_main(|b, _| {
+            let x = b.int(1);
+            b.call(ext, Some(t.u64), &[x]);
+        });
+        let e = build_image(&p.m, &BuildConfig::new(Some(p.main))).unwrap_err();
+        assert!(matches!(&e.kind, ErrorKind::Unsupported(s) if s == want), "{e}");
+        assert_eq!(e.func, Some(p.main));
+        assert!(e.to_string().starts_with("aarch64 backend: unsupported in fn #"), "{e}");
+    }
 }

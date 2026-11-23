@@ -383,6 +383,8 @@ pub(crate) struct JobOut {
     pub err: Option<LowerError>,
     /// The fn's name token.
     pub name: Option<(stave_diag::FileId, u32)>,
+    /// The target does not build the fn ([`stave_ir::Func::unbuilt`]).
+    pub unbuilt: bool,
 }
 
 /// The lowering context of one job.

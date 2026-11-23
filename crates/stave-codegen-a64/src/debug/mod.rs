@@ -161,14 +161,12 @@ pub enum ErrorKind {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(func) = self.func {
-            write!(f, "fn #{}: ", func.0)?;
-        }
+        let at = self.func.map(|x| format!(" in fn #{}", x.0)).unwrap_or_default();
         match &self.kind {
-            ErrorKind::Unsupported(s) => write!(f, "unsupported: {s}"),
-            ErrorKind::BadIr(s) => write!(f, "malformed IR: {s}"),
-            ErrorKind::Enc(e) => write!(f, "encoding: {e}"),
-            ErrorKind::Obj(e) => write!(f, "object: {e}"),
+            ErrorKind::Unsupported(s) => write!(f, "aarch64 backend: unsupported{at}: {s}"),
+            ErrorKind::BadIr(s) => write!(f, "aarch64 backend: malformed IR{at}: {s}"),
+            ErrorKind::Enc(e) => write!(f, "aarch64 encoder{at}: {e}"),
+            ErrorKind::Obj(e) => write!(f, "ELF writer{at}: {e}"),
         }
     }
 }

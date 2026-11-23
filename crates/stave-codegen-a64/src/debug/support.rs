@@ -274,12 +274,9 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
             if let Operand::Func(g) = o
                 && m.func(*g).is_none_or(|x| x.body.is_none())
             {
-                let path = m.func(*g).map_or("?", |x| x.path.as_str());
                 return Err(Error {
                     func: Some(f),
-                    kind: ErrorKind::Unsupported(format!(
-                        "reference to fn `{path}` without a body (extern imports need a C linker)"
-                    )),
+                    kind: ErrorKind::Unsupported(stave_ir::link::bodiless_reference(m, *g)),
                 });
             }
         }

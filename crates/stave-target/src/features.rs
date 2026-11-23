@@ -421,6 +421,12 @@ impl FeatureSet {
         self.iter().filter(|f| !f.is_owned_by(a)).collect()
     }
 
+    /// The members no other member implies, in bit order: `avx2` for the closure of `avx2`.
+    pub fn maximal(self) -> Vec<Feature> {
+        let all: Vec<Feature> = self.iter().collect();
+        all.iter().copied().filter(|f| !all.iter().any(|g| g != f && g.implies().contains(f))).collect()
+    }
+
     /// Parse a `--features` value: comma-separated names (`avx2,fma`).
     pub fn parse_list(s: &str) -> Result<FeatureSet, FeatureError> {
         let mut set = FeatureSet::EMPTY;

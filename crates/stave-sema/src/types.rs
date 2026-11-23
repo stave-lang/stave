@@ -1008,9 +1008,7 @@ pub fn display<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId) -> St
 
 pub(crate) fn feature_names(bits: u64) -> Vec<&'static str> {
     let Some(fs) = stave_target::FeatureSet::from_bits(bits) else { return Vec::new() };
-    let all: Vec<stave_target::Feature> = fs.iter().collect();
-    // Only features not implied by another member of the set.
-    all.iter().filter(|f| !all.iter().any(|g| g != *f && g.implies().contains(f))).map(|f| f.name()).collect()
+    fs.maximal().into_iter().map(|f| f.name()).collect()
 }
 
 /// The longest text [`display`] writes before it elides the rest: a type that shares

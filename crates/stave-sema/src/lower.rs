@@ -599,6 +599,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
         local_types: Vec::new(),
         err: e,
         name: None,
+        unbuilt: false,
     };
     let icx_of = |item: ItemId| g.brackets.get(item.idx()).and_then(|b| ItemCx::new(g.prog, item, b));
     match job {
@@ -650,7 +651,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 let mut cx = FnCx::new(g, icx, path);
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
                 let out = cx.lower_unbuilt(&ps, ret);
-                return finish_job(cx, out, name);
+                return JobOut { unbuilt: true, ..finish_job(cx, out, name) };
             }
             if decl.flags.has(DeclFlags::DISPATCH) && !unbuilt {
                 let mut cx = FnCx::new(g, icx, path);
@@ -689,7 +690,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                     site_consts: Vec::new(),
                     name_off: None,
                 };
-                return finish_job(cx, out, name);
+                return JobOut { unbuilt, ..finish_job(cx, out, name) };
             }
             let Some(tb) = body else { return empty(None) };
             let mut flagged: FxHashSet<crate::lower_fn::FlagKey> = FxHashSet::default();
@@ -758,6 +759,7 @@ fn finish_job(mut cx: FnCx<'_>, out: FnOut, name: Option<(stave_diag::FileId, u3
         local_types: cx.tys.local,
         err: cx.err,
         name,
+        unbuilt: false,
     }
 }
 
@@ -1158,6 +1160,7 @@ fn assemble(
         let strs = o.strs.clone();
         let intrs = o.intrs.clone();
         let job_name = o.name;
+        let unbuilt = o.unbuilt;
         for (k, f) in o.funcs.iter_mut().enumerate() {
             let instance = match f.closure {
                 Some(c) => InstanceId(vec![rank as u32, c]),
@@ -1320,6 +1323,7 @@ fn assemble(
                 variadic: variadic && f.closure.is_none(),
                 known: if f.closure.is_some() { None } else { known },
                 alt_stack: f.closure.is_none() && known.is_some_and(stave_ir::known::reports_on_alt_stack),
+                unbuilt: unbuilt && f.closure.is_none(),
             });
         }
     }
