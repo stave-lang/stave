@@ -18,8 +18,8 @@ optimizer rules, planned diagnostics); they say so where they do.
   parallel. There is no libc and no external linker: the compiler writes the static ELF itself.
 - **SIMD first.** Vector types, chunk loops with a mandatory tail, and CPU dispatch are language
   constructs checked by the type system, not intrinsics and not a hope that a loop
-  auto-vectorizes. *Status: partly type-checked; vector code generation on x86-64 and AArch64;
-  `dispatch` functions do not build yet.*
+  auto-vectorizes. *Status: vector code generation on x86-64 and AArch64; a `dispatch`
+  function picks its arm from the CPU features read at start.*
 - **The GPU as a runtime target.** Whole programs run on the GPU, not only kernels: heap,
   recursion, function values, and I/O through a thin host shim. First target: PTX for NVIDIA.
   *Status: design.*
@@ -194,8 +194,8 @@ fn main() -> i32 {
 }
 ```
 
-SIMD (design: this type-checks in part; stage0 builds vector types and chunk loops, a
-`dispatch fn` not yet): vector types, chunk loops with a mandatory tail, and runtime CPU dispatch:
+SIMD (stage0 builds this): vector types, chunk loops with a mandatory tail, and runtime CPU
+dispatch:
 
 ```stave
 fn sum_base(xs: &[f32]) -> f32 {
