@@ -9,7 +9,7 @@
 //! falls back to whole-function intervals (no sharing).
 
 use stave_ir::ir::{Target, ValueDef};
-use stave_ir::{Body, Func, Op, Operand, Term};
+use stave_ir::{Body, Func, Op, Operand, Term, Value};
 use stave_opt::regalloc;
 
 use super::abi;
@@ -329,8 +329,16 @@ impl Analysis {
                 continue;
             }
             self.fused[blk as usize] = j;
-            for oi in body.insts.args[j as usize].indices() {
-                self.last_use[oi as usize] = false;
+            // the compare is emitted after every instruction of the block, so a later instruction
+            // reading an operand must not drop it either
+            let read: Vec<Value> =
+                args.iter().filter_map(|o| if let Operand::Value(v) = o { Some(*v) } else { None }).collect();
+            for k in bd.insts.indices() {
+                for oi in body.insts.args[k as usize].indices() {
+                    if matches!(body.operands.get(oi as usize), Some(Operand::Value(v)) if read.contains(v)) {
+                        self.last_use[oi as usize] = false;
+                    }
+                }
             }
         }
     }
