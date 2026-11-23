@@ -46,7 +46,7 @@
 
 use rustc_hash::FxHashMap;
 use stave_diag::Span;
-use stave_sema::drops::{Owner, Point, Row, Schedule};
+use stave_sema::drops::{Made, Owner, Point, Row, Schedule};
 use stave_sema::itemcx::ItemCx;
 use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, World};
@@ -271,10 +271,10 @@ pub struct Local {
     pub end: Option<TempEnd>,
     /// A temporary: the innermost statement open when it was made ([`stave_sema::temps`]).
     pub stmt: u32,
-    /// A temporary: the last token of the expression whose value it holds (`u32::MAX`: the
-    /// last token of `node`). With `stmt` its owner key in the drop schedule, the key the
-    /// lowering names for the same value ([`Builder::owner_of`]).
-    pub made: u32,
+    /// A temporary: the value it holds (`None`: the value of expression `node`). With `stmt`
+    /// its owner key in the drop schedule, the key the lowering names for the same value
+    /// ([`Builder::owner_of`]).
+    pub made: Option<Made>,
     /// The local standing for the storage of an immutable `static` (never moved from). A
     /// `static mut` has a local of its own too, without this mark ([`Builder::path_val`]).
     pub static_root: bool,
@@ -696,15 +696,16 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     /// The owner key of local `l` in the drop schedule: a temporary is named by its statement
-    /// and the last token of the expression whose value it holds.
+    /// and the value it holds.
     fn owner_of(&self, l: LocalId) -> Owner {
         let loc = &self.body.locals[l as usize];
         if !loc.temp {
             return Owner::Local(loc.node);
         }
         let made = match loc.made {
-            u32::MAX if loc.node != u32::MAX => stave_sema::drops::value_key(&self.icx, loc.node),
-            m => m,
+            None if loc.node != u32::MAX => stave_sema::drops::value_key(&self.icx, loc.node),
+            None => Made::tok(u32::MAX),
+            Some(m) => m,
         };
         Owner::Temp(loc.stmt, made)
     }
@@ -762,7 +763,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             temp: temp.is_some(),
             end: temp.and_then(|n| self.tb.stmt_ends.bound(n)).map(TempEnd::Stmt),
             stmt: self.stmts.last().copied().unwrap_or(stave_sema::temps::NONE),
-            made: u32::MAX,
+            made: None,
             guard: false,
             node: u32::MAX,
             static_root: false,
@@ -1931,7 +1932,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                         // dropped where the body ends or is left
                         let et = ep.ty;
                         let it = self.temp(et, iter);
-                        self.body.locals[it as usize].made = icx.a(f);
+                        self.body.locals[it as usize].made = Some(Made::tok(icx.a(f)));
                         let span = self.span(iter);
                         let op = Operand { kind: OpKind::Copy, place: ep, span, node: iter, site: u32::MAX };
                         self.push(
@@ -1949,7 +1950,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 // the item `next` returned is a value of its own, taken out of its `Option`
                 let it = self.temp(ip.ty, iter);
                 // an iteration's item is named by the `for` token, the source by its expression
-                self.body.locals[it as usize].made = icx.a(f);
+                self.body.locals[it as usize].made = Some(Made::tok(icx.a(f)));
                 let span = self.span(iter);
                 let op = Operand { kind: OpKind::Copy, place: ip.clone(), span, node: iter, site: u32::MAX };
                 self.push(
@@ -3294,8 +3295,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             Cur::Val(self.expr(prim))
         };
         let mut p = prim_end + 1;
-        // the token naming the value of the chain so far in the drop schedule: the head's
-        // (through parentheses), then the last token of the last step
+        // the value of the chain so far in the drop schedule: the head's (through parentheses),
+        // then the chain up to the last token of the last step
         let head_key = stave_sema::drops::value_key(&icx, prim);
         let mut step_from: Option<usize> = None;
         for _ in 0..10_000_000 {
@@ -3305,7 +3306,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             if !self.open() {
                 return V::Never;
             }
-            let rk = if p == prim_end + 1 { head_key } else { p - 1 };
+            let rk = if p == prim_end + 1 { head_key } else { Made::step(&icx, n, p - 1) };
             step_from = Some(self.body.locals.len());
             let t = icx.tk(p);
             if t == Term::Dot as u8 && icx.is(p + 1, Term::Ident) {
@@ -3417,19 +3418,20 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     /// The temporaries from local `from` on that a step of the chain of node `n` made for its
-    /// own values are named by the step's last token `end` in the drop schedule, as the
+    /// own values hold the chain up to the step's last token `end` in the drop schedule, as the
     /// lowering names the value a next step takes.
     fn name_step_temps(&mut self, from: usize, n: u32, end: u32) {
+        let key = Made::step(&self.icx, n, end);
         for l in self.body.locals.get_mut(from..).unwrap_or(&mut []) {
-            if l.temp && l.node == n && l.made == u32::MAX {
-                l.made = end;
+            if l.temp && l.node == n && l.made.is_none() {
+                l.made = Some(key);
             }
         }
     }
 
-    /// The value of the chain of node `n` so far, used by its next step; `rk`: the token naming
-    /// it in the drop schedule.
-    fn cur_value(&mut self, cur: Cur, n: u32, rk: u32) -> V {
+    /// The value of the chain of node `n` so far, used by its next step; `rk`: its value in the
+    /// drop schedule.
+    fn cur_value(&mut self, cur: Cur, n: u32, rk: Made) -> V {
         match cur {
             Cur::Val(v) => v,
             Cur::Path(r, tok) => {
@@ -3439,7 +3441,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 if let V::P(p) = &v
                     && p.local as usize >= from
                 {
-                    self.body.locals[p.local as usize].made = rk;
+                    self.body.locals[p.local as usize].made = Some(rk);
                 }
                 v
             }
@@ -3582,7 +3584,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         out
     }
 
-    fn call(&mut self, n: u32, cur: Cur, paren: u32, args: &[u32], last: bool, rk: u32) -> V {
+    fn call(&mut self, n: u32, cur: Cur, paren: u32, args: &[u32], last: bool, rk: Made) -> V {
         let icx = self.icx;
         let tgt = self.tb.target(paren).cloned();
         let span = icx.range_span(icx.a(n), icx.close(paren));
@@ -3748,12 +3750,12 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
-    /// `rk`: the token naming the receiver's value in the drop schedule.
+    /// `rk`: the receiver's value in the drop schedule.
     fn method_call(
         &mut self,
         n: u32,
         recv: V,
-        (seg, close, rk): (u32, u32, u32),
+        (seg, close, rk): (u32, u32, Made),
         args: &[u32],
         last: bool,
     ) -> V {
@@ -3783,7 +3785,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             let from = self.body.locals.len();
             let h = self.hold(rop, span);
             if h.place.local as usize >= from {
-                self.body.locals[h.place.local as usize].made = rk;
+                self.body.locals[h.place.local as usize].made = Some(rk);
             }
             h
         };
@@ -3811,7 +3813,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             let u = self.temp(ret, n);
             self.body.locals[u as usize].span = span;
             // named by the method's name: the picked value is the call's
-            self.body.locals[u as usize].made = seg;
+            self.body.locals[u as usize].made = Some(Made::tok(seg));
             let op = Operand { kind: OpKind::Copy, place: rp.clone(), span, node: n, site: u32::MAX };
             self.push(
                 StmtKind::Assign { dest: Place::local(u, ret), rv: Rvalue::Use(op), init: true },

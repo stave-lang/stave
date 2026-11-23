@@ -9,7 +9,7 @@ use stave_ir::{Block, FuncBuilder, Op, Operand, Value, VecOp};
 use stave_syntax::{NodeKind, Term};
 
 use crate::decls::DeclKind;
-use crate::drops::{Mode, Owner, Point, Shape, Step, Sub};
+use crate::drops::{Made, Mode, Owner, Point, Shape, Step, Sub};
 use crate::loops::ForKind;
 use crate::lower_fn::{
     Base, E, Env, Flag, FlagKey, FnCx, FnOut, FnState, Home, Init, LocalInfo, LoopCx, LoopKind, Place, Proj,
@@ -1029,10 +1029,6 @@ impl<'a> FnCx<'a> {
         let kids = self.kids(b);
         for s in kids {
             if !self.open() {
-                // the rest of the block cannot run (the code here knows more than the borrow
-                // CFG: an index out of a constant length traps): it has no code, so no drop
-                let icx = self.icx;
-                self.dead.push((icx.a(s), icx.close(icx.a(b))));
                 break;
             }
             self.stmt(s);
@@ -1219,8 +1215,8 @@ impl<'a> FnCx<'a> {
         self.bind_irrefutable(pat, p, made);
     }
 
-    /// `made`: the token naming the value of `p` in the drop schedule, if it is an rvalue.
-    fn bind_irrefutable(&mut self, pat: u32, p: Place, made: u32) {
+    /// `made`: the value of `p` in the drop schedule, if it is an rvalue.
+    fn bind_irrefutable(&mut self, pat: u32, p: Place, made: Made) {
         let icx = self.icx;
         if icx.is(icx.a(pat), Term::Underscore) {
             // `let _ = e;`: an owned temporary is dropped at the end of the statement
@@ -1250,8 +1246,8 @@ impl<'a> FnCx<'a> {
     /// The place a pattern is matched against: an rvalue with drop glue becomes a temporary (of
     /// the statement, or of the innermost scope when `scoped`), which a pattern that only reads
     /// leaves to be dropped there. A pattern that is one name takes the whole value. `made`: the
-    /// token naming the value in the drop schedule.
-    fn owned_for(&mut self, pat: u32, p: Place, scoped: bool, made: u32) -> Place {
+    /// value in the drop schedule.
+    fn owned_for(&mut self, pat: u32, p: Place, scoped: bool, made: Made) -> Place {
         match p.base {
             Base::Val(v, t) if p.proj.is_empty() && p.root.is_none() && self.binding_ty(pat).is_none() => {
                 if self.needs_drop(t) {
@@ -1652,7 +1648,7 @@ impl<'a> FnCx<'a> {
                 p.ty = elem;
                 self.take(&p).map(|x| {
                     let item = Place { base: Base::Val(x, elem), proj: Vec::new(), ty: elem, root: None };
-                    self.owned_for(pat, item, true, self.icx.a(f))
+                    self.owned_for(pat, item, true, Made::tok(self.icx.a(f)))
                 })
             }
         };
@@ -2017,7 +2013,7 @@ impl<'a> FnCx<'a> {
         let (s, z) = (self.int(self.g.opt_some as i128), self.int(0));
         let x = self.opn(Op::EnumGet, xt, &[rv, s, z]);
         let item = Place { base: Base::Val(x, xt), proj: Vec::new(), ty: xt, root: None };
-        let item = self.owned_for(pat, item, true, self.icx.a(f));
+        let item = self.owned_for(pat, item, true, Made::tok(self.icx.a(f)));
         self.bind_pat(pat, item);
         self.block(body);
         self.pop_scope();
@@ -2546,7 +2542,7 @@ impl<'a> FnCx<'a> {
     fn ignored_parts(&mut self, p: u32, sp: &Place) -> Vec<(u32, Place)> {
         let mut out = Vec::new();
         for (k, path) in crate::drops::ignored_parts(self, p, sp.ty).into_iter().enumerate() {
-            self.asked.insert((Point::Bind(p), Owner::Part(k as u32)));
+            self.ledger.decide(Point::Bind(p), Owner::Part(k as u32));
             let mut part = sp.clone();
             for Step { variant, field, ty } in path {
                 part.proj.push(match variant {

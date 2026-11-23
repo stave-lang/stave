@@ -8,8 +8,9 @@
 //!   `check.bounds i n` right before `addr.elem p i`, with `n = slice.len p` or the array length.
 //! - `a[i]` on an array value (SSA): `get a i` / `set a i v`, which trap `Bounds` themselves for a
 //!   dynamic index.
-//! - a constant index ≥ the array length: an unconditional `panic.bounds` (the trap is kept, the
-//!   access is never emitted).
+//! - a constant index ≥ the array length: an unconditional `panic.bounds` (the trap is kept; the
+//!   access and the code after it are lowered into a block nothing reaches, which the lowering's
+//!   post-pass deletes).
 //! - compiler-made element accesses (`for` over an array or slice, drop loops over arrays, the
 //!   array → slice coercion) index below a length the generated code itself compares against.
 //! - a sub-slice `xs[a..b]`: branches to `panic.bounds` unless `b <= n` and `a <= b`, then

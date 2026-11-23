@@ -315,12 +315,13 @@ when that owner ends.
   of one end or exit in another order than their rows, stop the build as a compiler error. So
   does a row the generator never decided: every scheduled drop must have been emitted or left
   out for a stated reason (the owner holds no value there, the type has no drop glue in this
-  instance, the code there cannot run) where the generator lowered that point. A row is one
-  value: a temporary is named by its statement and the last token of the expression whose
-  value it holds (through parentheses; a step of a postfix chain by the step's last token, the
-  item of a `for` iteration by the `for` token, the operand `select` does not pick by the
-  method's name), which both sides compute from the syntax, and each row is consumed by at most
-  one emitted drop. The parts a pattern ignores and the steps of a value's drop glue are each
+  instance) where the generator lowered that point; a statement lowered at each return (an
+  `ensures` clause) does so in every copy. A row is one value: a temporary is named by its
+  statement and the first and last token of the expression whose value it holds (through
+  parentheses; a step of a postfix chain by the chain up to the step's last token, the item of
+  a `for` iteration by the `for` token, the operand `select` does not pick by the method's
+  name), which both sides compute from the syntax, so `&e` and `e` are two values; and each row
+  is consumed by at most one emitted drop. The parts a pattern ignores and the steps of a value's drop glue are each
   computed by one function both sides call. Whether a scheduled drop runs is the owner's init
   bit: one per owner, a temporary included.
 

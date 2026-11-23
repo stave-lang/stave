@@ -6,6 +6,7 @@
 use stave_ir::{CastKind, Op, Operand, PanicKind};
 use stave_syntax::{NodeKind, Term};
 
+use crate::drops::Made;
 use crate::lower_fn::{Base, E, FnCx, Home, Place, Proj, Ty};
 use crate::mono::{InstKey, Req, Resolved};
 use crate::resolve::{DeferKind, Res};
@@ -228,9 +229,9 @@ impl<'a> FnCx<'a> {
     }
 
     /// An rvalue base of a droppable type becomes a statement temporary (so its unmoved parts
-    /// are dropped at the end of the statement). `made`: the token naming the value in the drop
-    /// schedule ([`crate::drops::Owner::Temp`]).
-    fn own_temp(&mut self, p: Place, made: u32) -> Place {
+    /// are dropped at the end of the statement). `made`: the value in the drop schedule
+    /// ([`crate::drops::Owner::Temp`]).
+    fn own_temp(&mut self, p: Place, made: Made) -> Place {
         if let Base::Val(v, t) = p.base
             && p.proj.is_empty()
             && p.root.is_none()
@@ -1076,14 +1077,14 @@ impl<'a> FnCx<'a> {
             Cur::Val(self.expr(prim, if only { want } else { None }))
         };
         let mut p = prim_end + 1;
-        // the token naming the value of the chain so far in the drop schedule: the head's
-        // (through parentheses), then the last token of the last step
+        // the value of the chain so far in the drop schedule: the head's (through parentheses),
+        // then the chain up to the last token of the last step
         let head_key = crate::drops::value_key(&icx, prim);
         for _ in 0..10_000_000 {
             if !self.open() {
                 return E::Never;
             }
-            let rk = if p == prim_end + 1 { head_key } else { p - 1 };
+            let rk = if p == prim_end + 1 { head_key } else { Made::step(&icx, n, p - 1) };
             let t = icx.tk(p);
             if t == Term::Dot as u8 && icx.is(p + 1, Term::Ident) {
                 let seg = p + 1;
@@ -1199,8 +1200,8 @@ impl<'a> FnCx<'a> {
         Some(p)
     }
 
-    /// `rk`: the token naming the receiver's value in the drop schedule.
-    fn field_step(&mut self, recv: E, tok: u32, rk: u32) -> E {
+    /// `rk`: the receiver's value in the drop schedule.
+    fn field_step(&mut self, recv: E, tok: u32, rk: Made) -> E {
         let (index, derefs) = match self.target(tok) {
             Some(Target::Field { index, derefs, .. }) => (*index, *derefs),
             Some(Target::TupleField { index, derefs }) => (*index, *derefs),
@@ -1277,7 +1278,7 @@ impl<'a> FnCx<'a> {
     /// place. Layout (std/soa.stv): one buffer `ptr` of `cap` rows, column k at byte
     /// `cap * (sizes of fields 0..k)`; the products cannot overflow (the buffer holds
     /// `cap * row size` bytes), so they wrap.
-    fn column_step(&mut self, recv: E, tok: u32, index: u32, derefs: u32, rk: u32) -> E {
+    fn column_step(&mut self, recv: E, tok: u32, index: u32, derefs: u32, rk: Made) -> E {
         let Some(p) = self.place_of(recv) else { return E::Never };
         let p = self.own_temp(p, rk);
         let Some(p) = self.derefs(p, derefs) else { return E::Never };
@@ -1372,7 +1373,7 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    fn index_step(&mut self, base: E, ie: Option<u32>, tok: u32, rk: u32) -> E {
+    fn index_step(&mut self, base: E, ie: Option<u32>, tok: u32, rk: Made) -> E {
         let derefs = match self.target(tok) {
             Some(Target::Index { derefs }) => *derefs,
             Some(Target::Slice { derefs }) => {
@@ -1396,8 +1397,7 @@ impl<'a> FnCx<'a> {
             && (k < 0 || k as u128 >= n as u128)
         {
             self.trapping(tok, Op::Panic(PanicKind::Bounds), None, &[]);
-            self.f.b.unreachable();
-            return E::Never;
+            self.after_trap();
         }
         p.proj.push(Proj::Elem(i, et, tok));
         p.ty = et;
@@ -1407,8 +1407,9 @@ impl<'a> FnCx<'a> {
     /// `xs[a..b]` (`xs[a..=b]`: end `b + 1`): the slice place of elements `a..end` of an array
     /// or slice of length `n`, after the tests `end <= n` (inclusive: `b < n`, so `b + 1` cannot
     /// overflow) and `a <= end`, each a branch to `panic.bounds`. Constant operands are tested
-    /// here: a range out of a constant length is an unconditional `panic.bounds`.
-    fn slice_step(&mut self, base: E, ie: Option<u32>, tok: u32, derefs: u32, rk: u32) -> E {
+    /// here: a range out of a constant length is an unconditional `panic.bounds`, and the code
+    /// after it takes the empty slice at the start ([`FnCx::after_trap`]).
+    fn slice_step(&mut self, base: E, ie: Option<u32>, tok: u32, derefs: u32, rk: Made) -> E {
         let Some(ie) = ie else { return self.fail_at(Some(tok), "slice") };
         let Some(p) = self.place_of(base) else { return E::Never };
         let p = self.own_temp(p, rk);
@@ -1438,8 +1439,10 @@ impl<'a> FnCx<'a> {
             || ke.is_some_and(|e| e > i128::from(u64::MAX));
         if out {
             self.trapping(tok, Op::Panic(PanicKind::Bounds), None, &[]);
-            self.f.b.unreachable();
-            return E::Never;
+            self.after_trap();
+            let Some((bp, bt)) = self.addr_t(&p, None) else { return E::Never };
+            let z = self.int(0);
+            return self.sub_slice(bp, bt, elem, z, z);
         }
         let Some((bp, bt)) = self.addr_t(&p, None) else { return E::Never };
         let n = match kn {
@@ -1477,6 +1480,11 @@ impl<'a> FnCx<'a> {
             },
             (None, _) => self.op2(Op::SubWrap, us, end, a),
         };
+        self.sub_slice(bp, bt, elem, a, n)
+    }
+
+    /// The slice place of the `n` elements from `a` on behind pointer `bp` (type `bt`).
+    fn sub_slice(&mut self, bp: Operand, bt: Ty, elem: Ty, a: Operand, n: Operand) -> E {
         let mutable = self.pointee(bt).is_some_and(|x| x.1);
         let st = self.tys.intern(TypeKind::Slice { elem, align: 0 });
         let ept = self.ptr_like(bt, elem);
@@ -1841,9 +1849,8 @@ impl<'a> FnCx<'a> {
         E::V(self.opn(op, ty, &ops), ty)
     }
 
-    /// The receiver after typeck's adjustment; `rk`: the token naming its value in the drop
-    /// schedule.
-    fn receiver(&mut self, recv: E, adj: Adjust, want: Option<Ty>, rk: u32) -> Option<Operand> {
+    /// The receiver after typeck's adjustment; `rk`: its value in the drop schedule.
+    fn receiver(&mut self, recv: E, adj: Adjust, want: Option<Ty>, rk: Made) -> Option<Operand> {
         let p = self.place_of(recv)?;
         let p = if adj.autoref.is_some() { self.own_temp(p, rk) } else { p };
         let p = self.derefs(p, adj.derefs)?;
@@ -1865,7 +1872,7 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    fn method_call(&mut self, n: u32, recv: E, seg: u32, args: &[u32], last: bool, rk: u32) -> E {
+    fn method_call(&mut self, n: u32, recv: E, seg: u32, args: &[u32], last: bool, rk: Made) -> E {
         let _ = last;
         self.cur_tok = seg;
         match self.target(seg).cloned() {
@@ -2062,9 +2069,9 @@ impl<'a> FnCx<'a> {
                     // the operand not selected is a statement temporary, picked without a
                     // branch, named by the method's name (the picked value is the call's)
                     let u = self.opn(Op::Select, rt, &[c, b, a]);
-                    let _ = self.slot_temp(u, rt, seg);
+                    let _ = self.slot_temp(u, rt, Made::tok(seg));
                 } else {
-                    self.no_temp(seg);
+                    self.no_temp(Made::tok(seg));
                 }
                 E::V(r, rt)
             }

@@ -441,7 +441,7 @@ mod tests {
             static_root: false,
             static_item: false,
             stmt: u32::MAX,
-            made: u32::MAX,
+            made: None,
             env: false,
             node,
         };

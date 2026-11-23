@@ -1,0 +1,76 @@
+//~ STDOUT drop_keys_shared_end.stdout
+// Values of one statement whose expressions end at the same token: a reference to a temporary
+// and the temporary (`&mk(2)`, `mk(2)`), the same through parentheses, behind a `match`, a unit
+// variant and a struct literal behind `&`, an auto-referenced receiver. Each value with drop
+// glue is dropped once, at the end of its statement, the last made first.
+import std.io;
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let i = self.id;
+        io.print(f"d{i} ");
+    }
+}
+
+impl D {
+    fn n(&self) -> u32 {
+        return self.id;
+    }
+
+    fn pair(&self) -> D {
+        return D.{ id: self.id + 100 };
+    }
+}
+
+enum E {
+    A,
+    B,
+}
+
+impl Drop for E {
+    fn drop(&mut self) {
+        io.print("dE ");
+    }
+}
+
+impl E {
+    fn k(&self) -> u32 {
+        return 7;
+    }
+}
+
+fn mk(i: u32) -> D {
+    return D.{ id: i };
+}
+
+fn rd(d: &D) -> u32 {
+    return d.id;
+}
+
+fn main() -> i32 {
+    let _ = &mk(2);
+    io.print("|\n");
+    let b = match &mk(5) {
+        r => r.n(),
+    };
+    io.print(f"{b}\n");
+    let e = (&mk(8)).n();
+    io.print(f"{e}\n");
+    let x = match &E.A {
+        v => v.k(),
+    };
+    io.print(f"{x}\n");
+    let _ = &D.{ id: 71 };
+    io.print("|\n");
+    let y = match &mk(74) {
+        r => rd(&r.pair()),
+    };
+    io.print(f"{y}\n");
+    let z = mk(9).n() + rd(&mk(10)) + rd(&(mk(11)));
+    io.print(f"{z}\n");
+    return 0;
+}

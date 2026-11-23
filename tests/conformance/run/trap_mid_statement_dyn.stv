@@ -1,0 +1,47 @@
+//~ EXIT 101
+//~ STDOUT trap_mid_statement.stdout
+//~ STDERR-CONTAINS "panic: Bounds at trap_mid_statement_dyn.stv:37:31 in main.f"
+// `trap_mid_statement_index.stv` with the index known only at run time: the same output.
+import std.io;
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let i = self.id;
+        io.print(f"d{i} ");
+    }
+}
+
+fn mk(i: u32) -> D {
+    return D.{ id: i };
+}
+
+fn rd(d: &D) -> u32 {
+    return d.id;
+}
+
+fn eat3(a: D, n: u32, b: D) -> u32 {
+    return a.id + n + b.id;
+}
+
+fn opt(i: u32) -> Option<u32> {
+    return if i == 0 then Option.None else Option.Some(i);
+}
+
+fn f(k: u32) -> u32 {
+    let small = [1u32, 2u32];
+    let d = mk(1);
+    let x = rd(&mk(2)) + small[k as usize + 6] + rd(&mk(3));
+    let e = mk(4);
+    return x + k + d.id + e.id;
+}
+
+fn main() -> i32 {
+    io.print("before\n");
+    let w = f(0);
+    io.print(f"after {w}\n");
+    return 0;
+}

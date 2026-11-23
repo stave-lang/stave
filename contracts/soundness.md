@@ -200,8 +200,9 @@ the lock-rank and join rules (E1405, E1406) and for the types a body drops.
 
 **Assumptions.** A body's drop schedule (stave-sema `drops`, contracts/lang-details.md
 "Drops") has one row per drop: point and owner, an owner naming one value (a temporary by its
-statement and the last token of the expression whose value it holds, computed from the syntax
-by both sides). The builder of the borrow CFG makes each row
+statement and the first and last token of the expression whose value it holds, computed from
+the syntax by both sides; two values of one statement never share them, and the lowering fails
+the build when two values it makes do). The builder of the borrow CFG makes each row
 together with the drop statement it stands for, in one function, and makes no drop statement
 elsewhere; for a write through a dereference the assignment statement stands for the drop of
 the old value (it uses the pointer, and the lock check reads it as a drop). The lowering emits
@@ -212,8 +213,11 @@ when a drop emitted before already consumed that row, or when the drops of one s
 statement end, or exit are emitted in an order the rows of that point do not have. In the
 other direction, when a body is lowered every row of its schedule in code the CFG reaches must
 have been decided by that function's callers at its point (emitted, or left out because the
-owner holds no value there, the type has no drop glue in the instance, or the lowering found
-the code unreachable): a row never decided fails the build. A `const` has a type without drop
+owner holds no value there or the type of that value has no drop glue in the instance): a row
+never decided fails the build. A statement lowered more than once (an `ensures` clause, at
+each return) is checked per copy, both ways. Code after a trap the lowering knows runs (an
+index out of a constant length) is lowered as after a run-time trap, into a block nothing
+reaches that the post-pass deletes, so no row is excused for it. A `const` has a type without drop
 glue (E0413), so reading one in place makes no owner in either.
 Which parts a moving pattern ignores, in what order, and what a type's drop glue runs, in what
 order, are each one function called by both.
@@ -229,12 +233,8 @@ consumes it drops it; the lowering holds it as an owner over the same interval. 
 then conservative in one direction only: a drop statement for a value that was moved on this
 path does nothing in the code and is at most a use the code does not make.
 
-**Not claimed.** That the code after a statement the lowering proves unreachable (an index out
-of a constant length traps) is compared: it has no code, and its rows are left out. That two
-values of one statement whose expressions end at the same token are told apart (both sides
-name them alike; none is known to have drop glue, and a second drop of one key fails the
-build). Bodies the borrow checker
-does not build (const and `static mut` initializers) have no schedule and are not compared.
+**Not claimed.** Bodies the borrow checker does not build (const and `static mut`
+initializers) have no schedule and are not compared.
 
 **What would break it.** A drop emitted by code that does not ask the schedule (the one
 function refuses a drop nobody asked for). A row added without its statement. A statement the
