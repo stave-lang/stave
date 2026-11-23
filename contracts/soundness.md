@@ -577,8 +577,10 @@ component is a cycle; every member is `trap` (a call-cycle member, or a node of 
 set holds its `Vec.drop`'s cycle `trap`). A member's *reserve* is the most its callees off its
 component can use (another member counted as the 16 bytes its call puts down before that member's
 entry runs) and its own trap stub's 16 bytes. A function *probes* when one of its member nodes
-calls, off its component, a node that is neither a member nor a report entry, or has a call whose
-targets are not known; it probes the largest of its members' reserves: its entry, after the frame, reads one word at most every 60 KiB from the stack
+makes a call other than a direct call of a node with code in its own component or of a report
+entry (a node without code, such as a fn-type table through which an untracked fn-value call
+goes, stands for the call, and its targets count below the caller), or has a call whose targets
+are not known; it probes the largest of its members' reserves: its entry, after the frame, reads one word at most every 60 KiB from the stack
 pointer down to the reserve below the frame's lowest byte, and that byte; each node of such a function adds the
 reserve as a leaf, which the bound and every reserve above it count (repeated until no reserve
 grows). Main's stack and each thread start function's get the bound plus 4 KiB, rounded up to the
@@ -602,9 +604,9 @@ it. **What would break it.** A fn-value call whose real target the call graph mi
 write the flow misses): the bound counts the target it shows, and a bigger frame or a recursion
 behind the real one runs into the guard of a stack the build summary calls bounded. A frame larger
 than the backend reports, and stack use outside frames beyond the 4 KiB margin (signal handlers and
-the report run on the alternate stack). A report deeper than its alternate stack, whose bottom no
-guard protects (the run suite keeps it within half of `runtime.config.ALTSTACK`, the other half
-for the kernel's signal frame). A guard narrower than the probe's stride plus a page. Below a member, an unresolved node counts what is known of it (its frame
+the report run on the alternate stacks). A report deeper than its stack faults in the guard below
+it and ends the process (exit 101, no report line); the run suite keeps it within
+`runtime.config.REPORT_STACK` and the signal handler within half of `runtime.config.ALTSTACK`. A guard narrower than the probe's stride plus a page. Below a member, an unresolved node counts what is known of it (its frame
 and its resolved callees), C code and an unresolved fn-value target count nothing: their frames
 can reach the guard below the member. A function with a member node and an acyclic node below its
 own reserve: the repetition stops after 8 rounds with the reserve it has. A cycle of the bound's

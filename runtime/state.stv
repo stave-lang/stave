@@ -47,8 +47,8 @@ pub struct Block {
     pub origin: u32,
     pub count: u32,
     pub ring: [u32; NRING],
-    // the thread's alternate signal stack, [alt_top - alt_size, alt_top), where the panic report
-    // runs; alt_size 0 while there is none. Main's is written by runtime.panic.install before
+    // the thread's panic-report stack, [alt_top - alt_size, alt_top) (runtime.panic.alt_len);
+    // alt_size 0 while there is none. Main's is written by runtime.panic.install before
     // main, a thread's by runtime.thread.start before the thread exists.
     pub alt_top: usize,
     pub alt_size: usize,

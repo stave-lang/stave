@@ -16,11 +16,17 @@
 //!   with small, guard-sized, and larger frames, on main and on a spawned thread, it ends in its
 //!   own `StackOverflow` report; a trap at the deepest level that still fits prints its own
 //!   report (the report runs on the alternate stack), and one level deeper is `StackOverflow`;
+//! - a cycle through a fn-type table: the table's targets count below its caller, which probes,
+//!   so the overflow is raised in the cycle, never in a `without(trap)` target;
+//! - a report that runs past its stack faults in the guard below it and ends the process at
+//!   once (exit 101, no second report); a thread whose signal stack the kernel refuses fails at
+//!   its start; a report to a pipe without a reader keeps exit 101;
 //! - the thread-block offsets the back ends read are the runtime's;
 //! - a drop cycle of a recursive type has no bound;
 //! - every run-suite program, debug and release, maps every fn value it makes to the call graph
 //!   (no stack is unbounded for an unresolved fn-value call), gets a bound unless it reaches a
-//!   call cycle or a drop cycle, and has a panic report that fits half the alternate stack.
+//!   call cycle or a drop cycle, has a panic report that fits the report stack, and a signal
+//!   handler that fits half the signal stack.
 //!
 //! A leg that cannot run here (no qemu-aarch64, not Linux) builds only, or fails when
 //! `STAVE_REQUIRE_LEGS` lists it.
@@ -46,10 +52,15 @@ fn run_dir() -> PathBuf {
 }
 
 fn build(p: &Path, target: Triple, release: bool) -> Output {
+    build_with(p, &repo(), target, release)
+}
+
+/// [`build`] with the std and runtime of library directory `lib`.
+fn build_with(p: &Path, lib: &Path, target: Triple, release: bool) -> Output {
     let mut o = Options::new(Goal::Build).threads(Some(4));
     o.target = Some(target);
     o.release = release;
-    let out = pipeline::run(p, &Library::in_dir(&repo()), &o).unwrap();
+    let out = pipeline::run(p, &Library::in_dir(lib), &o).unwrap();
     assert!(!out.has_errors(), "{}: diagnostics {:?}", p.display(), out.diagnostics);
     assert!(out.failure.is_none(), "{}: {}", p.display(), out.failure.as_ref().unwrap());
     assert!(out.image.is_some() && out.stack.is_some(), "{}: no image or no stack bound", p.display());
@@ -419,6 +430,208 @@ fn a_trap_at_the_deepest_level_prints_its_report() {
     }
 }
 
+/// A cycle through a fn-type table: `g` is chosen by a value `if`, so its call goes through the
+/// table of `fn(u64) -> u64`, which holds `back` (so the table is in the cycle) and the
+/// `without(trap)` `heavy` (240 KB frame) and `light`. The table stands for `a`'s call: `a` probes
+/// for `heavy`, and the overflow is raised in `a`, never in `heavy`.
+const TABLE_CYCLE: &str = r#"import std.io;
+
+rec fn a(n: u64) -> u64 {
+    let g: fn(u64) -> u64 = if n % 1000u64 == 999u64 then heavy else light;
+    let h = g(n);
+    return back(n + 1u64) +% (h -% h);
+}
+
+rec fn back(n: u64) -> u64 {
+    let keep: fn(u64) -> u64 = back;
+    return a(n);
+}
+
+fn light(n: u64) -> u64 without(trap) {
+    return n;
+}
+
+fn heavy(n: u64) -> u64 without(trap) {
+    let t: [u64; 30000] = [n; 30000];
+    return t[0];
+}
+
+MAIN"#;
+
+#[test]
+fn a_table_in_a_cycle_counts_below_its_caller() {
+    let tmp = TempDir::new("stkf").unwrap();
+    for (place, thread, main) in [("main", 0, ON_MAIN), ("spawn", 1, ON_SPAWN)] {
+        let src = TABLE_CYCLE.replace("MAIN", &main.replace("DOWN", "back(0u64)"));
+        let name = format!("table_{place}");
+        for target in targets() {
+            for release in [false, true] {
+                let what = format!("{name} [{target}, release {release}]");
+                let out = build_src(&tmp, &name, &src, target, release);
+                assert!(probing(&out).contains(&"main.a".to_string()), "{what}: {:?}", probing(&out));
+                let Some(got) = run(&out, target, &name, tmp.path()) else { continue };
+                let err = String::from_utf8_lossy(&got.stderr);
+                let at_a = format!(":3:8 in main.a (thread {thread})\n");
+                let at_b = format!(":9:8 in main.back (thread {thread})\n");
+                assert_eq!(got.exit, 101, "{what}: {err}");
+                assert!(
+                    err.starts_with("panic: StackOverflow at ")
+                        && (err.ends_with(&at_a) || err.ends_with(&at_b))
+                        && err.lines().count() == 1,
+                    "{what}: {err}"
+                );
+            }
+        }
+    }
+}
+
+/// A copy of the shipped library in `tmp`, with `old` replaced by `new` in `file` (relative to
+/// the library directory).
+fn patched_library(tmp: &TempDir, file: &str, edits: &[(&str, &str)]) -> PathBuf {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let p = e.unwrap().path();
+            let dst = to.join(p.file_name().unwrap());
+            if p.is_dir() { copy(&p, &dst) } else { std::fs::copy(&p, &dst).map(|_| ()).unwrap() }
+        }
+    }
+    let lib = tmp.path().join("lib");
+    for d in ["std", "runtime"] {
+        copy(&repo().join(d), &lib.join(d));
+    }
+    let p = lib.join(file);
+    let mut text = std::fs::read_to_string(&p).unwrap();
+    for (old, new) in edits {
+        assert!(text.contains(old), "{file}: {old}");
+        text = text.replacen(old, new, 1);
+    }
+    std::fs::write(&p, text).unwrap();
+    lib
+}
+
+/// A Bounds trap in `pick`.
+const BOUNDS: &str = r#"import std.io;
+
+fn pick(xs: &[u64], i: usize) -> u64 {
+    return xs[i];
+}
+
+fn at() -> u64 {
+    let xs: [u64; 4] = [1u64; 4];
+    let s = &xs[0..4];
+    return pick(s, s.len() + 3);
+}
+
+MAIN"#;
+
+/// The report itself recursing far past its stack (injected into `runtime.panic.head`), for a
+/// Bounds trap and for a stack overflow, on main and on a spawned thread: the report faults in
+/// the guard below its stack and the process ends at once, exit 101, with no second report (the
+/// line was not written yet, so stderr is empty) and never a raw signal.
+#[test]
+fn a_report_past_its_stack_ends_the_process() {
+    let tmp = TempDir::new("stkg").unwrap();
+    let lib = patched_library(
+        &tmp,
+        "runtime/panic.stv",
+        &[
+            (
+                "    l.lit(\"panic: \");\n",
+                "    l.dec(burn(kind as u64 + 100000u64));\n    l.lit(\"panic: \");\n",
+            ),
+            (
+                "fn head(",
+                "rec fn burn(n: u64) -> u64 {\n    let mut t: [u64; 128] = [0u64; 128];\n    \
+                 t[(n % 128u64) as usize] = n;\n    if n == 0u64 {\n        return t[0];\n    }\n    \
+                 return burn(n - 1u64) +% t[1];\n}\n\nfn head(",
+            ),
+        ],
+    );
+    let cases = [
+        ("bounds", BOUNDS.to_string(), "at()"),
+        ("overflow", DOWN.replace("WORDS", "8"), "down(1000000000u64)"),
+    ];
+    for (kind, src, call) in &cases {
+        for (place, main) in [("main", ON_MAIN), ("spawn", ON_SPAWN)] {
+            let src = src.replace("MAIN", &main.replace("DOWN", call));
+            let name = format!("deep_report_{kind}_{place}");
+            let p = tmp.path().join(format!("{name}.stv"));
+            std::fs::write(&p, &src).unwrap();
+            for target in targets() {
+                for release in [false, true] {
+                    let what = format!("{name} [{target}, release {release}]");
+                    let out = build_with(&p, &lib, target, release);
+                    assert!(out.stack.as_ref().unwrap().alt.is_err(), "{what}: the report recurses");
+                    let Some(got) = run(&out, target, &name, tmp.path()) else { continue };
+                    let err = String::from_utf8_lossy(&got.stderr);
+                    assert_eq!((got.exit, err.as_ref()), (101, ""), "{what}");
+                }
+            }
+        }
+    }
+}
+
+/// A thread whose signal stack the kernel refuses (injected: size 0) fails at its start with a
+/// panic, exit 101, before its body runs, so an overflow there can never be a raw SIGSEGV.
+#[test]
+fn a_thread_without_its_signal_stack_fails_at_start() {
+    let tmp = TempDir::new("stks").unwrap();
+    let lib = patched_library(
+        &tmp,
+        "runtime/thread.stv",
+        &[("panic.set_altstack(alt, alt_len)", "panic.set_altstack(alt, 0)")],
+    );
+    let src = DOWN.replace("WORDS", "8").replace("MAIN", &ON_SPAWN.replace("DOWN", "down(10u64)"));
+    let p = tmp.path().join("no_sigstack.stv");
+    std::fs::write(&p, &src).unwrap();
+    for target in targets() {
+        for release in [false, true] {
+            let what = format!("no_sigstack [{target}, release {release}]");
+            let out = build_with(&p, &lib, target, release);
+            let Some(got) = run(&out, target, "no_sigstack", tmp.path()) else { continue };
+            let err = String::from_utf8_lossy(&got.stderr);
+            assert_eq!(got.exit, 101, "{what}: {err}");
+            assert!(err.ends_with("(thread 1)\ncannot install the thread's signal stack\n"), "{what}: {err}");
+            assert!(got.stdout.is_empty(), "{what}: the body ran");
+        }
+    }
+}
+
+/// A trap whose report goes to a pipe without a reader: the write fails, and the exit status
+/// is the panic's 101, never SIGPIPE.
+#[test]
+fn a_report_to_a_closed_pipe_keeps_the_panic_status() {
+    let tmp = TempDir::new("stkq").unwrap();
+    let src = BOUNDS.replace("MAIN", &ON_MAIN.replace("DOWN", "at()"));
+    for target in targets() {
+        for release in [false, true] {
+            let what = format!("closed_pipe [{target}, release {release}]");
+            let out = build_src(&tmp, "closed_pipe", &src, target, release);
+            let Some(how) = runner(target) else { continue };
+            let bin = tmp.path().join("closed_pipe");
+            out.image.as_ref().unwrap().write_file(&bin).unwrap();
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            let mut cmd = match how {
+                Some(r) => {
+                    let mut c = Command::new(r);
+                    c.arg(&bin);
+                    c
+                }
+                None => Command::new(&bin),
+            };
+            let status = cmd
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(writer)
+                .status()
+                .unwrap();
+            assert_eq!(exec::status_code(status), 101, "{what}");
+        }
+    }
+}
+
 /// The back ends read a thread's alternate stack from its block at
 /// `stave_obj::stub::BLOCK_ALT_TOP` and `BLOCK_ALT_SIZE`: the offsets of `runtime.state.Block`'s
 /// `alt_top` and `alt_size` (fields laid out in order, each at its alignment).
@@ -518,8 +731,9 @@ fn run_suite_programs_are_resolved() {
     }
     programs.sort();
     let target = Triple::parse("x86_64-linux").unwrap();
+    let report_room = config_const("REPORT_STACK");
     // the other half holds the kernel's signal frame
-    let report_room = config_const("ALTSTACK") / 2;
+    let signal_room = config_const("ALTSTACK") / 2;
     let mut bad = Vec::new();
     let mut bounded = 0;
     let mut deepest = 0;
@@ -539,6 +753,9 @@ fn run_suite_programs_are_resolved() {
             match r.alt {
                 Ok(a) if a <= report_room => deepest = deepest.max(a),
                 a => bad.push(format!("{} (release {release}): report {a:?}", p.display())),
+            }
+            if !r.signal.is_ok_and(|d| d <= signal_room) {
+                bad.push(format!("{} (release {release}): signal handler {:?}", p.display(), r.signal));
             }
             let all = std::iter::once(r.main).chain(r.threads.iter().map(|t| t.depth));
             for d in all {

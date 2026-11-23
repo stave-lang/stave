@@ -2,7 +2,7 @@
 //
 // A thread runs one fn value `fn()` (a closure: code + environment, contracts/checked-ir.md
 // "Closures") on its own mapping, laid out bottom to top as
-//     [guard: config.GUARD, PROT_NONE][stack][altstack: config.ALTSTACK][record]
+//     [guard: config.GUARD, PROT_NONE][stack][alternate stacks: panic.alt_len][record]
 // where the stack has config.thread_stack(code of the fn value) bytes: the compiler's bytes for
 // threads started with that fn, else `[run] stack`.
 // The record (one page) holds the futex word `tid`, the fn value, the mapping, and the thread's
@@ -79,7 +79,7 @@ fn start(f: fn()) -> usize {
     let w = fn_words(f);
     let guard = round_up(config.GUARD, page);
     let size = round_up(config.thread_stack(w[0]), page);
-    let alt = round_up(config.ALTSTACK, page);
+    let alt = panic.alt_len(page);
     let len = guard + size + alt + page;
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE | os.MAP_STACK;
@@ -89,7 +89,8 @@ fn start(f: fn()) -> usize {
     }
     let base = m as% usize;
     let g = unsafe("the guard pages are part of the fresh mapping and hold no objects") os.mprotect(base, guard, os.PROT_NONE);
-    if g < 0 {
+    let ag = unsafe("[base + guard + size, + alt) is part of the fresh mapping; no object and no thread uses it") panic.alt_guards(base + guard + size, page);
+    if g < 0 || !ag {
         // a thread is never run without its guard
         let u = unsafe("the mapping is fresh: no object and no thread uses it") os.munmap(base, len);
         cannot_create();
@@ -110,8 +111,8 @@ fn start(f: fn()) -> usize {
             env: w[1],
             map: base,
             map_len: len,
-            alt: base + guard + size,
-            alt_len: alt,
+            alt: panic.signal_base(base + guard + size, page),
+            alt_len: round_up(config.ALTSTACK, page),
             entry: e,
             next: 0,
             blk: state.Block.{
@@ -122,8 +123,8 @@ fn start(f: fn()) -> usize {
                 origin: state.NO_SITE,
                 count: 0,
                 ring: [0u32; state.NRING],
-                alt_top: base + guard + size + alt,
-                alt_size: alt,
+                alt_top: panic.report_top(base + guard + size, page),
+                alt_size: round_up(config.REPORT_STACK, page),
             },
         });
     }
@@ -150,6 +151,13 @@ unsafe("th is a live record whose fn value's captures are valid (start's obligat
     errtrace.clear();
     f();
     errtrace.restore(&saved);
+}
+
+// The panic of a thread whose signal stack the kernel refused (kind Assert at the user site that
+// started it, message on the next line).
+fn cannot_install() -> never {
+    let msg = "cannot install the thread's signal stack";
+    panic.abort(unsafe("&str and &[u8] are both (data pointer, byte length)") *(&msg as *const &str as *const &[u8]));
 }
 
 // The panic of a failed thread creation (kind Assert at the user site, message on the next line).
@@ -229,7 +237,11 @@ fn entry(arg: usize) -> usize {
     let th = arg as *const Thread;
     let alt = unsafe("arg is the record start passed to spawn_thread, mapped until join (this fn's obligation)") (*th).alt;
     let alt_len = unsafe("arg is the record start passed to spawn_thread, mapped until join (this fn's obligation)") (*th).alt_len;
-    let ok = unsafe("[alt, alt + alt_len) is this thread's altstack, config.ALTSTACK rounded up, in the mapping start made; used for nothing else, since entry runs once for its record (this fn's obligation); mapped while the thread runs, since join unmaps only after the kernel's exit-time CLEARTID wake") panic.set_altstack(alt, alt_len);
+    let ok = unsafe("[alt, alt + alt_len) is this thread's signal stack, config.ALTSTACK rounded up, with a guard page below it, in the mapping start made; used for nothing else, since entry runs once for its record (this fn's obligation); mapped while the thread runs, since join unmaps only after the kernel's exit-time CLEARTID wake") panic.set_altstack(alt, alt_len);
+    if !ok {
+        // a stack overflow would end the thread by a raw SIGSEGV: fail before the body runs
+        cannot_install();
+    }
     let code = unsafe("arg is the record start passed to spawn_thread, mapped until join (this fn's obligation)") (*th).code;
     let env = unsafe("arg is the record start passed to spawn_thread, mapped until join (this fn's obligation)") (*th).env;
     let w: [usize; 2] = [code, env];

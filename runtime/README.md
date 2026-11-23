@@ -94,12 +94,16 @@ by the prologue, or an overflow can jump the guard. A fn on a call cycle that ca
 off its cycle reads its reserve below its frame at entry every 60 KiB (contracts/intrinsics.md
 "reserve table"), which needs a guard of at least 64 KiB on every stack.
 
-**Alternate stack.** The trap entries above and `abort` run on the thread's alternate signal
-stack: the compiler's entry of each moves the stack pointer to the block's `alt_top` unless it
-is already in that stack or `alt_size` is 0 (contracts/intrinsics.md "Alternate stack"). So a
-trap at any depth reports without stack below the trapping frame; a trap during the report stays
-there and exits in `begin`. `runtime.panic.install` writes main's two words, `runtime.thread.start`
-a thread's, before any user code runs on it.
+**Alternate stacks.** Each thread has, above its stack, a report stack and a signal stack
+(`sigaltstack`), each over a guard page (`runtime.panic.alt_len`). The trap entries above and
+`abort` run on the report stack: the compiler's entry of each moves the stack pointer to the
+block's `alt_top` unless it is already in that stack or `alt_size` is 0 (contracts/intrinsics.md
+"Alternate stack"). So a trap at any depth reports without stack below the trapping frame; a
+trap during the report stays there and exits in `begin`; a fault during the report (one that
+runs past its guard) ends the process in `on_signal` with exit 101. The report blocks SIGPIPE, so
+a write to a closed stderr keeps exit 101. `runtime.panic.install` writes main's two words,
+`runtime.thread.start` a thread's, before any user code runs on it; a thread whose
+`sigaltstack` fails panics in `runtime.thread.entry` before its body.
 
 **Tables** (read-only data; little-endian; addresses from `site_table()`, `pc_table()`, and
 `stack_table()`):

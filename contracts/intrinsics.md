@@ -245,9 +245,9 @@ truth):
   counts them: a call of a report entry counts its return address (16 bytes), a trap stub the
   same.
 - **reserve table** `__stave_reserve_table` (`.rodata`, 8-byte aligned): one `u64` per *probing*
-  function, in function order: one with a node on a cycle of the stack bound's graph that calls,
-  off its cycle, a fn that is neither on a cycle nor a report entry, or a fn value or C code. Its
-  *reserve* is the most stack that what it calls off its cycle can use below its frame (a fn on
+  function, in function order: one with a node on a cycle of the stack bound's graph that makes
+  a call other than a direct call of a fn with code on its own cycle or of a report entry (a call
+  off its cycle, through a fn value or a fn-type table, or of C code). Its *reserve* is the most stack that what it calls off its cycle can use below its frame (a fn on
   another cycle counted as 16 bytes, since it faults in its own entry; a report entry or a trap
   stub as 16, its return address). A fn on a cycle that does not probe needs nothing below its
   frame but the return addresses its own calls write, so the guard catches it in its own code.
@@ -261,17 +261,23 @@ truth):
 
 **Alternate stack.** The panic report entries (`runtime.panic.trap`, `trap_msg`, `trap_err`,
 `abort`, `requires_failed`, `ensures_failed`; `stave_ir::known::reports_on_alt_stack`) run on
-the calling thread's alternate signal stack: their entry, before anything else, reads the
-thread's block (`alt_top` at +160, `alt_size` at +168, `runtime.state.Block`) and, unless the
-stack pointer is already in `(alt_top - alt_size, alt_top]` or `alt_size` is 0, moves it to
-`alt_top` (x86-64: `fs:[0]`, `r10`, `r11`; the return address is copied, so the frame looks
-called from there; AArch64: `tpidr_el0`, `x15`-`x17`). A report entry takes no stack arguments
-(the back ends reject one). A trap while one is reported, and the SIGSEGV handler, are already
-there and stay. The runtime writes the two words before the thread's first user code: main's
-in `runtime.panic.install`, a thread's in `runtime.thread.start` before the clone. The report's
-depth there (twice the deepest report entry or `on_signal`, for a trap during the report) is
-`stave_driver::stack::Report::alt`; the run suite keeps it within half of
-`runtime.config.ALTSTACK`.
+the calling thread's report stack, one of its two alternate stacks (`runtime.panic.alt_len`:
+`[guard page][report: REPORT_STACK][guard page][signal: ALTSTACK]`, the signal one given to
+`sigaltstack`): their entry, before anything else, reads the thread's block (`alt_top` at +160,
+`alt_size` at +168, `runtime.state.Block`: the report stack) and, unless the stack pointer is
+already in `(alt_top - alt_size, alt_top]` or `alt_size` is 0, moves it to `alt_top` (x86-64:
+`fs:[0]`, `r10`, `r11`; the return address is copied, so the frame looks called from there;
+AArch64: `tpidr_el0`, `x15`-`x17`). A report entry takes no stack arguments (the back ends
+reject one). A trap while one is reported is already there and stays; the SIGSEGV handler
+`on_signal` runs on the signal stack and moves there when it reports. A fault while the thread
+reports (its report past the report stack's guard, or any other) runs `on_signal` on the signal
+stack, which ends the process at once with exit 101 and no second report. The runtime writes the
+two words before the thread's first user code: main's in `runtime.panic.install`, a thread's in
+`runtime.thread.start` before the clone; a thread whose `sigaltstack` fails panics before its
+body runs. The report's depth (twice the deepest report entry, for a trap during the report) is
+`stave_driver::stack::Report::alt`, `on_signal`'s `Report::signal`; the run suite keeps them
+within `runtime.config.REPORT_STACK` and half of `runtime.config.ALTSTACK` (the other half for
+the kernel's signal frame).
 
 **Paths fixed by the compiler** (no attributes or lang items exist; these names are the whole
 list):
