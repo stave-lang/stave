@@ -32,24 +32,17 @@ optimizer rules, planned diagnostics); they say so where they do.
 
 ## Known limits
 
-Stave is pre-alpha. The full list, with examples and rewrites, is
-[contracts/known-limits.md](contracts/known-limits.md). It is meant to be complete: a safe program
-that breaks a guarantee, or is rejected for no good reason, and is not listed there is a bug;
-please report it. In short:
+Stave is pre-alpha.
 
-- **Guarantees.** Memory safety is the aim, not a proof: the borrow checker is young, and
-  soundness bugs are expected. "Safe code cannot deadlock" covers ranked locks and thread joins
-  only. Recursion has no computed stack bound: past the configured stack it traps
-  `StackOverflow`. Three rounds of adversarial testing found and fixed 51 ways to get a
-  misbehaving program past `check`; more may remain.
-- **False rejects.** The borrow, lock, effect and recursion checks are coarser than the rules:
-  some valid programs are rejected. Each known case has a rewrite.
-- **Deliberate rules.** Moves go left to right, no partial moves, a temporary ends with its
-  statement, `for` names its borrow.
-- **Code quality.** Nothing is inlined, hoisted or auto-vectorized yet: generated code is slow
-  next to `-O2`.
-- **Targets and tooling.** Linux only, x86-64 and AArch64. No C interop yet. `check` accepts a few
-  programs that `build` cannot. GPU: design only.
+- Memory safety is the aim, not yet a guarantee: the borrow checker is young, and soundness bugs
+  are expected. A safe program that corrupts memory is a compiler bug; please report it.
+- The checker is stricter than the rules need: some valid programs are rejected.
+- Generated code is slow next to `-O2`: nothing is inlined, hoisted out of loops, or vectorized.
+- "Safe code cannot deadlock" covers ranked locks and thread joins only.
+- Linux only. No C interop yet.
+
+The full list, with examples and rewrites, is in
+[contracts/known-limits.md](contracts/known-limits.md).
 
 ## Roadmap
 
