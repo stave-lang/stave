@@ -226,7 +226,9 @@ in place of its field (depth first); of an enum, only the matched variant's payl
 3. With a guard (`S.{ a, b: _ } if p(&a) => ..`): inside the guard the names are read-only
    views of the scrutinee, nothing is moved or dropped; if the guard fails the value is intact
    for the next arm; the move and the drop of `b` happen only when it passes. A guard only
-   reads (E0505), so the value it sees is the value the arm takes.
+   reads (E0505), so the value it sees is the value the arm takes. A guard that would move,
+   write, or `?` is a test in the arm: `3 if eat(o) => a` is `3 => { if eat(o) { a } else {
+   .. } }`, the `else` standing for the later arms.
 4. Nested patterns and payloads: `E.Two(a, _)` drops the second payload at arm entry;
    `W.{ p: P.{ x, y: _ }, q: _ }` drops `p.y`, then `q`. An or-pattern drops what the
    alternative that matched ignores.
@@ -289,6 +291,18 @@ when that owner ends.
   the type's `drop` and the drops of the fields before it run ("Locks and completion waits").
 - **Compound assignment.** `p op= e` drops nothing: every operand of an operator is Copy where
   it is used (§2 Operator traits), so the old value of `p` has no drop glue.
+- **Assignment targets.** The target of `=` and of every `op=` is a place rooted in a local, a
+  `static`, or a dereference (`x.f`, `a[i]`, `S0.n`, `*r`, `f().x` with `f` returning `&mut S`).
+  A target rooted in a temporary (`mk().a`, `[1u32, 2u32][0]`, `S.{ a: 1u32 }.a`, `arr()[0]`,
+  `(if c then a else b).f`) or in a `const` (`C.a`, `C`) is E0503 case `temporary`, with or
+  without drop glue: the statement drops the value, so the write would be lost. Bind it with
+  `let mut t = mk();` first. A `&mut` of a temporary is a borrow, not a target: `mk().set(1)`
+  (a `&mut self` call), `f(&mut arr()[1])`, `*&mut arr()[0] = 5` write through the reference
+  into the temporary, which the statement then drops.
+- **Consts.** A `const` is a new copy of its value at each use, so its type has no drop glue
+  (E0413 case `drop`, at the declaration): a destructor would run at each use of the name, on a
+  value no binding owns. One value with a destructor is a `static` (never dropped); a new one
+  at each use is a fn call (`fn k() -> Q { return Q.{ n: 1 }; }`).
 - **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
   made first, and only if the operand that makes it ran (the right side of `&&` / `||`). These
   are statements of their own for this rule: the condition of an `if` or `while` (each
@@ -329,12 +343,17 @@ when that owner ends.
   the move check, the lock-rank and join rules read exactly the scheduled drops; the code
   generator asks the schedule for every drop it emits, and a drop without a row, or the drops
   of one end or exit in another order than their rows, stop the build as a compiler error. So
-  does a row the generator never decided: every scheduled drop of a local, of an overwritten
-  value, and of a part a pattern ignores must have been emitted or left out for a stated
-  reason (the owner holds no value there, the type has no drop glue in this instance) where the
-  generator lowered that point. Temporaries are compared in the first direction only. The parts a pattern ignores and the steps of a value's drop glue
-  are each computed by one function both sides call. Whether a scheduled drop runs is the
-  owner's init bit: one per owner, a temporary included.
+  does a row the generator never decided: every scheduled drop must have been emitted or left
+  out for a stated reason (the owner holds no value there, the type has no drop glue in this
+  instance) where the generator lowered that point; a statement lowered at each return (an
+  `ensures` clause) does so in every copy. A row is one value: a temporary is named by its
+  statement and the first and last token of the expression whose value it holds (through
+  parentheses; a step of a postfix chain by the chain up to the step's last token, the item of
+  a `for` iteration by the `for` token, the operand `select` does not pick by the method's
+  name), which both sides compute from the syntax, so `&e` and `e` are two values; and each row
+  is consumed by at most one emitted drop. The parts a pattern ignores and the steps of a value's drop glue are each
+  computed by one function both sides call. Whether a scheduled drop runs is the owner's init
+  bit: one per owner, a temporary included.
 
 ## §3 Temporaries end with their statement
 
@@ -349,7 +368,7 @@ whatever holds it: a `let` (`let r = &f();`), an assignment, a field of a litera
 mk().first();`), a binding of a `match` over `&mk()`, a value `if` / `match`. Write `let t =
 f(); let r = &t;`. A branch of a value `if` and an arm of a value `match` are statements, so
 `ok(if c then &f() else &x)` is E0501 too: bind `let t = f();` before the `if`. There is no exception for constants: `&4u32`, `&[1, 2, 3]`, `&S.{ a: 1 }`,
-`&()`, `&C` of a `const` item, `&size_of::<T>()`, and a variant without payload make a temporary
+`&()`, `&C` of a `const` item (no drop glue, "Drops"), `&size_of::<T>()`, and a variant without payload make a temporary
 at each evaluation, as `&f()` does; data that outlives the statement is a local or a `static`. A
 string literal is no temporary: it is a `&str` to static data. A `static` is a place.
 

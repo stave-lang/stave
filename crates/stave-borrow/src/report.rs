@@ -366,6 +366,9 @@ pub fn diagnostics(
                     MoveOut::Behind => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
                 }
             }
+            Finding::TempWrite { span, text } => {
+                out.extend(mk("E0503", Some("temporary"), &[("place", &text)], span, &[]));
+            }
             Finding::GuardEffect { span, what } => {
                 let (case, place) = match what {
                     GuardEffect::Move(p) => ("move", Some(p)),
@@ -441,7 +444,9 @@ mod tests {
             end: None,
             guard: false,
             static_root: false,
+            static_item: false,
             stmt: u32::MAX,
+            made: None,
             env: false,
             node,
         };
@@ -452,6 +457,7 @@ mod tests {
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
             guard_effects: Vec::new(),
+            temp_writes: Vec::new(),
             operand_moves: Vec::new(),
             ret: RetCheck::None,
             declared: Vec::new(),

@@ -275,7 +275,8 @@ b2():
   slice, or an array behind a reference or in a `slot`) is `check.bounds i n` immediately before
   `addr.elem p i` (`n` = `slice.len p`, or the array length as a constant); `a[i]` on an array SSA
   value is `get`/`set`, which check a dynamic index themselves. A constant index ≥ a constant array
-  length is `panic.bounds ()` + `unreachable` (the trap is kept; sub-slices fold the same way).
+  length is `panic.bounds ()` + `unreachable` (the trap is kept; sub-slices fold the same way;
+  the code after it is lowered into a block nothing reaches, which the post-pass deletes).
   One pass after lowering removes the checks that have a proof (constant index < length, a
   dominating check on the same index and length, a dominating `lt i n` branch,
   and `LenEq`/`Offset`: `i + k < n` derived from dominating int compares (signed values read

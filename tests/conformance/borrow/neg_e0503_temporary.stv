@@ -1,0 +1,56 @@
+// E0503 case `temporary`: the target of `=` or of a compound `op=` is a place rooted in a local,
+// a `static`, or a dereference. A target rooted in a temporary or a `const` is rejected, with
+// or without drop glue: the statement drops the value, so the write would be lost.
+import std.io;
+
+struct S {
+    pub a: u32,
+}
+
+struct M {
+    pub id: u32,
+}
+
+impl Drop for M {
+    fn drop(&mut self) {
+        let i = self.id;
+        io.print(f"dropM{i}\n");
+    }
+}
+
+const C: S = S.{ a: 1 };
+const D: u32 = 3;
+
+fn arr() -> [u32; 2] {
+    return [1, 2];
+}
+
+fn mk(i: u32) -> M {
+    return M.{ id: i };
+}
+
+fn marr() -> [M; 2] {
+    return [mk(1), mk(2)];
+}
+
+fn pair() -> (u32, M) {
+    return (1, mk(3));
+}
+
+fn main() -> i32 {
+    let c = true;
+    let s1 = S.{ a: 1 };
+    let s2 = S.{ a: 2 };
+    [1u32, 2u32][0] = 5; //~ ERROR E0503
+    S.{ a: 1 }.a = 2; //~ ERROR E0503
+    C.a = 5; //~ ERROR E0503
+    D = 4; //~ ERROR E0503
+    arr()[0] = 7; //~ ERROR E0503
+    arr()[1] += 1; //~ ERROR E0503
+    (if c then s1 else s2).a = 9; //~ ERROR E0503
+    mk(1).id = 5; //~ ERROR E0503
+    (mk(2)).id -= 1; //~ ERROR E0503
+    marr()[1] = mk(9); //~ ERROR E0503
+    pair().0 = 3; //~ ERROR E0503
+    return 0;
+}
