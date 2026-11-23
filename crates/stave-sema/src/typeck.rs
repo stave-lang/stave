@@ -860,8 +860,9 @@ fn frame_of<I: Interner + ?Sized>(
 /// one a generic fn instantiates), once per instance, at the generic fn, naming the instance:
 /// E0911 case `instance` for a value past [`crate::consteval::MAX_VALUE_BYTES`], case
 /// `overflow` for one whose size does not fit in a `u64`, case `frame` for a frame sum past
-/// [`crate::consteval::MAX_FRAME_BYTES`]. A fn without generic args is checked by
-/// [`Ck::value_sizes`].
+/// [`crate::consteval::MAX_FRAME_BYTES`]; then case `overflow` / `instance-layout` for a
+/// [`layout_queries`] type the instance gives no layout. A fn without generic args is checked
+/// by [`Ck::value_sizes`] and at each call.
 fn instance_sizes(
     prog: &Program,
     sigs: &Sigs,
@@ -878,7 +879,10 @@ fn instance_sizes(
             continue;
         }
         let Some(b) = body_of.get(&inst.decl) else { continue };
-        if !b.held.iter().any(|&(_, t)| ov.has_params(t)) && !b.temps.iter().any(|&t| ov.has_params(t)) {
+        if !b.held.iter().any(|&(_, t)| ov.has_params(t))
+            && !b.temps.iter().any(|&t| ov.has_params(t))
+            && !layout_queries(b).any(|t| ov.has_params(t))
+        {
             continue;
         }
         let (first, sum) = frame_of(&mut ov, sigs, b, &inst.args);
@@ -911,11 +915,41 @@ fn instance_sizes(
             None if sum > crate::consteval::MAX_FRAME_BYTES => {
                 mk("E0911", Some("frame"), &[("fn", &name), ("bytes", &sum.to_string())], node.span, &[])
             }
-            None => None,
+            None => {
+                let queried: Vec<TypeId> = layout_queries(b).filter(|&t| ov.has_params(t)).collect();
+                let missing = queried.into_iter().find_map(|t| {
+                    let it = ov.subst(t, &inst.args, None);
+                    if ov.has_params(it) || ov.has_error(it) {
+                        return None;
+                    }
+                    crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: &mut ov, sigs }, it)
+                        .err()
+                        .map(|e| (it, e))
+                });
+                missing.and_then(|(it, e)| {
+                    let tn = types::display(&ov, &names, it);
+                    let case = match e {
+                        crate::traits::NoLayout::Overflow => "overflow",
+                        crate::traits::NoLayout::Unknown => "instance-layout",
+                    };
+                    mk("E0911", Some(case), &[("type", &tn), ("fn", &name)], node.span, &[])
+                })
+            }
         };
         out.extend(d);
     }
     out
+}
+
+/// The types whose layout lowering reads without holding a value of them: the type of each
+/// `size_of` / `align_of` and the row type of each `std.soa` row built-in (std-only, its row
+/// type a param). One with a param is checked per instance ([`instance_sizes`]), a concrete
+/// `size_of` / `align_of` type at the call.
+fn layout_queries(b: &TypedBody) -> impl Iterator<Item = TypeId> + '_ {
+    b.targets.iter().filter_map(|(_, t)| match t {
+        Target::SizeOf { ty, .. } | Target::SoaRow { ty, .. } => Some(*ty),
+        _ => None,
+    })
 }
 
 fn empty_body(j: Job) -> TypedBody {

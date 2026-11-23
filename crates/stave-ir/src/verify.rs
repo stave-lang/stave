@@ -769,6 +769,7 @@ impl<'a> FnVerifier<'a> {
                     None => match (self.operand_cls(b, args[0]), self.operand_cls(b, args[1])) {
                         (None, None) => Ok(()),
                         (Some(Cls::Float(x)), Some(Cls::Float(y))) if x == y => Ok(()),
+                        (Some(Cls::Fn), Some(Cls::Fn)) if matches!(op, Op::Eq | Op::Ne) => Ok(()),
                         _ => Err("compare of mismatched constants".into()),
                     },
                 }
@@ -1082,6 +1083,23 @@ impl<'a> FnVerifier<'a> {
                 let g = self.m.func(fi).ok_or("callee out of range")?;
                 if ty != g.ret {
                     return Err("call result type differs from the callee's return type".into());
+                }
+                if g.variadic && args.len() > g.params.len() + 1 {
+                    let (fixed, extra) = args[1..].split_at(g.params.len());
+                    self.check_args(b, fixed, &g.params)?;
+                    for (k, &o) in extra.iter().enumerate() {
+                        // the C-passable variadic args (E0813); an int constant is typed by context
+                        let ok = match self.operand_cls(b, o) {
+                            None => matches!(o, Operand::Const(_)),
+                            Some(Cls::Int(it)) => it.bits == 32 || it.bits == 64,
+                            Some(c) => matches!(c, Cls::Float(FloatBits::F64) | Cls::Ptr),
+                        };
+                        if !ok {
+                            let at = g.params.len() + k;
+                            return Err(format!("variadic argument {at}: not a C variadic type"));
+                        }
+                    }
+                    return Ok(());
                 }
                 self.check_args(b, &args[1..], &g.params)
             }

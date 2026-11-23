@@ -733,6 +733,9 @@ pub struct Func {
     /// The link symbol of an `extern "C"` import or export: its fn name, unmangled (sema
     /// rejects clashes and reserved names, E0812). `None` for Stave fns, named by [`crate::link`].
     pub symbol: Option<String>,
+    /// An `extern "C"` import declared with `...`: a direct call passes C variadic args after
+    /// `params` (contracts/checked-ir.md `call`).
+    pub variadic: bool,
     /// The compiler-known item this function is an instance of (the front end resolved it in a
     /// built-in package); not printed. Stages find known functions by it, never by `path`.
     pub known: Option<crate::Known>,
@@ -839,6 +842,7 @@ impl Module {
             body: None,
             name_site: Site::NONE,
             symbol: None,
+            variadic: false,
             known: None,
         });
         id

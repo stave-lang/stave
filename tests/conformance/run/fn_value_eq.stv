@@ -1,0 +1,67 @@
+//~ STDOUT fn_value_eq.stdout
+//~ EXIT 0
+// `==` / `!=` on fn values compare code and environment: fn items, generic instances, and
+// methods by identity, whether both sides are known at compile time, one is, or neither; a
+// closure equals itself and differs from another closure.
+import std.io;
+
+struct S {
+    x: u32,
+}
+
+impl S {
+    fn get(&self) -> u32 {
+        return self.x;
+    }
+
+    fn two(&self) -> u32 {
+        return 2;
+    }
+}
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn same(a: fn(), b: fn()) -> bool {
+    return a == b;
+}
+
+fn pick(b: bool) -> fn() {
+    return if b then nop else noisy;
+}
+
+fn main() -> i32 {
+    let f: fn() = nop;
+    let g: fn() = noisy;
+    let a = f == g;
+    let b = f != g;
+    let c = nop == nop;
+    let d = nop != noisy;
+    let h: fn(u32) -> u32 = id::<u32>;
+    let k: fn(u32) -> u32 = id::<u32>;
+    let e = h == k;
+    let m: fn(&S) -> u32 = S.get;
+    let n: fn(&S) -> u32 = S.two;
+    let mn = m == n;
+    io.print(f"{a} {b} {c} {d} {e} {mn}\n");
+    let p = pick(true);
+    let pf = p == f;
+    let pg = p == noisy;
+    let s1 = same(f, g);
+    let s2 = same(f, nop);
+    io.print(f"{pf} {pg} {s1} {s2}\n");
+    let q: u32 = 3;
+    let c1 = fn() -> u32 { return q; };
+    let c2 = fn() -> u32 { return q + 1; };
+    let x1 = c1 == c1;
+    let x2 = c1 == c2;
+    io.print(f"{x1} {x2}\n");
+    return 0;
+}

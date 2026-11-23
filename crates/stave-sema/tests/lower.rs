@@ -266,6 +266,19 @@ fn std_and_runtime_lower_and_verify_on_both_arches() {
     }
 }
 
+/// Calls of a variadic `extern "C"` import pass their C variadic args after the fixed ones; the
+/// import is marked variadic and the module verifies (linking it is left to the backends).
+#[test]
+fn variadic_import_calls_lower_and_verify() {
+    let p = repo().join("tests/conformance/types/ffi_variadic_ok.stv");
+    for t in ["x86_64-linux", "aarch64-linux"] {
+        let m = lowered(&p, t, Mode::DebugAll, None);
+        let printf = m.funcs.iter().find(|f| f.symbol.as_deref() == Some("printf"));
+        assert!(printf.is_some_and(|f| f.variadic && f.body.is_none() && f.params.len() == 1), "{t}");
+        assert!(m.funcs.iter().filter(|f| f.variadic).count() == 1, "{t}");
+    }
+}
+
 /// A golden for the construct table and SSA rule on a small fn (contracts/checked-ir.md).
 #[test]
 fn checked_ir_of_small_fns() {
