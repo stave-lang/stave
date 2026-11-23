@@ -1,0 +1,50 @@
+//~ CHECK-ONLY
+// `size_of` / `align_of` of a type with a param is checked per instance: an instance whose
+// type has no size in 64 bits (E0911 `overflow`) or is unsized (E0911 `instance-layout`) is
+// rejected at the generic fn, naming it; an instance with a layout passes.
+struct W<const N: usize> {
+    a: [u64; N],
+}
+
+struct S<const N: usize> {
+    x: u32,
+}
+
+impl<const N: usize> S<N> {
+    fn bytes(&self) -> usize { //~ ERROR E0911
+        return size_of::<[u64; N]>();
+    }
+}
+
+fn sz<const N: usize>() -> usize { //~ ERROR E0911
+    return size_of::<[u64; N]>();
+}
+
+fn al<const N: usize>() -> usize { //~ ERROR E0911
+    return align_of::<W<N>>();
+}
+
+fn elems<T>() -> usize { //~ ERROR E0911
+    return size_of::<[T; 4611686018427387904]>();
+}
+
+fn any<T>() -> usize { //~ ERROR E0911
+    return size_of::<T>();
+}
+
+fn ok<const N: usize>() -> usize {
+    return size_of::<[u8; N]>();
+}
+
+fn main() -> i32 {
+    let a = sz::<4611686018427387904>();
+    let b = sz::<4>();
+    let c = al::<2305843009213693952>();
+    let d = elems::<u64>();
+    let e = any::<str>();
+    let f = any::<u32>();
+    let s = S::<2305843009213693952>.{ x: 1 };
+    let g = s.bytes();
+    let h = ok::<1099511627776>();
+    return 0;
+}

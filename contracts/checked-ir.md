@@ -100,7 +100,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `mem.prefetch_read_l1` … `mem.prefetch_write_nta` | `p i` | the eight prefetch hints (simd-ops.md "Memory hints") of the address `p + i * size_of(pointee)` (wrapping); `p` a thin pointer (`slice.ptr` of a slice, or the raw pointer with `i = 0`); no access, never traps |
 | `mem.store_stream` / `mem.fence_stream` | `p v` / — | `store` with a non-temporal hint (`v` a lane type or a vector) / orders the streaming stores before it |
 | `fn.make` | `@f env` | fn value `(code, environment)` of closure body `@f` (see Closures) |
-| `call` / `call.ind` | `@f args..` / `f args..` | direct / fn-value call (`call.ind` also passes the value's environment, see Closures) |
+| `call` / `call.ind` | `@f args..` / `f args..` | direct / fn-value call (`call.ind` also passes the value's environment, see Closures); a direct call of an `extern "C"` import declared with `...` passes C variadic args after its params: `i32 u32 i64 u64 isize usize f64` values, thin raw pointers, or int constants |
 | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
 | `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap panic.unsupported_cpu panic.deadlock panic.contract` (lowering emits no `panic.contract`: a false clause calls the runtime, see Contracts) |
 

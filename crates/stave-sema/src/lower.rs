@@ -1144,6 +1144,10 @@ fn assemble(
             Job::Inst(k) => c_symbol(prog, sigs, k.decl),
             Job::Glue(_) => None,
         };
+        let variadic = match job {
+            Job::Inst(k) => sigs.fn_sig(k.decl).is_some_and(|s| s.variadic),
+            Job::Glue(_) => false,
+        };
         let known = match job {
             Job::Inst(k) => prog.known.of(k.decl),
             Job::Glue(_) => None,
@@ -1313,6 +1317,7 @@ fn assemble(
                 body,
                 name_site,
                 symbol: if f.closure.is_some() { None } else { symbol.clone() },
+                variadic: variadic && f.closure.is_none(),
                 known: if f.closure.is_some() { None } else { known },
                 alt_stack: f.closure.is_none() && known.is_some_and(stave_ir::known::reports_on_alt_stack),
             });
