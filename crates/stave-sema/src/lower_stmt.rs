@@ -54,7 +54,7 @@ impl<'a> crate::drops::PatCx<'a> for FnCx<'a> {
 
     fn drop_impl(&mut self, t: TypeId) -> bool {
         let w = self.g.world();
-        crate::mono::drop_method(&w, &mut self.tys, t).is_some()
+        crate::mono::drop_impl(&w, &mut self.tys, t)
     }
 
     /// The answer of the definition, the same for every instance. An instance may make a moved
@@ -1554,6 +1554,11 @@ impl<'a> FnCx<'a> {
                 let n = self.int(len as i128);
                 let z = self.int(0);
                 if !self.needs_drop(elem) {
+                    // no glue in this instance: the array and each iteration's item, values the
+                    // schedule of a generic definition may have, get no temporary
+                    let icx = self.icx;
+                    self.no_temp(crate::drops::value_key(&icx, iter));
+                    self.no_temp(Made::tok(icx.a(f)));
                     self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
                     return;
                 }
@@ -2574,7 +2579,7 @@ impl<'a> FnCx<'a> {
         }
         let Shape::Parts { ty, mode, fields, .. } = self.pat_shape(p, t, Mode::Move) else { return false };
         let w = self.g.world();
-        if mode != Mode::Move || crate::mono::drop_method(&w, &mut self.tys, ty).is_some() {
+        if mode != Mode::Move || crate::mono::drop_impl(&w, &mut self.tys, ty) {
             return false;
         }
         let mut empty = true;

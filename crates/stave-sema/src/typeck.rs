@@ -1695,7 +1695,7 @@ impl<'a> Ck<'a> {
             if ty != ids::ERROR
                 && !self.tys.has_error(ty)
                 && !crate::kinds::is_view_concrete(self.prog, &self.tys, ty)
-                && crate::mono::needs_drop(&self.w, &mut self.tys, ty, &mut FxHashMap::default())
+                && crate::mono::needs_drop(&self.w, &mut self.tys, ty, &[], &mut FxHashMap::default())
             {
                 let name = self.prog.strings.get(decl.name).to_string();
                 let tn = self.show(ty);

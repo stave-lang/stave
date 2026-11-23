@@ -16,7 +16,7 @@ use rustc_hash::FxHashMap;
 use stave_sema::sigs::{FnSig, GenericParam, Sigs};
 use stave_sema::traits::World;
 use stave_sema::types::{GArg, Interner, Overlay, TypeId, TypeKind, TypeTable};
-use stave_sema::{DeclId, Program};
+use stave_sema::Program;
 
 /// How a dereference reaches its pointee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -81,7 +81,6 @@ pub struct Tys<'a> {
     /// Answers for canonical types, shared by the non-generic bodies a thread checks in one run.
     shared: Memo,
     share: Option<u64>,
-    drop_impls: &'a [DeclId],
     /// The last Copy and drop-glue answers, by the low bits of the type id: the builder asks for
     /// every operand and temporary, and a body uses a handful of types.
     hot_copy: [(TypeId, bool); HOT],
@@ -122,7 +121,6 @@ impl<'a> Tys<'a> {
         env: &'a [GenericParam],
         run: u64,
     ) -> Tys<'a> {
-        let drop_impls = sigs.impls_by_trait.get(&sigs.lang.drop).map_or(&[][..], |v| &v[..]);
         let share = env.is_empty().then_some(run);
         let shared = match share {
             Some(r) => SHARED.with(|c| {
@@ -139,7 +137,6 @@ impl<'a> Tys<'a> {
             local: Memo::default(),
             shared,
             share,
-            drop_impls,
             hot_copy: [(TypeId::NONE, false); HOT],
             hot_drop: [(TypeId::NONE, false); HOT],
         }
@@ -327,8 +324,8 @@ impl<'a> Tys<'a> {
         b
     }
 
-    /// Whether dropping a value of `t` runs code (a `Drop` impl inside, not behind a pointer); a
-    /// generic param that is not Copy may.
+    /// Whether dropping a value of `t` runs code ([`stave_sema::mono::needs_drop`] under the
+    /// body's generic params: exact for a concrete type, "some instance may" otherwise).
     pub fn needs_drop(&mut self, t: TypeId) -> bool {
         if self.is_unknown(t) {
             return false;
@@ -337,61 +334,20 @@ impl<'a> Tys<'a> {
         if self.hot_drop[h].0 == t {
             return self.hot_drop[h].1;
         }
-        let r = self.needs_drop_d(t, 0);
+        let w = World { prog: self.prog, sigs: self.sigs };
+        let env = self.env;
+        let mut memo = std::mem::take(&mut self.memo(t).drop);
+        let r = stave_sema::mono::needs_drop(&w, &mut self.ov, t, env, &mut memo);
+        self.memo(t).drop = memo;
         self.hot_drop[h] = (t, r);
         r
     }
 
-    fn needs_drop_d(&mut self, t: TypeId, depth: u32) -> bool {
-        if self.is_unknown(t) {
-            return false;
-        }
-        // Unreachable for a checked type (E0005 case `type`); past it a drop is assumed, so a
-        // borrow the value may hold stays live to its scope end.
-        if depth >= stave_sema::typedepth::MAX_TYPE_DEPTH {
-            return true;
-        }
-        if let Some(&b) = self.memo(t).drop.get(&t) {
-            return b;
-        }
-        self.memo(t).drop.insert(t, false);
-        let r = match self.kind(t) {
-            TypeKind::Adt { def, args } => {
-                let has_impl = self.drop_impls.iter().any(|&i| {
-                    self.sigs.impl_def(i).is_some_and(|d| d.head == Some(stave_sema::TypeHead::Adt(def)))
-                });
-                has_impl || {
-                    let fields: Vec<TypeId> = self
-                        .sigs
-                        .adt(def)
-                        .map(|a| a.variants.iter().flat_map(|v| v.fields.iter().map(|f| f.ty)).collect())
-                        .unwrap_or_default();
-                    fields.into_iter().any(|f| {
-                        let ft = self.ov.subst(f, &args, None);
-                        self.needs_drop_d(ft, depth + 1)
-                    })
-                }
-            }
-            TypeKind::Tuple(ts) => ts.iter().any(|&x| self.needs_drop_d(x, depth + 1)),
-            TypeKind::Array { elem, .. } => self.needs_drop_d(elem, depth + 1),
-            TypeKind::Param(_) => !self.is_copy(t),
-            _ => false,
-        };
-        self.memo(t).drop.insert(t, r);
-        r
-    }
-
-    /// Whether `t` is an ADT with an `impl Drop` of its own (not only drop glue of its fields),
-    /// declared in the ADT's package (another package's is E0419 and drops nothing).
+    /// Whether `t` is an ADT with an `impl Drop` of its own (not only drop glue of its fields):
+    /// [`stave_sema::mono::drop_impl`].
     pub fn has_drop_impl(&mut self, t: TypeId) -> bool {
-        let TypeKind::Adt { def, .. } = self.kind(t) else { return false };
-        let prog = self.prog;
-        let package_of =
-            |d: stave_sema::DeclId| prog.decl(d).and_then(|x| prog.module(x.module)).map(|m| m.package);
-        self.drop_impls.iter().any(|&i| {
-            self.sigs.impl_def(i).is_some_and(|d| d.head == Some(stave_sema::TypeHead::Adt(def)))
-                && package_of(i) == package_of(def)
-        })
+        let w = World { prog: self.prog, sigs: self.sigs };
+        stave_sema::mono::drop_impl(&w, &mut self.ov, t)
     }
 
     /// The pointee of a reference or raw pointer.

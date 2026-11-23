@@ -1,0 +1,77 @@
+//~ ARGS --release
+//~ STDOUT drop_glue_per_instance.stdout
+// `drop_glue_per_instance.stv` in a release build.
+import std.io;
+
+struct G<T> {
+    pub x: T,
+}
+
+impl Copy for G<u32> {}
+
+impl Drop for G<u64> {
+    fn drop(&mut self) {
+        io.print("dG64 ");
+    }
+}
+
+struct P<const N: usize> {
+    pub x: u32,
+}
+
+impl Copy for P<1> {}
+
+impl Drop for P<2> {
+    fn drop(&mut self) {
+        io.print("dP2 ");
+    }
+}
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let i = self.id;
+        io.print(f"d{i} ");
+    }
+}
+
+fn mkg(v: u32) -> G<u32> {
+    return G.{ x: v };
+}
+
+fn count<T>(a: T, b: T) -> u32 {
+    let mut n = 0u32;
+    for _ in [a, b] {
+        n += 1;
+    }
+    return n;
+}
+
+fn first<T>(a: T, b: T) -> u32 {
+    let mut n = 0u32;
+    for x in [a, b] {
+        n += 1;
+        break;
+    }
+    return n;
+}
+
+fn main() -> i32 {
+    let a = G.{ x: 1u32 };
+    let n = mkg(2).x + G.{ x: 3u32 }.x;
+    let p = P::<1>.{ x: 4 };
+    io.print(f"{a.x} {n} {p.x}\n");
+    let c = count(3u32, 4u32) + first(5u32, 6u32);
+    io.print(f"{c}\n");
+    let d = count(D.{ id: 7 }, D.{ id: 8 });
+    io.print(f"{d}\n");
+    let e = first(D.{ id: 9 }, D.{ id: 10 });
+    io.print(f"{e}\n");
+    let b = G.{ x: 5u64 };
+    let q = P::<2>.{ x: 6 };
+    io.print(f"{b.x} {q.x}\n");
+    return 0;
+}

@@ -655,7 +655,7 @@ impl<'a> FnCx<'a> {
             return false;
         }
         let w = self.g.world();
-        crate::mono::needs_drop(&w, &mut self.tys, t, &mut self.drop_memo)
+        crate::mono::needs_drop(&w, &mut self.tys, t, &[], &mut self.drop_memo)
     }
 
     /// Whether a by-value use of a place of type `t` copies it (else it moves the value out).

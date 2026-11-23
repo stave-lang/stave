@@ -445,7 +445,7 @@ impl Cx<'_> {
             return (self.low[n as usize], Some(n));
         }
         let world = World { prog: self.prog, sigs: &self.tc.sigs };
-        if !crate::mono::needs_drop(&world, w.tycx, t, &mut w.drops) {
+        if !crate::mono::needs_drop(&world, w.tycx, t, &[], &mut w.drops) {
             return (NONE, None);
         }
         if depth > crate::typedepth::MAX_TYPE_DEPTH {
@@ -493,7 +493,7 @@ impl Cx<'_> {
         let mut seen: FxHashSet<TypeId> = FxHashSet::default();
         let mut work = vec![t];
         while let Some(t) = work.pop() {
-            if !seen.insert(t) || !crate::mono::needs_drop(&world, w.tycx, t, &mut w.drops) {
+            if !seen.insert(t) || !crate::mono::needs_drop(&world, w.tycx, t, &[], &mut w.drops) {
                 continue;
             }
             let g = crate::drops::glue(&world, w.tycx, t);

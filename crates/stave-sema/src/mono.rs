@@ -45,7 +45,7 @@ use crate::decls::{DeclFlags, DeclKind};
 use crate::ids::{DeclId, Sym};
 use crate::itemcx::{Brackets, ItemCx};
 use crate::package::PackageKind;
-use crate::sigs::{Sigs, TraitRef};
+use crate::sigs::{GenericParam, Sigs, TraitRef};
 use crate::traits::World;
 use crate::typeck::{Typeck, TypedBody};
 use crate::types::{ConstArg, GArg, Interner, Overlay, TypeId, TypeKind, TypeTable};
@@ -361,12 +361,41 @@ pub(crate) fn resolve_trait_method<I: Interner + ?Sized>(
 /// The `Drop.drop` impl method instance of `t`, if `t` implements `Drop`.
 pub(crate) fn drop_method<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> Option<InstKey> {
     let drop = w.sigs.lang.drop;
-    if drop.is_none() || !matches!(cx.kind(t), TypeKind::Adt { .. }) {
+    let TypeKind::Adt { def, .. } = *cx.kind(t) else { return None };
+    if drop.is_none() {
         return None;
     }
     let (imp, args) = w.find_impl(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[], 0)?;
+    if !own_package(w, imp, def) {
+        return None;
+    }
     let m = *w.sigs.impl_def(imp)?.methods.first()?;
     Some(InstKey { decl: m, args })
+}
+
+/// Whether impl `imp` is declared in the package of ADT `def`: an `impl Drop` of another
+/// package is E0419 and drops nothing.
+fn own_package(w: &World<'_>, imp: DeclId, def: DeclId) -> bool {
+    let package = |d: DeclId| w.prog.decl(d).and_then(|x| w.prog.module(x.module)).map(|m| m.package);
+    package(imp) == package(def)
+}
+
+/// Whether a value of type `t` runs a `Drop` impl of its own when dropped (not only the glue of
+/// its parts). A concrete type: the impl its instance resolves to ([`drop_method`]), so a Copy
+/// instance of a type with a `Drop` impl for another instance has none. A type with parameters
+/// (in a generic body): some instance may, so any `Drop` impl of its ADT counts. The one answer
+/// the borrow checker's CFG, the lowering, and the drop schedule read.
+pub fn drop_impl<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> bool {
+    let TypeKind::Adt { def, .. } = *cx.kind(t) else { return false };
+    if !cx.has_params(t) {
+        return drop_method(w, cx, t).is_some();
+    }
+    let drop = w.sigs.lang.drop;
+    w.sigs.impls_by_trait.get(&drop).is_some_and(|is| {
+        is.iter().any(|&i| {
+            w.sigs.impl_def(i).is_some_and(|d| d.head == Some(crate::TypeHead::Adt(def))) && own_package(w, i, def)
+        })
+    })
 }
 
 /// Field types of the variants of a concrete ADT type (struct: one variant).
@@ -388,15 +417,19 @@ pub(crate) fn adt_fields<I: Interner + ?Sized>(
     Some(out)
 }
 
-/// Whether values of the concrete type `t` need drop glue (a `Drop` impl anywhere inside, not
-/// behind a pointer). Memoized in `memo`.
+/// Whether values of type `t` need drop glue: a `Drop` impl anywhere inside, not behind a
+/// pointer ([`drop_impl`]), or a type parameter that is not Copy under `env`. Exact for a
+/// concrete type; for a type with parameters, whether some instance may. The one answer every
+/// stage reads: the borrow checker's CFG and drop schedule, the lowering, the call graph, the
+/// lock ranks of drops, the const rule (E0413). Memoized in `memo` (answers under one `env`).
 ///
 /// This is reachability over containment edges (ADT fields, tuple and array elements), walked
 /// with an explicit stack, so the answer is exact for a type of any finite nesting depth.
-pub(crate) fn needs_drop<I: Interner + ?Sized>(
+pub fn needs_drop<I: Interner + ?Sized>(
     w: &World<'_>,
     cx: &mut I,
     t: TypeId,
+    env: &[GenericParam],
     memo: &mut FxHashMap<TypeId, bool>,
 ) -> bool {
     if let Some(&b) = memo.get(&t) {
@@ -417,12 +450,17 @@ pub(crate) fn needs_drop<I: Interner + ?Sized>(
         }
         let inner: Vec<TypeId> = match cx.kind(u).clone() {
             TypeKind::Adt { .. } => {
-                if drop_method(w, cx, u).is_some() {
+                if drop_impl(w, cx, u) {
                     memo.insert(u, true);
                     memo.insert(t, true);
                     return true;
                 }
                 adt_fields(w.sigs, cx, u).map_or_else(Vec::new, |vs| vs.into_iter().flatten().collect())
+            }
+            TypeKind::Param(_) if !w.is_copy(cx, u, env) => {
+                memo.insert(u, true);
+                memo.insert(t, true);
+                return true;
             }
             TypeKind::Tuple(ts) => ts.to_vec(),
             TypeKind::Array { elem, .. } => vec![elem],

@@ -1367,7 +1367,7 @@ impl<'a> Walk<'a> {
             return k == 2;
         }
         let w = World { prog: self.prog, sigs: self.sigs };
-        let r = crate::mono::needs_drop(&w, &mut self.cx, t, &mut self.drop_memo);
+        let r = crate::mono::needs_drop(&w, &mut self.cx, t, &[], &mut self.drop_memo);
         if global && let Some(k) = self.drop_known.get_mut(t.idx()) {
             *k = 1 + r as u8;
         }
