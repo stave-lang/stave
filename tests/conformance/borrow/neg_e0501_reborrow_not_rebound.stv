@@ -1,0 +1,173 @@
+//~ CHECK-ONLY
+// A kept reborrow of `*p` conflicts with a later borrow or write through `p` wherever `p` may
+// still hold the same pointer: declared outside the loop, redefined on some paths only, changed
+// only through a pointer to it (`mem.swap`, a callee given `&mut p`) or by a write to a field.
+// The lender of the old pointer stays borrowed while the reborrow lives, so re-pointing `p` at
+// the same object conflicts there, and so does taking the old pointer out of `p`. A reference
+// re-pointed through the vector that holds the reborrow keeps the vector borrowed. See
+// pos_reborrow_rebound.stv.
+import std.arena;
+import std.mem;
+import std.vec;
+
+struct P { x: i64 }
+
+impl Copy for P {}
+
+view struct S { p: &mut P, n: u32 }
+
+fn id(q: &mut P) -> &mut P from q {
+    return q;
+}
+
+fn repoint(r: &mut &mut P from q, q: &mut P) {
+    *r = q;
+}
+
+fn same_object() {
+    let mut x = P.{ x: 1 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = &mut x;
+    ps.push(p);
+    p = &mut x; //~ ERROR E0501
+    ps.push(p);
+}
+
+fn same_object_loop() {
+    let mut x = P.{ x: 1 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    for i in 0i64..2 {
+        let p = &mut x; //~ ERROR E0501
+        ps.push(p);
+    }
+}
+
+fn declared_outside() {
+    let a = arena.Arena.new(1024);
+    let mut ps = vec.Vec::<&mut P>.new();
+    let p = a.alloc(P.{ x: 0 });
+    for i in 0i64..2 {
+        ps.push(p); //~ ERROR E0501
+    }
+}
+
+fn some_paths() {
+    let a = arena.Arena.new(1024);
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = a.alloc(P.{ x: 0 });
+    for i in 0i64..3 {
+        if i == 1 { p = a.alloc(P.{ x: i }); }
+        ps.push(p); //~ ERROR E0501
+    }
+}
+
+fn written_after() {
+    let a = arena.Arena.new(1024);
+    let mut ps = vec.Vec::<&P>.new();
+    for i in 0i64..5 {
+        let p = a.alloc(P.{ x: 0 });
+        ps.push(&*p);
+        p.x = i; //~ ERROR E0501
+    }
+}
+
+fn same_inner() {
+    let mut a = P.{ x: 1 };
+    let mut y: &mut P = &mut a;
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut x: &mut &mut P = &mut y;
+    ps.push(&mut **x);
+    x = &mut y; //~ ERROR E0501
+    ps.push(&mut **x);
+}
+
+fn field_written() {
+    let a = arena.Arena.new(1024);
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut s = S.{ p: a.alloc(P.{ x: 1 }), n: 0 };
+    ps.push(&mut *s.p);
+    s.p = a.alloc(P.{ x: 2 });
+    ps.push(&mut *s.p); //~ ERROR E0501
+}
+
+fn swapped() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = &mut a;
+    let mut q = &mut b;
+    ps.push(p);
+    mem.swap(&mut p, &mut q); //~ ERROR E0501
+    ps.push(p); //~ ERROR E0501
+}
+
+fn callee_repoints() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = &mut a;
+    ps.push(p);
+    repoint(&mut p, &mut b); //~ ERROR E0501
+    ps.push(p); //~ ERROR E0501
+}
+
+fn moved_out() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = &mut a;
+    ps.push(p);
+    let old = p; //~ ERROR E0501
+    p = &mut b;
+    old.x = 5;
+    ps.push(p);
+}
+
+fn replaced_out() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = &mut a;
+    ps.push(p);
+    let old = mem.replace(&mut p, &mut b); //~ ERROR E0501
+    old.x = 5;
+    ps.push(p); //~ ERROR E0501
+}
+
+fn through_holder() -> usize {
+    let mut a = P.{ x: 1 };
+    let mut ps = vec.Vec::<&mut P>.new();
+    let mut p = &mut a;
+    ps.push(p);
+    p = &mut **ps.get_mut(0);
+    let n = ps.len(); //~ ERROR E0501
+    p.x = 4;
+    return n;
+}
+
+fn through_live_reborrow() {
+    let mut a = P.{ x: 1 };
+    let mut p = &mut a;
+    let r = &mut *p;
+    p = id(r);
+    p.x = 1;
+    r.x = 2; //~ ERROR E0501
+    p.x = 3;
+}
+
+fn reset_while_kept() -> i64 {
+    let mut a = arena.Arena.new(1024);
+    let mut ps = vec.Vec::<&mut P>.new();
+    for i in 0i64..2 {
+        let p = a.alloc(P.{ x: i });
+        ps.push(p);
+    }
+    a.reset(); //~ ERROR E0501
+    let mut s: i64 = 0;
+    for r in ps.as_slice() { s = s + r.x; }
+    return s;
+}
+
+fn main() -> i32 {
+    return 0;
+}

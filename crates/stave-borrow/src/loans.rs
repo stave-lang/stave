@@ -6,7 +6,8 @@
 //! points to: `from copy i`). Every tracked local (one whose type is ref-like) holds an origin set
 //! per program point; the sets are unioned through copies, moves, aggregates, field assignments,
 //! and call results ([`Flows`]: only the named arguments' origins reach the result; all other
-//! argument loans end at the call).
+//! argument loans end at the call). A local moved whole holds the empty set until it is written
+//! again ([`Flow::moved_out`]).
 //!
 //! **Contents.** Reading a ref-like value through `k` dereferences of a local `x` yields
 //! `contents^k(O(x))`, where `contents(L)` is the origin set of the borrowed place's value (taken
@@ -1416,11 +1417,7 @@ impl<'b> Flow<'b> {
                 }
                 let (s, ch) = self.rv_origins(st, rv, dest.ty);
                 changed |= ch;
-                for_each_op(rv, |o| {
-                    if o.kind == OpKind::Move {
-                        st.set_moved(o.place.local, true);
-                    }
-                });
+                for_each_op(rv, |o| self.moved_out(st, o));
                 // re-initialized: moves of the place or below it are undone
                 self.reinit(st, dest);
                 if dest.has_deref() {
@@ -1470,14 +1467,28 @@ impl<'b> Flow<'b> {
                 let p = Place::local(*l, TypeId::NONE);
                 self.reinit(st, &p);
             }
-            StmtKind::Return(o) | StmtKind::Read(o) => {
-                if o.kind == OpKind::Move {
-                    st.set_moved(o.place.local, true);
-                }
-            }
+            StmtKind::Return(o) | StmtKind::Read(o) => self.moved_out(st, o),
             StmtKind::Drop(_) => {}
         }
         changed
+    }
+
+    /// A move of operand `o` marks its local moved. A local moved whole holds no value until it
+    /// is written again, so it holds no origins: what its value borrowed went with the value
+    /// (to the destination, the callee's stores, or nowhere), nothing reads the local (E0502),
+    /// and its drop does not run. Where it was moved on some paths only, the join brings back
+    /// the set of the others, which their drop reads.
+    fn moved_out(&self, st: &mut State, o: &Operand) {
+        if o.kind != OpKind::Move {
+            return;
+        }
+        st.set_moved(o.place.local, true);
+        if o.place.proj.is_empty()
+            && let Some(&t) = self.tracked.get(o.place.local as usize)
+            && t != u32::MAX
+        {
+            st.put(t, 0);
+        }
     }
 
     /// A write of a whole local initializes it again; a write of a part of a moved local is a

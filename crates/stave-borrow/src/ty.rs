@@ -96,6 +96,7 @@ struct Memo {
     copy: FxHashMap<TypeId, bool>,
     drop: FxHashMap<TypeId, bool>,
     view: FxHashMap<TypeId, bool>,
+    deep: FxHashMap<TypeId, bool>,
 }
 
 thread_local! {
@@ -340,6 +341,60 @@ impl<'a> Tys<'a> {
         let r = stave_sema::mono::needs_drop(&w, &mut self.ov, t, env, &mut memo);
         self.memo(t).drop = memo;
         self.hot_drop[h] = (t, r);
+        r
+    }
+
+    /// Whether dropping a value of `t` may run a `drop(&mut self)` on a value that holds
+    /// references: an ADT with a `Drop` impl that is ref-like, reached through fields, enum
+    /// payloads, tuple and array elements, and type arguments (as fields), or a generic param that
+    /// may be both a view and not Copy. Such a destructor can read and write what the references
+    /// point to, so the drop is an access of everything the value reaches, not only of its own
+    /// storage. A value that holds no reference reaches nothing borrowed through its destructor;
+    /// fn values and references have no drop glue. Unknown types and types past the depth bound:
+    /// yes.
+    pub fn drop_reaches_refs(&mut self, t: TypeId) -> bool {
+        if let Some(&b) = self.memo(t).deep.get(&t) {
+            return b;
+        }
+        let r = self.drop_reaches_d(t, 0, &mut Vec::new());
+        self.memo(t).deep.insert(t, r);
+        r
+    }
+
+    /// `on`: the types being walked (a type met again reaches nothing new). Only the answer of
+    /// the outermost type is kept: an inner one may have met a type still being walked.
+    fn drop_reaches_d(&mut self, t: TypeId, depth: u32, on: &mut Vec<TypeId>) -> bool {
+        if self.is_unknown(t) || depth >= stave_sema::typedepth::MAX_TYPE_DEPTH {
+            return true;
+        }
+        if !self.ref_like(t) || !self.needs_drop(t) || on.contains(&t) {
+            return false;
+        }
+        if let Some(&b) = self.memo(t).deep.get(&t) {
+            return b;
+        }
+        on.push(t);
+        let r = match self.kind(t) {
+            TypeKind::Adt { def, args } => {
+                self.has_drop_impl(t) || {
+                    let fields: Vec<TypeId> = self
+                        .sigs
+                        .adt(def)
+                        .map(|a| a.variants.iter().flat_map(|v| v.fields.iter().map(|f| f.ty)).collect())
+                        .unwrap_or_default();
+                    fields.into_iter().any(|f| {
+                        let ft = self.ov.subst(f, &args, None);
+                        self.drop_reaches_d(ft, depth + 1, on)
+                    })
+                }
+            }
+            TypeKind::Tuple(ts) => ts.iter().any(|&x| self.drop_reaches_d(x, depth + 1, on)),
+            TypeKind::Array { elem, .. } => self.drop_reaches_d(elem, depth + 1, on),
+            // ref-like and with drop glue: a view-bounded param that is not Copy, or a type
+            // this walk does not take apart
+            _ => true,
+        };
+        on.pop();
         r
     }
 

@@ -63,9 +63,7 @@ fn t_via(zero: &u32) -> u32 {
         let x: u32 = i;
         let mut p = Pick.{ best: zero, count: 0 };
         let mut tw = Twin.{ out: &mut p, spare: zero }; //~ ERROR E0501
-//~^ ERROR E0501
         let mut kb = Keep.{ t: &mut tw }; //~ ERROR E0501
-//~^ ERROR E0501
         via(&mut o, &mut kb, &x);
         i = i + 1;
     } //~ ERROR E0501

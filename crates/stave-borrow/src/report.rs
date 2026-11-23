@@ -255,8 +255,8 @@ pub fn diagnostics(
         match f {
             Finding::Conflict { block, stmt, access, place, span, loans } => {
                 let access = match (access, paired(body, block, stmt, &place)) {
-                    (Access::Drop, Some((j, _))) if hit.contains(&(block, j)) => continue,
-                    (Access::Drop, Some((_, true))) => Access::Write,
+                    (Access::Drop | Access::DeepDrop, Some((j, _))) if hit.contains(&(block, j)) => continue,
+                    (Access::Drop | Access::DeepDrop, Some((_, true))) => Access::Write,
                     _ => access,
                 };
                 let Some(l) = pick_loan(body, &loans) else { continue };
@@ -469,6 +469,7 @@ mod tests {
             internal: None,
             loops: Vec::new(),
             schedule: Default::default(),
+            deep_drops: Default::default(),
         }
     }
 
