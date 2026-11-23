@@ -234,6 +234,15 @@ pub enum AdtKind {
     Enum,
 }
 
+/// A declaration an ADT type or [`crate::ir::Module::cell`] refers to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclInfo {
+    pub id: DeclId,
+    pub kind: AdtKind,
+    /// The declaration's dotted path (`std.cell.UnsafeCell`).
+    pub path: String,
+}
+
 /// The monomorphized shape of an ADT instance type: field types per variant (a struct has one
 /// variant). Needed by aggregate ops, layout, and the interpreter; not printed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
