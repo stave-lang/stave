@@ -474,6 +474,14 @@ fn round_up(x: usize, page: usize) -> usize {
 // token (PC table). Any other fault is not a panic: the default action runs.
 pub unsafe("sig, info, uctx are the arguments the kernel passed to an SA_SIGINFO handler")
 fn on_signal(sig: usize, info: usize, uctx: usize) -> never {
+    // Entered again on this thread (SA_NODEFER): a fault in the handler itself or in the report
+    // it started. Running it again would fault again (a handler past its stack restarts at the
+    // top and overruns at the same depth: no end), so the process ends here, before anything
+    // else uses the stack.
+    let b = state.block();
+    let again = unsafe("b is this thread's block; only this thread uses it") (*b).in_signal;
+    if again != 0 { os.exit_group(EXIT_PANIC); }
+    unsafe("b is this thread's block; only this thread uses it") { (*b).in_signal = 1; }
     // A fault while this thread reports (its report overran the report stack into the guard,
     // or any other): the report cannot finish, and a second one would start over.
     let st = state.get();
@@ -486,13 +494,19 @@ fn on_signal(sig: usize, info: usize, uctx: usize) -> never {
         let pc = unsafe("uctx is the kernel's ucontext_t for this handler") os.signal_pc(uctx);
         trap(KIND_STACK_OVERFLOW, site_for_pc(pc));
     }
-    // Default action: restore SIG_DFL, unblock the signal, raise it again.
+    // Default action: restore SIG_DFL for both signals, unblock them, raise the signal again.
+    // kill is process-directed: another thread may take it while this one runs on, so this
+    // thread then faults itself (address 0 is never mapped): a fault is delivered to the
+    // faulting thread before its next instruction, so the process ends by a signal, never by
+    // the exit below.
     let none = 0usize as *mut u64;
     let dfl: [u64; 4] = [0, 0, 0, 0];
     let sig32 = sig as% i32;
     let r = unsafe("dfl is the kernel's four-word struct sigaction for SIG_DFL") os.rt_sigaction(sig32, &dfl as *const [u64; 4] as *const u64, none);
-    let set: [u64; 1] = [1u64 << ((sig as u64) - 1)];
+    let r1 = unsafe("dfl is the kernel's four-word struct sigaction for SIG_DFL") os.rt_sigaction(os.SIGSEGV, &dfl as *const [u64; 4] as *const u64, none);
+    let set: [u64; 1] = [os.FAULT_SET];
     let r2 = unsafe("set is one sigset word") os.rt_sigprocmask(os.SIG_UNBLOCK, &set as *const [u64; 1] as *const u64, none);
     let r3 = os.kill(os.getpid(), sig32);
+    let z = unsafe("address 0 is never mapped: the read faults, with SIGSEGV's default action") atomic.load_u64(0usize as *const u64);
     os.exit_group(128 + sig32);
 }

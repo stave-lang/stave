@@ -150,7 +150,7 @@ atomics are sequentially consistent; `p` is the address (naturally aligned) as `
 | `set_thread_block(p: usize)` | AArch64 | `msr tpidr_el0, x0` (`D51BD040`), x0 = p |
 
 **Thread pointer.** Each CPU thread's thread pointer holds the address of its block
-(`runtime.state.Block`, 176 bytes, first word = its own address, so x86-64 reads it as `fs:[0]`).
+(`runtime.state.Block`, 184 bytes, first word = its own address, so x86-64 reads it as `fs:[0]`).
 `runtime.start.entry` sets main's first, before any other code: x86-64 with the `arch_prctl`
 system call (`ARCH_SET_FS`), AArch64 with `set_thread_block`. A thread gets its own through
 `CLONE_SETTLS` (`clone_args.tls`, or the `tls` argument of `clone`), so its creation needs no other
@@ -271,7 +271,9 @@ AArch64: `tpidr_el0`, `x15`-`x17`). A report entry takes no stack arguments (the
 reject one). A trap while one is reported is already there and stays; the SIGSEGV handler
 `on_signal` runs on the signal stack and moves there when it reports. A fault while the thread
 reports (its report past the report stack's guard, or any other) runs `on_signal` on the signal
-stack, which ends the process at once with exit 101 and no second report. The runtime writes the
+stack, which ends the process at once with exit 101 and no second report; so does any second
+entry of `on_signal` on one thread (`Block.in_signal`, set first thing: a fault in the handler
+itself, which would otherwise restart at the signal stack's top and fault again). The runtime writes the
 two words before the thread's first user code: main's in `runtime.panic.install`, a thread's in
 `runtime.thread.start` before the clone; a thread whose `sigaltstack` fails panics before its
 body runs. The report's depth (twice the deepest report entry, for a trap during the report) is

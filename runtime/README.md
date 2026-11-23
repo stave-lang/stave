@@ -100,7 +100,10 @@ off its cycle reads its reserve below its frame at entry every 60 KiB (contracts
 block's `alt_top` unless it is already in that stack or `alt_size` is 0 (contracts/intrinsics.md
 "Alternate stack"). So a trap at any depth reports without stack below the trapping frame; a
 trap during the report stays there and exits in `begin`; a fault during the report (one that
-runs past its guard) ends the process in `on_signal` with exit 101. The report blocks SIGPIPE, so
+runs past its guard) ends the process in `on_signal` with exit 101, and so does a second entry of
+`on_signal` on one thread (a fault in the handler itself). A fault that is no stack overflow
+gets the default action: SIGSEGV/SIGBUS reset, the signal raised again, then a fault of the
+handler's own thread, so the process is killed by a signal, never a normal exit. The report blocks SIGPIPE, so
 a write to a closed stderr keeps exit 101. `runtime.panic.install` writes main's two words,
 `runtime.thread.start` a thread's, before any user code runs on it; a thread whose
 `sigaltstack` fails panics in `runtime.thread.entry` before its body.

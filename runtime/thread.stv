@@ -125,6 +125,7 @@ fn start(f: fn()) -> usize {
                 ring: [0u32; state.NRING],
                 alt_top: panic.report_top(base + guard + size, page),
                 alt_size: round_up(config.REPORT_STACK, page),
+                in_signal: 0,
             },
         });
     }

@@ -20,7 +20,9 @@
 //!   so the overflow is raised in the cycle, never in a `without(trap)` target;
 //! - a report that runs past its stack faults in the guard below it and ends the process at
 //!   once (exit 101, no second report); a thread whose signal stack the kernel refuses fails at
-//!   its start; a report to a pipe without a reader keeps exit 101;
+//!   its start; a report to a pipe without a reader keeps exit 101; a fault in the signal
+//!   handler itself (past its stack) ends the process with exit 101, never a loop; a fault that is
+//!   no stack overflow is killed by SIGSEGV, on main and on a thread;
 //! - the thread-block offsets the back ends read are the runtime's;
 //! - a drop cycle of a recursive type has no bound;
 //! - every run-suite program, debug and release, maps every fn value it makes to the call graph
@@ -566,6 +568,114 @@ fn a_report_past_its_stack_ends_the_process() {
                     let Some(got) = run(&out, target, &name, tmp.path()) else { continue };
                     let err = String::from_utf8_lossy(&got.stderr);
                     assert_eq!((got.exit, err.as_ref()), (101, ""), "{what}");
+                }
+            }
+        }
+    }
+}
+
+/// Runs `bin` (through `how`) with a time limit; `None` if it did not end within it (then killed).
+fn run_limited(bin: &Path, how: Option<&str>, secs: u64) -> Option<std::process::ExitStatus> {
+    let mut cmd = match how {
+        Some(r) => {
+            let mut c = Command::new(r);
+            c.arg(bin);
+            c
+        }
+        None => Command::new(bin),
+    };
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            return Some(s);
+        }
+        if start.elapsed().as_secs() >= secs {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The signal handler itself overrunning its stack (injected into `runtime.panic.on_signal`:
+/// a 1 KiB-frame recursion 100 levels deep, past the 32 KiB signal stack), on a stack overflow,
+/// main and spawned thread: the fault in the guard below the signal stack enters the handler
+/// again, which ends the process at once with exit 101: no loop, no hang.
+#[test]
+fn a_fault_in_the_signal_handler_ends_the_process() {
+    let tmp = TempDir::new("stkh").unwrap();
+    let lib = patched_library(
+        &tmp,
+        "runtime/panic.stv",
+        &[
+            (
+                "    // siginfo_t.si_addr is at offset 16",
+                "    if burn(sig as u64 + 100u64) == 5u64 {\n        os.exit_group(3);\n    }\n    \
+                 // siginfo_t.si_addr is at offset 16",
+            ),
+            (
+                "fn head(",
+                "rec fn burn(n: u64) -> u64 {\n    let mut t: [u64; 128] = [0u64; 128];\n    \
+                 t[(n % 128u64) as usize] = n;\n    if n == 0u64 {\n        return t[0];\n    }\n    \
+                 return burn(n - 1u64) +% t[1];\n}\n\nfn head(",
+            ),
+        ],
+    );
+    for (place, main) in [("main", ON_MAIN), ("spawn", ON_SPAWN)] {
+        let src = DOWN.replace("WORDS", "8").replace("MAIN", &main.replace("DOWN", "down(1000000000u64)"));
+        let name = format!("handler_fault_{place}");
+        let p = tmp.path().join(format!("{name}.stv"));
+        std::fs::write(&p, &src).unwrap();
+        for target in targets() {
+            for release in [false, true] {
+                let what = format!("{name} [{target}, release {release}]");
+                let out = build_with(&p, &lib, target, release);
+                let Some(how) = runner(target) else { continue };
+                let bin = tmp.path().join(&name);
+                out.image.as_ref().unwrap().write_file(&bin).unwrap();
+                let status = run_limited(&bin, how, 120).unwrap_or_else(|| panic!("{what}: no end in 120 s"));
+                assert_eq!(status.code(), Some(101), "{what}: {status:?}");
+            }
+        }
+    }
+}
+
+/// A fault that is not a stack overflow (a wild write) on main and on a spawned thread: the
+/// default action, so the process is killed by SIGSEGV, never a normal exit (no race between
+/// the re-raised signal and the handler's fallback exit).
+#[test]
+fn a_wild_write_is_killed_by_its_signal() {
+    use std::os::unix::process::ExitStatusExt;
+    let tmp = TempDir::new("stkw").unwrap();
+    let poke = "import std.io;\n\nfn poke() {\n    unsafe(\"deliberate wild write\") {\n        \
+                *(16usize as *mut u64) = 1u64;\n    }\n}\n\n";
+    let mains = [
+        ("main", "fn main() {\n    poke();\n    io.print(\"after\\n\");\n}\n"),
+        (
+            "spawn",
+            "fn main() {\n    scope {\n        spawn { poke(); }\n    }\n    io.print(\"after\\n\");\n}\n",
+        ),
+    ];
+    for (place, main) in mains {
+        let name = format!("wild_{place}");
+        for target in targets() {
+            for release in [false, true] {
+                let what = format!("{name} [{target}, release {release}]");
+                let out = build_src(&tmp, &name, &format!("{poke}{main}"), target, release);
+                let Some(how) = runner(target) else { continue };
+                let bin = tmp.path().join(&name);
+                out.image.as_ref().unwrap().write_file(&bin).unwrap();
+                for _ in 0..10 {
+                    let status =
+                        run_limited(&bin, how, 120).unwrap_or_else(|| panic!("{what}: no end in 120 s"));
+                    assert_eq!((status.code(), status.signal()), (None, Some(11)), "{what}: {status:?}");
                 }
             }
         }
