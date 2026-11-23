@@ -393,7 +393,8 @@ pub fn drop_impl<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> 
     let drop = w.sigs.lang.drop;
     w.sigs.impls_by_trait.get(&drop).is_some_and(|is| {
         is.iter().any(|&i| {
-            w.sigs.impl_def(i).is_some_and(|d| d.head == Some(crate::TypeHead::Adt(def))) && own_package(w, i, def)
+            w.sigs.impl_def(i).is_some_and(|d| d.head == Some(crate::TypeHead::Adt(def)))
+                && own_package(w, i, def)
         })
     })
 }
@@ -432,7 +433,9 @@ fn has_params<I: Interner + ?Sized>(cx: &mut I, t: TypeId) -> bool {
         match k {
             TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => return true,
             TypeKind::Array { len: ConstArg::Param(_), .. } => return true,
-            TypeKind::Adt { args, .. } if args.iter().any(|a| matches!(a, GArg::Const(ConstArg::Param(_)))) => {
+            TypeKind::Adt { args, .. }
+                if args.iter().any(|a| matches!(a, GArg::Const(ConstArg::Param(_)))) =>
+            {
                 return true;
             }
             _ => {}

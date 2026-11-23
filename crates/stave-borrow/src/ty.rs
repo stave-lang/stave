@@ -13,10 +13,10 @@
 //! distinct component type once).
 
 use rustc_hash::FxHashMap;
+use stave_sema::Program;
 use stave_sema::sigs::{FnSig, GenericParam, Sigs};
 use stave_sema::traits::World;
 use stave_sema::types::{GArg, Interner, Overlay, TypeId, TypeKind, TypeTable};
-use stave_sema::Program;
 
 /// How a dereference reaches its pointee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
