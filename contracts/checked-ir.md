@@ -20,9 +20,9 @@ Each level is printed from the canonical module of that point ("Canonical module
 one level do not correspond to those of another.
 
 The **gate form** is what the dumps hold. The **emit form** (`stave ir emit`) is the gate form
-plus the stack section: the `runstack`, `truncated`, `node` and `edge` lines, and the `nodes`
-attribute of fn headers. Deleting those lines and that attribute from the emit form gives the
-gate form byte for byte. The stack section is not in a gate: its node numbers are the front
+plus the stack section: the `runstack`, `truncated`, `node`, `edge` and `nodes` lines. Rule: the
+gate form is exactly the emit form with the stack-section lines filtered out, byte for byte; no
+other line differs between the two forms. The stack section is not in a gate: its node numbers are the front
 end's call-graph order, which no contract fixes.
 
 ## Text
@@ -55,7 +55,8 @@ Spellings, `<x>` a field, `[..]` present only with its datum, `{..}` repeated ze
 | incomplete graph | `truncated` |
 | call-graph node | `node <n>[ rec]` |
 | call-graph edge | `edge <from> <to> call\|indirect\|spawn` |
-| fn header | `fn @<inst> <path>[<<arg>{,<arg>}>](<t>{, <t>})[ -> t<R>][ needs(<f>{, <f>})][ symbol "<sym>"][ variadic][ known][ altstack][ unbuilt][ site <row>][ nodes <n>{ <n>}][ {]` |
+| fn nodes | `nodes @<inst> <n>{ <n>}` |
+| fn header | `fn @<inst> <path>[<<arg>{,<arg>}>](<t>{, <t>})[ -> t<R>][ needs(<f>{, <f>})][ symbol "<sym>"][ variadic][ known][ altstack][ unbuilt][ site <row>][ {]` |
 | block header | `b<N>(<param>{, <param>}):`, a param `%<v>: t<T>` |
 | instruction | `  [%<v> = ]<op> t<T>\|()[ <operand>]..[ !<row>]` |
 | terminator | `  br <target>`, `  cbr <o> <target> <target>`, `  switch <o>{ <int>:<target>} _:<target>`, `  ret[ <o>]`, `  unreachable`; a target `b<N>(<o>{, <o>})` |
@@ -99,7 +100,7 @@ A file is these sections in this order; each kind of line has one section.
    lines by ascending offset.
 8. `main`, then `cell`, each at most once.
 9. The stack section (emit form only): `runstack` and `truncated`, each at most once; `node`
-   lines, `0` up, dense; `edge` lines by ascending (from, to).
+   lines, `0` up, dense; `edge` lines by ascending (from, to); `nodes` lines by instance id.
 10. Per fn, by instance id ("Ids"): its header; with a body, the body's blocks (each a block
     header, its instructions, one terminator) and `}`; then its `claim` lines, the `pre` rows
     then the `post` rows, each in the summary's order.
@@ -149,8 +150,8 @@ set). `truncated`: the call graph is incomplete (an instantiation chain too deep
 instances), so no stack has a bound. `node <n>`:
 call-graph node n; `rec`: the node of a `rec fn`. `edge`: the call-graph edge from node `<from>`
 to node `<to>` (at most one per pair): `spawn` a `spawn` edge, `indirect` a call through a fn
-value, `call` every other kind (a call, a dispatch arm, a member, a drop). A fn header's
-`nodes`: the nodes the fn stands for, ascending; absent: none. A module loaded without the
+value, `call` every other kind (a call, a dispatch arm, a member, a drop). `nodes @<inst>`: the
+nodes fn `@<inst>` stands for, ascending; a fn without the line stands for none. A module loaded without the
 section builds with an empty stack table: every stack gets the `[run] stack` default.
 
 **fn header.** Every fn of the module, with or without a body.
@@ -254,7 +255,7 @@ step stops before the next.
 2. **Structure.** One sequential pass checks "Sections" and the rules below, errors as in step 1:
    - ids of a dense section run from 0 without gaps; ascending sections have no repeats;
    - every `t<T>`, `s<S>`, site row, static index, `d<D>`, node number, and `@<inst>` names an
-     existing line; each `@<inst>` heads one fn; fn headers may come in any order (they are
+     existing line; at most one `nodes` line per fn; each `@<inst>` heads one fn; fn headers may come in any order (they are
      sorted by instance id);
    - a body begins with block `b0`; block labels and values are unique within their fn, with any
      numbers (they are renumbered in text order: blocks by their headers, values by their

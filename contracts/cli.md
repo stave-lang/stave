@@ -197,7 +197,7 @@ Outputs and statuses of the code-generating commands:
     refused as for `stave build`. A file without a `main` line is exit 1.
 - `stave ir emit [PKG_DIR] [--release] [--target T] [-o FILE]`: compiles the
   program as `stave build` does, through the removal of proven checks, and prints its IR text at
-  level `checked` in the emit form (the gate form plus the stack section) to FILE, default
+  level `checked` in the emit form (the gate form plus the stack-section lines) to FILE, default
   stdout. Diagnostics, their exit codes, and the summary line are those of `stave build`.
 
 Planned commands (exit codes as above):

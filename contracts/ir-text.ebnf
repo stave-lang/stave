@@ -64,7 +64,7 @@ Line         = HeaderLine
              | DeclLine | TypeLine | ShapeLine | StrLine | SiteLine
              | StaticLine | DataLine | RefLine
              | MainLine | CellLine
-             | RunStackLine | TruncatedLine | NodeLine | EdgeLine
+             | RunStackLine | TruncatedLine | NodeLine | EdgeLine | NodesLine
              | FnLine | ClaimLine
              | BlockLine | ValueInst | EffectInst | TermLine
              | "}" ;
@@ -132,19 +132,19 @@ TruncatedLine = "truncated" ;
 NodeLine     = "node" Int "rec"? ;
 EdgeLine     = "edge" Int Int EdgeKind ;
 EdgeKind     = "call" | "indirect" | "spawn" ;
+NodesLine    = "nodes" FnRef Int+ ;
 
 (* ---- functions ---- *)
 
 FnLine       = "fn" FnRef Path GenericArgs? "(" TypeList? ")" FnRet?
                Needs? Symbol? "variadic"? "known"? "altstack"? "unbuilt"? NameSite?
-               Nodes? "{"? ;                               (* no "{": no body. Nodes: stack section only *)
+               "{"? ;                                      (* no "{": no body *)
 GenericArgs  = "<" GArg ("," GArg)* ">" ;
 TypeList     = TId ("," TId)* ;
 FnRet        = "->" TId ;
 Needs        = "needs" "(" Feature ("," Feature)* ")" ;
 Symbol       = "symbol" String ;
 NameSite     = "site" Int ;
-Nodes        = "nodes" Int+ ;
 
 ClaimLine    = "claim" FnRef ClaimKind CTerm "<=" CTerm Int ;   (* a <= b + Int *)
 ClaimKind    = "pre" "checked"? | "post" ;

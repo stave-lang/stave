@@ -78,8 +78,8 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
   - `verdict` is `ok` or the diagnostic code reported for this access (`E0501`, `E0502`, `E0503`,
     `E0512`, `E0513`).
   - `loan` is the conflicting loan `L` reported (smallest creation offset), or `-`.
-- `lir`, `ir`, `opt`: the gate form of the IR text (checked-ir.md "Levels and forms"): never the
-  stack section. Each file is absent (not written) when the build has error diagnostics; `opt.txt`
+- `lir`, `ir`, `opt`: the gate form of the IR text (checked-ir.md "Levels and forms"): the emit
+  form with the stack-section lines filtered out. Each file is absent (not written) when the build has error diagnostics; `opt.txt`
   is written only by a `--release` build (cli.md). `lir` gates the lowering alone, `ir` adds the
   bounds prover and the witness checker, `opt` the release passes. `opt` also gates the Stave
   optimizer: from the same `ir` text, its `opt` text equals stave-opt's.
