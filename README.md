@@ -32,130 +32,24 @@ optimizer rules, planned diagnostics); they say so where they do.
 
 ## Known limits
 
-Stave is pre-alpha. This is a selection. The full list, with examples and rewrites, is
-[contracts/known-limits.md](contracts/known-limits.md); it is meant to be complete: a safe program
-that breaks a guarantee there, or is rejected for no good reason, and is not listed there is a
-bug; please report it.
+Stave is pre-alpha. The full list, with examples and rewrites, is
+[contracts/known-limits.md](contracts/known-limits.md). It is meant to be complete: a safe program
+that breaks a guarantee, or is rejected for no good reason, and is not listed there is a bug;
+please report it. In short:
 
-The checker was hardened in three rounds of adversarial testing: hand-written probes and generated
-programs over closures and threads, patterns, moves and drops, views, traits, function values, and
-the verification rules (effects, recursion, stack bound, lock ranks, contracts). The rounds found
-27, 21, and 3 root causes of programs that `check` accepted and that then misbehaved (memory
-errors, data races, deadlocks, a denied effect or trap that ran, a crash on a CPU without a
-feature), plus a compiler hang and 4 internal errors after a passing `check`; each was fixed and
-the fixes were reviewed. The third round was the last, so its fixes were not hunted again: holes
-of the same kinds may remain, and the first round ran without the interpreter's borrow tracking.
-
-**Guarantees and their gaps**
-
-- Memory safety is the aim, not a proof: the borrow checker is young, and soundness bugs are
-  expected. A safe program that corrupts memory is a compiler bug.
-- Unsafe code in `std` and `runtime` was checked against the borrow model by reading it; thread
-  start and the system-call paths do not run under the interpreter. Unsafe code and C code are
-  trusted not to write function values into places the compiler tracks.
-- Races through raw pointers or `UnsafeCell` are the author's obligation; nothing checks them.
-- "Safe code cannot deadlock" covers ranked locks and thread joins only. Not covered: a file wait
-  (`std.io` read, write, open: the `block` effect) on a pipe or FIFO whose other end this process
-  holds, a loop that spins on `try_lock` or an atomic until another thread acts (livelock), and a
-  panic report stuck on a full stderr pipe. The table is in [std/README.md](std/README.md).
-- Lock-order tracking at run time and an interpreter scheduler are not built: the interpreter runs
-  a spawned body on its one thread, at the join.
-- A `rec fn` cycle and the drop of a recursive value have no computed stack bound: they get
-  `[run] stack` and trap `StackOverflow` past it. Signal handlers and the panic report run on
-  stacks of their own that no bound counts. There is no GPU stack bound. `stave test` runs every
-  `test fn` on the default 8 MiB stack, not `[run] stack`: a test of a deep `rec fn` can trap
-  where `stave run` does not, and pass where `stave run` traps.
-- The effects of `runtime` functions come from a table in the compiler, and `io` leaves out the
-  allocator's, a lock's and a thread's system calls. Effect checks (`without(..)`) run only on
-  programs with no other error. The effect sets over-approximate: a value moved out is still
-  charged the drop where it was made, and a call that cannot run still counts (after `return`,
-  after a call that never returns, after `break`, under `if false`):
-  `fn f(n: u32) -> u32 without(io) { return n; noisy(); }` is E1401; delete the dead call.
-
-**What the interpreter's checking does not see.** It runs the positive conformance programs and
-the fuzzer's programs with borrow tracking and a memory mode; it is the oracle for checker holes.
-
-- A verdict covers the run it saw (one input, one schedule). There is no data-race detection.
-  A program where one thread waits for another before the join never ends there.
-- Leaks, destructors that never run, and hangs are reported by neither mode.
-- A pointer that lost its tag acts as the root of its allocation, accesses by C code and the
-  kernel are not seen, and the captures of a function value that is a param, field or result are
-  not walked. Moves are tracked less exactly than the rules say (guarded or-patterns, drops of
-  moved-out places).
-- Programs with `unsafe` need not run clean there, and the fuzzer builds programs from fixed
-  classes of borrow constructs: a hole outside them is not found by it.
-- It does not read `[run] stack`: its call depth is fixed at 20,000 and the slots of all live
-  frames together are limited to 8 MiB, so a `rec fn` that recurses 30,000 deep runs natively and
-  ends `StackOverflow` there.
-
-**Valid programs the checker rejects** (each has a rewrite)
-
-- `v.push(*v.get_ref(0));` and `*g.get_mut() = *g.get() + 1;` are E0501: read into a local first.
-- Lock holding is per local type, not per value (E1405): `g = Option.None;` does not release a
-  guard, and an empty `vec.Vec<MutexGuard<..>>` blocks the lock pushed into it.
-- A closure that passes a closure to a helper that calls it is E1409; a closure that returns what
-  an inner closure returns is E0512 when that is a reference to a function value or a view with
-  a function-valued field.
-- A view keeps every loan stored into it after a field is overwritten, and a `match` that moves a
-  view in some arms only keeps its loans in the others: moving the borrowed value afterwards is
-  E0501. Dropping a value that has a destructor reaching a reference counts as an access to every
-  reference it holds.
-- Calls through function values are as precise as their flow: some uses of a function-typed place
-  make its calls reach every function value of its type, which can give a false effect, lock-rank,
-  recursion or stack-bound error. `c.select(f, g)` of two function items is a call result of the
-  plain fn type, so it is E1403 where a `without(..)` fn type is expected. A value read out of an
-  array, a tuple or an `if` arm is such a use: with `fn b() { call(); }` used as a value,
-  `fn call() { let fs: [fn(); 1] = [a]; let f = fs[0]; f(); }` is a call cycle (E1402); a closure
-  (a `spawn` body, a `thread.join` arm) that calls such a value of its own fn type is E1409. Bind
-  the value to a plain local (`let f: fn() = a;`), give the table a fn type unlike the closure's,
-  or (E1402) mark the cycle `rec fn`.
-- One slot stands for the function field of every `iter.Map` of one instance type: a
-  `.map(loud)` over `&[u32]` that prints gives `io` to every other `Map<u32, u32>`, so a
-  `without(io)` fn that only maps a quiet fn is E1401. Map to another type, or loop by hand.
-- Generic code that stores what a `from copy it` call returns into a `&mut` view param is E0513
-  (`fn drain<T: view>(it: &mut iter.SliceIter<T>, out: &mut vec.Vec<&T> from copy it)` with
-  `out.push(x)` for `x` from `it.next()`); the same fn over `u32` is accepted. Write `from it`.
-- Generic code over masks or vectors (`T: Not` at `mask32x4`) is E0901. A vector type wider than
-  the target's registers cannot be named in a fn without `needs(..)`, even as `Vec` element type.
-- The exhaustiveness search has a limit: a `match` past it is E0300 `limit`. So is any `let` of
-  a struct or tuple with 2,000 fields or more in all (a nested struct counts as a field too),
-  even `let s = S.{ f0: 0, .. };` with a plain name; keep bulk data in an array or a `vec.Vec`.
-- A fn whose values take more than 704,643,072 bytes together is E0911, a bound that allows for
-  a frame of 1.5 times that sum and so can reject a fn that would run.
-
-**Deliberate rules** (they reject programs that would run; each has a rewrite)
-
-- Moves go left to right: `s.consume(s.len())` and `f(s, s.n)` are E0502. No partial moves: a
-  non-Copy value moves whole or is taken apart whole by a pattern (E0504); a `static` is never
-  moved from.
-- `for` names its borrow: an array or slice place is E0219 (`for x in &arr`). A `match` guard only
-  reads (E0505). A temporary ends with its statement, with no constant promotion:
-  `let r = &f();` is E0501.
-- `Drop` impls only on a type of the same package (E0419), not overlapping a `Copy` impl (E0416),
-  and a `Drop` impl on a call cycle needs `rec fn drop`. Operator traits only on `Copy` types, and
-  never on a fn type (E0420, `impl Add for fn(u32) -> u32`): put your own trait on it.
-- A write through a `&mut` to a temporary is accepted and lost at the end of the statement. Each
-  cast of a `&mut` to a raw pointer is a new reborrow: a write through one makes a pointer cast
-  earlier from the same `&mut` unusable.
-- Two bounds of one trait on a param make a method call ambiguous (E0908). Const parameters are
-  unsigned integers. A type nests at most 1,000 levels (E0005).
-
-**Targets and tooling**
-
-- Generated code is slow next to `-O2`: `--release` assigns registers and cleans up slice accesses,
-  but nothing is inlined, hoisted out of loops, or vectorized. Two searches give up on huge
-  functions, with the same results and slower code: past 50 million block visits (10,000 locals
-  read after 4,000 `if`s; 5,000 are fine) the function keeps every value in its stack frame, and
-  in a loop body of more than 4,096 blocks (4,500 `if`s) a repeated `i = i + 8` is computed twice.
-- `check` accepts programs that `build` cannot: `dispatch fn main`, `fn main<T>()` (no `fn main`),
-  and `fn main(x: u32)` (`main` with parameters); write a plain `fn main()` that calls the
-  `dispatch fn`. On AArch64 a fn with a 256-bit vector param and `needs(avx2)` used as a value
-  (`sink(w)`) passes `check --target aarch64-linux` and fails to build (a written
-  `fn(f32x8) -> f32 needs(avx2)` type is E0702): call it, or use a 128-bit vector.
-- Linux only. No C interop yet: `extern "C"` imports check, but a program that reaches one cannot
-  be built. `[target.<T>.link]` in `stave.toml` is reserved for C link inputs.
-- GPU: design only; no PTX back end, no kernel checks beyond the front end. The optimizer is not
-  started.
+- **Guarantees.** Memory safety is the aim, not a proof: the borrow checker is young, and
+  soundness bugs are expected. "Safe code cannot deadlock" covers ranked locks and thread joins
+  only. Recursion has no computed stack bound: past the configured stack it traps
+  `StackOverflow`. Three rounds of adversarial testing found and fixed 51 ways to get a
+  misbehaving program past `check`; more may remain.
+- **False rejects.** The borrow, lock, effect and recursion checks are coarser than the rules:
+  some valid programs are rejected. Each known case has a rewrite.
+- **Deliberate rules.** Moves go left to right, no partial moves, a temporary ends with its
+  statement, `for` names its borrow.
+- **Code quality.** Nothing is inlined, hoisted or auto-vectorized yet: generated code is slow
+  next to `-O2`.
+- **Targets and tooling.** Linux only, x86-64 and AArch64. No C interop yet. `check` accepts a few
+  programs that `build` cannot. GPU: design only.
 
 ## Roadmap
 

@@ -1,9 +1,18 @@
 # Known limits
 
 What the compiler does not guarantee, what it rejects without need, and what it rejects on
-purpose. The README lists the items in short; this file has all of them, with the example and the
-rewrite. A safe program that breaks a guarantee below, or is rejected for no good reason, and is
-not listed here is a bug.
+purpose. The README has a summary; this file has every item, with the example and the rewrite.
+A safe program that breaks a guarantee below, or is rejected for no good reason, and is not listed
+here is a bug.
+
+The checker was hardened in three rounds of adversarial testing: hand-written probes and generated
+programs over closures and threads, patterns, moves and drops, views, traits, function values, and
+the verification rules (effects, recursion, stack bound, lock ranks, contracts). The rounds found
+27, 21, and 3 root causes of programs that `check` accepted and that then misbehaved (memory
+errors, data races, deadlocks, a denied effect or trap that ran, a crash on a CPU without a
+feature), plus a compiler hang and 4 internal errors after a passing `check`; each was fixed and
+the fixes were reviewed. The third round was the last, so its fixes were not hunted again: holes
+of the same kinds may remain, and the first round ran without the interpreter's borrow tracking.
 
 ## 1. Guarantees and where they have gaps
 
