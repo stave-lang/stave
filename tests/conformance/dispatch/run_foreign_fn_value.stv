@@ -1,0 +1,38 @@
+//~ STDOUT run_foreign_fn_value.stdout
+//~ TARGET x86_64-linux-v2
+// A fn value of a fn or dispatch needing another arch's features may be made and passed on in
+// code the target builds: the fn is not built there, and no call through the value runs there
+// (every call needs those features, E0704, and dropping them is E0707), so it builds to a trap
+// that never runs (both arches: crates/stave-driver/tests/dispatch_run.rs).
+import std.io;
+
+fn on_sve() -> u32 needs(sve2) {
+    return 1;
+}
+
+fn on_sve_base() -> u32 needs(sve) {
+    return 2;
+}
+
+dispatch fn pick_sve() -> u32 needs(sve) {
+    sve2 => on_sve,
+    _ => on_sve_base,
+}
+
+fn on_bmi2() -> u32 needs(bmi2) {
+    return 3;
+}
+
+dispatch fn pick_bmi2() -> u32 needs(bmi2) {
+    _ => on_bmi2,
+}
+
+fn count(a: fn() -> u32 needs(sve2), b: fn() -> u32 needs(sve), c: fn() -> u32 needs(bmi2), d: fn() -> u32 needs(bmi2)) -> u32 {
+    return 4;
+}
+
+fn main() -> i32 {
+    let n = count(on_sve, pick_sve, on_bmi2, pick_bmi2);
+    io.print(f"{n}\n");
+    return 0;
+}

@@ -1,6 +1,7 @@
 //! `dispatch fn` arms:
 //! - E0708: an arm feature name no target owns;
-//! - E0705: an arm target whose type is not the dispatch's signature with needs = the
+//! - E0705: an arm target that is not a fn with a body (case `dispatch`: a `dispatch fn`; name
+//!   its arms instead), or whose type is not the dispatch's signature with needs = the
 //!   dispatch's needs plus the arm's features (the `_` arm: plus nothing);
 //! - E0706 case `extra-needs`: a `_` target needing a feature neither the dispatch nor the target baseline has;
 //! - E0718: an arm never picked, because its features (implied ones counted) include those of
@@ -137,14 +138,32 @@ fn check_arm(
     want: FeatureSet,
     out: &mut Vec<Diagnostic>,
 ) {
-    let Some(u) = icx.uses(arm.name).last() else { return };
-    let Res::Decl(t) = u.res else { return };
     let at = icx.node_span(arm.name);
     let roles = [("dispatch", disp_span)];
     let expected = fn_type_text(prog, tys, disp, want.bits());
-    let target = prog.decl(t).filter(|x| matches!(x.kind, DeclKind::Fn | DeclKind::Method));
-    let Some(ts) = target.and_then(|_| sigs.fn_sig(t)) else {
+    // An arm target is a fn with a body: the arm chain calls that code. Every other name is
+    // rejected here, so [`plan`] finds a resolved chain for every dispatch that checks.
+    let t = match icx.uses(arm.name).last().map(|u| u.res) {
+        Some(Res::Decl(t)) => t,
+        // E0101 / E0103 are reported
+        Some(Res::Unresolved) => return,
+        _ => {
+            let found = icx.node_text(arm.name);
+            out.extend(mk("E0705", None, &[("expected", &expected), ("found", found)], at, &roles));
+            return;
+        }
+    };
+    let target = prog.decl(t);
+    if target.is_some_and(|x| x.kind == DeclKind::Fn && x.flags.has(DeclFlags::DISPATCH)) {
         let found = prog.decl_path(t);
+        out.extend(mk("E0705", Some("dispatch"), &[("target", &found)], at, &roles));
+        return;
+    }
+    let Some(ts) = target.filter(|x| x.has_body()).and_then(|_| sigs.fn_sig(t)) else {
+        let found = match sigs.fn_sig(t) {
+            Some(s) => fn_type_text(prog, tys, s, s.features),
+            None => prog.decl_path(t),
+        };
         out.extend(mk("E0705", None, &[("expected", &expected), ("found", &found)], at, &roles));
         return;
     };
@@ -218,7 +237,7 @@ pub(crate) fn plan(prog: &Program, tc: &Typeck, icx: &ItemCx<'_>, d: DeclId) -> 
             continue;
         }
         let Res::Decl(t) = icx.uses(arm.name).last()?.res else { return None };
-        let ok = prog.decl(t).is_some_and(|x| matches!(x.kind, DeclKind::Fn | DeclKind::Method))
+        let ok = prog.decl(t).is_some_and(|x| x.has_body())
             && tc.body(t).is_some_and(|b| !b.has_error)
             && tc.sigs.fn_sig(t).is_some_and(|s| s.generics.is_empty());
         if !ok {

@@ -3897,12 +3897,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0705",
         severity: Severity::Error,
         area: "features",
-        rule: "dispatch arm signature differs from the dispatch signature",
+        rule: "dispatch arm signature differs from the dispatch signature, or the arm target is not a fn with a body. Case `dispatch`: the target is a `dispatch fn`",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "expected", kind: HoleKind::Type, choices: &[] },
             Hole { name: "found", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "target", kind: HoleKind::Path, choices: &[] },
         ],
         shapes: &[
             Shape {
@@ -3914,6 +3915,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give the arm's function the type `{expected}` (the dispatch signature, with needs = dispatch needs + the arm's features)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "dispatch",
+                message: "dispatch arm names `dispatch fn` `{target}`: an arm target is a fn with a body",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a `dispatch fn`" },
+                    LabelTemplate { at: "dispatch", text: "this dispatch" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name the arms of `{target}` in this dispatch directly, each fn that has the features of its arm",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4012,11 +4026,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0709",
         severity: Severity::Error,
         area: "features",
-        rule: "`main`, a trait method, or an `extern` export declares `needs`",
+        rule: "an entry point (`main`, a `test fn`, an `extern` export, an allocator fn, a runtime entry fn: code that runs with no typed call site, on any CPU of the target) or a trait method declares `needs`. Case `test`: a `test fn`",
         retired: false,
         located: true,
         holes: &[
-            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["`main`", "a trait method", "an `extern` export"] },
+            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["`main`", "a trait method", "an `extern` export", "a `test fn`", "an allocator fn", "a runtime entry fn"] },
         ],
         shapes: &[
             Shape {
@@ -4027,6 +4041,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `needs(...)` here, and call the feature-specific code through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "test",
+                message: "{what} cannot declare `needs`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`needs` here: the harness runs this test on any CPU" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `needs(...)`: move the body to a fn with `needs(...)` and call it through a `dispatch` fn whose `_` arm returns without it (the test then passes on a CPU without the features)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

@@ -918,6 +918,13 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    /// The code of a fn the target does not build ([`crate::sigs::FnSig::built_on`]): a trap.
+    pub fn lower_unbuilt(&mut self, params: &[Ty], ret: Ty) -> FnOut {
+        self.fresh_env(params, ret);
+        self.f.b.unreachable();
+        self.dispatch_out(params, ret)
+    }
+
     fn dispatch_out(&mut self, params: &[Ty], ret: Ty) -> FnOut {
         let body = if self.err.is_none() { self.finish_fn() } else { None };
         FnOut {
