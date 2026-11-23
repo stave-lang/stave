@@ -1,0 +1,5 @@
+u32 sum 15
+i64 sum -3
+money 22.34
+i64 dot -2
+mod7 dot 2

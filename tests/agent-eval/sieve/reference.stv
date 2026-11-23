@@ -1,0 +1,40 @@
+import std.io;
+
+fn main() -> i32 {
+    let mut is_p: [bool; 101] = [true; 101];
+    is_p[0] = false;
+    is_p[1] = false;
+    let mut i: usize = 2;
+    while i * i <= 100 {
+        if is_p[i] {
+            let mut j = i * i;
+            while j <= 100 {
+                is_p[j] = false;
+                j = j + i;
+            }
+        }
+        i = i + 1;
+    }
+    let mut count: u32 = 0;
+    let mut sum: u32 = 0;
+    for k in 0..is_p.len() {
+        if is_p[k] {
+            count = count + 1;
+            sum = sum + (k as% u32);
+        }
+    }
+    io.print(f"count {count}\n");
+    io.print(f"sum {sum}\n");
+    io.print("largest");
+    let mut found: u32 = 0;
+    let mut k: usize = 100;
+    while found < 3 {
+        if is_p[k] {
+            io.print(f" {k}");
+            found = found + 1;
+        }
+        k = k - 1;
+    }
+    io.print("\n");
+    return 0;
+}

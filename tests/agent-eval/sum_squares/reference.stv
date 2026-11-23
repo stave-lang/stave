@@ -1,0 +1,22 @@
+import std.io;
+
+fn main() -> i32 {
+    let mut squares: u64 = 0;
+    for i in 1u64..=100 {
+        squares = squares + i * i;
+    }
+    let mut cubes: u32 = 0;
+    for i in 1u32..=20 {
+        cubes = cubes + i * i * i;
+    }
+    let mut odds: i32 = 0;
+    let mut k: i32 = 1;
+    while k < 50 {
+        odds = odds + k;
+        k = k + 2;
+    }
+    io.print(f"squares {squares}\n");
+    io.print(f"cubes {cubes}\n");
+    io.print(f"odds {odds}\n");
+    return 0;
+}
