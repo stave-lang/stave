@@ -600,7 +600,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-/// Run `f`; any panic becomes exit 3 with a bug-report hint on stderr.
+/// Run `f`; any panic becomes exit 3 with a bug-report hint on stderr. Worker threads that
+/// cannot be created are a plain error (exit 2): the machine's limits, not a bug.
 pub fn guarded(f: impl FnOnce() -> i32) -> i32 {
     panic::set_hook(Box::new(|info| {
         let loc = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
@@ -612,7 +613,16 @@ pub fn guarded(f: impl FnOnce() -> i32) -> i32 {
             panic_message(info.payload())
         );
     }));
-    panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or(EXIT_ICE)
+    match panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(code) => code,
+        Err(p) => match p.downcast_ref::<stave_sema::pool::NoThreads>() {
+            Some(stave_sema::pool::NoThreads(e)) => {
+                let _ = writeln!(std::io::stderr(), "stave: cannot start worker threads: {e}");
+                EXIT_USAGE
+            }
+            None => EXIT_ICE,
+        },
+    }
 }
 
 #[cfg(test)]

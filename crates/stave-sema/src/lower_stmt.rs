@@ -769,17 +769,15 @@ impl<'a> FnCx<'a> {
         if caps.is_empty() {
             return None;
         }
-        let mut elems = Vec::with_capacity(caps.len());
+        let mut tys = Vec::with_capacity(caps.len());
         let mut locals = Vec::with_capacity(caps.len());
         for c in &caps {
             let l = *self.by_node.get(&c.binding)?;
             let t = self.locals[l].ty;
-            let rt = self.t_ref(true, t);
-            elems.push(rt);
-            locals.push((l, rt));
+            tys.push(t);
+            locals.push((l, self.t_ref(true, t)));
         }
-        let tup = self.tys.intern(TypeKind::Tuple(elems.into_boxed_slice()));
-        let pt = self.t_ref(true, tup);
+        let (tup, pt) = crate::closures::env_type(&mut self.tys, &tys);
         Some((tup, pt, locals))
     }
 
@@ -941,7 +939,7 @@ impl<'a> FnCx<'a> {
 
     /// The drop glue of `t`: `fn(p: &mut T)`.
     pub fn lower_glue(&mut self, t: Ty) -> FnOut {
-        let pt = self.t_ref(true, t);
+        let pt = crate::drops::glue_param(&mut self.tys, t);
         self.fresh_env(&[pt], TypeId::NONE);
         let unit = self.t_unit();
         self.f.ret = unit;
@@ -1468,6 +1466,7 @@ impl<'a> FnCx<'a> {
             self.chunk_loop(f, pat, t, iter, body, tail);
             return;
         }
+        // the checker rejects a tail clause on an element loop (E0601 case `element`)
         if tail.is_some() {
             self.fail(f, "a tail clause on an element loop (E0601 `element-loop` at check)");
             return;
@@ -1484,8 +1483,9 @@ impl<'a> FnCx<'a> {
                 self.fail(f, "a `for` over a range whose instance type is no range");
                 return;
             };
+            // only an integer range is a `for` source (`loops::for_source`)
             if !matches!(self.kind(elem), TypeKind::Int { .. }) {
-                self.unsupported(f, "char ranges in for loops are not supported yet");
+                self.fail(f, "a `for` over a range of non-integers");
                 return;
             }
             let bounds = if icx.kind(iter) == Some(NodeKind::RangeExpr) {
@@ -2582,8 +2582,9 @@ impl<'a> FnCx<'a> {
         if let Some(&l0) = kids.first()
             && icx.kind(l0) == Some(NodeKind::Literal)
         {
+            // the checker rejects a literal pattern of a type without a scalar `==` (E0206)
             if icx.is(icx.a(l0), Term::StrLit) {
-                self.unsupported(p, "string literal patterns are not supported yet");
+                self.fail(p, "a string literal pattern");
                 return false;
             }
             let Some((dp, _)) = self.peel(place, mode) else { return false };
@@ -2710,9 +2711,10 @@ impl<'a> FnCx<'a> {
                 if skip_top {
                     return true;
                 }
-                let Some(c) = self.g.sigs.konst(d) else { return false };
-                let (ct, Some(cv)) = (c.ty, c.value.clone()) else { return false };
-                let ce = self.const_val(&cv, ct, a);
+                if self.g.sigs.konst(d).is_none_or(|c| c.value.is_none()) {
+                    return false;
+                }
+                let ce = self.const_use(d, a);
                 let Some(k) = self.operand_of(ce) else { return false };
                 let Some(v) = self.peek(&dp) else { return false };
                 let bt = self.t_bool();

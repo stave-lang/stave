@@ -401,8 +401,7 @@ pub fn run(root: &Path, lib: &Library, opts: &Options) -> Result<Output, Pipelin
 /// runs started from the items of a `par_iter` would nest on one stack without bound.
 pub fn run_on(pool: &rayon::ThreadPool, root: &Path, lib: &Library, opts: &Options) -> Output {
     if rayon::current_thread_index().is_some() && pool.current_thread_index().is_none() {
-        return std::thread::scope(|s| s.spawn(|| pool.install(|| run_inner(root, lib, opts))).join())
-            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        return stave_sema::pool::wait_off_pool(|| pool.install(|| run_inner(root, lib, opts)));
     }
     pool.install(|| run_inner(root, lib, opts))
 }
@@ -574,7 +573,10 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     }
     // A body the borrow checker could not model is not known to be sound: the run fails (check
     // and build alike) instead of accepting it without its E05xx diagnostics.
-    let mut failure = if has_errors {
+    // An internal error of the checker stops the run whatever else it reported.
+    let mut failure = if let Some(m) = tc.internal.first() {
+        Some(Failure::Internal { stage: Stage::Typeck, message: m.clone() })
+    } else if has_errors {
         None
     } else {
         silent_error(&tc, |d| program.decl_path(d))

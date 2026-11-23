@@ -47,6 +47,7 @@ use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::ids::{BindingRef, DeclId, ItemId};
 use crate::itemcx::{Brackets, ItemCx};
+use crate::resolve::Res;
 use crate::sigs::{self, DeclSig, FnSig, GenericParam, NameCx, SigBuilder, Sigs, TyEnv};
 use crate::traits::{Adjust, MethodRef, World};
 use crate::types::{self, ConstArg, GArg, Interner, Overlay, TypeId, TypeKind, TypeTable, ids};
@@ -212,6 +213,21 @@ pub struct TypedBody {
     pub test_domain: Option<Box<crate::testgen::Domain>>,
     /// Where each temporary of the body ends: the one answer checker and lowering read.
     pub stmt_ends: crate::temps::StmtEnds,
+    /// Internal errors found while checking the body (const evaluation).
+    pub internal: Vec<String>,
+    /// The values the fn holds whole, by the node that makes or binds them (the decl's node
+    /// for the return value), sorted: parameters and bindings, every expression value but a
+    /// place read in place (a value `if` / `match` twice: result and live arm; [`Ck::value_sizes`]), the
+    /// return value. Their types are checked against [`crate::consteval::MAX_VALUE_BYTES`] here
+    /// for a concrete type and per instance for a generic one ([`instance_sizes`]).
+    pub held: Vec<(u32, TypeId)>,
+    /// The frame temporaries no node of [`TypedBody::held`] stands for: per call, its result,
+    /// its by-value receiver, and each argument (the copy passed). With `held` they make the frame sum
+    /// ([`crate::consteval::MAX_FRAME_BYTES`]).
+    pub temps: Vec<TypeId>,
+    /// Per closure body (its node): the `&mut` to its environment
+    /// ([`crate::closures::env_type`]). Measured like the node types ([`crate::typedepth`]).
+    pub envs: Vec<(u32, TypeId)>,
 }
 
 impl TypedBody {
@@ -293,6 +309,8 @@ pub struct Typeck {
     pub diagnostics: Vec<Diagnostic>,
     pub timings: TypeckTimings,
     pub error_type: TypeId,
+    /// Internal errors of the checker (const evaluation): the compilation stops with the first.
+    pub internal: Vec<String>,
 }
 
 impl Typeck {
@@ -440,6 +458,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
         .collect();
     let mut sb = SigBuilder::new(prog, &brackets);
     sb.build_all();
+    let mut internal = std::mem::take(&mut sb.internal);
     let (mut tys, sigs_table, mut diags) = sb.finish();
     diags.extend(crate::traits::check_impls(prog, &sigs_table, &mut tys, &brackets));
     diags.extend(crate::builtins::check_intrinsics(prog, &sigs_table, &tys, &brackets));
@@ -473,14 +492,15 @@ fn check_in_pool(prog: &Program) -> Typeck {
         };
         jobs.push(Job { decl, item: d.item, node: d.node, kind });
     }
+    sigs_table.queries.arm(tys.len());
     let w = World { prog, sigs: &sigs_table };
-    let results: Vec<(TypedBody, Vec<TypeKind>, Vec<Diagnostic>)> = jobs
+    let results: Vec<BodyResult> = jobs
         .par_iter()
         .map(|j| {
             let br = &brackets[j.item.idx()];
             match ItemCx::new(prog, j.item, br) {
                 Some(icx) => check_body(w, &tys, icx, *j),
-                None => (empty_body(*j), Vec::new(), Vec::new()),
+                None => (empty_body(*j), (Vec::new(), 0, 0), Vec::new()),
             }
         })
         .collect();
@@ -489,8 +509,10 @@ fn check_in_pool(prog: &Program) -> Typeck {
     // Merge overlays (decl order), then canonical ids.
     let t2 = Instant::now();
     let mut bodies = Vec::with_capacity(results.len());
-    for (mut b, local, ds) in results {
+    for (mut b, (local, refused, claimed), ds) in results {
         diags.extend(ds);
+        tys.add_refusals(refused, claimed);
+        internal.append(&mut b.internal);
         if !local.is_empty() {
             let m = tys.merge(&local);
             remap_body(&mut b, &|t: TypeId| {
@@ -513,6 +535,9 @@ fn check_in_pool(prog: &Program) -> Typeck {
     bodies.par_iter_mut().for_each(|b| remap_body(b, &map));
     let mut sigs_table = sigs_table;
     remap_sigs(&mut sigs_table, &map_sig);
+    // the table was renumbered: answers about the old ids are gone
+    sigs_table.queries.arm(tys.len());
+    diags.extend(data_total(prog, &sigs_table, &tys));
     let gated = crate::inherit::gate_bodies(prog, &sigs_table, &tys, &bodies, &brackets);
     diags.extend(gated.diagnostics);
     let mut instances: Vec<Instance> =
@@ -520,6 +545,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
     instances.sort();
     instances.dedup();
     let deep = crate::mono::depth_check(prog, &sigs_table, &tys, &bodies, &brackets);
+
     // polymorphic recursion (E0902) has no finite instance graph
     let too_deep = !deep.is_empty();
     diags.extend(deep);
@@ -546,6 +572,19 @@ fn check_in_pool(prog: &Program) -> Typeck {
         diags.extend(mk("E0902", Some("graph"), &[("generic", &generic)], span, &[]));
     }
     diags.extend(crate::typedepth::check(prog, &sigs_table, &tys, &bodies, &call_graph, &brackets));
+    if !call_graph.truncated {
+        diags.extend(instance_sizes(prog, &sigs_table, &tys, &bodies, &call_graph));
+    }
+    // A type refused for its height (`types::MAX_TYPE_HEIGHT`) is E0005 case `type` at the span
+    // that owned it: written types, nodes, statements and bodies claimed theirs above, and each
+    // declaration its signature's; the call graph's are per instance.
+    for &at in &call_graph.refused_at {
+        diags.extend(mk("E0005", Some("type"), &[], at, &[]));
+    }
+    // Every phase above ends in an owner that claims all that is left, so this never holds.
+    if tys.unclaimed() > 0 {
+        internal.push("a type refused for its height was claimed by no owner".into());
+    }
     let t_graph = t3.elapsed();
     let diagnostics = stave_diag::canonical_order(diags, &prog.source_map);
     Typeck {
@@ -559,7 +598,324 @@ fn check_in_pool(prog: &Program) -> Typeck {
         diagnostics,
         timings: TypeckTimings { sigs: t_sigs, bodies: t_bodies, canon: t_canon, graph: t_graph },
         error_type: err,
+        internal,
     }
+}
+
+/// E0904 case `total`: the `static`s and `const`s of the program take more than
+/// [`crate::consteval::MAX_PROGRAM_DATA_BYTES`] together (each its type's bytes rounded up to
+/// its alignment; every `const` counts, read from an image or not, used or not). Reported once,
+/// at the largest item of the program's own packages (the built-in packages' share is what their
+/// imports bring and cannot be changed there), with the next largest items as related spans.
+/// One without a value or a size has its own diagnostic.
+fn data_total(prog: &Program, sigs: &Sigs, tys: &TypeTable) -> Option<Diagnostic> {
+    let mut cx = Overlay::new(tys);
+    let mut sum = 0u64;
+    // (bytes, built-in package, span, name), one per item with a size
+    let mut items: Vec<(u64, bool, Span, crate::ids::Sym)> = Vec::new();
+    for k in 0..prog.decls.len() as u32 {
+        let id = DeclId(k);
+        let Some(d) = prog.decl(id) else { continue };
+        if !matches!(d.kind, DeclKind::Const | DeclKind::Static) {
+            continue;
+        }
+        let Some(c) = sigs.konst(id).filter(|c| c.value.is_some()) else { continue };
+        if cx.has_params(c.ty) || cx.has_error(c.ty) {
+            continue;
+        }
+        let Ok((bytes, align)) =
+            crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: &mut cx, sigs }, c.ty)
+        else {
+            continue;
+        };
+        let padded = bytes.checked_next_multiple_of(align.max(1)).unwrap_or(u64::MAX);
+        sum = sum.saturating_add(padded);
+        items.push((padded, crate::callgraph::in_builtin_package(prog, id), d.name_span, d.name));
+    }
+    if sum <= crate::consteval::MAX_PROGRAM_DATA_BYTES {
+        return None;
+    }
+    // largest first; the program's own items before the built-in packages'; then source order
+    items.sort_by_key(|&(b, builtin, sp, _)| (builtin, std::cmp::Reverse(b), sp.file, sp.offset));
+    let (_, _, at, name) = items[0];
+    let name = prog.strings.get(name).to_string();
+    let mut rest: Vec<(u64, Span)> = items[1..].iter().map(|&(b, _, sp, _)| (b, sp)).collect();
+    rest.sort_by_key(|&(b, sp)| (std::cmp::Reverse(b), sp.file, sp.offset));
+    let related: Vec<(&str, Span)> = rest.iter().take(3).map(|&(_, sp)| ("other", sp)).collect();
+    mk("E0904", Some("total"), &[("name", &name), ("bytes", &sum.to_string())], at, &related)
+}
+
+/// The frame slots of a body's expression values ([`Ck::value_sizes`]). The back end gives every
+/// value a slot of its own; the forms below are read in place and take none, and anything not
+/// listed takes one.
+struct Frame<'a> {
+    icx: ItemCx<'a>,
+    lo: u32,
+    n: u32,
+    /// Dereferences used as places (written, borrowed, or the head of a field / index chain):
+    /// read in place, no copy.
+    place_pos: rustc_hash::FxHashSet<u32>,
+}
+
+/// A step of a postfix chain, for [`Frame`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// `.f`, `.0`, `[i]`: a part of the place before it.
+    Part,
+    /// `.m(..)` or `(..)`: a call, keyed at these tokens (method name, `(`).
+    Call(u32, u32),
+    /// Anything else (a path step, `?`, a struct literal).
+    Other,
+}
+
+impl<'a> Frame<'a> {
+    fn inside(&self, n: u32) -> bool {
+        n >= self.lo && n < self.lo + self.n
+    }
+
+    /// `n` without the parentheses (and `unsafe`) around it.
+    fn strip(&self, mut n: u32) -> u32 {
+        let icx = self.icx;
+        for _ in 0..self.n {
+            let a = icx.a(n);
+            let paren = icx.kind(n) == Some(NodeKind::Primary)
+                && icx.is(a, Term::LParen)
+                && icx.kids_vec(n).len() == 1;
+            let unsafe_op = icx.kind(n) == Some(NodeKind::Unary) && icx.is(a, Term::KwUnsafe);
+            match (paren || unsafe_op).then(|| icx.last_child(n)).flatten() {
+                Some(c) => n = c,
+                None => break,
+            }
+        }
+        n
+    }
+
+    /// The steps of postfix chain `n` after its head.
+    fn steps(&self, n: u32) -> Vec<Step> {
+        let icx = self.icx;
+        let mut out = Vec::new();
+        if icx.kind(n) != Some(NodeKind::Postfix) {
+            return out;
+        }
+        let Some(prim) = icx.first_child(n) else { return out };
+        let end = icx.postfix_end(n);
+        let mut p = icx.primary_end(prim) + 1;
+        while p <= end {
+            let t = icx.tk(p);
+            if t == Term::Dot as u8 && icx.is(p + 1, Term::Ident) {
+                let seg = p + 1;
+                let mut q = p + 2;
+                if icx.is(q, Term::ColonColon) {
+                    q = icx.angle_end(q + 1).0;
+                }
+                if icx.is(q, Term::LParen) {
+                    out.push(Step::Call(seg, q));
+                    p = icx.close(q) + 1;
+                } else {
+                    out.push(if icx.use_at(prim, seg).is_some() { Step::Other } else { Step::Part });
+                    p = q;
+                }
+            } else if t == Term::Dot as u8 && icx.is(p + 1, Term::IntLit) {
+                out.push(Step::Part);
+                p += 2;
+            } else if t == Term::LBracket as u8 {
+                out.push(Step::Part);
+                p = icx.close(p) + 1;
+            } else if t == Term::LParen as u8 {
+                out.push(Step::Call(p, p));
+                p = icx.close(p) + 1;
+            } else if t == Term::DotLBrace as u8 {
+                out.push(Step::Other);
+                p = icx.close(p) + 1;
+            } else {
+                out.push(Step::Other);
+                p += 1;
+            }
+        }
+        out
+    }
+
+    /// Whether `n` names a place: a local, `self`, or a `static`; a dereference; or a field or
+    /// element of a place.
+    fn is_place(&self, n: u32) -> bool {
+        let icx = self.icx;
+        let n = self.strip(n);
+        match icx.kind(n) {
+            Some(NodeKind::Primary) if icx.is_path_head(n) => {
+                let named = icx.use_at(n, icx.a(n)).map(|u| u.res);
+                icx.primary_end(n) == icx.a(n) && matches!(named, Some(Res::Local(_) | Res::SelfValue(_)))
+                    || matches!(named, Some(Res::Decl(d)) if self.is_static(d))
+            }
+            Some(NodeKind::Unary) => icx.is(icx.a(n), Term::Star),
+            Some(NodeKind::Postfix) => {
+                let steps = self.steps(n);
+                !steps.is_empty()
+                    && steps.iter().all(|s| *s == Step::Part)
+                    && icx.first_child(n).is_some_and(|h| self.is_place(h))
+            }
+            _ => false,
+        }
+    }
+
+    fn is_static(&self, d: DeclId) -> bool {
+        self.icx.prog.decl(d).is_some_and(|x| x.kind == DeclKind::Static)
+    }
+
+    /// Marks the dereferences read in place: assigned to, borrowed, or the head of a chain of
+    /// parts.
+    fn mark_places(&mut self, lhs: &[u32]) {
+        let icx = self.icx;
+        let mut heads: Vec<u32> = lhs.to_vec();
+        for n in self.lo..self.lo + self.n {
+            match icx.kind(n) {
+                Some(NodeKind::Unary) if icx.is(icx.a(n), Term::Amp) || icx.is(icx.a(n), Term::AmpAmp) => {
+                    heads.extend(icx.last_child(n));
+                }
+                Some(NodeKind::Postfix) if self.steps(n).first() == Some(&Step::Part) && self.is_place(n) => {
+                    heads.extend(icx.first_child(n));
+                }
+                _ => {}
+            }
+        }
+        for h in heads {
+            let h = self.strip(h);
+            if self.inside(h) && icx.kind(h) == Some(NodeKind::Unary) && icx.is(icx.a(h), Term::Star) {
+                self.place_pos.insert(h);
+            }
+        }
+    }
+
+    /// How many frame slots the value of expression node `n` takes: a place read in place
+    /// none; a value `if` or `match` two, whatever its arm count (the join's result, and the
+    /// value of the arm that is live into it: the arms' values are never live together, and
+    /// both back ends give them one slot; an arm that makes a value of its own counts it as
+    /// its own node); a chain ending in a call counted with its call none; anything else one.
+    fn copies(&self, n: u32, counted_calls: &rustc_hash::FxHashSet<u32>) -> usize {
+        let icx = self.icx;
+        let a = icx.a(n);
+        match icx.kind(n) {
+            // the same value as the expression inside
+            Some(NodeKind::Primary) if icx.is(a, Term::LParen) && icx.kids_vec(n).len() == 1 => 0,
+            Some(NodeKind::Unary) if icx.is(a, Term::KwUnsafe) => 0,
+            // a dereference is loaded into a slot unless it is used as a place
+            Some(NodeKind::Unary) if icx.is(a, Term::Star) => usize::from(!self.place_pos.contains(&n)),
+            Some(NodeKind::IfExpr | NodeKind::MatchExpr) => 2,
+            Some(NodeKind::Primary | NodeKind::Postfix) if self.is_place(n) => 0,
+            Some(NodeKind::Postfix) => match self.steps(n).last() {
+                Some(Step::Call(k1, k2)) if counted_calls.contains(k1) || counted_calls.contains(k2) => 0,
+                _ => 1,
+            },
+            _ => 1,
+        }
+    }
+}
+
+/// The size checks of one fn instance ([`TypedBody::held`], [`TypedBody::temps`] with `args`
+/// substituted; `args` empty: the fn itself): the first value past
+/// [`crate::consteval::MAX_VALUE_BYTES`] or without a size (`(node, type, bytes)`, bytes
+/// `None`: past `u64`), and the frame sum (saturating; `u64::MAX` when a size is past `u64`).
+/// Values whose type keeps a param (a generic fn checked by itself) are left out.
+fn frame_of<I: Interner + ?Sized>(
+    cx: &mut I,
+    sigs: &Sigs,
+    b: &TypedBody,
+    args: &[GArg],
+) -> (Option<(u32, TypeId, Option<u64>)>, u64) {
+    let mut first = None;
+    let mut sum = 0u64;
+    let mut memo: FxHashMap<TypeId, Result<u64, crate::traits::NoLayout>> = FxHashMap::default();
+    let items = b.held.iter().map(|&(n, t)| (Some(n), t)).chain(b.temps.iter().map(|&t| (None, t)));
+    for (n, t) in items {
+        let it = if args.is_empty() { t } else { cx.subst(t, args, None) };
+        if cx.has_params(it) || cx.has_error(it) {
+            continue;
+        }
+        let r = match memo.get(&it) {
+            Some(&r) => r,
+            None => {
+                let r = crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: &mut *cx, sigs }, it)
+                    .map(|l| l.0);
+                memo.insert(it, r);
+                r
+            }
+        };
+        let bytes = match r {
+            Ok(x) => Some(x),
+            Err(crate::traits::NoLayout::Overflow) => None,
+            // no layout for another reason: its own diagnostic (E0005, E0911)
+            Err(crate::traits::NoLayout::Unknown) => continue,
+        };
+        sum = sum.saturating_add(bytes.unwrap_or(u64::MAX));
+        if let Some(n) = n
+            && first.is_none()
+            && bytes.is_none_or(|x| x > crate::consteval::MAX_VALUE_BYTES)
+        {
+            first = Some((n, it, bytes));
+        }
+    }
+    (first, sum)
+}
+
+/// The size limits per instance of a generic fn (every `Fn` instance of the call graph, so also
+/// one a generic fn instantiates), once per instance, at the generic fn, naming the instance:
+/// E0911 case `instance` for a value past [`crate::consteval::MAX_VALUE_BYTES`], case
+/// `overflow` for one whose size does not fit in a `u64`, case `frame` for a frame sum past
+/// [`crate::consteval::MAX_FRAME_BYTES`]. A fn without generic args is checked by
+/// [`Ck::value_sizes`].
+fn instance_sizes(
+    prog: &Program,
+    sigs: &Sigs,
+    tys: &TypeTable,
+    bodies: &[TypedBody],
+    g: &CallGraph,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let body_of: FxHashMap<DeclId, &TypedBody> = bodies.iter().map(|b| (b.decl, b)).collect();
+    let mut ov = g.types(tys);
+    for node in &g.nodes {
+        let crate::callgraph::NodeKind::Fn { inst, body: true, .. } = &node.kind else { continue };
+        if inst.args.is_empty() {
+            continue;
+        }
+        let Some(b) = body_of.get(&inst.decl) else { continue };
+        if !b.held.iter().any(|&(_, t)| ov.has_params(t)) && !b.temps.iter().any(|&t| ov.has_params(t)) {
+            continue;
+        }
+        let (first, sum) = frame_of(&mut ov, sigs, b, &inst.args);
+        let names = NameCx { prog, generics: &[] };
+        let args: Vec<String> = inst
+            .args
+            .iter()
+            .map(|a| match a {
+                GArg::Type(x) => types::display(&ov, &names, *x),
+                GArg::Const(ConstArg::Value(v)) => v.to_string(),
+                GArg::Const(_) => "_".to_string(),
+            })
+            .collect();
+        let name = format!("{}::<{}>", prog.decl_path(inst.decl), args.join(", "));
+        let d = match first {
+            Some((_, it, Some(bytes))) => {
+                let tn = types::display(&ov, &names, it);
+                mk(
+                    "E0911",
+                    Some("instance"),
+                    &[("type", &tn), ("bytes", &bytes.to_string()), ("instance", &name)],
+                    node.span,
+                    &[],
+                )
+            }
+            Some((_, it, None)) => {
+                let tn = types::display(&ov, &names, it);
+                mk("E0911", Some("overflow"), &[("type", &tn), ("fn", &name)], node.span, &[])
+            }
+            None if sum > crate::consteval::MAX_FRAME_BYTES => {
+                mk("E0911", Some("frame"), &[("fn", &name), ("bytes", &sum.to_string())], node.span, &[])
+            }
+            None => None,
+        };
+        out.extend(d);
+    }
+    out
 }
 
 fn empty_body(j: Job) -> TypedBody {
@@ -587,6 +943,10 @@ fn empty_body(j: Job) -> TypedBody {
         contracts: None,
         test_domain: None,
         stmt_ends: crate::temps::StmtEnds::default(),
+        internal: Vec::new(),
+        held: Vec::new(),
+        temps: Vec::new(),
+        envs: Vec::new(),
     }
 }
 
@@ -617,7 +977,13 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
     for t in &mut b.node_types {
         *t = f(*t);
     }
-    for (_, t) in &mut b.locals {
+    for (_, t) in b.locals.iter_mut().chain(b.held.iter_mut()) {
+        *t = f(*t);
+    }
+    for t in &mut b.temps {
+        *t = f(*t);
+    }
+    for (_, t) in &mut b.envs {
         *t = f(*t);
     }
     for (_, t) in b.targets.iter_mut().chain(b.implicit.iter_mut()) {
@@ -689,7 +1055,11 @@ fn remap_sigs(s: &mut Sigs, f: &dyn Fn(TypeId) -> TypeId) {
                 }
             }
             DeclSig::Trait(t) => remap_generics(&mut t.generics, f),
-            DeclSig::Const(c) | DeclSig::Static(c) => c.ty = f(c.ty),
+            DeclSig::Const(c) | DeclSig::Static(c) => {
+                c.ty = f(c.ty);
+                // the checker compared them before the renumbering
+                c.types = Vec::new();
+            }
             DeclSig::Alias(a) => {
                 remap_generics(&mut a.generics, f);
                 a.target = f(a.target);
@@ -805,6 +1175,12 @@ pub(crate) struct Ck<'a> {
     /// `c.select(a, b)` on a `bool`: the token of its target and the type of its operands, which
     /// is its result type once the literals among them are fixed.
     pub selects: Vec<(u32, Ty)>,
+    /// Per call step (the token its target is keyed at: the `(`, or a method's name): its
+    /// argument nodes, each passed by value as a copy ([`Ck::value_sizes`]).
+    pub call_args: Vec<(u32, Vec<u32>)>,
+    /// Where a dereference is read in place: the left side of an assignment (a place written),
+    /// the initializer of a binding of one name (loaded into the binding's slot).
+    pub assign_lhs: Vec<u32>,
     /// [`TypedBody::moves`], unsorted.
     pub moves: Vec<u32>,
     pub drops: Vec<(u32, TypeId)>,
@@ -815,6 +1191,9 @@ pub(crate) struct Ck<'a> {
     pub depth: u32,
     /// E0005 case `expr` was reported for this body.
     pub depth_reported: bool,
+    /// The nodes entered ([`Ck::enter`]) and not left, each with [`Interner::refusals`] when it
+    /// was entered: each owns the refusals made inside it ([`types::claim_refusals`]).
+    owners: Vec<(u32, u32)>,
     /// The current statement always calls a `-> never` fn (path rule).
     pub diverges: bool,
     /// The current position is reachable (no earlier diverging statement).
@@ -831,14 +1210,15 @@ pub(crate) struct Ck<'a> {
     pub contracts: Option<Box<crate::contracts::Contracts>>,
     /// The input domain of a `test fn` with parameters ([`crate::testgen`]).
     pub domain: Option<Box<crate::testgen::Domain>>,
+    /// [`TypedBody::internal`].
+    pub internal: Vec<String>,
 }
 
-fn check_body(
-    w: World<'_>,
-    global: &TypeTable,
-    icx: ItemCx<'_>,
-    j: Job,
-) -> (TypedBody, Vec<TypeKind>, Vec<Diagnostic>) {
+/// A checked body, its overlay's local types and refusal count
+/// ([`crate::types::Interner::refusals`]), and its diagnostics.
+type BodyResult = (TypedBody, (Vec<TypeKind>, u32, u32), Vec<Diagnostic>);
+
+fn check_body(w: World<'_>, global: &TypeTable, icx: ItemCx<'_>, j: Job) -> BodyResult {
     let prog = w.prog;
     let sigs = w.sigs;
     let lo = icx.ast.descendants(j.node).start;
@@ -884,6 +1264,8 @@ fn check_body(
         for_kinds: Vec::new(),
         chunk_loops: Vec::new(),
         selects: Vec::new(),
+        call_args: Vec::new(),
+        assign_lhs: Vec::new(),
         moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
@@ -891,6 +1273,7 @@ fn check_body(
         fn_items: Vec::new(),
         depth: 0,
         depth_reported: false,
+        owners: Vec::new(),
         diverges: false,
         reachable: true,
         kids_buf: Vec::new(),
@@ -900,6 +1283,7 @@ fn check_body(
         olds: Vec::new(),
         contracts: None,
         domain: None,
+        internal: Vec::new(),
     };
     match j.kind {
         JobKind::Fn => {
@@ -1677,10 +2061,6 @@ impl<'a> Ck<'a> {
         let tspan = kids.iter().find(|&&c| icx.kind(c) == Some(NodeKind::Type)).map(|&t| icx.node_span(t));
         self.check_expr(e, ty, tspan);
         self.rets.pop();
-        // A const initializer must be a const-expr: its value is computed by the signature phase.
-        if self.sigs.konst(self.decl).is_some_and(|c| c.value.is_none()) {
-            self.has_error = true;
-        }
         self.static_rules(n, ty, tspan);
     }
 
@@ -1786,7 +2166,7 @@ impl<'a> Ck<'a> {
         }
     }
 
-    fn finish(mut self, j: Job) -> (TypedBody, Vec<TypeKind>, Vec<Diagnostic>) {
+    fn finish(mut self, j: Job) -> BodyResult {
         // Pending literal groups left: no context anywhere (E0202).
         for g in 0..self.lits.len() as u32 {
             let r = self.find(g);
@@ -1794,6 +2174,35 @@ impl<'a> Ck<'a> {
                 self.e0202(g);
             }
         }
+        // A const initializer must be a const-expr: the signature phase computes its value, and
+        // the diagnostic it deferred is reported unless this body reported an error (a failed
+        // const without a deferred one has its diagnostic elsewhere: the evaluation's own, or
+        // that of the const or type it failed on).
+        let reported = self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
+        if j.kind == JobKind::Const
+            && let Some(c) = self.sigs.konst(self.decl)
+        {
+            if c.value.is_none() {
+                let d = if reported { None } else { c.deferred.clone() };
+                self.has_error = true;
+                self.report(d);
+            } else if !reported && !self.has_error {
+                self.same_const_types(&c.types);
+            }
+        }
+        // a `select`'s result type is known once its literals are fixed; the frame sum reads it
+        for (tok, out) in std::mem::take(&mut self.selects) {
+            let t = match self.resolve(out) {
+                Ty::T(t) => t,
+                Ty::Lit(_) => ids::ERROR,
+            };
+            if let Some((_, Target::Builtin { ret, .. })) = self.targets.iter_mut().rev().find(|x| x.0 == tok)
+            {
+                *ret = t;
+            }
+        }
+        let (held, temps) =
+            if j.kind == JobKind::Fn { self.value_sizes(j) } else { (Vec::new(), Vec::new()) };
         let mut node_types = Vec::with_capacity(self.node_ty.len());
         for i in 0..self.node_ty.len() {
             let t = self.node_ty[i];
@@ -1808,16 +2217,6 @@ impl<'a> Ck<'a> {
         let mut moves = std::mem::take(&mut self.moves);
         moves.sort_unstable();
         moves.dedup();
-        for (tok, out) in std::mem::take(&mut self.selects) {
-            let t = match self.resolve(out) {
-                Ty::T(t) => t,
-                Ty::Lit(_) => ids::ERROR,
-            };
-            if let Some((_, Target::Builtin { ret, .. })) = self.targets.iter_mut().rev().find(|x| x.0 == tok)
-            {
-                *ret = t;
-            }
-        }
         self.targets.sort_by_key(|x| x.0);
         self.implicit.sort_by_key(|x| x.0);
         self.record_drops();
@@ -1828,6 +2227,9 @@ impl<'a> Ck<'a> {
         self.valued.retain(|v| v.1 != 0);
         self.valued.sort();
         self.valued.dedup();
+        // the body owns every refusal no node inside it claimed
+        let at = self.prog.decl(self.decl).map_or_else(|| self.icx.node_span(j.node), |d| d.name_span);
+        self.claim_at(0, at);
         let has_error =
             self.has_error || self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
         let stmt_ends = crate::temps::StmtEnds::new(&self.icx, j.node, self.lo, self.contracts.as_deref());
@@ -1872,11 +2274,213 @@ impl<'a> Ck<'a> {
             contracts: self.contracts.take(),
             test_domain: self.domain.take(),
             stmt_ends,
+            internal: std::mem::take(&mut self.internal),
+            held,
+            temps,
+            envs: Vec::new(),
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);
         self.diags.extend(td);
-        (body, self.tys.local, self.diags)
+        let mut body = body;
+        if !body.has_error {
+            body.envs = self.closure_envs(&body);
+            body.has_error = self.has_error;
+        }
+        let claimed = self.tys.claimed_here();
+        (body, (self.tys.local, self.tys.refused, claimed), self.diags)
+    }
+
+    /// [`TypedBody::envs`]: each closure's environment type, built here, so a capture too tall
+    /// for the type table is E0005 case `type` at that closure.
+    fn closure_envs(&mut self, body: &TypedBody) -> Vec<(u32, TypeId)> {
+        let infos = crate::closures::closures(&self.icx, body, &self.tys, body.node);
+        let mut out = Vec::new();
+        for c in infos {
+            if c.captures.is_empty() {
+                continue;
+            }
+            let caps: Vec<TypeId> = c
+                .captures
+                .iter()
+                .map(|cap| self.locals.get(&cap.binding).copied().unwrap_or(ids::ERROR))
+                .collect();
+            let start = self.tys.refusals();
+            let (_, env) = crate::closures::env_type(&mut self.tys, &caps);
+            self.claim_at(start, self.icx.node_span(c.node));
+            out.push((c.node, env));
+        }
+        out
+    }
+
+    /// The values this fn holds ([`TypedBody::held`]: parameters and bindings, every expression
+    /// value but a place read in place, the return value) and its other frame temporaries
+    /// ([`TypedBody::temps`]: per call), and their limits where the types are concrete:
+    /// E0911 case `size` for a value past [`crate::consteval::MAX_VALUE_BYTES`] (once per type,
+    /// at its first binding), case `overflow` for one whose size does not fit in a `u64`, case
+    /// `frame` for a frame sum past [`crate::consteval::MAX_FRAME_BYTES`] (at the fn). A generic
+    /// type is left to the instances ([`instance_sizes`]).
+    fn value_sizes(&mut self, j: Job) -> (Vec<(u32, TypeId)>, Vec<TypeId>) {
+        let icx = self.icx;
+        let mut held: Vec<(u32, TypeId)> = self.locals.iter().map(|(&n, &t)| (n, t)).collect();
+        // Calls: each result and each argument passed by value (the callee's copy). The tokens
+        // of the calls whose result is counted here, so the chain ending in one is not counted
+        // again.
+        let mut temps = Vec::new();
+        let mut counted_calls: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+        let call_args: FxHashMap<u32, Vec<u32>> = self.call_args.iter().cloned().collect();
+        let mut fr = Frame { icx, lo: self.lo, n: self.node_ty.len() as u32, place_pos: Default::default() };
+        fr.mark_places(&self.assign_lhs);
+        for (tok, tgt) in self.targets.clone() {
+            let call = icx.is(tok, Term::LParen) || !matches!(tgt, Target::Fn { .. });
+            // the result, and the receiver if the callee takes one by value
+            let (ret, recv): (TypeId, Option<TypeId>) = match &tgt {
+                Target::Fn { decl, args } if call => match self.sigs.fn_sig(*decl) {
+                    Some(s) => (self.tys.subst(s.ret, args, None), None),
+                    None => continue,
+                },
+                Target::Intrinsic { decl } => match self.sigs.fn_sig(*decl) {
+                    Some(s) => (s.ret, None),
+                    None => continue,
+                },
+                Target::Method { method, .. } | Target::Op { method, .. } => {
+                    match self.w.method_sig(method) {
+                        Some((s, a, st)) => {
+                            let mut a = a;
+                            if let Target::Method { args, .. } = &tgt
+                                && args.len() >= a.len()
+                            {
+                                a = args.clone();
+                            }
+                            let n_args = call_args.get(&tok).map_or(0, |v| v.len());
+                            // an operator passes its operands by value: they are its params
+                            if let Target::Op { .. } = &tgt {
+                                for &p in &s.params {
+                                    temps.push(self.tys.subst(p, &a, st));
+                                }
+                            }
+                            let recv = (matches!(tgt, Target::Method { .. }) && s.params.len() > n_args)
+                                .then(|| self.tys.subst(s.params[0], &a, st));
+                            (self.tys.subst(s.ret, &a, st), recv)
+                        }
+                        None => continue,
+                    }
+                }
+                Target::TraitMethod { method, self_ty, args } => match self.sigs.fn_sig(*method) {
+                    Some(s) => {
+                        let n_args = call_args.get(&tok).map_or(0, |v| v.len());
+                        let recv = (s.params.len() > n_args)
+                            .then(|| self.tys.subst(s.params[0], args, Some(*self_ty)));
+                        (self.tys.subst(s.ret, args, Some(*self_ty)), recv)
+                    }
+                    None => continue,
+                },
+                Target::Builtin { ret, .. } => (*ret, None),
+                Target::FnValue { ty } => match self.tys.kind(*ty).clone() {
+                    TypeKind::Fn { ret, .. } => (ret, None),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            counted_calls.insert(tok);
+            temps.push(ret);
+            temps.extend(recv);
+        }
+        // each argument is passed in a copy of its own (a fill or a call result as well as a
+        // place: the back end copies the value it made into the argument)
+        let mut toks: Vec<u32> = counted_calls.iter().copied().collect();
+        toks.sort_unstable();
+        for tok in toks {
+            for &a in call_args.get(&tok).map_or(&[][..], |v| &v[..]) {
+                if let Some(&t) = a.checked_sub(self.lo).and_then(|i| self.node_ty.get(i as usize))
+                    && let Ty::T(t) = self.resolve(t)
+                {
+                    temps.push(t);
+                }
+            }
+        }
+        temps.retain(|&t| !t.is_none() && t != ids::ERROR && !self.tys.has_error(t));
+        // Every expression value takes a frame slot of its own, except the forms on this list,
+        // which name a place the back end reads in place (`Frame::copies`).
+        for i in 0..self.node_ty.len() {
+            let n = self.lo + i as u32;
+            if !icx.is_expr(n) {
+                continue;
+            }
+            let Ty::T(t) = self.resolve(self.node_ty[i]) else { continue };
+            let copies = fr.copies(n, &counted_calls);
+            held.extend(std::iter::repeat_n((n, t), copies));
+        }
+        held.sort_unstable_by_key(|x| x.0);
+        if let Some(sig) = self.sigs.fn_sig(j.decl) {
+            held.push((j.node, sig.ret));
+        }
+        held.retain(|&(_, t)| !t.is_none() && t != ids::ERROR && !self.tys.has_error(t));
+        let mut seen = rustc_hash::FxHashSet::default();
+        let empty = TypedBody { held, temps, ..empty_body(j) };
+        let (first, sum) = frame_of(&mut self.tys, self.sigs, &empty, &[]);
+        let TypedBody { held, temps, .. } = empty;
+        let span_of = |n: u32| {
+            if n == j.node {
+                self.prog.decl(j.decl).map_or(icx.node_span(n), |d| d.name_span)
+            } else {
+                icx.node_span(n)
+            }
+        };
+        for &(n, t) in &held {
+            if !seen.insert(t) || self.tys.has_params(t) || self.tys.has_error(t) {
+                continue;
+            }
+            let r = crate::traits::type_bytes(
+                &mut crate::traits::WithSigs { cx: &mut self.tys, sigs: self.sigs },
+                t,
+            );
+            let tn = self.show(t);
+            let d = match r {
+                Ok((bytes, _)) if bytes > crate::consteval::MAX_VALUE_BYTES => mk(
+                    "E0911",
+                    Some("size"),
+                    &[("type", &tn), ("bytes", &bytes.to_string())],
+                    span_of(n),
+                    &[],
+                ),
+                Err(crate::traits::NoLayout::Overflow) => {
+                    let f = self.prog.decl_path(j.decl);
+                    mk("E0911", Some("overflow"), &[("type", &tn), ("fn", &f)], span_of(n), &[])
+                }
+                _ => None,
+            };
+            self.report(d);
+        }
+        if first.is_none() && sum > crate::consteval::MAX_FRAME_BYTES {
+            let f = self.prog.decl_path(j.decl);
+            let d =
+                mk("E0911", Some("frame"), &[("fn", &f), ("bytes", &sum.to_string())], span_of(j.node), &[]);
+            self.report(d);
+        }
+        (held, temps)
+    }
+
+    /// The types const evaluation decided for the scalar nodes of this const initializer are
+    /// the ones this checker gave them: else the value is not the one the source means.
+    fn same_const_types(&mut self, types: &[(u32, TypeId)]) {
+        for &(n, t) in types {
+            let Some(&got) = n.checked_sub(self.lo).and_then(|i| self.node_ty.get(i as usize)) else {
+                continue;
+            };
+            let got = match self.resolve(got) {
+                Ty::T(g) => g,
+                Ty::Lit(_) => TypeId::NONE,
+            };
+            if got != t {
+                let text = self.icx.node_text(n).to_string();
+                let g = if got.is_none() { "no type".to_string() } else { self.show(got) };
+                let e = self.show(t);
+                self.has_error = true;
+                self.internal.push(format!("const evaluation typed `{text}` as `{e}`, the checker as `{g}`"));
+                return;
+            }
+        }
     }
 
     // ---------- statements ----------
@@ -1917,15 +2521,37 @@ impl<'a> Ck<'a> {
             }
             return false;
         }
+        let start = self.tys.refusals();
+        self.owners.push((n, start));
         true
     }
 
+    /// Leaves the node last entered: E0005 case `type` at it if a type it built was refused
+    /// ([`types::MAX_TYPE_HEIGHT`]) and no node inside it reported that.
     pub fn leave(&mut self) {
         self.depth = self.depth.saturating_sub(1);
+        if let Some((n, start)) = self.owners.pop() {
+            self.claim_at(start, self.icx.node_span(n));
+        }
+    }
+
+    /// E0005 case `type` at `at` for the refusals since `start` that no owner inside claimed.
+    fn claim_at(&mut self, start: u32, at: Span) {
+        if types::claim_refusals(&mut self.tys, start) {
+            let d = mk("E0005", Some("type"), &[], at, &[]);
+            self.report(d);
+        }
     }
 
     /// A statement: whether it diverges.
     fn stmt(&mut self, s: u32) -> bool {
+        let start = self.tys.refusals();
+        let r = self.stmt_kind(s);
+        self.claim_at(start, self.icx.node_span(s));
+        r
+    }
+
+    fn stmt_kind(&mut self, s: u32) -> bool {
         let icx = self.icx;
         let a = icx.a(s);
         let t = icx.tk(a);
@@ -2065,6 +2691,12 @@ impl<'a> Ck<'a> {
         let div = std::mem::take(&mut self.diverges);
         let p = self.pattern(pat, t, crate::patterns::Mode::Move);
         crate::patterns::irrefutable(self, pat, &p, t);
+        // a value bound whole by one name is made in that binding's slot
+        if let Some(e) = init
+            && self.locals.contains_key(&pat)
+        {
+            self.assign_lhs.push(e);
+        }
         div
     }
 
@@ -2075,6 +2707,7 @@ impl<'a> Ck<'a> {
         if kids.len() >= 3 {
             // OrExpr AssignOp Expr
             let (lhs, op, rhs) = (kids[0], kids[1], kids[2]);
+            self.assign_lhs.push(lhs);
             let lt = self.expr(lhs, None);
             let lt = self.force(lt);
             self.assign_target(lhs);
@@ -2345,8 +2978,8 @@ impl crate::consteval::CEnv for Ck<'_> {
         self.sigs.adt(d).cloned()
     }
 
-    fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        crate::traits::layout_of(&mut self.tys, self.sigs, t, 0)
+    fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout> {
+        crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: &mut self.tys, sigs: self.sigs }, t)
     }
 
     fn lang(&self) -> &sigs::LangItems {
@@ -2355,6 +2988,11 @@ impl crate::consteval::CEnv for Ck<'_> {
 
     fn fn_types(&mut self, d: DeclId) -> Option<(Vec<TypeId>, TypeId)> {
         self.sigs.fn_sig(d).map(|f| (f.params.clone(), f.ret))
+    }
+
+    fn internal(&mut self, msg: String) {
+        self.has_error = true;
+        self.internal.push(msg);
     }
 }
 
@@ -2365,6 +3003,12 @@ impl Interner for Ck<'_> {
 
     fn intern(&mut self, k: TypeKind) -> TypeId {
         self.tys.intern(k)
+    }
+    fn refusals(&self) -> u32 {
+        self.tys.refusals()
+    }
+    fn claimed_mut(&mut self) -> &mut u32 {
+        self.tys.claimed_mut()
     }
 
     fn fixed_ty(&self, f: TypeId) -> TypeId {

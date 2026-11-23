@@ -1,0 +1,71 @@
+//~ STDOUT array_repeat_fill.stdout
+// `[e; n]` evaluates `e` once and stores its value into each of the `n` elements, for any
+// length: short and long arrays, a non-constant element, zero-size elements, generic lengths,
+// a repeat in a loop (each evaluation is a new array), and a repeat used in place.
+import std.io;
+
+struct P {
+    pub x: u32,
+    pub y: u64,
+}
+
+impl Copy for P {}
+
+fn fill<T: Copy, const N: usize>(x: T) -> [T; N] {
+    return [x; N];
+}
+
+fn sum(a: &[u32; 1000]) -> u32 {
+    let mut s = 0u32;
+    let mut i = 0usize;
+    while i < 1000 {
+        s = s + a[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn pairs(k: u32) -> u32 {
+    let p = (k, k + 1u32);
+    let a = [p; 300];
+    return a[0].0 + a[299].1;
+}
+
+fn main() -> i32 {
+    let a16 = [4u8; 16];
+    let a17 = [5u8; 17];
+    let e16 = a16[15];
+    let e17 = a17[16];
+    io.print(f"edge {e16} {e17}\n");
+    let big = [7u32; 1000];
+    let s = sum(&big);
+    let t = sum(&[1u32; 1000]);
+    io.print(f"sum {s} {t}\n");
+    let pr = pairs(10);
+    io.print(f"pairs {pr}\n");
+    let ps = [P.{ x: 3, y: 4 }; 50];
+    let px = ps[49].x;
+    let py = ps[0].y;
+    io.print(f"struct {px} {py}\n");
+    let z = [[0u8; 0]; 100];
+    let zl = z.len();
+    let zl0 = z[99].len();
+    io.print(f"zero {zl} {zl0}\n");
+    let g = fill::<u16, 40>(9u16);
+    let gl = g.len();
+    let g39 = g[39];
+    io.print(f"generic {gl} {g39}\n");
+    let m = [[1u8; 20]; 20];
+    let m19 = m[19][19];
+    io.print(f"nested {m19}\n");
+    let mut acc = 0u32;
+    let mut i = 0u32;
+    while i < 3 {
+        let mut b = [i; 100];
+        b[5] = 9;
+        acc = acc + b[99] + b[5];
+        i = i + 1;
+    }
+    io.print(f"loop {acc}\n");
+    return 0;
+}

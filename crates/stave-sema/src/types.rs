@@ -22,7 +22,7 @@
 
 use std::cmp::Ordering;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ids::DeclId;
 use crate::prim::{Lanes, Scalar};
@@ -282,10 +282,38 @@ pub mod ids {
 /// Number of well-known types ([`ids`]).
 const FIXED: usize = ids::COUNT as usize;
 
+/// The tallest type term a table holds: a type is one level above its tallest component (type
+/// arguments, elements, fields of a tuple, parameters and result of a fn type), a type without
+/// components is 1 high. Interning a taller type gives the error type and counts a refusal
+/// ([`Interner::refusals`], every attempt). So the types of a program are finitely many (every type is built
+/// from the finitely many written ones by substitution, and none passes this height), and every
+/// walk over types with a visited set ends; polymorphic recursion (`P<T>` holding a `P<(T, T)>`)
+/// grows the height by one per instance and stops here.
+///
+/// A refusal is reported by whoever owns the span being checked when it happens: every checker
+/// phase that interns runs inside owners (a written type, an expression, a block, a statement, a
+/// pattern, a body, a declaration's signature, a call-graph instance), each ending with
+/// [`claim_refusals`], and the outermost owner of each phase covers the whole phase. So every
+/// refusal ends in one E0005 case `type`, and no program runs on the error type it got.
+pub const MAX_TYPE_HEIGHT: u32 = crate::typedepth::MAX_TYPE_DEPTH;
+
+/// The height of key `k` whose components have heights `h` ([`MAX_TYPE_HEIGHT`]).
+fn key_height(k: &TypeKind, h: impl Fn(TypeId) -> u32) -> u32 {
+    let mut kids = Vec::new();
+    k.children(&mut kids);
+    1 + kids.into_iter().map(h).max().unwrap_or(0)
+}
+
 /// Interning access shared by the global table and body overlays.
 pub trait Interner {
     fn kind(&self, t: TypeId) -> &TypeKind;
+    /// The id of key `k`; the error type if `k` is taller than [`MAX_TYPE_HEIGHT`].
     fn intern(&mut self, k: TypeKind) -> TypeId;
+    /// How many keys this table refused to intern ([`MAX_TYPE_HEIGHT`]). A wrapper forwards it.
+    fn refusals(&self) -> u32;
+    /// How many of [`Interner::refusals`] an owner has reported ([`claim_refusals`]). A wrapper
+    /// forwards it.
+    fn claimed_mut(&mut self) -> &mut u32;
 
     /// The id in this table of the well-known type `f` (one of [`ids`]; any other id is returned
     /// unchanged). Identity for a table that was never canonicalized; [`TypeTable`] and
@@ -361,44 +389,19 @@ pub trait Interner {
         ) {
             return false;
         }
-        let mut stack = vec![t];
-        let mut kids = Vec::new();
-        while let Some(x) = stack.pop() {
-            let k = self.kind(x);
-            if matches!(k, TypeKind::Error) {
-                return true;
-            }
-            if let TypeKind::Array { len: ConstArg::Error, .. } = k {
-                return true;
-            }
-            kids.clear();
-            k.children(&mut kids);
-            stack.extend_from_slice(&kids);
-        }
-        false
+        any_component(self, t, |k| {
+            matches!(k, TypeKind::Error | TypeKind::Array { len: ConstArg::Error, .. })
+        })
     }
 
     /// Whether `t` mentions a generic parameter (type or const) or `SelfTy`.
     fn has_params(&self, t: TypeId) -> bool {
-        let mut stack = vec![t];
-        let mut kids = Vec::new();
-        while let Some(x) = stack.pop() {
-            let k = self.kind(x);
-            match k {
-                TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => return true,
-                TypeKind::Array { len: ConstArg::Param(_), .. } => return true,
-                TypeKind::Adt { args, .. }
-                    if args.iter().any(|a| matches!(a, GArg::Const(ConstArg::Param(_)))) =>
-                {
-                    return true;
-                }
-                _ => {}
-            }
-            kids.clear();
-            k.children(&mut kids);
-            stack.extend_from_slice(&kids);
-        }
-        false
+        any_component(self, t, |k| match k {
+            TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => true,
+            TypeKind::Array { len: ConstArg::Param(_), .. } => true,
+            TypeKind::Adt { args, .. } => args.iter().any(|a| matches!(a, GArg::Const(ConstArg::Param(_)))),
+            _ => false,
+        })
     }
 
     /// `t` with `Param(i)` replaced by `args[i]` (type args; const args replace const params in
@@ -437,6 +440,34 @@ pub trait Interner {
         (t, n)
     }
 }
+
+/// Whether `t` or a component of it at any depth has a kind `hit` accepts. Interned types share
+/// components (`(T, T)` nested k deep has 2^k leaves but k + 1 distinct ids), so past the first
+/// [`TREE_WALK`] visits each distinct id is visited once: linear in the distinct ids.
+fn any_component<I: Interner + ?Sized>(cx: &I, t: TypeId, hit: impl Fn(&TypeKind) -> bool) -> bool {
+    let mut seen: FxHashSet<TypeId> = FxHashSet::default();
+    let mut visits = 0usize;
+    let mut stack = vec![t];
+    let mut kids = Vec::new();
+    while let Some(x) = stack.pop() {
+        visits += 1;
+        if visits > TREE_WALK && !seen.insert(x) {
+            continue;
+        }
+        let k = cx.kind(x);
+        if hit(k) {
+            return true;
+        }
+        kids.clear();
+        k.children(&mut kids);
+        stack.extend_from_slice(&kids);
+    }
+    false
+}
+
+/// Visits a component walk makes before it remembers the ids it visited (most types are small
+/// trees, which need no set).
+const TREE_WALK: usize = 64;
 
 /// Height of `t` with `Param(i)` replaced by type arg `args[i]`, without building it: a type
 /// without components is 1, every other type one more than its highest component (type
@@ -549,10 +580,31 @@ impl TypeKind {
     }
 }
 
+/// Claims, for the owner of a span that began when [`Interner::refusals`] was `start`, the
+/// refusals made since then that no owner nested in it claimed: true if there is one, and the
+/// caller reports E0005 case `type` at its span ([`MAX_TYPE_HEIGHT`]). `start` 0: every refusal
+/// not claimed yet (the outermost owner of a phase).
+pub fn claim_refusals<I: Interner + ?Sized>(cx: &mut I, start: u32) -> bool {
+    let now = cx.refusals();
+    let c = cx.claimed_mut();
+    // refusals made before `start` and not claimed yet stay with the owner around this one
+    let fresh = now > (*c).max(start);
+    if fresh {
+        *c = now;
+    }
+    fresh
+}
+
 /// The global type table.
 #[derive(Clone, Debug)]
 pub struct TypeTable {
     kinds: Vec<TypeKind>,
+    /// Per type: its height ([`MAX_TYPE_HEIGHT`]).
+    heights: Vec<u32>,
+    /// Keys refused for their height, here and in the overlays merged into this table.
+    refused: u32,
+    /// Of `refused`: those an owner reported ([`claim_refusals`]).
+    claimed: u32,
     map: FxHashMap<TypeKind, TypeId>,
     /// `fixed[i]`: the id of well-known type `ids::*` number `i` (identity until canonicalized).
     fixed: [TypeId; FIXED],
@@ -568,6 +620,9 @@ impl TypeTable {
     pub fn new() -> TypeTable {
         let mut t = TypeTable {
             kinds: Vec::new(),
+            heights: Vec::new(),
+            refused: 0,
+            claimed: 0,
             map: FxHashMap::default(),
             fixed: std::array::from_fn(|i| TypeId(i as u32)),
         };
@@ -628,6 +683,23 @@ impl TypeTable {
         self.kinds.iter().enumerate().map(|(i, k)| (TypeId(i as u32), k))
     }
 
+    /// The height of `t` ([`MAX_TYPE_HEIGHT`]); 0 for an id not in the table.
+    pub fn height(&self, t: TypeId) -> u32 {
+        self.heights.get(t.idx()).copied().unwrap_or(0)
+    }
+
+    /// Counts `n` refusals made in an overlay of this table ([`Interner::refusals`]), of which
+    /// `claimed` were reported ([`claim_refusals`]).
+    pub fn add_refusals(&mut self, n: u32, claimed: u32) {
+        self.refused = self.refused.saturating_add(n);
+        self.claimed = self.claimed.saturating_add(claimed.min(n));
+    }
+
+    /// Refusals no owner reported ([`claim_refusals`]).
+    pub fn unclaimed(&self) -> u32 {
+        self.refused.saturating_sub(self.claimed)
+    }
+
     /// Merges an overlay's local types: returns the local index → global id map.
     pub fn merge(&mut self, local: &[TypeKind]) -> Vec<TypeId> {
         let mut out: Vec<TypeId> = Vec::with_capacity(local.len());
@@ -657,10 +729,13 @@ impl TypeTable {
             old_to_new[old as usize] = TypeId(new as u32);
         }
         let mut kinds: Vec<TypeKind> = Vec::with_capacity(n);
+        let mut heights: Vec<u32> = Vec::with_capacity(n);
         for &old in &order {
             let k = self.kinds[old as usize].map(|c| old_to_new.get(c.idx()).copied().unwrap_or(c));
             kinds.push(k);
+            heights.push(self.heights[old as usize]);
         }
+        self.heights = heights;
         self.map = kinds.iter().enumerate().map(|(i, k)| (k.clone(), TypeId(i as u32))).collect();
         self.kinds = kinds;
         for f in &mut self.fixed {
@@ -690,10 +765,24 @@ impl Interner for TypeTable {
         if let Some(&id) = self.map.get(&k) {
             return id;
         }
+        let h = key_height(&k, |c| self.height(c));
+        if h > MAX_TYPE_HEIGHT {
+            self.refused = self.refused.saturating_add(1);
+            return self.error_ty();
+        }
         let id = TypeId(self.kinds.len() as u32);
         self.kinds.push(k.clone());
+        self.heights.push(h);
         self.map.insert(k, id);
         id
+    }
+
+    fn refusals(&self) -> u32 {
+        self.refused
+    }
+
+    fn claimed_mut(&mut self) -> &mut u32 {
+        &mut self.claimed
     }
 }
 
@@ -771,12 +860,36 @@ fn cmp_types(kinds: &[TypeKind], a: TypeId, b: TypeId) -> Ordering {
 pub struct Overlay<'g> {
     pub global: &'g TypeTable,
     pub local: Vec<TypeKind>,
+    /// Per local type: its height ([`MAX_TYPE_HEIGHT`]).
+    heights: Vec<u32>,
+    /// Keys this overlay refused for their height; merging adds them to the global count.
+    pub refused: u32,
+    /// [`Interner::refusals`] (the global table's included) that an owner reported
+    /// ([`claim_refusals`]); those of the frozen global table belong to its own owners.
+    claimed: u32,
     map: FxHashMap<TypeKind, TypeId>,
 }
 
 impl<'g> Overlay<'g> {
     pub fn new(global: &'g TypeTable) -> Overlay<'g> {
-        Overlay { global, local: Vec::new(), map: FxHashMap::default() }
+        Overlay {
+            global,
+            local: Vec::new(),
+            heights: Vec::new(),
+            refused: 0,
+            claimed: global.refusals(),
+            map: FxHashMap::default(),
+        }
+    }
+
+    /// Of this overlay's own refusals: those an owner reported ([`claim_refusals`]).
+    pub fn claimed_here(&self) -> u32 {
+        self.claimed.saturating_sub(self.global.refusals()).min(self.refused)
+    }
+
+    /// The height of `t` ([`MAX_TYPE_HEIGHT`]).
+    pub fn height(&self, t: TypeId) -> u32 {
+        if t.is_local() { self.heights.get(t.idx()).copied().unwrap_or(0) } else { self.global.height(t) }
     }
 }
 
@@ -798,10 +911,24 @@ impl Interner for Overlay<'_> {
         if let Some(&id) = self.map.get(&k) {
             return id;
         }
+        let h = key_height(&k, |c| self.height(c));
+        if h > MAX_TYPE_HEIGHT {
+            self.refused = self.refused.saturating_add(1);
+            return self.error_ty();
+        }
         let id = TypeId(self.local.len() as u32 | TypeId::LOCAL);
         self.local.push(k.clone());
+        self.heights.push(h);
         self.map.insert(k, id);
         id
+    }
+
+    fn refusals(&self) -> u32 {
+        self.refused.saturating_add(self.global.refusals())
+    }
+
+    fn claimed_mut(&mut self) -> &mut u32 {
+        &mut self.claimed
     }
 }
 
@@ -872,7 +999,7 @@ pub trait Names {
 }
 
 /// The Stave surface spelling of `t` (`&mut [u8]`, `Option<u32>`, `fn(i32) -> i32`), used in
-/// diagnostics. ADTs print by their declared name. Depth-limited.
+/// diagnostics. ADTs print by their declared name. Depth- and length-limited (`..` elides).
 pub fn display<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId) -> String {
     let mut s = String::new();
     display_into(cx, names, t, &mut s, 0);
@@ -886,8 +1013,12 @@ pub(crate) fn feature_names(bits: u64) -> Vec<&'static str> {
     all.iter().filter(|f| !all.iter().any(|g| g != *f && g.implies().contains(f))).map(|f| f.name()).collect()
 }
 
+/// The longest text [`display`] writes before it elides the rest: a type that shares
+/// components may have exponentially many leaves (`(T, T)` nested 64 deep).
+const DISPLAY_MAX: usize = 4096;
+
 fn display_into<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId, s: &mut String, depth: u32) {
-    if depth > 64 {
+    if depth > 64 || s.len() > DISPLAY_MAX {
         s.push_str("..");
         return;
     }
@@ -1212,6 +1343,33 @@ mod tests {
         assert_eq!(t.kind(m[0]), &TypeKind::Ref { mutable: true, inner: a });
     }
 
+    /// A refusal is claimed once, by the innermost owner that ended after it; an owner that
+    /// began after it, or whose inner owner claimed it, claims nothing.
+    #[test]
+    fn refusals_are_claimed_once_by_their_owner() {
+        let g = TypeTable::new();
+        let mut o = Overlay::new(&g);
+        let mut t = ids::U8;
+        for _ in 1..MAX_TYPE_HEIGHT {
+            t = o.mk_ref(false, t);
+        }
+        let outer = o.refusals();
+        assert!(!claim_refusals(&mut o, outer));
+        let inner = o.refusals();
+        assert_eq!(o.mk_ref(false, t), o.error_ty());
+        assert!(claim_refusals(&mut o, inner));
+        assert!(!claim_refusals(&mut o, outer));
+        let late = o.refusals();
+        assert_eq!(o.mk_ref(true, t), o.error_ty());
+        let now = o.refusals();
+        assert!(!claim_refusals(&mut o, now));
+        assert!(claim_refusals(&mut o, late));
+        assert_eq!((o.refused, o.claimed_here()), (2, 2));
+        let mut table = g.clone();
+        table.add_refusals(o.refused, o.claimed_here());
+        assert_eq!(table.unclaimed(), 0);
+    }
+
     #[test]
     fn subst_params() {
         let mut t = TypeTable::new();
@@ -1219,5 +1377,34 @@ mod tests {
         let r = t.mk_ref(false, p0);
         let s = t.subst(r, &[GArg::Type(ids::U32)], None);
         assert_eq!(t.kind(s), &TypeKind::Ref { mutable: false, inner: ids::U32 });
+    }
+
+    /// `(T, T)` nested 100 deep has 2^100 leaves but 101 distinct ids: the component walks and
+    /// the display finish (a walk of the tree would not), and the display is bounded.
+    #[test]
+    fn shared_components_are_walked_once() {
+        struct N;
+        impl Names for N {
+            fn adt_name(&self, _: DeclId) -> String {
+                "A".into()
+            }
+            fn param_name(&self, i: u32) -> String {
+                format!("T{i}")
+            }
+        }
+        let mut t = TypeTable::new();
+        let (mut closed, mut open) = (ids::U8, t.mk_param(0));
+        for _ in 0..100 {
+            closed = t.mk_tuple(vec![closed, closed]);
+            open = t.mk_tuple(vec![open, open]);
+        }
+        let open_last = t.mk_tuple(vec![closed, open]);
+        assert!(!t.has_params(closed) && !t.has_error(closed));
+        assert!(t.has_params(open) && t.has_params(open_last));
+        let wrong = t.mk_ref(false, ids::ERROR);
+        let with_error = t.mk_tuple(vec![closed, wrong]);
+        assert!(t.has_error(with_error));
+        let s = display(&t, &N, closed);
+        assert!(s.len() <= DISPLAY_MAX + 1024 && s.contains(".."), "{}", s.len());
     }
 }

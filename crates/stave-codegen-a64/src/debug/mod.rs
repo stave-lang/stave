@@ -115,7 +115,7 @@
 //!
 //! - Branches to trap stubs and between blocks are `b.cond`/`cbz` (±1 MiB); a function where
 //!   one does not reach is emitted again with each as an inverted branch over a `b` (±128 MiB).
-//! - Frames are limited to 16 MiB; aggregates must be aligned to at most 16 bytes.
+//! - Frames are limited to 1 GiB; aggregates must be aligned to at most 16 bytes.
 //! - With stave-obj's jump table (debug [`stave_obj::Options`]), every function reference resolves
 //!   to the function's jump-table stub, except the `pc_lo` words of the PC table
 //!   ([`stave_obj::RelocKind::Abs64Body`]: the body's first instruction).

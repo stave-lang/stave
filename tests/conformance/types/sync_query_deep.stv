@@ -1,7 +1,7 @@
 //~ CHECK-ONLY
-// Past the trait query depth (the type depth limit, 1,000 levels) a type is not Sync: a chain of
-// 600 view structs, each holding a `&` to the next, is shallow as a type but the Sync query of
-// its head descends two levels per link, so it is not shared with threads (E0802).
+// A trait query has no depth limit of its own: a chain of 600 view structs, each holding a `&`
+// to the next, is Sync all the way down (its Sync query descends two steps per link), so it is
+// shared with threads.
 import std.thread;
 
 view struct S0 {
@@ -2409,7 +2409,7 @@ struct S600 {
 }
 
 fn share(x: &S0, n: usize) {
-    thread.par_for(0, n, fn(i: usize) { let r = x; }); //~ ERROR E0802
+    thread.par_for(0, n, fn(i: usize) { let r = x; });
 }
 
 fn main() -> i32 {

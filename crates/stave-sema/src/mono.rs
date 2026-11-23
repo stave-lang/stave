@@ -350,7 +350,7 @@ pub(crate) fn resolve_trait_method<I: Interner + ?Sized>(
         return Some(Resolved::BuiltinOp(op));
     }
     let tr = TraitRef { trait_decl, args: trait_args.to_vec() };
-    let (imp, impl_args) = w.find_impl(cx, self_ty, &tr, &[], 0)?;
+    let (imp, impl_args) = w.find_impl(cx, self_ty, &tr, &[])?;
     let idef = w.sigs.impl_def(imp)?;
     let m = idef.methods.iter().copied().find(|&m| w.prog.decl(m).is_some_and(|d| d.name == name))?;
     let mut args = impl_args;
@@ -364,7 +364,7 @@ pub(crate) fn drop_method<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: Ty
     if drop.is_none() || !matches!(cx.kind(t), TypeKind::Adt { .. }) {
         return None;
     }
-    let (imp, args) = w.find_impl(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[], 0)?;
+    let (imp, args) = w.find_impl(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[])?;
     let m = *w.sigs.impl_def(imp)?.methods.first()?;
     Some(InstKey { decl: m, args })
 }

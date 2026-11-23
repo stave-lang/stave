@@ -496,6 +496,13 @@ impl Ck<'_> {
                 ok = false;
                 continue;
             }
+            // the size first, on the type (memoised): a generator holds one node per scalar
+            if crate::consteval::cells(self, t).is_some_and(|c| c > MAX_SCALARS) {
+                let tn = self.show(t);
+                self.report(mk("E0214", Some("size"), &[("type", &tn)], at, &[]));
+                ok = false;
+                continue;
+            }
             match self.param_gen(t, true, 0) {
                 Ok(values) => params.push(Param { name: icx.tok_str(icx.a(p)).to_string(), values }),
                 Err(why) => {

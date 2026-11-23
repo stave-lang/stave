@@ -14,6 +14,10 @@ use crate::traits::Adjust;
 use crate::typeck::{Coercion, Target};
 use crate::types::{ConstArg, FloatBits, GArg, Interner, TypeId, TypeKind};
 
+/// The longest array repeat `[e; n]` lowered as one `make` of `n` operands; a longer one is
+/// filled by a loop ([`FnCx::repeat_fill`]).
+const REPEAT_MAKE_MAX: u64 = 16;
+
 /// A postfix chain's state between steps.
 enum Cur {
     Path(Res, u32),
@@ -890,9 +894,6 @@ impl<'a> FnCx<'a> {
         if kids.len() == 2 && icx.is(icx.end_tok(kids[0]) + 1, Term::Semi) {
             let Some(v) = self.val(kids[0], Some(elem)) else { return E::Never };
             let Some(len) = len.value() else { return self.fail(n, "array length") };
-            if len > (1 << 20) {
-                return self.fail(n, "array repeat literal too long for the IR (no splat op)");
-            }
             if self.g.borrows
                 && len >= 2
                 && !self.is_copy(elem)
@@ -901,8 +902,7 @@ impl<'a> FnCx<'a> {
                 // each element after the first is a second owner of the one value
                 self.f.events.push(stave_ir::EventMark { value, kind: stave_ir::EventKind::Repeat });
             }
-            let vs = vec![v; len as usize];
-            return E::V(self.opn(Op::Make, ty, &vs), ty);
+            return self.repeat_fill(v, elem, ty, len);
         }
         let mut vs = Vec::with_capacity(kids.len());
         let mut held = Vec::new();
@@ -914,6 +914,45 @@ impl<'a> FnCx<'a> {
         }
         self.release(&held);
         E::V(self.opn(Op::Make, ty, &vs), ty)
+    }
+
+    /// Array `ty` of `len` copies of the lowered value `v` of type `elem`. Up to
+    /// [`REPEAT_MAKE_MAX`] elements it is one `make` of `len` operands. A longer array is a
+    /// frame slot filled by a counted loop that stores `v` into each element (no loop for a
+    /// zero-size element), so the code does not grow with `len`; the result is then the slot's
+    /// place, which owns nothing: more than one copy of a value needs it to be Copy.
+    pub(crate) fn repeat_fill(&mut self, v: Operand, elem: Ty, ty: Ty, len: u64) -> E {
+        if len <= REPEAT_MAKE_MAX {
+            let vs = vec![v; len as usize];
+            return E::V(self.opn(Op::Make, ty, &vs), ty);
+        }
+        let s = self.new_slot(ty);
+        let pt = self.t_ref(true, ty);
+        // each evaluation is a new temporary
+        self.event(stave_ir::EventKind::Begin, s, pt);
+        if self.layout(elem).is_none_or(|l| l.0 > 0) {
+            let us = self.t_usize();
+            let (head, hv) = self.f.b.create_block_with(&[FnCx::ir(us)]);
+            let body = self.f.b.create_block();
+            let exit = self.f.b.create_block();
+            let z = self.int(0);
+            self.f.b.br(head, &[z]);
+            self.f.b.switch_to(head);
+            let i = Operand::Value(hv[0]);
+            let nn = self.int(len as i128);
+            let bt = self.t_bool();
+            let c = self.op2(Op::Lt, bt, i, nn);
+            self.f.b.cbr(c, body, &[], exit, &[]);
+            self.f.b.switch_to(body);
+            let ep = self.t_ref(true, elem);
+            let a = self.op2(Op::ElemAddr, ep, s, i);
+            self.f.b.store(a, v);
+            let one = self.int(1);
+            let next = self.op2(Op::AddWrap, us, i, one);
+            self.f.b.br(head, &[next]);
+            self.f.b.switch_to(exit);
+        }
+        E::P(Place { base: Base::Mem(s, pt), proj: Vec::new(), ty, root: None })
     }
 
     // ---------- paths ----------
@@ -938,13 +977,7 @@ impl<'a> FnCx<'a> {
                 }
             }
             Res::Decl(d) => match self.decl_kind(d) {
-                Some(crate::decls::DeclKind::Const) => {
-                    let Some(c) = self.g.sigs.konst(d) else { return self.fail_at(Some(tok), "const") };
-                    let (ty, Some(v)) = (c.ty, c.value.clone()) else {
-                        return self.fail_at(Some(tok), "const without a value");
-                    };
-                    self.const_val(&v, ty, tok)
-                }
+                Some(crate::decls::DeclKind::Const) => self.const_use(d, tok),
                 Some(crate::decls::DeclKind::Static) => self.static_place(d, tok),
                 Some(crate::decls::DeclKind::Fn | crate::decls::DeclKind::Method) => {
                     let end = icx.end_tok(node);
@@ -991,6 +1024,24 @@ impl<'a> FnCx<'a> {
         let i = self.int(idx as i128);
         let p = Operand::Value(self.f.b.op(stave_ir::Op::Intrinsic(id), FnCx::ir(pt), &[i]));
         E::P(Place { base: Base::Mem(p, pt), proj: Vec::new(), ty, root: None })
+    }
+
+    /// The value of const `d`. One with more than [`crate::lower::CONST_INLINE_CELLS`] value
+    /// cells is read from its image (a read-only static), so the code does not grow with the
+    /// value; a smaller one is built in place.
+    pub fn const_use(&mut self, d: crate::ids::DeclId, tok: u32) -> E {
+        let Some(c) = self.g.sigs.konst(d) else { return self.fail_at(Some(tok), "const") };
+        let (ty, Some(v)) = (c.ty, c.value.clone()) else {
+            return self.fail_at(Some(tok), "const without a value");
+        };
+        if self.g.statics.contains_key(&d) {
+            let p = self.static_place(d, tok);
+            return match self.operand_of(p) {
+                Some(o) => E::V(o, ty),
+                None => E::Never,
+            };
+        }
+        self.const_val(&v, ty, tok)
     }
 
     /// A const value of type `ty`.
@@ -1042,6 +1093,14 @@ impl<'a> FnCx<'a> {
                     ops.push(o);
                 }
                 E::V(self.opn(Op::EnumMake, ty, &ops), ty)
+            }
+            Val::Rep(x, n) => {
+                let TypeKind::Array { elem, .. } = self.kind(ty) else {
+                    return self.fail_at(Some(tok), "const repeat of a type that is not an array");
+                };
+                let e = self.const_val(x, elem, tok);
+                let Some(o) = self.operand_of(e) else { return E::Never };
+                self.repeat_fill(o, elem, ty, *n)
             }
         }
     }
@@ -2181,9 +2240,10 @@ impl<'a> FnCx<'a> {
             }
             match res {
                 Res::Decl(d) if self.decl_kind(d) == Some(crate::decls::DeclKind::Const) => {
-                    let Some(c) = self.g.sigs.konst(d) else { return false };
-                    let (ty, Some(v)) = (c.ty, c.value.clone()) else { return false };
-                    self.const_val(&v, ty, tok)
+                    if self.g.sigs.konst(d).is_none_or(|c| c.value.is_none()) {
+                        return false;
+                    }
+                    self.const_use(d, tok)
                 }
                 Res::Decl(d) if self.decl_kind(d) == Some(crate::decls::DeclKind::Static) => {
                     self.static_place(d, tok)
@@ -2264,7 +2324,7 @@ impl<'a> FnCx<'a> {
         let disp = self.g.sigs.lang.display;
         let w = self.g.world();
         let Some((imp, iargs)) =
-            w.find_impl(&mut self.tys, d, &TraitRef { trait_decl: disp, args: Vec::new() }, &[], 0)
+            w.find_impl(&mut self.tys, d, &TraitRef { trait_decl: disp, args: Vec::new() }, &[])
         else {
             self.fail_at(Some(tok), "no Display impl for an f-string hole");
             return false;
@@ -2302,10 +2362,10 @@ impl<'a> FnCx<'a> {
 }
 
 /// Type lowering host for cast types (the signature-phase lowering over the body's overlay).
-struct TyHost<'x, 'a> {
-    tys: &'x mut crate::types::Overlay<'a>,
-    prog: &'a crate::Program,
-    sigs: &'a crate::sigs::Sigs,
+pub(crate) struct TyHost<'x, 'a> {
+    pub(crate) tys: &'x mut crate::types::Overlay<'a>,
+    pub(crate) prog: &'a crate::Program,
+    pub(crate) sigs: &'a crate::sigs::Sigs,
 }
 
 impl Interner for TyHost<'_, '_> {
@@ -2314,6 +2374,12 @@ impl Interner for TyHost<'_, '_> {
     }
     fn intern(&mut self, k: TypeKind) -> TypeId {
         self.tys.intern(k)
+    }
+    fn refusals(&self) -> u32 {
+        self.tys.refusals()
+    }
+    fn claimed_mut(&mut self) -> &mut u32 {
+        self.tys.claimed_mut()
     }
     fn fixed_ty(&self, f: TypeId) -> TypeId {
         self.tys.fixed_ty(f)
@@ -2355,8 +2421,8 @@ impl crate::consteval::CEnv for TyHost<'_, '_> {
     fn adt_def(&mut self, d: crate::ids::DeclId) -> Option<crate::sigs::AdtDef> {
         self.sigs.adt(d).cloned()
     }
-    fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        crate::traits::layout_of(self.tys, self.sigs, t, 0)
+    fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout> {
+        crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: self.tys, sigs: self.sigs }, t)
     }
     fn lang(&self) -> &crate::sigs::LangItems {
         &self.sigs.lang
@@ -2364,4 +2430,6 @@ impl crate::consteval::CEnv for TyHost<'_, '_> {
     fn fn_types(&mut self, d: crate::ids::DeclId) -> Option<(Vec<TypeId>, TypeId)> {
         self.sigs.fn_sig(d).map(|f| (f.params.clone(), f.ret))
     }
+    // The checker lowered the same type first and stopped on the same internal error.
+    fn internal(&mut self, _msg: String) {}
 }

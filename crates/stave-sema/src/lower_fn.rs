@@ -534,11 +534,6 @@ impl<'a> FnCx<'a> {
         self.error_at(LowerErrorKind::Unsupported, tok, msg.into())
     }
 
-    pub fn unsupported(&mut self, n: u32, msg: impl Into<String>) -> E {
-        let tok = Some(self.icx.a(n));
-        self.unsupported_at(tok, msg)
-    }
-
     /// Vector code, which stage0 does not generate yet; `what` names the construct.
     pub fn vector_unsupported(&mut self, tok: Option<u32>, what: &str) -> E {
         self.unsupported_at(tok, format!("vector code generation is not implemented yet: {what}"))
@@ -714,7 +709,7 @@ impl<'a> FnCx<'a> {
 
     /// (size, align) of a concrete type (equal to stave-ir's layout rules).
     pub fn layout(&mut self, t: Ty) -> Option<(u64, u64)> {
-        crate::traits::layout_of(&mut self.tys, self.g.sigs, t, 0)
+        crate::traits::layout_of(&mut self.tys, self.g.sigs, t)
     }
 
     pub fn ir(t: Ty) -> stave_ir::TypeId {
@@ -2145,5 +2140,9 @@ fn empty_body() -> &'static TypedBody {
         contracts: None,
         test_domain: None,
         stmt_ends: crate::temps::StmtEnds::default(),
+        internal: Vec::new(),
+        held: Vec::new(),
+        temps: Vec::new(),
+        envs: Vec::new(),
     })
 }

@@ -1,0 +1,30 @@
+//~ CHECK-ONLY
+// Only a chunk loop (a vector binding) leaves elements for a tail clause: on a loop over
+// elements one is E0601 case `element`.
+fn over_slice(xs: &[u32]) -> u32 {
+    let mut s = 0u32;
+    for x in xs { s += *x; } tail exact; //~ ERROR E0601
+    return s;
+}
+
+fn over_range() -> u32 {
+    let mut s = 0u32;
+    for i in 0u32..4u32 { s += i; } tail exact; //~ ERROR E0601
+    return s;
+}
+
+fn annotated(xs: &[u32]) -> u32 {
+    let mut s = 0u32;
+    for x: &u32 in xs { s += *x; } tail scalar (y) { s += y; } //~ ERROR E0601
+    return s;
+}
+
+fn chunks(xs: &[u32]) -> u32 {
+    let mut s = 0u32;
+    for v: u32x4 in xs { s += v.reduce_add_wrap(); } tail scalar (x) { s += x; }
+    return s;
+}
+
+fn main() -> i32 {
+    return 0;
+}

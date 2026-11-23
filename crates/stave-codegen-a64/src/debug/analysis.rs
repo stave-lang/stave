@@ -139,8 +139,9 @@ fn align_up64(x: u64, a: u64) -> u64 {
     x.div_ceil(a) * a
 }
 
-/// Frames must stay below 16 MiB: every SP offset is then reachable with two `add` immediates.
-const FRAME_MAX: u64 = 1 << 24;
+/// The largest frame, the x86-64 back end's limit too. Offsets of 16 MiB or more are formed with
+/// `mov` + `add` (extended register when `sp` is an operand).
+const FRAME_MAX: u64 = 1 << 30;
 
 /// The registers values own in a release build: `x19`–`x28` and `v8`–`v15`. All are
 /// callee-saved, but none keeps a whole vector across a call.
@@ -149,8 +150,10 @@ const FLOATS: u8 = 8;
 const POOLS: regalloc::Pools =
     regalloc::Pools { int_saved: INTS, int_scratch: 0, float_saved: FLOATS, float_scratch: 0, vec_saved: 0 };
 
+/// A frame past [`FRAME_MAX`]: the checker bounds every fn's frame sum (E0911 case `frame`) so
+/// that no frame of a checked program gets here, so this is a compiler bug.
 fn frame_too_large() -> super::Error {
-    unsupported("stack frame of 16 MiB or more")
+    bad("stack frame larger than 1 GiB, past the checker's frame bound")
 }
 
 impl Analysis {
@@ -423,7 +426,7 @@ impl Analysis {
         self.saved.extend((0..INTS).filter(|r| asg.int_used & (1 << r) != 0).map(|r| (false, 19 + r)));
         self.saved.extend((0..FLOATS).filter(|r| asg.float_used & (1 << r) != 0).map(|r| (true, 8 + r)));
         let frame = align_up64(u64::from(self.frame) + 8 * self.saved.len() as u64, 16);
-        if frame >= FRAME_MAX {
+        if frame > FRAME_MAX {
             return Err(frame_too_large());
         }
         self.frame = frame as u32;
@@ -728,7 +731,7 @@ impl Analysis {
                         slots = align_up64(slots, l.align);
                         slot_list.push((r.index(), slots));
                         slots += l.size;
-                        if slots >= FRAME_MAX {
+                        if slots > FRAME_MAX {
                             return Err(frame_too_large());
                         }
                     }
@@ -743,7 +746,7 @@ impl Analysis {
         let x8_off = vtmp_off + if has_vec { 32 } else { 0 };
         let ret_mem = matches!(f.ret.map(|t| cg.ty(t)), Some(Ty::Mem { .. }));
         let homes_base = align_up64(x8_off + if ret_mem { 8 } else { 0 }, 16);
-        if homes_base >= FRAME_MAX {
+        if homes_base > FRAME_MAX {
             return Err(frame_too_large());
         }
         self.scratch_off = scratch_off as u32;
@@ -821,7 +824,7 @@ impl Analysis {
                         }
                     }
                 };
-                if u64::from(homes_base) + top >= FRAME_MAX {
+                if u64::from(homes_base) + top > FRAME_MAX {
                     return Err(frame_too_large());
                 }
                 self.home[v] = homes_base + off as u32;
@@ -838,7 +841,7 @@ impl Analysis {
             }
         }
         let frame = align_up64(u64::from(homes_base) + top, 16);
-        if frame >= FRAME_MAX {
+        if frame > FRAME_MAX {
             return Err(frame_too_large());
         }
         self.frame = frame as u32;
