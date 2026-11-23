@@ -1,0 +1,106 @@
+import std.io;
+import std.vec;
+
+struct Node { key: u32, left: Option<usize>, right: Option<usize> }
+
+impl Copy for Node {}
+
+struct Tree { nodes: vec.Vec<Node> }
+
+impl Tree {
+    fn new() -> Tree {
+        return Tree.{ nodes: vec.Vec::<Node>.new() };
+    }
+
+    fn insert(&mut self, key: u32) {
+        let idx = self.nodes.len();
+        self.nodes.push(Node.{ key: key, left: Option.None, right: Option.None });
+        if idx == 0 {
+            return;
+        }
+        let mut cur: usize = 0;
+        loop {
+            let n = *self.nodes.get_ref(cur);
+            if key < n.key {
+                match n.left {
+                    Option.Some(l) => { cur = l; }
+                    Option.None => {
+                        self.nodes.as_mut_slice()[cur].left = Option.Some(idx);
+                        return;
+                    }
+                }
+            } else {
+                match n.right {
+                    Option.Some(r) => { cur = r; }
+                    Option.None => {
+                        self.nodes.as_mut_slice()[cur].right = Option.Some(idx);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn contains(&self, key: u32) -> bool {
+        let ns = self.nodes.as_slice();
+        let mut at: Option<usize> = if ns.len() == 0 then Option.None else Option.Some(0);
+        loop {
+            match at {
+                Option.None => { return false; }
+                Option.Some(i) => {
+                    if ns[i].key == key {
+                        return true;
+                    }
+                    at = if key < ns[i].key then ns[i].left else ns[i].right;
+                }
+            }
+        }
+    }
+}
+
+rec fn walk(ns: &[Node], at: Option<usize>, out: &mut vec.Vec<u32>) {
+    match at {
+        Option.None => {}
+        Option.Some(i) => {
+            walk(ns, ns[i].left, out);
+            out.push(ns[i].key);
+            walk(ns, ns[i].right, out);
+        }
+    }
+}
+
+rec fn height(ns: &[Node], at: Option<usize>) -> u32 {
+    match at {
+        Option.None => { return 0; }
+        Option.Some(i) => {
+            let l = height(ns, ns[i].left);
+            let r = height(ns, ns[i].right);
+            let m = if l > r then l else r;
+            return 1 + m;
+        }
+    }
+}
+
+fn main() -> i32 {
+    let keys: [u32; 10] = [50, 30, 70, 20, 40, 60, 80, 35, 45, 65];
+    let mut t = Tree.new();
+    for i in 0..keys.len() {
+        t.insert(keys[i]);
+    }
+    let mut out = vec.Vec::<u32>.new();
+    walk(t.nodes.as_slice(), Option.Some(0usize), &mut out);
+    io.print("inorder:");
+    let xs = out.as_slice();
+    for i in 0..xs.len() {
+        let k = xs[i];
+        io.print(f" {k}");
+    }
+    io.print("\n");
+    let h = height(t.nodes.as_slice(), Option.Some(0usize));
+    io.print(f"height {h}\n");
+    let a = t.contains(65);
+    let b = t.contains(66);
+    io.print(f"has 65: {a}\n");
+    io.print(f"has 66: {b}\n");
+    return 0;
+}

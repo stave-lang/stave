@@ -1,0 +1,34 @@
+import std.io;
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<i64>.new();
+    for i in 0i64..20 {
+        v.push((i * 37) % 101 - 50);
+    }
+    let xs = v.as_slice();
+    let mut min = xs[0];
+    let mut max = xs[0];
+    let mut sum: i64 = 0;
+    let mut neg: u32 = 0;
+    for i in 0..xs.len() {
+        let x = xs[i];
+        if x < min {
+            min = x;
+        }
+        if x > max {
+            max = x;
+        }
+        sum = sum + x;
+        if x < 0 {
+            neg = neg + 1;
+        }
+    }
+    let n = v.len();
+    io.print(f"n {n}\n");
+    io.print(f"min {min}\n");
+    io.print(f"max {max}\n");
+    io.print(f"sum {sum}\n");
+    io.print(f"negatives {neg}\n");
+    return 0;
+}

@@ -1,0 +1,36 @@
+import std.io;
+
+struct Step { id: u32 }
+
+impl Drop for Step {
+    fn drop(&mut self) {
+        io.print(f"undo {self.id}\n");
+    }
+}
+
+fn stage(id: u32, fail: bool) -> Result<Step, u32> {
+    io.print(f"do {id}\n");
+    if fail {
+        return Result.Err(id);
+    }
+    return Result.Ok(Step.{ id: id });
+}
+
+fn run(fail_at: u32) -> Result<u32, u32> {
+    let a = stage(1, fail_at == 1)?;
+    let b = stage(2, fail_at == 2)?;
+    let c = stage(3, fail_at == 3)?;
+    io.print("all done\n");
+    return Result.Ok(a.id + b.id + c.id);
+}
+
+fn main() -> i32 {
+    let tries: [u32; 3] = [2, 0, 3];
+    for i in 0..tries.len() {
+        match run(tries[i]) {
+            Result.Ok(s) => { io.print(f"ok {s}\n"); }
+            Result.Err(id) => { io.print(f"failed at {id}\n"); }
+        }
+    }
+    return 0;
+}

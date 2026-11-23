@@ -1,0 +1,45 @@
+import std.io;
+
+fn is_sorted(xs: &[u32]) -> bool {
+    for i in 1..xs.len() {
+        if xs[i - 1] > xs[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn lower_bound(xs: &[u32], key: u32) -> usize without(alloc, io, lock) requires(is_sorted(xs)) ensures(result <= xs.len()) {
+    let mut lo: usize = 0;
+    let mut hi = xs.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if xs[mid] < key {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+fn range_of(xs: &[u32], lo: u32, hi: u32) -> &[u32] from xs requires(lo <= hi && is_sorted(xs)) {
+    let a = lower_bound(xs, lo);
+    let b = lower_bound(xs, hi);
+    return &xs[a..b];
+}
+
+fn main() -> i32 {
+    let xs: [u32; 8] = [1, 3, 3, 5, 8, 13, 21, 34];
+    let keys: [u32; 4] = [5, 4, 40, 0];
+    for i in 0..keys.len() {
+        let k = keys[i];
+        let r = lower_bound(&xs[0..8], k);
+        io.print(f"lower_bound({k}) = {r}\n");
+    }
+    let r = range_of(&xs[0..8], 3, 14);
+    let n = r.len();
+    let s = r.sum();
+    io.print(f"in [3, 14): {n} values, sum {s}\n");
+    return 0;
+}

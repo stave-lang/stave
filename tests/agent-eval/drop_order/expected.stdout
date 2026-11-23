@@ -1,0 +1,9 @@
+inner end
+drop 3
+drop 2
+drop 4
+consume 5
+drop 5
+drop 1
+main end
+drop 6

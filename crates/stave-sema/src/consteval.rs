@@ -116,7 +116,7 @@ pub(crate) fn eval_u64<E: CEnv>(env: &mut E, te: &TyEnv<'_>, n: u32, ty: TypeId)
             let text = icx.node_text(n).to_string();
             let d = mk(
                 "E0201",
-                None,
+                Some("no-cast"),
                 &[("expected", &e), ("found", &f), ("operand", &text)],
                 icx.node_span(n),
                 &[],

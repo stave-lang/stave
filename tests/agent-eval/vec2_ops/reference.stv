@@ -1,0 +1,52 @@
+import std.io;
+
+struct V2 { x: i32, y: i32 }
+
+impl Copy for V2 {}
+
+impl Add for V2 {
+    fn add(self, rhs: Self) -> Self {
+        return V2.{ x: self.x + rhs.x, y: self.y + rhs.y };
+    }
+}
+
+impl Sub for V2 {
+    fn sub(self, rhs: Self) -> Self {
+        return V2.{ x: self.x - rhs.x, y: self.y - rhs.y };
+    }
+}
+
+impl Mul for V2 {
+    fn mul(self, rhs: Self) -> Self {
+        return V2.{ x: self.x * rhs.x, y: self.y * rhs.y };
+    }
+}
+
+impl Neg for V2 {
+    fn neg(self) -> Self {
+        return V2.{ x: -self.x, y: -self.y };
+    }
+}
+
+impl V2 {
+    fn dot(self, o: V2) -> i32 {
+        return self.x * o.x + self.y * o.y;
+    }
+}
+
+fn show(label: &str, v: V2) {
+    io.print(f"{label} = ({v.x}, {v.y})\n");
+}
+
+fn main() -> i32 {
+    let a = V2.{ x: 3, y: -2 };
+    let b = V2.{ x: 1, y: 3 };
+    show("a + b", a + b);
+    show("a - b", a - b);
+    show("a * b", a * b);
+    show("-a", -a);
+    show("a + b + b", a + b + b);
+    let d = a.dot(b);
+    io.print(f"a . b = {d}\n");
+    return 0;
+}

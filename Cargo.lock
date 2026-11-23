@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "agent-eval"
+version = "0.0.1"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -491,6 +495,7 @@ dependencies = [
 name = "stave-cli"
 version = "0.0.1"
 dependencies = [
+ "agent-eval",
  "serde_json",
  "stave-diag",
  "stave-driver",

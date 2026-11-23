@@ -1,0 +1,34 @@
+import std.atomic;
+import std.io;
+import std.thread;
+
+static COUNT: atomic.U64 = atomic.U64.new(0);
+static SUM: atomic.U64 = atomic.U64.new(0);
+
+fn is_prime(n: usize) -> bool {
+    if n < 2 {
+        return false;
+    }
+    let mut d: usize = 2;
+    while d * d <= n {
+        if n % d == 0 {
+            return false;
+        }
+        d = d + 1;
+    }
+    return true;
+}
+
+fn main() -> i32 {
+    thread.par_for(2, 10000, fn(i: usize) {
+        if is_prime(i) {
+            let _ = COUNT.fetch_add(1);
+            let _ = SUM.fetch_add(i as u64);
+        }
+    });
+    let c = COUNT.load();
+    let s = SUM.load();
+    io.print(f"primes below 10000: {c}\n");
+    io.print(f"sum {s}\n");
+    return 0;
+}

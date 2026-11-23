@@ -1,0 +1,27 @@
+import std.io;
+
+fn gcd(a: u64, b: u64) -> u64 {
+    let mut x = a;
+    let mut y = b;
+    while y != 0 {
+        let t = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+fn lcm(a: u64, b: u64) -> u64 {
+    return a / gcd(a, b) * b;
+}
+
+fn main() -> i32 {
+    let pairs: [(u64, u64); 3] = [(12, 18), (17, 5), (100, 75)];
+    for i in 0..pairs.len() {
+        let (a, b) = pairs[i];
+        let g = gcd(a, b);
+        let l = lcm(a, b);
+        io.print(f"gcd({a}, {b}) = {g}, lcm = {l}\n");
+    }
+    return 0;
+}

@@ -1,0 +1,52 @@
+import std.debug;
+import std.io;
+
+fn dot_base(a: &[i32], b: &[i32]) -> i32 {
+    debug.assert(a.len() == b.len(), "lengths differ");
+    let mut acc = i32x4.splat(0);
+    let mut i: usize = 0;
+    while i + 4 <= a.len() {
+        acc = acc +% (i32x4.load(a, i) *% i32x4.load(b, i));
+        i = i + 4;
+    }
+    let mut s = acc.reduce_add_wrap();
+    while i < a.len() {
+        s = s +% a[i] *% b[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn dot_avx2(a: &[i32], b: &[i32]) -> i32 needs(avx2) {
+    debug.assert(a.len() == b.len(), "lengths differ");
+    let mut acc = i32x8.splat(0);
+    let mut i: usize = 0;
+    while i + 8 <= a.len() {
+        acc = acc +% (i32x8.load(a, i) *% i32x8.load(b, i));
+        i = i + 8;
+    }
+    let mut s = acc.reduce_add_wrap();
+    while i < a.len() {
+        s = s +% a[i] *% b[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+dispatch fn dot(a: &[i32], b: &[i32]) -> i32 { avx2 => dot_avx2, _ => dot_base, }
+
+fn main() -> i32 {
+    let mut a: [i32; 100] = [0; 100];
+    let mut b: [i32; 100] = [0; 100];
+    for i in 0..a.len() {
+        let k = i as% i32;
+        a[i] = k - 40;
+        b[i] = k % 7 + 1;
+    }
+    let d = dot(&a[0..100], &b[0..100]);
+    let p = dot_base(&a[0..100], &b[0..100]);
+    let same = d == p;
+    io.print(f"dot {d}\n");
+    io.print(f"same {same}\n");
+    return 0;
+}

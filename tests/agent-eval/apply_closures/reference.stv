@@ -1,0 +1,45 @@
+import std.io;
+
+fn apply(xs: &mut [i32], f: fn(i32) -> i32) {
+    for i in 0..xs.len() {
+        xs[i] = f(xs[i]);
+    }
+}
+
+fn compose(f: fn(i32) -> i32, g: fn(i32) -> i32, x: i32) -> i32 {
+    return g(f(x));
+}
+
+fn double(x: i32) -> i32 {
+    return x * 2;
+}
+
+fn inc(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn show(label: &str, xs: &[i32]) {
+    io.print(label);
+    for i in 0..xs.len() {
+        let x = xs[i];
+        io.print(f" {x}");
+    }
+    io.print("\n");
+}
+
+fn main() -> i32 {
+    let mut xs: [i32; 5] = [1, 2, 3, 4, 5];
+    let offset: i32 = 10;
+    apply(&mut xs[0..5], fn(x: i32) -> i32 { return x * 2 + offset; });
+    show("after first:", &xs[0..5]);
+    let mut calls: u32 = 0;
+    apply(&mut xs[0..5], fn(x: i32) -> i32 {
+        calls = calls + 1;
+        return x - 1;
+    });
+    show("after second:", &xs[0..5]);
+    io.print(f"calls {calls}\n");
+    let c = compose(double, inc, 7);
+    io.print(f"compose {c}\n");
+    return 0;
+}
