@@ -52,7 +52,13 @@ fn repeated_roles_print_in_given_order_and_missing_roles_are_left_out() {
     let labels: Vec<u32> = d.related().iter().map(|r| r.span.offset).collect();
     assert_eq!(labels, [0, 40, 4]);
     // E0501 without the `use` role: that label is not printed.
-    let holes = [("access", "borrow mutably"), ("place", "*v"), ("loan", "`&`"), ("loaned", "*v")];
+    let holes = [
+        ("access", "borrow mutably"),
+        ("place", "*v"),
+        ("loan", "`&`"),
+        ("loaned", "*v"),
+        ("later", "later here"),
+    ];
     let d = Diagnostic::new(
         "E0501",
         None,

@@ -1,0 +1,5 @@
+next 1
+next 1
+next 2
+rest sum 25
+longest run: 3 x 4

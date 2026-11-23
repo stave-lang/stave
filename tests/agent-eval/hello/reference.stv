@@ -1,0 +1,10 @@
+import std.io;
+
+fn main() -> i32 {
+    let a: u32 = 2;
+    let b: u32 = 3;
+    let c = a + b;
+    io.print("Hello, Stave!\n");
+    io.print(f"{a} + {b} = {c}\n");
+    return 0;
+}

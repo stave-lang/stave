@@ -9,7 +9,7 @@
 //! falls back to whole-function intervals (no sharing).
 
 use stave_ir::ir::{Target, ValueDef};
-use stave_ir::{Body, Func, Op, Operand, Term};
+use stave_ir::{Body, Func, Op, Operand, Term, Value};
 use stave_opt::regalloc;
 
 use super::abi;
@@ -150,8 +150,10 @@ const FLOATS: u8 = 8;
 const POOLS: regalloc::Pools =
     regalloc::Pools { int_saved: INTS, int_scratch: 0, float_saved: FLOATS, float_scratch: 0, vec_saved: 0 };
 
+/// A frame past [`FRAME_MAX`]: the checker bounds every fn's frame sum (E0911 case `frame`) so
+/// that no frame of a checked program gets here, so this is a compiler bug.
 fn frame_too_large() -> super::Error {
-    unsupported("stack frame larger than 1 GiB")
+    bad("stack frame larger than 1 GiB, past the checker's frame bound")
 }
 
 impl Analysis {
@@ -330,8 +332,16 @@ impl Analysis {
                 continue;
             }
             self.fused[blk as usize] = j;
-            for oi in body.insts.args[j as usize].indices() {
-                self.last_use[oi as usize] = false;
+            // the compare is emitted after every instruction of the block, so a later instruction
+            // reading an operand must not drop it either
+            let read: Vec<Value> =
+                args.iter().filter_map(|o| if let Operand::Value(v) = o { Some(*v) } else { None }).collect();
+            for k in bd.insts.indices() {
+                for oi in body.insts.args[k as usize].indices() {
+                    if matches!(body.operands.get(oi as usize), Some(Operand::Value(v)) if read.contains(v)) {
+                        self.last_use[oi as usize] = false;
+                    }
+                }
             }
         }
     }

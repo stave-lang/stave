@@ -111,7 +111,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0005",
         severity: Severity::Error,
         area: "lex-parse",
-        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type, at the first signature, field, alias, value, or call that reaches it",
+        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type at the first signature, field, alias, value, or call that reaches it, and at each expression, statement, or declaration whose checking asks for a type past the limit",
         retired: false,
         located: true,
         holes: &[],
@@ -1043,10 +1043,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0201",
         severity: Severity::Error,
         area: "types",
-        rule: "mismatched types, with no implicit conversion",
+        rule: "mismatched types, with no implicit conversion; cases `fn-arms`, `fn-arms-wanted`: value `if` / `match` arms of fn types that differ only in `needs` or `without`; the fix names a form that converts (cases `cast-marked`, `some`, `ok`, `unwrap-option`, `unwrap-result`, `borrow`, `borrow-mut`, `deref`), plain `as` only where the cast table admits it, else case `no-cast`",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "cast", kind: HoleKind::TextLiteral, choices: &["as%", "as|", "as~"] },
+            Hole { name: "common", kind: HoleKind::Type, choices: &[] },
             Hole { name: "count", kind: HoleKind::Int, choices: &[] },
             Hole { name: "expected", kind: HoleKind::Type, choices: &[] },
             Hole { name: "found", kind: HoleKind::Type, choices: &[] },
@@ -1082,6 +1084,51 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "borrow",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it: `&{operand}`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "&{operand}" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "borrow-mut",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it mutably: `&mut {operand}`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "&mut {operand}" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "cast-marked",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "convert explicitly: `{operand} {cast} {expected}` (plain `as` from `{found}` can lose information, E0204; `as%` wraps or truncates, `as|` saturates, `as~` rounds)",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "{operand} {cast} {expected}" },
+                    ],
+                }),
+            },
+            Shape {
                 case: "const-arg",
                 message: "`{operand}` is not a const generic argument",
                 labels: &[
@@ -1101,6 +1148,60 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare it with an unsigned integer type: `const {operand}: usize`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "copy the value out: `*{operand}`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "*{operand}" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "fn-arms",
+                message: "the arms have different fn types: `{expected}` and `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "give the value a fn type both arms convert to: `let f: {common} = ..;` (`as` converts no fn value)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "fn-arms-wanted",
+                message: "arm of type `{found}` is not usable as `{expected}`: a fn item arm gains a `without` clause only alone",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "convert the arm alone first: `let g: {expected} = {operand};`, then use `g` as the arm (`as` converts no fn value)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "no-cast",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write a value of type `{expected}` here, or change what requires `{expected}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1142,6 +1243,36 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "ok",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "wrap the value: `Result.Ok({operand})`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "Result.Ok({operand})" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "some",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "wrap the value: `Option.Some({operand})`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "Option.Some({operand})" },
+                    ],
+                }),
+            },
+            Shape {
                 case: "type-args",
                 message: "`{operand}` takes {count} generic arguments, found {given}",
                 labels: &[
@@ -1149,6 +1280,32 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give exactly {count} generic arguments",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "unwrap-option",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the value out: `{operand}.unwrap()` (panics `Unwrap` on `Option.None`), `{operand}?` in a fn returning `Option`, or `match {operand} {{ Option.Some(v) => v, Option.None => .. }}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "unwrap-result",
+                message: "mismatched types: expected `{expected}`, found `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the value out: `{operand}.unwrap()` (panics `Unwrap` on `Result.Err`), `{operand}?` in a fn returning `Result` of the same error type, or `match {operand} {{ Result.Ok(v) => v, Result.Err(e) => .. }}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1350,11 +1507,14 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0206",
         severity: Severity::Error,
         area: "types",
-        rule: "operator not defined for type (e.g. `+%` on a float). Case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a const of a struct, enum, tuple, or array type); case `pattern-str`: the same for a string literal or `&str` const pattern",
+        rule: "operator not defined for type (e.g. `+%` on a float); case `ref-operand`: an operand of reference type; cases `deref`, `deref-read`, `deref-write`, `deref-accessors`: unary `*` on a value that is no reference or raw pointer, the fix naming the type's methods that take `&self` / `&mut self` alone and return a reference; case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a const of a struct, enum, tuple, or array type); case `pattern-str`: the same for a string literal or `&str` const pattern",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "get", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "get_mut", kind: HoleKind::Name, choices: &[] },
             Hole { name: "op", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "operand", kind: HoleKind::Source, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
@@ -1366,6 +1526,54 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use an operator that `{type}` defines (floats: plain `+ - * /`), or convert the operands with `as` first",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref",
+                message: "`*` cannot dereference `{type}`: it is no reference or raw pointer",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{operand}` is a value already: use it without `*`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref-accessors",
+                message: "`*` cannot dereference `{type}`: it is no reference or raw pointer",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{type}` gives a `&` from its method `{get}` and a `&mut` from `{get_mut}`: read `*{operand}.{get}()`; to change the value, `let r = {operand}.{get_mut}();`, then `*r` for every read and write (`*r = *r + 1;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref-read",
+                message: "`*` cannot dereference `{type}`: it is no reference or raw pointer",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{type}` gives a `&` from its method `{get}`: read `*{operand}.{get}()`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "deref-write",
+                message: "`*` cannot dereference `{type}`: it is no reference or raw pointer",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{type}` gives a `&mut` from its method `{get_mut}`: `let r = {operand}.{get_mut}();`, then `*r` for every read and write",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1390,6 +1598,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "bind the string with a name and compare its bytes in a guard: `s if mem.str_bytes(s).eq(mem.str_bytes(\"a\")) =>` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "ref-operand",
+                message: "operator `{op}` is not defined for `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{type}` is a reference: apply `{op}` to the value behind it (`*a {op} *b`; the bindings of a `match` on a reference are references)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1438,11 +1658,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0208",
         severity: Severity::Error,
         area: "types",
-        rule: "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern",
+        rule: "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern; case `reserved`: a type-relative name reserved for a built-in stage0 does not compile (`TxN.load_first_fault`)",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "added", kind: HoleKind::Pattern, choices: &[] },
+            Hole { name: "mask", kind: HoleKind::Type, choices: &[] },
             Hole { name: "missing", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
@@ -1492,6 +1713,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "name each field, `f: _` for one the pattern ignores: add `{added}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "reserved",
+                message: "`{type}.{name}` is reserved: first-fault loads are not available yet",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "reserved name" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "load the lanes in bounds with a masked load: `{type}.load_masked(s, i, {mask}.first_n(s.len() -| i))` (inactive lanes read 0)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2596,7 +2829,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
-        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)",
+        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check; `temporary-old`: the operand `e` of an `old(e)`, which ends where it is evaluated, at fn entry; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)",
         retired: false,
         located: true,
         holes: &[
@@ -2616,7 +2849,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[
                     LabelTemplate { at: "primary", text: "{access} here" },
                     LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
-                    LabelTemplate { at: "use", text: "borrow used later here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
                 ],
                 fix: Some(FixTemplate {
                     description: "end the borrow before this point: move the later use before it, or copy the value out first",
@@ -2695,6 +2928,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "temporary-old",
+                message: "the temporary `{place}` ends with its `old(..)` operand at fn entry, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "temporary made here: it ends where the `old(..)` operand is evaluated, at fn entry" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "compute the Copy value inside `old(..)`, so that no borrow of `{place}` is kept: `old(f(x).len())`, not `old(f(x).as_slice()).len()`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "thread",
                 message: "cannot {access} `{place}`: it has a live {loan} borrow",
                 labels: &[
@@ -2702,7 +2949,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` by the thread spawned here: it may use `{loaned}` until the scope is left" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "leave the scope before this point (its threads are joined there), or use the place only inside the thread",
+                    description: "{access} `{place}` after the `scope` that runs the thread: its threads are joined only where it is left, so a `scope` around an endless loop never ends the borrow (open the `scope` inside the loop body instead)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3257,7 +3504,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0601",
         severity: Severity::Error,
         area: "simd",
-        rule: "chunk loop without a tail policy; case `element`: a tail clause on a loop over elements (no vector binding), which leaves none",
+        rule: "chunk loop without a tail policy; case `element-loop`: a tail clause on a loop that is not a chunk loop (its annotation, as written, is no vector or reference to one: a range, an iterator, an element loop, also a generic `T`)",
         retired: false,
         located: true,
         holes: &[
@@ -3277,13 +3524,13 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
-                case: "element",
-                message: "tail clause on a `for` loop over the elements of `{type}`",
+                case: "element-loop",
+                message: "a tail clause on a loop that is not a chunk loop",
                 labels: &[
-                    LabelTemplate { at: "primary", text: "only a chunk loop has a tail" },
+                    LabelTemplate { at: "primary", text: "tail clause of an element loop: it visits every element, none is left over" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "remove the tail clause, or bind a vector type to make it a chunk loop: `for v: f32x8 in xs {{ .. }} tail ..`",
+                    description: "remove the tail clause; for a chunk loop, annotate the binding with a vector type written out (`for v: f32x8 in xs`), not a generic one",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3748,12 +3995,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0705",
         severity: Severity::Error,
         area: "features",
-        rule: "dispatch arm signature differs from the dispatch signature",
+        rule: "dispatch arm signature differs from the dispatch signature, or the arm target is not a fn with a body. Case `dispatch`: the target is a `dispatch fn`",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "expected", kind: HoleKind::Type, choices: &[] },
             Hole { name: "found", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "target", kind: HoleKind::Path, choices: &[] },
         ],
         shapes: &[
             Shape {
@@ -3765,6 +4013,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give the arm's function the type `{expected}` (the dispatch signature, with needs = dispatch needs + the arm's features)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "dispatch",
+                message: "dispatch arm names `dispatch fn` `{target}`: an arm target is a fn with a body",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a `dispatch fn`" },
+                    LabelTemplate { at: "dispatch", text: "this dispatch" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name the arms of `{target}` in this dispatch directly, each fn that has the features of its arm",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3863,11 +4124,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0709",
         severity: Severity::Error,
         area: "features",
-        rule: "`main`, a trait method, or an `extern` export declares `needs`",
+        rule: "an entry point (`main`, a `test fn`, an `extern` export, an allocator fn, a runtime entry fn: code that runs with no typed call site, on any CPU of the target) or a trait method declares `needs`. Case `test`: a `test fn`",
         retired: false,
         located: true,
         holes: &[
-            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["`main`", "a trait method", "an `extern` export"] },
+            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["`main`", "a trait method", "an `extern` export", "a `test fn`", "an allocator fn", "a runtime entry fn"] },
         ],
         shapes: &[
             Shape {
@@ -3878,6 +4139,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `needs(...)` here, and call the feature-specific code through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "test",
+                message: "{what} cannot declare `needs`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`needs` here: the harness runs this test on any CPU" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `needs(...)`: move the body to a fn with `needs(...)` and call it through a `dispatch` fn whose `_` arm returns without it (the test then passes on a CPU without the features)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4687,7 +4960,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0904",
         severity: Severity::Error,
         area: "generics",
-        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself, through its initializer or its type (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `generic`: `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter (its value is known per instance only). Case `size`: an array literal of a const-expr (a `const` or `static` initializer: compile-time data) whose type takes more than 2^26 bytes (contracts/lang-details.md, Size limits); a `[e; n]` in a fn body is a fill at run time and has no such limit",
+        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself, through its initializer or its type (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `generic`: `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter (its value is known per instance only). Case `size`: an array literal of a const-expr (a `const` or `static` initializer: compile-time data) whose type takes more than 2^26 bytes (contracts/lang-details.md, Size limits); a `[e; n]` in a fn body is a fill at run time and has no such limit. Case `total`: the `static`s and `const`s of the program take more than 2^30 bytes together (file data and zero fill, each rounded up to its alignment; every `const` counts, used or not; the built-in packages' own count too), once, at the largest item of the program's own packages, with the next three largest as related spans",
         retired: false,
         located: true,
         holes: &[
@@ -4754,6 +5027,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "fill the array at run time (a `[e; n]` in a fn body has no size limit), or use a heap buffer (`vec.Vec`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "total",
+                message: "the `static`s and `const`s of the program take {bytes} bytes together, more than 1,073,741,824",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` is the largest of the program's own" },
+                    LabelTemplate { at: "other", text: "another of the largest" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "allocate the large buffers at run time (`vec.Vec`), or make the statics smaller",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4999,7 +5285,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, array, tuple, or struct literal, value `if` / `match`, or return value of a fn whose type takes more than 2^28 bytes (contracts/lang-details.md, Size limits), once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, plus each call's result and by-value arguments) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it; once per instance, at the generic fn",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, expression value (all but a place read in place: contracts/lang-details.md, Size limits), or return value of a fn whose type takes more than 2^28 bytes, once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, two slots for a value `if` / `match` (its result and the live arm, whatever the arm count), plus each call's result, by-value receiver, and arguments, whatever the callee) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it; once per instance, at the generic fn",
         retired: false,
         located: true,
         holes: &[
@@ -6259,7 +6545,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1407",
         severity: Severity::Error,
         area: "effects",
-        rule: "`Flat` demanded by a bound, type not `Flat`: names the first non-flat component and its path (field chain); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        rule: "`Flat` demanded by a bound, type not `Flat`: names the first non-flat component and its path (field chain); case `self` when the type itself is the component; case `depth` when the path to that component is longer than the type depth limit",
         retired: false,
         located: true,
         holes: &[
@@ -6368,7 +6654,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1410",
         severity: Severity::Error,
         area: "effects",
-        rule: "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        rule: "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` when the path to that component is longer than the type depth limit",
         retired: false,
         located: true,
         holes: &[

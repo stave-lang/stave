@@ -193,6 +193,15 @@ const MAX_DEPTH: u32 = 2000;
 /// value and the image holds its bytes.
 pub const MAX_DATA_BYTES: u64 = 1 << 26;
 
+/// The most bytes every `static` and `const` of a program may take together, file data and zero
+/// fill alike, each rounded up to its alignment (contracts/lang-details.md "Size limits"). Both
+/// targets lay an image out as text, then read-only data, data, zero fill, and reach a static
+/// PC-relatively: x86-64 by a `rel32` (`S - P` within ±2^31, so the code and all data before the
+/// last static's start must stay below 2 GiB), AArch64 by `ADRP` (±2^32), and the ELF writer
+/// takes at most 2^32 bytes in all. x86-64 binds: half of its 2 GiB is kept for the code, string
+/// literals, the runtime's own data, and padding, so 2^30 bytes on both targets.
+pub const MAX_PROGRAM_DATA_BYTES: u64 = 1 << 30;
+
 /// The compile-time data limit on type `t` ([`MAX_DATA_BYTES`]): `Err(bytes)` past it, with
 /// `u64::MAX` for a size past `u64`. A type with params or an error passes (its instances, or
 /// the error's diagnostic, decide); a type without a layout otherwise is rejected.
@@ -213,12 +222,12 @@ pub(crate) fn data_size<E: CEnv + ?Sized>(env: &mut E, t: TypeId) -> Result<(), 
 pub const MAX_VALUE_BYTES: u64 = 1 << 28;
 
 /// The most bytes the values of one fn instance may take together (its frame sum: parameters,
-/// bindings, literals, one copy per arm of a value `if` / `match`, call results and by-value
-/// arguments, the return value; contracts/lang-details.md "Size limits"). A back end's frame
-/// holds at most 1 GiB. Its frame is that sum for most shapes, and up to 1.5 times it where a
-/// whole aggregate is loaded to read a part of it (through a `*p`, a borrowed binding, or a
-/// closure's capture); 16 MiB are kept for the back end's own slots and spills:
-/// (1 GiB - 16 MiB) / 1.5.
+/// bindings, every expression value but a place read in place, two slots for a value `if` /
+/// `match` (its result and the live arm), each call's result, by-value receiver and arguments, the return value;
+/// contracts/lang-details.md "Size limits"). A back end's frame holds at most 1 GiB. Its frame
+/// measures at most 1.5 times that sum (a filled local, a whole aggregate loaded to read a part
+/// of it) on both targets, debug and release; 16 MiB are kept for the back end's own slots and
+/// spills: (1 GiB - 16 MiB) / 1.5.
 pub const MAX_FRAME_BYTES: u64 = ((1 << 30) - (1 << 24)) / 3 * 2;
 
 /// The `what` of the E0904 at the innermost node without a value.
@@ -530,7 +539,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         let text = icx.node_text(n).to_string();
         let d = mk(
             "E0201",
-            None,
+            Some("no-cast"),
             &[("expected", expected), ("found", found), ("operand", &text)],
             icx.node_span(n),
             &[],

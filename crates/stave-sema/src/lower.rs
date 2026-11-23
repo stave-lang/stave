@@ -635,7 +635,24 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 }));
             }
             let needs = inst_features(g.sigs, g.inherited, k);
-            if decl.flags.has(DeclFlags::DISPATCH) {
+            // A fn the target does not build is reached only as a fn value made in code the
+            // target builds: every call of it, or through a value of its type, needs features the
+            // target's arch lacks (E0704, E0707), so no call runs. Its code is a trap, where the
+            // target can pass its params and return at all (else it stays declared only).
+            let max = crate::gates::max_vector_bits(prog.target);
+            let passable = sig
+                .params
+                .iter()
+                .chain(std::iter::once(&sig.ret))
+                .all(|&t| t.is_none() || crate::gates::wide_part(&g.tc.types, t, max).is_none());
+            let unbuilt = !sig.built_on(prog.target.arch());
+            if unbuilt && passable {
+                let mut cx = FnCx::new(g, icx, path);
+                let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
+                let out = cx.lower_unbuilt(&ps, ret);
+                return finish_job(cx, out, name);
+            }
+            if decl.flags.has(DeclFlags::DISPATCH) && !unbuilt {
                 let mut cx = FnCx::new(g, icx, path);
                 cx.needs = needs;
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
@@ -656,7 +673,8 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 return finish_job(cx, out, name);
             }
             let body = g.tc.body(k.decl).filter(|b| !b.has_error);
-            let declared_only = body.is_none()
+            let declared_only = unbuilt
+                || body.is_none()
                 || decl.flags.has(DeclFlags::EXTERN_IMPORT)
                 || sig.abi == crate::sigs::Abi::Intrinsic;
             if declared_only {
@@ -717,6 +735,16 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
 }
 
 fn finish_job(mut cx: FnCx<'_>, out: FnOut, name: Option<(stave_diag::FileId, u32)>) -> JobOut {
+    // the checker reported every type too tall for an instance (E0005 case `type`), so lowering
+    // never builds one: its error type would be lowered as a value
+    if cx.tys.refused > 0 && cx.err.is_none() {
+        cx.err = Some(crate::lower_fn::LowerError {
+            kind: crate::lower_fn::LowerErrorKind::Internal,
+            func: cx.path.clone(),
+            at: String::from("?"),
+            msg: "lowering built a type taller than the type height limit".into(),
+        });
+    }
     let mut funcs = vec![out];
     let mut cl = std::mem::take(&mut cx.outs);
     cl.sort_by_key(|f| f.closure);

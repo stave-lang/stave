@@ -109,6 +109,15 @@ impl Decl {
     pub fn is_pub(&self) -> bool {
         self.flags.has(DeclFlags::PUB)
     }
+
+    /// Whether this is a fn or method whose code is a body the type checker checks: not an
+    /// extern import (foreign code), a `dispatch fn` (its code is the arm chain), or a trait
+    /// signature.
+    pub fn has_body(&self) -> bool {
+        matches!(self.kind, DeclKind::Fn | DeclKind::Method)
+            && !self.flags.has(DeclFlags::EXTERN_IMPORT)
+            && !self.flags.has(DeclFlags::DISPATCH)
+    }
 }
 
 /// An impl block found during collection.

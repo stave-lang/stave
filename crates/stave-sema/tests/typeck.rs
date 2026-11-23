@@ -368,12 +368,12 @@ fn type_helpers_on_the_canonical_table() {
     assert!(b.locals.iter().any(|&(_, lt)| lt == wu8));
     let world = World { prog: &p, sigs: &tc.sigs };
     let (imp, iargs) =
-        world.find_impl(&mut t, wu8, &TraitRef { trait_decl: tr, args: Vec::new() }, &[], 0).expect("impl");
+        world.find_impl(&mut t, wu8, &TraitRef { trait_decl: tr, args: Vec::new() }, &[]).expect("impl");
     assert_eq!(p.decl(imp).map(|d| d.kind), Some(stave_sema::DeclKind::Impl));
     assert_eq!(iargs, vec![GArg::Type(u8t)]);
     let imp_def = tc.sigs.impl_def(imp).expect("impl sig");
-    assert_eq!(world.impl_applies(&mut t, imp_def, wu8, &[], 0), Some(vec![GArg::Type(u8t)]));
-    assert_eq!(world.impl_applies(&mut t, imp_def, u8t, &[], 0), None);
+    assert_eq!(world.impl_applies(&mut t, imp_def, wu8, &[]), Some(vec![GArg::Type(u8t)]));
+    assert_eq!(world.impl_applies(&mut t, imp_def, u8t, &[]), None);
     // layout: Option<u8> (tag + payload) then u8
     let lx = stave_sema::traits::layout_of(&mut t, &tc.sigs, sx).expect("layout");
     let lw = stave_sema::traits::layout_of(&mut t, &tc.sigs, wu8).expect("layout");
@@ -821,4 +821,258 @@ fn e0219_next_shape_and_e0609_lane_type_say_why() {
     let lane = "`vec<P, 4>` has the lane type `P`, which no vector has";
     assert!(got.iter().any(|(c, m, _)| *c == "E0609" && *m == lane), "{got:?}");
     assert_eq!(got.len(), 3, "{got:?}");
+}
+
+/// E0704 case `value` names the missing features no other missing one implies, as for a direct
+/// call: `avx2` (not the baseline's `sse42` or the implied `avx`), and both of two.
+#[test]
+fn e0704_value_names_the_missing_features() {
+    let src = "fn one(f: fn(u32) -> u32 needs(avx2)) -> u32 { return f(1u32); }\n\
+         fn two(f: fn(u32) -> u32 needs(avx2, fma)) -> u32 needs(avx) { return f(1u32); }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<&str> = tc.diagnostics.iter().filter(|d| d.code() == "E0704").map(|d| d.message()).collect();
+    let want = [
+        "a call through a value of type `fn(u32) -> u32 needs(avx2)` needs `avx2`, which the caller does not have",
+        "a call through a value of type `fn(u32) -> u32 needs(avx2, fma)` needs `avx2, fma`, which the caller \
+         does not have",
+    ];
+    assert_eq!(got, want, "{got:?}");
+}
+
+/// E0709 case `test` and E0705 case `dispatch` say what the rule is and how to write the code.
+#[test]
+fn e0709_test_and_e0705_dispatch_texts() {
+    let src = "fn base(x: u32) -> u32 { return x; }\n\
+         dispatch fn inner(x: u32) -> u32 { _ => base, }\n\
+         dispatch fn outer(x: u32) -> u32 { _ => inner, }\n\
+         test fn t() needs(avx2) { }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str, &str)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| (d.code(), d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(
+        got.iter().any(|(c, m, f)| *c == "E0705"
+            && *m == "dispatch arm names `dispatch fn` `main.inner`: an arm target is a fn with a body"
+            && f.starts_with("name the arms of `main.inner` in this dispatch directly")),
+        "{got:?}"
+    );
+    assert!(
+        got.iter().any(|(c, m, f)| *c == "E0709"
+            && *m == "a `test fn` cannot declare `needs`"
+            && f.contains("through a `dispatch` fn whose `_` arm")),
+        "{got:?}"
+    );
+}
+
+/// `TxN.load_first_fault` is reserved (E0208 `reserved`): the fix writes the masked load of the
+/// lanes in bounds with the vector's own mask type, also inside `emulate { }`.
+#[test]
+fn e0208_reserved_first_fault_load_names_the_masked_load() {
+    let src = "fn f(s: &[f32]) -> f32x4 { return f32x4.load_first_fault(s, 0); }\n\
+         fn g(s: &[u16]) { emulate { let v = u16x8.load_first_fault(s, 1); } }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str, &str)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| (d.code(), d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    let has = |ty: &str, mask: &str| {
+        got.iter().any(|(c, m, f)| {
+            *c == "E0208"
+                && *m
+                    == format!("`{ty}.load_first_fault` is reserved: first-fault loads are not available yet")
+                && f.contains(&format!("`{ty}.load_masked(s, i, {mask}.first_n(s.len() -| i))`"))
+        })
+    };
+    assert!(has("f32x4", "mask32x4"), "{got:?}");
+    assert!(has("u16x8", "mask16x8"), "{got:?}");
+    assert_eq!(got.len(), 2, "{got:?}");
+}
+
+/// E0201 for value arms of fn types that differ only in `needs` / `without` names a change that
+/// compiles, never an `as` (E0204 for fn types): with no wanted type the fn type both arms
+/// convert to; with one, the arm not usable as it, converted alone first (in a `match`, also an
+/// earlier arm).
+#[test]
+fn e0201_fn_arms_fixes_name_what_compiles() {
+    let src = "fn twice(x: u64) -> u64 { return x * 2u64; }\n\
+         fn stop(x: u64) -> u64 without(io) { return x; }\n\
+         fn wide(x: u64) -> u64 needs(avx2) { return x; }\n\
+         fn apply(f: fn(u64) -> u64 without(io), x: u64) -> u64 without(io) { return f(x); }\n\
+         fn main() -> i32 {\n\
+         let c = true;\n\
+         let k = 1u32;\n\
+         let a = if c then stop else twice;\n\
+         let b = if c then wide else twice;\n\
+         let r = apply(if c then twice else stop, 3u64);\n\
+         let s = apply(match k { 0u32 => twice, _ => stop }, 3u64);\n\
+         return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> =
+        tc.diagnostics.iter().map(|d| (d.code(), d.fix().map_or("", |f| f.description.as_str()))).collect();
+    let has = |needle: &str| got.iter().filter(|(c, f)| *c == "E0201" && f.contains(needle)).count();
+    assert_eq!(has("`let f: fn(u64) -> u64 = ..;`"), 1, "{got:?}");
+    assert_eq!(has("`let f: fn(u64) -> u64 needs(avx2) = ..;`"), 1, "{got:?}");
+    assert_eq!(has("`let g: fn(u64) -> u64 without(io) = twice;`"), 2, "{got:?}");
+    assert!(got.iter().all(|(_, f)| !f.contains(" as fn")), "{got:?}");
+    assert_eq!(got.len(), 4, "{got:?}");
+}
+
+/// With a wanted fn type, an arm needing features neither that type nor the enclosing fn has is
+/// E0707, as the same arm converted alone (converting it first compiles no better); inside a fn
+/// with those features the arms convert.
+#[test]
+fn e0707_fn_arm_needing_features_the_wanted_type_lacks() {
+    let src = "fn plain(x: u64) -> u64 without(trap) { return x; }\n\
+         fn wide(x: u64) -> u64 needs(avx2) { return x; }\n\
+         fn pick(k: u32) -> u64 needs(avx2) { let f: fn(u64) -> u64 = match k { 0u32 => plain, _ => wide }; return f(1u64); }\n\
+         fn main() -> i32 {\n\
+         let k = 1u32;\n\
+         let f: fn(u64) -> u64 = match k { 0u32 => plain, _ => wide };\n\
+         let g: fn(u64) -> u64 = if k == 0u32 then wide else plain;\n\
+         return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> = tc.diagnostics.iter().map(|d| (d.code(), d.message())).collect();
+    let e0707 = "`fn(u64) -> u64 needs(avx2)` cannot be used as `fn(u64) -> u64`";
+    assert_eq!(got.iter().filter(|(c, m)| *c == "E0707" && m.contains(e0707)).count(), 2, "{got:?}");
+    assert_eq!(got.len(), 2, "{got:?}");
+}
+
+/// E0201 offers plain `as` only where the cast table admits it; otherwise the fix names the form
+/// that gives the expected type (a marked cast, `Option.Some` / `Result.Ok`, taking the payload
+/// out, a borrow, a copy through `*`), and with none of them no conversion at all.
+#[test]
+fn e0201_fixes_name_a_conversion_that_exists() {
+    let src = "import std.vec;\n\
+         fn some(v: &vec.Vec<u32>) -> Option<&u32> from v { return v.get_ref(0); }\n\
+         fn lit() -> Option<u32> { return 5; }\n\
+         fn ok(x: u32) -> Result<u32, u8> { return x; }\n\
+         fn un(x: Option<u32>) -> u32 { return x; }\n\
+         fn unr(x: Result<u32, u8>) -> u32 { return x; }\n\
+         fn wide(x: u32) -> u64 { return x; }\n\
+         fn narrow(x: u64) -> u32 { return x; }\n\
+         fn sat(x: f64) -> i32 { return x; }\n\
+         fn round(x: u32) -> f32 { return x; }\n\
+         fn take(xs: &[u32]) -> usize { return xs.len(); }\n\
+         fn bump(x: &mut u32) { *x = *x + 1u32; }\n\
+         fn read(x: &u32) -> u32 { return x; }\n\
+         fn none(x: u32) -> bool { return x; }\n\
+         fn float() -> f64 { return 2; }\n\
+         fn main() -> i32 {\n\
+         let a: [u32; 2] = [1u32; 2];\n\
+         let n = take(a);\n\
+         let mut k: u32 = 0;\n\
+         bump(k);\n\
+         return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> =
+        tc.diagnostics.iter().map(|d| (d.code(), d.fix().map_or("", |f| f.description.as_str()))).collect();
+    let has = |needle: &str| got.iter().filter(|(c, f)| *c == "E0201" && f.contains(needle)).count();
+    assert_eq!(has("`Option.Some(v.get_ref(0))`"), 1, "{got:?}");
+    assert_eq!(has("`Option.Some(5)`"), 1, "{got:?}");
+    assert_eq!(has("`Result.Ok(x)`"), 1, "{got:?}");
+    assert_eq!(has("`x.unwrap()` (panics `Unwrap` on `Option.None`)"), 1, "{got:?}");
+    assert_eq!(has("`x.unwrap()` (panics `Unwrap` on `Result.Err`)"), 1, "{got:?}");
+    assert_eq!(has("`x as u64`"), 1, "{got:?}");
+    assert_eq!(has("`x as% u32`"), 1, "{got:?}");
+    assert_eq!(has("`x as| i32`"), 1, "{got:?}");
+    assert_eq!(has("`x as~ f32`"), 1, "{got:?}");
+    assert_eq!(has("borrow it: `&a`"), 1, "{got:?}");
+    assert_eq!(has("borrow it mutably: `&mut k`"), 1, "{got:?}");
+    assert_eq!(has("copy the value out: `*x`"), 1, "{got:?}");
+    assert_eq!(has("write a value of type `bool` here"), 1, "{got:?}");
+    assert_eq!(has("write a value of type `f64` here"), 1, "{got:?}");
+    assert!(got.iter().all(|(_, f)| !f.contains(" as Option") && !f.contains(" as Result")), "{got:?}");
+    assert!(got.iter().all(|(_, f)| !f.contains("`x as bool`") && !f.contains("`2 as f64`")), "{got:?}");
+    assert_eq!(got.len(), 14, "{got:?}");
+}
+
+/// E0206 for unary `*` on a value that is no reference names what the type offers: its first
+/// `&self -> &U` and `&mut self -> &mut U` methods (a lock guard's `get` / `get_mut`), one of
+/// them, or else the value itself; an operator on a reference says to apply it to the value
+/// behind it.
+#[test]
+fn e0206_deref_names_the_reference_accessors() {
+    let src = "import std.sync;\n\
+         struct R { v: u64 }\n\
+         impl R { pub fn get(&self) -> &u64 from self { return &self.v; } }\n\
+         struct W { v: u64 }\n\
+         impl W { pub fn put(&mut self, x: u64) { self.v = x; } pub fn slot(&mut self) -> &mut u64 from self { return &mut self.v; } }\n\
+         fn guard(m: &sync.Mutex<u64, 1>) -> u64 { let g = m.lock(); return *g; }\n\
+         fn read(r: R) -> u64 { return *r; }\n\
+         fn write(w: W) -> u64 { return *w; }\n\
+         fn plain(x: u64) -> u64 { return *x; }\n\
+         fn refs(a: &u64, b: &u64) -> u64 { return a + b; }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str, &str)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| (d.code(), d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    let has = |needle: &str| got.iter().filter(|(c, _, f)| *c == "E0206" && f.contains(needle)).count();
+    assert_eq!(has("read `*g.get()`; to change the value, `let r = g.get_mut();`"), 1, "{got:?}");
+    assert_eq!(has("`R` gives a `&` from its method `get`: read `*r.get()`"), 1, "{got:?}");
+    assert_eq!(has("`W` gives a `&mut` from its method `slot`: `let r = w.slot();`"), 1, "{got:?}");
+    assert_eq!(has("`x` is a value already: use it without `*`"), 1, "{got:?}");
+    assert_eq!(has("`&u64` is a reference: apply `+` to the value behind it"), 1, "{got:?}");
+    let deref = "`*` cannot dereference `MutexGuard<u64, 1>`: it is no reference or raw pointer";
+    assert!(got.iter().any(|(_, m, _)| *m == deref), "{got:?}");
+    assert_eq!(got.len(), 5, "{got:?}");
+}
+
+/// Trait queries are answered once per (type, trait) and checking run: along a chain of 20,000
+/// structs linked by raw pointers, a `Frozen` query at the head (failing at the far end, or
+/// holding) and a `Copy` query over 20,000 structs with impls of their own take time linear in
+/// the chain. Answers found inside a cycle are kept only once the cycle's goal is settled: a
+/// mutual cycle is Sync when neither holds a `Cell` and is not when one does, whichever type is
+/// asked first.
+#[test]
+fn trait_queries_are_answered_once_per_type() {
+    let codes = |src: &str| -> Vec<String> {
+        let (p, tc) = mem(src);
+        let mut c: Vec<String> = tc.all_diagnostics(&p).iter().map(|d| d.code().to_string()).collect();
+        c.sort();
+        c
+    };
+    let chain = |n: usize, last: &str, copy: bool| -> String {
+        let mut s = String::from("import std.cell;\n");
+        for k in 1..n {
+            s += &format!("struct S{k} {{ pub p: *const S{}, pub b: u8 }}\n", k + 1);
+            if copy {
+                s += &format!("impl Copy for S{k} {{}}\n");
+            }
+        }
+        s += &format!("struct S{n} {{ pub {last} }}\n");
+        s
+    };
+    let none: Vec<String> = Vec::new();
+    let frozen = "fn need<T: Frozen>(t: &T) -> u8 { return 1u8; }\n\
+                  fn f(p: &S1) -> u8 { return need(p); }\nfn main() -> i32 { return 0; }\n";
+    assert_eq!(codes(&(chain(20_000, "v: u32", false) + frozen)), none);
+    assert_eq!(codes(&(chain(20_000, "c: cell.Cell<u32>", false) + frozen)), vec!["E1410".to_string()]);
+    let copy = "fn need<T: Copy>(t: &T) -> u8 { return 1u8; }\n\
+                fn f(p: &S1) -> u8 { return need(p); }\nfn main() -> i32 { return 0; }\n";
+    assert_eq!(codes(&(chain(20_000, "v: u32", true) + copy)), none);
+    let mutual = |cell: &str, a_first: bool| -> String {
+        let calls = if a_first { "need(&a) + need(&v)" } else { "need(&v) + need(&a)" };
+        format!(
+            "import std.vec;\nimport std.cell;\nstruct A {{ pub bs: vec.Vec<B> }}\n\
+             struct B {{ pub as_: vec.Vec<A>{cell} }}\nfn need<T: Sync>(t: &T) -> u8 {{ return 1u8; }}\n\
+             fn main() -> i32 {{\n    let a = A.{{ bs: vec.Vec::<B>.new() }};\n    \
+             let v = vec.Vec::<A>.new();\n    return (({calls}) as u8) as i32;\n}}\n"
+        )
+    };
+    let two = vec!["E0901".to_string(), "E0901".to_string()];
+    assert_eq!(codes(&mutual(", pub c: cell.Cell<u32>", true)), two);
+    assert_eq!(codes(&mutual(", pub c: cell.Cell<u32>", false)), two);
+    assert_eq!(codes(&mutual("", true)), none);
+    assert_eq!(codes(&mutual("", false)), none);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }

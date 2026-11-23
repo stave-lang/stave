@@ -1,0 +1,36 @@
+import std.io;
+import std.vec;
+
+fn isqrt(n: u64) -> u64 requires(n <= 1000000000000) ensures(result * result <= n && (result + 1) * (result + 1) > n) {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = 1000001;
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if mid * mid <= n {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+fn push_small(v: &mut vec.Vec<u32>, x: u32) requires(x < 100) ensures(v.len() == old(v.len()) + 1) {
+    v.push(x);
+}
+
+fn main() -> i32 {
+    let ns: [u64; 6] = [0, 1, 15, 16, 1000000, 999999999999];
+    for i in 0..ns.len() {
+        let n = ns[i];
+        let r = isqrt(n);
+        io.print(f"isqrt({n}) = {r}\n");
+    }
+    let mut v = vec.Vec::<u32>.new();
+    push_small(&mut v, 5);
+    push_small(&mut v, 50);
+    push_small(&mut v, 99);
+    let n = v.len();
+    io.print(f"len {n}\n");
+    return 0;
+}

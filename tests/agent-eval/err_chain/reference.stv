@@ -1,0 +1,89 @@
+import std.io;
+
+struct Item { id: u32, stock: u32, price: u32 }
+
+enum LookupErr { NoSuchItem(u32) }
+
+enum OrderErr { Lookup(u32), OutOfStock { id: u32, want: u32, have: u32 }, TooLarge(u64) }
+
+fn find(items: &[Item], id: u32) -> Result<usize, LookupErr> {
+    for i in 0..items.len() {
+        if items[i].id == id {
+            return Result.Ok(i);
+        }
+    }
+    return Result.Err(LookupErr.NoSuchItem(id));
+}
+
+fn place(items: &mut [Item], id: u32, qty: u32) -> Result<u64, OrderErr> {
+    let i = find(items, id).map_err(fn(e: LookupErr) -> OrderErr {
+        return match e {
+            LookupErr.NoSuchItem(x) => OrderErr.Lookup(x),
+        };
+    })?;
+    let have = items[i].stock;
+    if have < qty {
+        return Result.Err(OrderErr.OutOfStock.{ id: id, want: qty, have: have });
+    }
+    let cost = (qty as u64) * (items[i].price as u64);
+    if cost > 250 {
+        return Result.Err(OrderErr.TooLarge(cost));
+    }
+    items[i].stock = have - qty;
+    return Result.Ok(cost);
+}
+
+fn batch(items: &mut [Item], orders: &[(u32, u32)]) -> Result<u64, OrderErr> {
+    let mut total: u64 = 0;
+    for k in 0..orders.len() {
+        let (id, qty) = orders[k];
+        total = total + place(items, id, qty)?;
+    }
+    return Result.Ok(total);
+}
+
+fn show_err(e: OrderErr) {
+    match e {
+        OrderErr.Lookup(x) => { io.print(f"no item {x}\n"); }
+        OrderErr.OutOfStock.{ id, want, have } => { io.print(f"out of stock (want {want}, have {have})\n"); }
+        OrderErr.TooLarge(c) => { io.print(f"too large {c}\n"); }
+    }
+}
+
+fn main() -> i32 {
+    let mut items: [Item; 3] = [
+        Item.{ id: 1, stock: 10, price: 25 },
+        Item.{ id: 2, stock: 3, price: 100 },
+        Item.{ id: 3, stock: 50, price: 7 },
+    ];
+    let orders: [(u32, u32); 7] = [(1, 4), (2, 5), (9, 1), (2, 3), (3, 20), (1, 6), (1, 1)];
+    for k in 0..orders.len() {
+        let (id, qty) = orders[k];
+        io.print(f"order {id} x{qty}: ");
+        match place(&mut items[0..3], id, qty) {
+            Result.Ok(c) => { io.print(f"ok {c}\n"); }
+            Result.Err(e) => { show_err(e); }
+        }
+    }
+    let b1: [(u32, u32); 3] = [(3, 10), (3, 5), (2, 1)];
+    let b2: [(u32, u32); 2] = [(3, 1), (9, 2)];
+    match batch(&mut items[0..3], &b1[0..3]) {
+        Result.Ok(t) => { io.print(f"batch ok {t}\n"); }
+        Result.Err(e) => {
+            io.print("batch failed: ");
+            show_err(e);
+        }
+    }
+    match batch(&mut items[0..3], &b2[0..2]) {
+        Result.Ok(t) => { io.print(f"batch ok {t}\n"); }
+        Result.Err(e) => {
+            io.print("batch failed: ");
+            show_err(e);
+        }
+    }
+    let s1 = items[0].stock;
+    let s2 = items[1].stock;
+    let s3 = items[2].stock;
+    io.print(f"stock: {s1} {s2} {s3}\n");
+    return 0;
+}

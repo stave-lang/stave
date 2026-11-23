@@ -1,0 +1,36 @@
+import std.io;
+
+fn main() -> i32 {
+    let mut xs: [u32; 103] = [0; 103];
+    for i in 0..xs.len() {
+        xs[i] = (i as% u32) + 1;
+    }
+    let fifty = u32x4.splat(50);
+    let mut acc = u32x4.splat(0);
+    let mut big = u32x4.splat(0);
+    let mut above: u32 = 0;
+    let mut sum_tail: u32 = 0;
+    let mut max_tail: u32 = 0;
+    for v: u32x4 in &xs {
+        acc = acc +% v;
+        big = big.max(v);
+        above = above + ((v > fifty).to_bits().popcount() as u32);
+    } tail scalar (x) {
+        sum_tail = sum_tail + x;
+        if x > 50 {
+            above = above + 1;
+        }
+        if x > max_tail {
+            max_tail = x;
+        }
+    }
+    let sum = acc.reduce_add_wrap() + sum_tail;
+    let mut max = big.reduce_max();
+    if max_tail > max {
+        max = max_tail;
+    }
+    io.print(f"sum {sum}\n");
+    io.print(f"above 50: {above}\n");
+    io.print(f"max {max}\n");
+    return 0;
+}

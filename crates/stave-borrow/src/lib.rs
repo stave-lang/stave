@@ -38,12 +38,10 @@ pub mod check;
 pub mod live;
 pub mod loans;
 pub mod locks;
-pub mod old;
 pub mod report;
 pub mod set;
 pub mod ty;
 
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -83,11 +81,8 @@ pub struct Borrowck {
     /// The drop schedule of each body a CFG was built for ([`stave_sema::drops`]): the lowering
     /// checks every drop it emits against it.
     pub schedules: stave_sema::drops::Schedules,
-    /// What the sparse dataflow did, summed over the bodies.
+    /// What the dataflow did, summed over the bodies.
     pub cost: loans::Cost,
-    /// [`Dataflow::Both`]: the bodies the two dataflows disagree on (nothing reported for them).
-    /// The run says nothing reliable about the program then, whatever else it reports.
-    pub differ: Vec<stave_sema::DeclId>,
 }
 
 impl Borrowck {
@@ -98,54 +93,11 @@ impl Borrowck {
     }
 }
 
-/// Which dataflow checks the bodies.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Dataflow {
-    /// [`loans`] and [`check`].
-    #[default]
-    Sparse,
-    /// [`old`].
-    Dense,
-    /// Both: a body for which they give different diagnostics or dump lines fails the run
-    /// ([`Borrowck::differ`]).
-    Both,
-}
-
-/// The environment variable that names the dataflow.
-pub const DATAFLOW_ENV: &str = "STAVE_BORROW_DATAFLOW";
-
-impl Dataflow {
-    /// The dataflow a value of [`DATAFLOW_ENV`] names: unset, empty or `new` the sparse one, `old`
-    /// the dense one, `both` both. Any other value is an error.
-    pub fn named(v: Option<&str>) -> Result<Dataflow, String> {
-        match v.map(str::trim) {
-            None | Some("" | "new") => Ok(Dataflow::Sparse),
-            Some("old") => Ok(Dataflow::Dense),
-            Some("both") => Ok(Dataflow::Both),
-            Some(s) => Err(format!("{DATAFLOW_ENV} must be `new`, `old` or `both`, not `{s}`")),
-        }
-    }
-
-    /// The choice of [`DATAFLOW_ENV`], read once.
-    ///
-    /// # Panics
-    /// On a value [`Dataflow::named`] rejects: a run must not go on with another dataflow than
-    /// the one asked for. `stave` checks the value first and reports it as a usage error.
-    pub fn from_env() -> Dataflow {
-        static CHOICE: OnceLock<Dataflow> = OnceLock::new();
-        *CHOICE.get_or_init(|| match Dataflow::named(std::env::var(DATAFLOW_ENV).ok().as_deref()) {
-            Ok(d) => d,
-            Err(msg) => panic!("{msg}"),
-        })
-    }
-}
-
 /// Options.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     /// Collect the `borrow` dump.
     pub dump: bool,
-    pub dataflow: Dataflow,
 }
 
 struct One {
@@ -160,7 +112,6 @@ struct One {
     closures: Vec<(stave_diag::Span, Option<Vec<stave_sema::TypeId>>)>,
     schedule: stave_sema::drops::Schedule,
     cost: loans::Cost,
-    differ: bool,
 }
 
 /// Borrow-checks every fn body of the program without a type error.
@@ -204,10 +155,6 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
         out.cost.add(r.cost);
         for (a, b) in out.phases.iter_mut().zip(r.phases) {
             *a += b;
-        }
-        if r.differ {
-            out.differ.push(tb.decl);
-            continue;
         }
         if let Some(why) = r.internal {
             out.internal.push((tb.decl, why));
@@ -295,7 +242,6 @@ fn check_body(
         closures: Vec::new(),
         schedule: schedule_of(&body),
         cost: loans::Cost::default(),
-        differ: false,
     };
     if body.unsupported.is_none() && body.internal.is_none() {
         check_tree(&body, &mut tys, opts, tb.item.0, &mut one);
@@ -329,73 +275,21 @@ fn check_tree(root: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32,
     }
 }
 
-/// What a dataflow found in one body.
-#[derive(PartialEq, Eq)]
-struct Found {
-    diags: Vec<Diagnostic>,
-    dump: Vec<DumpAccess>,
-}
-
-/// One body under the sparse dataflow.
-fn sparse<'b>(
-    body: &'b cfg::Body,
-    tys: &mut ty::Tys<'_>,
-    dump: bool,
-    phases: &mut [Duration; 3],
-) -> (Found, loans::Flow<'b>) {
+fn check_body_flow(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32, one: &mut One) {
     let t0 = Instant::now();
     let mut flow = loans::Flow::new(body, tys);
     flow.solve();
     let t1 = Instant::now();
-    let c = check::check(&mut flow, dump);
+    let c = check::check(&mut flow, opts.dump);
     let diags =
         report::diagnostics(body, tys, c.findings, &mut |at, loan| check::later_use(&mut flow, at, loan));
-    phases[1] += t1 - t0;
-    phases[2] += t1.elapsed();
-    (Found { diags, dump: c.dump }, flow)
-}
-
-/// One body under the dense dataflow.
-fn dense<'b>(
-    body: &'b cfg::Body,
-    tys: &mut ty::Tys<'_>,
-    dump: bool,
-    phases: &mut [Duration; 3],
-) -> (Found, old::loans::Flow<'b>) {
-    let t0 = Instant::now();
-    let mut flow = old::loans::Flow::new(body, tys);
-    flow.solve();
-    let t1 = Instant::now();
-    let c = old::check::check(&mut flow, dump);
-    let diags = report::diagnostics(body, tys, c.findings, &mut |at, loan| {
-        old::check::later_use(&mut flow, at, loan)
-    });
-    phases[1] += t1 - t0;
-    phases[2] += t1.elapsed();
-    (Found { diags, dump: c.dump }, flow)
-}
-
-fn check_body_flow(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32, one: &mut One) {
-    let (found, rounds, l) = match opts.dataflow {
-        Dataflow::Sparse | Dataflow::Both => {
-            let (found, flow) = sparse(body, tys, opts.dump, &mut one.phases);
-            if opts.dataflow == Dataflow::Both {
-                let (other, _) = dense(body, tys, opts.dump, &mut [Duration::ZERO; 3]);
-                one.differ |= other != found;
-            }
-            one.cost.add(flow.cost());
-            let l = locks::scan(body, &flow.rpo, &|t| flow.is_ref_like(t), tys);
-            (found, flow.rounds, l)
-        }
-        Dataflow::Dense => {
-            let (found, flow) = dense(body, tys, opts.dump, &mut one.phases);
-            let l = locks::scan(body, &flow.rpo, &|t| flow.is_ref_like(t), tys);
-            (found, flow.rounds, l)
-        }
-    };
-    one.rounds = one.rounds.max(rounds);
-    one.diags.extend(found.diags);
-    one.dump.extend(found.dump.into_iter().map(|d| (item, d)));
+    one.phases[1] += t1 - t0;
+    one.phases[2] += t1.elapsed();
+    one.cost.add(flow.cost());
+    let l = locks::scan(body, &flow.rpo, &|t| flow.is_ref_like(t), tys);
+    one.rounds = one.rounds.max(flow.rounds);
+    one.diags.extend(diags);
+    one.dump.extend(c.dump.into_iter().map(|d| (item, d)));
     one.locks.holds |= l.holds;
     one.locks.sites.extend(l.sites);
     one.locks.any.extend(l.any);

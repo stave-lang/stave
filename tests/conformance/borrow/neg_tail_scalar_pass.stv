@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+// `tail scalar` runs its body once per element left over: a borrow made in one pass and used in
+// the next is live in between, as in a `while` loop.
+import std.vec;
+
+fn grows(a: &[u32], v: &mut vec.Vec<u32>) -> u32 {
+    let z: u32 = 0;
+    let mut r: &u32 = &z;
+    let mut k: u32 = 0;
+    for c: u32x4 in a { } tail scalar (x) {
+        v.push(x); //~ ERROR E0501
+        k = k + *r;
+        r = &v.as_slice()[0];
+    }
+    return k;
+}
+
+fn writes_under_shared(a: &[u32]) -> u32 {
+    let mut b: u32 = 0;
+    let z: u32 = 0;
+    let mut r: &u32 = &z;
+    let mut k: u32 = 0;
+    for c: u32x4 in a { } tail scalar (x) {
+        b = x; //~ ERROR E0501
+        k = k + *r;
+        r = &b;
+    }
+    return k;
+}
+
+fn shared_under_mut(a: &[u32]) -> u32 {
+    let mut b: u32 = 0;
+    let mut z: u32 = 0;
+    let mut r: &mut u32 = &mut z;
+    let mut k: u32 = 0;
+    for c: u32x4 in a { } tail scalar (x) {
+        let s: &u32 = &b; //~ ERROR E0501
+        *r = x;
+        k = k + *s;
+        r = &mut b;
+    }
+    return k;
+}
+
+fn main() { }

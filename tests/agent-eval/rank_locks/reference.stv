@@ -1,0 +1,31 @@
+import std.io;
+import std.sync;
+
+fn deposit(balance: &sync.Mutex<u64, 1>, log: &sync.Mutex<u64, 2>) {
+    balance.with_lock(fn(b: &mut u64) {
+        *b = *b + 10;
+        log.with_lock(fn(n: &mut u64) { *n = *n + 1; });
+    });
+}
+
+fn main() -> i32 {
+    let balance = sync.Mutex::<u64, 1>.new(100);
+    let log = sync.Mutex::<u64, 2>.new(0);
+    scope {
+        spawn {
+            for i in 0u32..5 {
+                deposit(&balance, &log);
+            }
+        }
+        spawn {
+            for i in 0u32..5 {
+                deposit(&balance, &log);
+            }
+        }
+    }
+    let b = balance.into_inner();
+    let n = log.into_inner();
+    io.print(f"balance {b}\n");
+    io.print(f"log entries {n}\n");
+    return 0;
+}

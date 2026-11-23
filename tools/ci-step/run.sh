@@ -25,11 +25,6 @@ case "$step" in
   interp-gate)
            cargo test --locked -p stave-driver --test interp_gate -- --ignored --nocapture --exact \
              accepted_programs_run_clean_under_borrow_tracking ;;
-  # The borrow checker's two dataflows on every program of the repository, a generated corpus
-  # and the fuzz classes (minutes); `test` leaves this ignored test out.
-  borrow-diff)
-           cargo test --locked --release -p stave-driver --test borrow_dataflow -- --ignored --nocapture --exact \
-             everything_agrees ;;
   # The same with the slow programs too (nightly).
   interp-gate-slow)
            cargo test --locked -p stave-driver --test interp_gate -- --ignored --nocapture --exact \
@@ -45,7 +40,14 @@ case "$step" in
            cargo run -q --locked -p lang-budget -- LANG.md --limit 15000 ;;
   check)   "$0" fmt; "$0" stave-fmt; "$0" clippy; "$0" test; "$0" interp-gate; "$0" gen-check; "$0" lang-budget ;;
   unsafe-diff) sh tools/ci-step/unsafe-diff.sh ;;
+  # Scores a directory of answers (`--answers DIR`, `DIR/<task>/answer.stv`) against
+  # tests/agent-eval with the release compiler; the result goes to target/agent-eval/. `test`
+  # runs the self-test over the reference answers.
+  agent-eval)
+           cargo build -q --locked --release -p stave-cli -p agent-eval
+           target/release/agent-eval --stave target/release/stave --out target/agent-eval/result.json \
+             --work target/agent-eval/work "$@" ;;
   bench)   sh bench/run.sh "$@" ;;
   cargo)   cargo "$@" ;;
-  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|borrow-diff|gen|gen-check|lang-budget|check|unsafe-diff|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
+  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|gen|gen-check|lang-budget|check|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
 esac

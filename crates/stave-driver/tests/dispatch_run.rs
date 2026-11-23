@@ -519,6 +519,65 @@ fn dispatch_body_loads_the_word() {
     }
 }
 
+/// Fn values of fns and dispatches of the other arch: neither is built, the values are made and
+/// passed on, and the program builds and runs on both arches (the fns' code is a trap that never
+/// runs).
+const FOREIGN: &str = r#"import std.io;
+
+fn on_sve() -> u32 needs(sve2) {
+    return 1;
+}
+
+fn on_sve_base() -> u32 needs(sve) {
+    return 2;
+}
+
+dispatch fn pick_sve() -> u32 needs(sve) { sve2 => on_sve, _ => on_sve_base, }
+
+fn on_bmi2() -> u32 needs(bmi2) {
+    return 3;
+}
+
+dispatch fn pick_bmi2() -> u32 needs(bmi2) { _ => on_bmi2, }
+
+fn count(a: fn() -> u32 needs(sve2), b: fn() -> u32 needs(sve), c: fn() -> u32 needs(bmi2), d: fn() -> u32 needs(bmi2)) -> u32 {
+    return 4;
+}
+
+fn main() -> i32 {
+    let n = count(on_sve, pick_sve, on_bmi2, pick_bmi2);
+    io.print(f"{n}\n");
+    return 0;
+}
+"#;
+
+#[test]
+fn foreign_fn_values_build_on_both_arches() {
+    let tmp = TempDir::new("disp-foreign").unwrap();
+    let src = tmp.path().join("foreign.stv");
+    std::fs::write(&src, FOREIGN).unwrap();
+    let v2 = Triple::parse("x86_64-linux").unwrap();
+    let a64 = Triple::parse("aarch64-linux").unwrap();
+    let native_v2 = legs::gate(v2.name(), exec::can_run(v2));
+    let qemu_a64 = legs::gate(a64.name(), cfg!(target_os = "linux") && have("qemu-aarch64"));
+    for (target, runner, runs) in
+        [(v2, None, native_v2), (a64, Some("qemu-aarch64 -cpu cortex-a57"), qemu_a64)]
+    {
+        for release in [false, true] {
+            let out = build(&src, target, release);
+            if !runs {
+                continue;
+            }
+            let bin = tmp.path().join(format!("foreign-{target}-{release}"));
+            out.image.as_ref().unwrap().write_file(&bin).unwrap();
+            let spec = RunSpec { args: &[], runner, cwd: None, inherit: false };
+            let got = exec::run(&bin, &spec).unwrap();
+            let at = format!("{target}, release {release}");
+            assert_eq!((got.exit, String::from_utf8_lossy(&got.stdout).as_ref()), (0, "4\n"), "[{at}]");
+        }
+    }
+}
+
 /// The IR interpreter stores no feature word: every dispatch that tests the word takes `_`.
 #[test]
 fn interpreter_takes_the_default_arm() {

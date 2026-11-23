@@ -1,9 +1,10 @@
 //~ CHECK-ONLY
 // Polymorphic recursion makes a new type per instance (`P<u32>`, `P<(u32, u32)>`, ..): the
 // type table refuses one taller than the type height limit (1000), so every walk over the
-// family's types ends, and the family is E0005 case `type`. Here a pointer cast walks the
-// fn-value tables through `P`'s fields, an `ensures` on a borrowed result walks them for a
-// `&mut`, and a `let` pattern describes `Q`'s by-value fields.
+// family's types ends, and the family is E0005 case `type`, at each signature and expression
+// that asks for a type past the limit. Here a pointer cast walks the fn-value tables through
+// `P`'s fields, an `ensures` on a borrowed result walks them for a `&mut`, and a `let` pattern
+// describes `Q`'s by-value fields.
 import std.vec;
 
 struct P<T> { //~ ERROR E0005
@@ -12,12 +13,13 @@ struct P<T> { //~ ERROR E0005
 }
 
 fn cast(p: &P<u32>) -> u32 { //~ ERROR E0005
+    //~^ ERROR E0005
     let q = p as *const P<u32>;
     let r = q as *const u8;
     return 0;
 }
 
-fn keep(p: &P<u32>) -> &P<u32> from p ensures(true) {
+fn keep(p: &P<u32>) -> &P<u32> from p ensures(true) { //~ ERROR E0005
     return p;
 }
 
@@ -28,5 +30,6 @@ view struct Q<T> { //~ ERROR E0005
 
 fn main() -> i32 {
     let q = Q.{ x: 1u32, next: Option.None }; //~ ERROR E0005
+    //~^ ERROR E0005
     return 0;
 }

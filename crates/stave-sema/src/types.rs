@@ -288,8 +288,13 @@ const FIXED: usize = ids::COUNT as usize;
 /// ([`Interner::refusals`], every attempt). So the types of a program are finitely many (every type is built
 /// from the finitely many written ones by substitution, and none passes this height), and every
 /// walk over types with a visited set ends; polymorphic recursion (`P<T>` holding a `P<(T, T)>`)
-/// grows the height by one per instance and stops here. A program reaches it only with a type
-/// E0005 case `type` rejects anyway (that depth counts at least these levels).
+/// grows the height by one per instance and stops here.
+///
+/// A refusal is reported by whoever owns the span being checked when it happens: every checker
+/// phase that interns runs inside owners (a written type, an expression, a block, a statement, a
+/// pattern, a body, a declaration's signature, a call-graph instance), each ending with
+/// [`claim_refusals`], and the outermost owner of each phase covers the whole phase. So every
+/// refusal ends in one E0005 case `type`, and no program runs on the error type it got.
 pub const MAX_TYPE_HEIGHT: u32 = crate::typedepth::MAX_TYPE_DEPTH;
 
 /// The height of key `k` whose components have heights `h` ([`MAX_TYPE_HEIGHT`]).
@@ -306,6 +311,9 @@ pub trait Interner {
     fn intern(&mut self, k: TypeKind) -> TypeId;
     /// How many keys this table refused to intern ([`MAX_TYPE_HEIGHT`]). A wrapper forwards it.
     fn refusals(&self) -> u32;
+    /// How many of [`Interner::refusals`] an owner has reported ([`claim_refusals`]). A wrapper
+    /// forwards it.
+    fn claimed_mut(&mut self) -> &mut u32;
 
     /// The id in this table of the well-known type `f` (one of [`ids`]; any other id is returned
     /// unchanged). Identity for a table that was never canonicalized; [`TypeTable`] and
@@ -572,6 +580,21 @@ impl TypeKind {
     }
 }
 
+/// Claims, for the owner of a span that began when [`Interner::refusals`] was `start`, the
+/// refusals made since then that no owner nested in it claimed: true if there is one, and the
+/// caller reports E0005 case `type` at its span ([`MAX_TYPE_HEIGHT`]). `start` 0: every refusal
+/// not claimed yet (the outermost owner of a phase).
+pub fn claim_refusals<I: Interner + ?Sized>(cx: &mut I, start: u32) -> bool {
+    let now = cx.refusals();
+    let c = cx.claimed_mut();
+    // refusals made before `start` and not claimed yet stay with the owner around this one
+    let fresh = now > (*c).max(start);
+    if fresh {
+        *c = now;
+    }
+    fresh
+}
+
 /// The global type table.
 #[derive(Clone, Debug)]
 pub struct TypeTable {
@@ -580,6 +603,8 @@ pub struct TypeTable {
     heights: Vec<u32>,
     /// Keys refused for their height, here and in the overlays merged into this table.
     refused: u32,
+    /// Of `refused`: those an owner reported ([`claim_refusals`]).
+    claimed: u32,
     map: FxHashMap<TypeKind, TypeId>,
     /// `fixed[i]`: the id of well-known type `ids::*` number `i` (identity until canonicalized).
     fixed: [TypeId; FIXED],
@@ -597,6 +622,7 @@ impl TypeTable {
             kinds: Vec::new(),
             heights: Vec::new(),
             refused: 0,
+            claimed: 0,
             map: FxHashMap::default(),
             fixed: std::array::from_fn(|i| TypeId(i as u32)),
         };
@@ -662,9 +688,16 @@ impl TypeTable {
         self.heights.get(t.idx()).copied().unwrap_or(0)
     }
 
-    /// Counts `n` refusals made in an overlay of this table ([`Interner::refusals`]).
-    pub fn add_refusals(&mut self, n: u32) {
+    /// Counts `n` refusals made in an overlay of this table ([`Interner::refusals`]), of which
+    /// `claimed` were reported ([`claim_refusals`]).
+    pub fn add_refusals(&mut self, n: u32, claimed: u32) {
         self.refused = self.refused.saturating_add(n);
+        self.claimed = self.claimed.saturating_add(claimed.min(n));
+    }
+
+    /// Refusals no owner reported ([`claim_refusals`]).
+    pub fn unclaimed(&self) -> u32 {
+        self.refused.saturating_sub(self.claimed)
     }
 
     /// Merges an overlay's local types: returns the local index → global id map.
@@ -747,6 +780,10 @@ impl Interner for TypeTable {
     fn refusals(&self) -> u32 {
         self.refused
     }
+
+    fn claimed_mut(&mut self) -> &mut u32 {
+        &mut self.claimed
+    }
 }
 
 /// Structural comparison in the canonical key order (the error type last).
@@ -827,12 +864,27 @@ pub struct Overlay<'g> {
     heights: Vec<u32>,
     /// Keys this overlay refused for their height; merging adds them to the global count.
     pub refused: u32,
+    /// [`Interner::refusals`] (the global table's included) that an owner reported
+    /// ([`claim_refusals`]); those of the frozen global table belong to its own owners.
+    claimed: u32,
     map: FxHashMap<TypeKind, TypeId>,
 }
 
 impl<'g> Overlay<'g> {
     pub fn new(global: &'g TypeTable) -> Overlay<'g> {
-        Overlay { global, local: Vec::new(), heights: Vec::new(), refused: 0, map: FxHashMap::default() }
+        Overlay {
+            global,
+            local: Vec::new(),
+            heights: Vec::new(),
+            refused: 0,
+            claimed: global.refusals(),
+            map: FxHashMap::default(),
+        }
+    }
+
+    /// Of this overlay's own refusals: those an owner reported ([`claim_refusals`]).
+    pub fn claimed_here(&self) -> u32 {
+        self.claimed.saturating_sub(self.global.refusals()).min(self.refused)
     }
 
     /// The height of `t` ([`MAX_TYPE_HEIGHT`]).
@@ -873,6 +925,10 @@ impl Interner for Overlay<'_> {
 
     fn refusals(&self) -> u32 {
         self.refused.saturating_add(self.global.refusals())
+    }
+
+    fn claimed_mut(&mut self) -> &mut u32 {
+        &mut self.claimed
     }
 }
 
@@ -1285,6 +1341,33 @@ mod tests {
         let local = o.local.clone();
         let m = t.merge(&local);
         assert_eq!(t.kind(m[0]), &TypeKind::Ref { mutable: true, inner: a });
+    }
+
+    /// A refusal is claimed once, by the innermost owner that ended after it; an owner that
+    /// began after it, or whose inner owner claimed it, claims nothing.
+    #[test]
+    fn refusals_are_claimed_once_by_their_owner() {
+        let g = TypeTable::new();
+        let mut o = Overlay::new(&g);
+        let mut t = ids::U8;
+        for _ in 1..MAX_TYPE_HEIGHT {
+            t = o.mk_ref(false, t);
+        }
+        let outer = o.refusals();
+        assert!(!claim_refusals(&mut o, outer));
+        let inner = o.refusals();
+        assert_eq!(o.mk_ref(false, t), o.error_ty());
+        assert!(claim_refusals(&mut o, inner));
+        assert!(!claim_refusals(&mut o, outer));
+        let late = o.refusals();
+        assert_eq!(o.mk_ref(true, t), o.error_ty());
+        let now = o.refusals();
+        assert!(!claim_refusals(&mut o, now));
+        assert!(claim_refusals(&mut o, late));
+        assert_eq!((o.refused, o.claimed_here()), (2, 2));
+        let mut table = g.clone();
+        table.add_refusals(o.refused, o.claimed_here());
+        assert_eq!(table.unclaimed(), 0);
     }
 
     #[test]

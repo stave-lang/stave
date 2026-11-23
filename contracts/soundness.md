@@ -103,6 +103,48 @@ end drops the new one.
 check. A transfer function that leaves out of the destination's set a loan the new value holds.
 Reading the loans live after a statement from the state before it.
 
+## Loans through a redefined pointer: the place names the new pointee
+
+**Claim.** Take a loan L of a place `x.π * ρ`, made through a `&mut` or `&` pointer held at
+`x.π`, and an access at a point where every path from L's creation to that point redefines `x`
+entirely. Then no use of a reference L stands for can conflict with the access through L's
+place. The loan stays live and keeps everything it carries live, but the access is not checked
+against it. So `for .. { let p = a.alloc(..); ps.push(p); }` reborrows each new `*p` while
+`ps` holds the earlier ones.
+
+**Assumptions.** A redefinition is a whole assignment to `x` or the end of its storage
+(`check::stmt_def`): a `let` in a loop body, `x = e`, a pattern binding, the end of the
+iteration's scope. A borrow carries its loan, the origins of the pointers it reborrows through
+after the last `&` one, and that one's (stave-borrow `loans`, **Contents**). So the value
+holding L also holds the loans that made the pointer at `x.π` when L was made, back to the
+local or param it came from.
+
+**Argument.** L stands for the memory reached from the pointer `p0` that `x.π` held when L was
+made. After the redefinition `x.π` holds another pointer, and the place names the memory
+reached from that one. The new value can reach `p0`'s memory only in these ways:
+- From `p0` itself, taken out of `x` before the redefinition. A move of `x`, a `&mut` of `x`
+  or of a part on the way to `x.π` (`mem.swap`, `mem.replace`, a callee given `&mut x`) are
+  deep accesses above L, so they conflict with L while it is still bound to the old value. A
+  `&mut` pointer is not Copy. A `&` one may be copied, but a loan made through a `&` conflicts
+  only with writes and `&mut` borrows through it, which are E0503.
+- From a value that holds L: the reborrow itself, kept in a vector, an `Option`, or a view.
+  Taking it out moves it (the holder no longer has it), or reborrows through the holder, which
+  makes a loan of the holder's place. The new `x` carries that loan, so the holder stays
+  borrowed while the new `x` is used.
+- Through the original lender: it is still borrowed by the loans L carries, so a new borrow of
+  it conflicts there (`p = &mut x` again after `ps.push(p)`).
+
+In each case one usable path to the memory remains, and the loan on that path is checked.
+
+**Not claimed.** Nothing is claimed for a loan whose first dereference is a raw pointer
+(Copy, and aliasing through it is the unsafe code's obligation). Nothing is claimed for a root
+that is a closure capture or a static, or when the redefinition the checker does not see
+happens through a pointer to `x` or by a write to a field of `x`: such a loan keeps its
+conflicts. A loan made in the statement of an access that comes after that statement's
+borrows (its write, the drop the write stands for) also keeps them. A path that reaches the
+access without the redefinition keeps the conflict: a pointer reborrowed twice without being
+redefined between is still E0501.
+
 ## Stores of a call: the result does not depend on order
 
 **Claim.** Applying the stores of one call until nothing changes ends, and the sets it ends at
@@ -223,7 +265,14 @@ the CFG keeps a temporary on the drop list from the statement that makes it to t
 that moves it out, so an exit taken between an operand's evaluation and the expression that
 consumes it drops it; the lowering holds it as an owner over the same interval. The checks are
 then conservative in one direction only: a drop statement for a value that was moved on this
-path does nothing in the code and is at most a use the code does not make.
+path does nothing in the code and is at most a use the code does not make. It uses nothing a
+loan check reads, because a local moved whole holds the empty origin set until it is written
+again. The value took its borrows along: into the destination, into a callee's declared
+stores, or nowhere (a callee param without a `from` clause keeps nothing past the call). The
+local itself is not read (E0502 is judged on the moved marks, not on the sets), and no loan
+of it is live across the move (the move conflicts with one). Where the local is moved on some
+paths only, the join of the sets is the set of the other paths, and that is what the drop on
+them reads.
 
 **Not claimed.** That two temporaries of one statement with the same outermost type are told
 apart: a row is found by point, owner, and type constructor, and a temporary's owner key is
@@ -236,6 +285,35 @@ have no schedule and are not compared.
 **What would break it.** A drop emitted by code that does not ask the schedule (the one
 function refuses a drop nobody asked for). A row added without its statement. A statement the
 checks read as something weaker than a use of the value and a call of its glue.
+
+## Destructors: a drop reaches what the value references
+
+**Claim.** When a drop runs a destructor that can reach a borrow, no reference made through the
+dropped value's references is used after the drop. Such a drop is a deep access of the
+dropped place.
+
+**Assumptions.** A destructor is `drop(&mut self)` of an ADT with a `Drop` impl. It can read and
+write through every `&mut` and read through every `&` the value holds. The borrow CFG keeps
+one answer per dropped type, `Body::deep_drop` (stave-borrow `Tys::drop_reaches_refs`). That
+answer is yes when the drop glue reaches, through fields, enum payloads, tuple and array
+elements, and type arguments, an ADT with a `Drop` impl whose type is ref-like. It is also yes
+for a view-bounded param that is not Copy and for an unknown type. A type that is not ref-like
+holds no reference, so its destructor reaches only its own storage.
+
+**Argument.** A shallow drop conflicts only with loans of the dropped place and of places in its
+own storage. A reborrow `&mut *w.r` is a loan of a place below the dereference of `w.r`, so a
+shallow drop lets it pass, while `W.drop` writes `*w.r`. A deep drop conflicts with every live
+loan of a place below the dropped one, except below a `&`. There the destructor can only read,
+and no `&mut` loan is made below a `&` (E0503). The drop statements are the ones of the
+schedule: scope ends, exits, a statement's temporaries, the parts a pattern ignores, and the
+old value of an assignment. An assignment through a dereference stands for its old value's drop
+and is checked as that drop too. At a return the exit's drops come after the `Return`
+statement, so the returned value no longer counts as live there. The loans the returned value
+holds are checked against each deep drop of that exit, because the destructor runs while the
+caller already holds the result.
+
+**Not claimed.** A destructor reaching memory through a raw pointer field is the unsafe code's
+obligation. The drop of a moved value runs nothing and is no access.
 
 ## Whole moves: no value is left with a moved-out part
 

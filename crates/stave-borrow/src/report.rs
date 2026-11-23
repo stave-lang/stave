@@ -159,6 +159,7 @@ fn temp_case(end: Option<TempEnd>) -> (&'static str, &'static str) {
         Some(TempEnd::Stmt(Bound::Branch)) => ("temporary-branch", "branch"),
         Some(TempEnd::Stmt(Bound::Arm)) => ("temporary-arm", "arm"),
         Some(TempEnd::Stmt(Bound::Clause)) => ("temporary-clause", "check"),
+        Some(TempEnd::Stmt(Bound::Old)) => ("temporary-old", "check"),
         Some(TempEnd::Stmt(Bound::Cond)) => ("temporary", "condition"),
         Some(TempEnd::Stmt(Bound::Guard)) => ("temporary", "guard"),
         Some(TempEnd::Stmt(Bound::Stmt)) | None => ("temporary", "statement"),
@@ -254,8 +255,8 @@ pub fn diagnostics(
         match f {
             Finding::Conflict { block, stmt, access, place, span, loans } => {
                 let access = match (access, paired(body, block, stmt, &place)) {
-                    (Access::Drop, Some((j, _))) if hit.contains(&(block, j)) => continue,
-                    (Access::Drop, Some((_, true))) => Access::Write,
+                    (Access::Drop | Access::DeepDrop, Some((j, _))) if hit.contains(&(block, j)) => continue,
+                    (Access::Drop | Access::DeepDrop, Some((_, true))) => Access::Write,
                     _ => access,
                 };
                 let Some(l) = pick_loan(body, &loans) else { continue };
@@ -269,8 +270,13 @@ pub fn diagnostics(
                     roles.push(("use", u));
                 }
                 let again = later.is_some_and(|x| x.1);
-                let holes =
-                    [("access", access.verb()), ("place", &text), ("loan", kind), ("loaned", &loaned)];
+                let holes = [
+                    ("access", access.verb()),
+                    ("place", &text),
+                    ("loan", kind),
+                    ("loaned", &loaned),
+                    ("later", if again { "here, in the next iteration" } else { "later here" }),
+                ];
                 if crate::check::temp_end(body, access, &place) {
                     // the temporary is where it was made, also when a `break` / `continue` ends it
                     let t = &body.locals[place.local as usize];
@@ -280,7 +286,6 @@ pub fn diagnostics(
                         ("stmt", stmt),
                         ("bind", if m { "let mut t" } else { "let t" }),
                         ("tref", if m { "&mut t" } else { "&t" }),
-                        ("later", if again { "here, in the next iteration" } else { "later here" }),
                     ];
                     let all: Vec<(&str, &str)> = holes.iter().chain(&more).copied().collect();
                     out.extend(mk("E0501", Some(case), &all, t.span, &roles));
@@ -458,6 +463,7 @@ mod tests {
             internal: None,
             loops: Vec::new(),
             schedule: Default::default(),
+            deep_drops: Default::default(),
         }
     }
 

@@ -443,6 +443,17 @@ fn mask_method<I: Interner + ?Sized>(
     })
 }
 
+/// Type-relative names of vector types reserved for built-ins stage0 does not compile: naming one
+/// is E0208 case `reserved`, whatever else could take the name.
+const RESERVED_VEC_ASSOC: &[&str] = &["load_first_fault"];
+
+/// The mask type of vector type `t` when `name` is a reserved type-relative name of `t`
+/// ([`RESERVED_VEC_ASSOC`]): the masked load that replaces it takes that mask.
+pub fn reserved_assoc<I: Interner + ?Sized>(cx: &mut I, t: TypeId, name: &str) -> Option<TypeId> {
+    let TypeKind::Vector { lane, n } = cx.kind(t).clone() else { return None };
+    RESERVED_VEC_ASSOC.contains(&name).then(|| mask_of(cx, lane, n))
+}
+
 /// A type-relative built-in fn of a vector or mask type (`f32x4.splat(x)`): (params, ret).
 pub fn builtin_assoc<I: Interner + ?Sized>(
     cx: &mut I,
@@ -463,7 +474,6 @@ pub fn builtin_assoc<I: Interner + ?Sized>(
                     (vec![ArgTy::Aligned { elem: lane, mutable: false, bytes }, ArgTy::Is(us)], t)
                 }
                 "load_masked" => (vec![ArgTy::Is(rs), ArgTy::Is(us), ArgTy::Mask(mask)], t),
-                "load_first_fault" => (vec![ArgTy::Is(rs), ArgTy::Is(us)], t),
                 "gather" => {
                     let idx = index_vec(cx, lane, n);
                     (vec![ArgTy::Is(rs), ArgTy::Index(idx)], t)
@@ -709,17 +719,7 @@ pub fn cpuid_ok<I: Interner + ?Sized>(cx: &I, t: TypeId) -> bool {
 
 /// The static name of a type-relative built-in (for [`crate::typeck::Target::Builtin`]).
 pub fn builtin_assoc_name(name: &str) -> &'static str {
-    const NAMES: &[&str] = &[
-        "splat",
-        "load",
-        "load_aligned",
-        "load_masked",
-        "load_first_fault",
-        "gather",
-        "join",
-        "first_n",
-        "all",
-        "none",
-    ];
+    const NAMES: &[&str] =
+        &["splat", "load", "load_aligned", "load_masked", "gather", "join", "first_n", "all", "none"];
     NAMES.iter().copied().find(|&n| n == name).unwrap_or("?")
 }

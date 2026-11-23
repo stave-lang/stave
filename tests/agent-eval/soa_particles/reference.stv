@@ -1,0 +1,40 @@
+import std.io;
+import std.soa;
+
+struct P { x: i32, y: i32, vx: i32, vy: i32 }
+
+impl Copy for P {}
+
+fn step(ps: &mut soa.Soa<P>) {
+    let n = ps.len();
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        let x = i32x4.load(&ps.x, i) +% i32x4.load(&ps.vx, i);
+        x.store(&mut ps.x, i);
+        let y = i32x4.load(&ps.y, i) +% i32x4.load(&ps.vy, i);
+        y.store(&mut ps.y, i);
+        i = i + 4;
+    }
+    while i < n {
+        ps.x[i] = ps.x[i] + ps.vx[i];
+        ps.y[i] = ps.y[i] + ps.vy[i];
+        i = i + 1;
+    }
+}
+
+fn main() -> i32 {
+    let mut ps = soa.Soa::<P>.new();
+    for i in 0i32..10 {
+        ps.push(P.{ x: i, y: 2 * i, vx: 3, vy: -1 });
+    }
+    for s in 0u32..4 {
+        step(&mut ps);
+    }
+    let sx = ps.x.sum();
+    let sy = ps.y.sum();
+    io.print(f"sum x {sx}\n");
+    io.print(f"sum y {sy}\n");
+    let p = ps.get(3);
+    io.print(f"row 3: ({p.x}, {p.y})\n");
+    return 0;
+}

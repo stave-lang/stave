@@ -32,9 +32,7 @@
 //! as not implemented (exit 2): no flag is accepted and ignored.
 //!
 //! `STAVE_THREADS` sets the worker count; `STAVE_SEMA_SHUFFLE` is stave-sema's test knob (dumps must not
-//! change); `STAVE_PROFILE` prints the step profile of a compile on stderr (`stave_driver::prof`);
-//! `STAVE_BORROW_DATAFLOW` (`new`, `old`, `both`) picks the borrow checker's dataflow while both
-//! exist (`stave_borrow::Dataflow`), any other value is a usage error.
+//! change); `STAVE_PROFILE` prints the step profile of a compile on stderr (`stave_driver::prof`).
 
 pub mod args;
 pub mod effects_report;
@@ -90,13 +88,7 @@ pub fn run(argv: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             let _ = writeln!(out, "stave {} (stage0)", env!("CARGO_PKG_VERSION"));
             EXIT_OK
         }
-        Ok(Parsed::Args(a)) => match stave_driver::pipeline::borrow_dataflow_from_env() {
-            Err(msg) => {
-                let _ = writeln!(err, "stave: {msg}\nrun `stave --help` for usage");
-                EXIT_USAGE
-            }
-            Ok(_) => dispatch(&a, out, err),
-        },
+        Ok(Parsed::Args(a)) => dispatch(&a, out, err),
     }
 }
 

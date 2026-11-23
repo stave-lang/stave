@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+// E0201 at every shape whose fix names its own conversion: plain `as` only where the cast table
+// admits it, a marked cast, `Option.Some` / `Result.Ok`, the payload taken out, a borrow, a copy
+// through `*`, or none.
+import std.vec;
+
+fn some(v: &vec.Vec<u32>) -> Option<&u32> from v {
+    return v.get_ref(0); //~ ERROR E0201
+}
+
+fn ok(x: u32) -> Result<u32, u8> {
+    return x; //~ ERROR E0201
+}
+
+fn unwrap(x: Option<u32>) -> u32 {
+    return x; //~ ERROR E0201
+}
+
+fn narrow(x: u64) -> u32 {
+    return x; //~ ERROR E0201
+}
+
+fn take(xs: &[u32]) -> usize {
+    return xs.len();
+}
+
+fn read(x: &u32) -> u32 {
+    return x; //~ ERROR E0201
+}
+
+fn none(x: u32) -> bool {
+    return x; //~ ERROR E0201
+}
+
+fn main() -> i32 {
+    let a: [u32; 2] = [1u32; 2];
+    let n = take(a); //~ ERROR E0201
+    return 0;
+}

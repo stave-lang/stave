@@ -153,15 +153,9 @@ fn is_shift(op: u8) -> bool {
 }
 
 impl<'a> Ck<'a> {
-    /// The declaration of struct field `f` when it is private to a module other than the one being
-    /// checked: field reads, struct literals, struct patterns, and columns all ask this. Enum
-    /// variant fields have no privacy.
+    /// [`crate::Program::hidden_field`] from the module being checked.
     pub(crate) fn hidden_field(&self, f: DeclId) -> Option<crate::decls::Decl> {
-        let fd = self.prog.decl(f).copied()?;
-        (!fd.is_pub()
-            && self.prog.decl(fd.parent).is_some_and(|p| p.kind == DeclKind::Struct)
-            && fd.module != self.icx.res_module())
-        .then_some(fd)
+        self.prog.hidden_field(f, self.icx.res_module())
     }
 
     /// Types expression node `n` with context type `hint` and records the type on `n`.
@@ -259,11 +253,74 @@ impl<'a> Ck<'a> {
         }
     }
 
+    /// E0206 for operator token `tok` on type `t`; on a reference (case `ref-operand`) the fix
+    /// says to apply the operator to the value behind it.
     fn e0206(&mut self, tok: u32, t: TypeId) {
         let op = self.icx.tok_str(tok).to_string();
         let tn = self.show(t);
-        let d = mk("E0206", None, &[("op", &op), ("type", &tn)], self.icx.tok_span(tok), &[]);
+        let case = matches!(self.tys.kind(t), TypeKind::Ref { .. }).then_some("ref-operand");
+        let d = mk("E0206", case, &[("op", &op), ("type", &tn)], self.icx.tok_span(tok), &[]);
         self.report(d);
+    }
+
+    /// E0206 for unary `*` (token `tok`) on operand `c` of type `t`, which is no reference or
+    /// raw pointer. The fix names what `t` offers instead, read off its inherent impls: the
+    /// first method this module may call that takes `&self` and nothing else and returns a `&`
+    /// (reading), and the first that takes `&mut self` alone and returns a `&mut` (writing); with
+    /// neither, the value itself.
+    fn e0206_deref(&mut self, tok: u32, c: u32, t: TypeId) {
+        let (get, get_mut) = self.ref_accessors(t);
+        let ty = self.show(t);
+        let operand = self.icx.node_text(c).to_string();
+        let mut holes = vec![("op", "*"), ("type", ty.as_str()), ("operand", operand.as_str())];
+        let case = match (&get, &get_mut) {
+            (Some(g), Some(m)) => {
+                holes.push(("get", g.as_str()));
+                holes.push(("get_mut", m.as_str()));
+                "deref-accessors"
+            }
+            (Some(g), None) => {
+                holes.push(("get", g.as_str()));
+                "deref-read"
+            }
+            (None, Some(m)) => {
+                holes.push(("get_mut", m.as_str()));
+                "deref-write"
+            }
+            (None, None) => "deref",
+        };
+        let d = mk("E0206", Some(case), &holes, self.icx.tok_span(tok), &[]);
+        self.report(d);
+    }
+
+    /// The reference accessors of type `t` (see [`Ck::e0206_deref`]): the names of its first
+    /// `&self -> &U` and its first `&mut self -> &mut U` method, neither generic nor unsafe.
+    fn ref_accessors(&mut self, t: TypeId) -> (Option<String>, Option<String>) {
+        let genv = self.genv();
+        let from = self.package();
+        let methods = self.w.inherent_methods(&mut self.tys, t, genv, from);
+        let (mut read, mut write) = (None, None);
+        for m in methods {
+            let Some(d) = self.prog.decl(m) else { continue };
+            if !d.is_pub() && d.module != self.icx.res_module() {
+                continue;
+            }
+            let Some(sig) = self.sigs.fn_sig(m) else { continue };
+            if sig.is_unsafe || sig.params.len() != 1 || sig.generics.len() != sig.n_parent as usize {
+                continue;
+            }
+            let by_mut = match sig.self_kind {
+                Some(crate::sigs::SelfKind::Ref) => false,
+                Some(crate::sigs::SelfKind::RefMut) => true,
+                _ => continue,
+            };
+            let TypeKind::Ref { mutable, .. } = *self.tys.kind(sig.ret) else { continue };
+            let slot = if by_mut { &mut write } else { &mut read };
+            if mutable == by_mut && slot.is_none() {
+                *slot = Some(self.prog.strings.get(d.name).to_string());
+            }
+        }
+        (read, write)
     }
 
     /// Unifies two operands of one type (rule 4): a pending literal takes the other's type.
@@ -357,7 +414,7 @@ impl<'a> Ck<'a> {
                     let _ = self.fix(r2, ids::ERROR);
                     let d = mk(
                         "E0201",
-                        None,
+                        Some("no-cast"),
                         &[
                             ("expected", if self.lit_root(g1).1.float { "{float}" } else { "{integer}" }),
                             ("found", if self.lit_root(g2).1.float { "{float}" } else { "{integer}" }),
@@ -586,7 +643,7 @@ impl<'a> Ck<'a> {
             })
         } else {
             let tref = TraitRef { trait_decl: tr, args: Vec::new() };
-            let Some((imp, args)) = self.w.find_impl(&mut self.tys, t, &tref, genv, 0) else {
+            let Some((imp, args)) = self.w.find_impl(&mut self.tys, t, &tref, genv) else {
                 self.e0206(tok, t);
                 return Ty::ERR;
             };
@@ -824,7 +881,7 @@ impl<'a> Ck<'a> {
                 }
                 TypeKind::Error => Ty::ERR,
                 _ => {
-                    self.e0206(a, ct);
+                    self.e0206_deref(a, c, ct);
                     Ty::ERR
                 }
             };
@@ -968,7 +1025,7 @@ impl<'a> Ck<'a> {
     }
 
     /// Cast table: the result type of `from <op> to`, `None` if not allowed (E0204).
-    fn cast_result(&mut self, op: u8, from: TypeId, to: TypeId) -> Option<TypeId> {
+    pub(crate) fn cast_result(&mut self, op: u8, from: TypeId, to: TypeId) -> Option<TypeId> {
         let plain = op == Term::KwAs as u8;
         let wrap = op == Term::AsPercent as u8;
         let sat = op == Term::AsPipe as u8;
@@ -1081,11 +1138,12 @@ impl<'a> Ck<'a> {
         let bt = self.expr(b, bh);
         let db = self.diverges;
         self.diverges = before || (da && db);
-        self.arms_unify(b, at, bt, hint)
+        self.arms_unify(Some(a), b, at, bt, hint)
     }
 
-    /// Unifies two arm types (rule 4), with the expected type when given.
-    fn arms_unify(&mut self, b: u32, at: Ty, bt: Ty, hint: Option<TypeId>) -> Ty {
+    /// Unifies two arm types (rule 4), with the expected type when given. `a`: an earlier arm of
+    /// type `at`, `b` the arm of type `bt`.
+    fn arms_unify(&mut self, a: Option<u32>, b: u32, at: Ty, bt: Ty, hint: Option<TypeId>) -> Ty {
         let (at, bt) = (self.resolve(at), self.resolve(bt));
         if at == Ty::T(ids::NEVER) {
             return bt;
@@ -1102,7 +1160,72 @@ impl<'a> Ck<'a> {
                 return Ty::T(h);
             }
         }
+        if let (Ty::T(x), Ty::T(y)) = (at, bt)
+            && x != y
+            && !self.tys.has_error(x)
+            && !self.tys.has_error(y)
+            && self.fn_shape_eq(x, y)
+        {
+            self.fn_arms_mismatch(a, b, x, y, hint);
+            return Ty::ERR;
+        }
         self.unify_operands(b, at, bt)
+    }
+
+    /// Whether `x` and `y` are fn types with the same params and return type (they may differ in
+    /// `needs` and `without`).
+    fn fn_shape_eq(&self, x: TypeId, y: TypeId) -> bool {
+        matches!(
+            (self.tys.kind(x), self.tys.kind(y)),
+            (TypeKind::Fn { params: p1, ret: r1, .. }, TypeKind::Fn { params: p2, ret: r2, .. })
+                if p1 == p2 && r1 == r2
+        )
+    }
+
+    /// E0201 for value arms of fn types `x` (arm `a`) and `y` (arm `b`) that differ only in
+    /// `needs` or `without`. An arm keeps its own fn type (a fn item gains a deny clause only
+    /// where it alone is converted), and `as` converts no fn value, so the fix names what
+    /// compiles: with a wanted fn type of that shape, converting the arm that is not usable as it
+    /// alone first (case `fn-arms-wanted`), or E0707 when that arm needs features the wanted type
+    /// and the enclosing fn lack (no conversion of it compiles here); else the fn type both arms
+    /// convert to (case `fn-arms`).
+    fn fn_arms_mismatch(&mut self, a: Option<u32>, b: u32, x: TypeId, y: TypeId, hint: Option<TypeId>) {
+        if let Some(h) = hint
+            && self.fn_shape_eq(h, x)
+        {
+            let y_ok = y == h || self.coercible(y, h).is_some();
+            let (n, t) = if y_ok { (a.unwrap_or(b), x) } else { (b, y) };
+            let (expected, found) = (self.show(h), self.show(t));
+            // An arm needing features neither the wanted type nor the enclosing fn has converts
+            // here neither alone nor as an arm: E0707, as for that arm alone.
+            if let (TypeKind::Fn { features: ft, .. }, TypeKind::Fn { features: fh, .. }) =
+                (self.tys.kind(t), self.tys.kind(h))
+                && ft & !(fh | self.proven_features()) != 0
+            {
+                let holes = [("from", found.as_str()), ("to", expected.as_str())];
+                let d = mk("E0707", None, &holes, self.icx.node_span(n), &[]);
+                self.report(d);
+                return;
+            }
+            let operand = self.icx.node_text(n).to_string();
+            let holes =
+                [("expected", expected.as_str()), ("found", found.as_str()), ("operand", operand.as_str())];
+            let d = mk("E0201", Some("fn-arms-wanted"), &holes, self.icx.node_span(n), &[]);
+            self.report(d);
+            return;
+        }
+        let (
+            TypeKind::Fn { params, ret, features: fx, deny: dx },
+            TypeKind::Fn { features: fy, deny: dy, .. },
+        ) = (self.tys.kind(x).clone(), self.tys.kind(y).clone())
+        else {
+            return;
+        };
+        let common = self.tys.intern(TypeKind::Fn { params, ret, features: fx | fy, deny: dx & dy });
+        let (expected, found, common) = (self.show(x), self.show(y), self.show(common));
+        let holes = [("expected", expected.as_str()), ("found", found.as_str()), ("common", common.as_str())];
+        let d = mk("E0201", Some("fn-arms"), &holes, self.icx.node_span(b), &[]);
+        self.report(d);
     }
 
     // ---------- literals and primaries ----------
@@ -1246,7 +1369,7 @@ impl<'a> Ck<'a> {
                     let operand = icx.node_text(n).to_string();
                     let d = mk(
                         "E0201",
-                        None,
+                        Some("no-cast"),
                         &[("expected", &expected), ("found", &found), ("operand", &operand)],
                         icx.node_span(n),
                         &[],
@@ -1697,7 +1820,7 @@ impl<'a> Ck<'a> {
         // the use of the method, a call or a fn value, reaches the site check, which names the
         // unmet bound (E0414, E0901, E0910, E1407) instead of failing inference (E0202).
         self.w
-            .impl_applies(&mut self.tys, idef, t, genv, 0)
+            .impl_applies(&mut self.tys, idef, t, genv)
             .or_else(|| self.w.impl_applies_but_views(&mut self.tys, idef, t, genv))
             .or_else(|| self.w.impl_head_args(&mut self.tys, idef, t))
     }
@@ -2041,6 +2164,13 @@ impl<'a> Ck<'a> {
         let name = icx.sym(seg);
         let text = self.prog.strings.get(name);
         if base == ids::ERROR {
+            return St::Err;
+        }
+        if let Some(mask) = builtins::reserved_assoc(&mut self.tys, base, text) {
+            let (tn, mn) = (self.show(base), self.show(mask));
+            let holes = [("name", text), ("type", tn.as_str()), ("mask", mn.as_str())];
+            let d = mk("E0208", Some("reserved"), &holes, icx.tok_span(seg), &[]);
+            self.report(d);
             return St::Err;
         }
         if matches!(self.tys.kind(base), TypeKind::Vector { .. } | TypeKind::Mask { .. })
@@ -2458,7 +2588,7 @@ impl<'a> Ck<'a> {
             let roles: Vec<(&str, Span)> = rspan.map(|s| ("expected", s)).into_iter().collect();
             let d = mk(
                 "E0201",
-                None,
+                Some("no-cast"),
                 &[("expected", &expected), ("found", &found), ("operand", "?")],
                 self.icx.tok_span(tok),
                 &roles,
@@ -2576,6 +2706,9 @@ impl<'a> Ck<'a> {
         hint: Option<TypeId>,
     ) {
         let mut pending: Vec<(usize, Ty)> = Vec::new();
+        // an argument of the error type has its diagnostic, and the params it would have
+        // decided are not reported again
+        let mut arg_err = false;
         for (i, &a) in args.iter().enumerate() {
             let Some(&p) = params.get(i) else {
                 // past the params only through `...` (the arity check rejects the rest)
@@ -2602,6 +2735,7 @@ impl<'a> Ck<'a> {
                         if x != ids::ERROR && x != ids::NEVER {
                             self.infer(p, x, binds);
                         }
+                        arg_err |= x == ids::ERROR || self.tys.has_error(x);
                         pending.push((i, Ty::T(x)));
                     }
                 }
@@ -2632,7 +2766,7 @@ impl<'a> Ck<'a> {
             self.note_reborrow(a, t2, want);
         }
         if binds.iter().any(|b| b.is_none()) {
-            if !lit_err {
+            if !lit_err && !arg_err {
                 self.e0202_infer(at);
             }
             for b in binds.iter_mut() {
@@ -2794,6 +2928,7 @@ impl<'a> Ck<'a> {
 
     /// A call `(args)` on state `st`.
     fn call(&mut self, n: u32, st: St, paren: u32, args: &[u32], hint: Option<TypeId>) -> Ty {
+        self.call_args.push((paren, args.to_vec()));
         let icx = self.icx;
         let ctok = self.callee_tok(n, paren);
         let cspan = icx.tok_span(ctok);
@@ -3529,6 +3664,7 @@ impl<'a> Ck<'a> {
         args: &[u32],
         hint: Option<TypeId>,
     ) -> Ty {
+        self.call_args.push((seg, args.to_vec()));
         let icx = self.icx;
         let recv = self.force(recv);
         let name = icx.sym(seg);
@@ -4044,7 +4180,11 @@ impl<'a> Ck<'a> {
             arm_ts.push((e, t));
             result = Some(match result {
                 None => t,
-                Some(r) => self.arms_unify(e, r, t, hint),
+                Some(r) => {
+                    let rt = self.resolve(r);
+                    let a = arm_ts.iter().find(|p| self.resolve(p.1) == rt).map(|p| p.0);
+                    self.arms_unify(a, e, r, t, hint)
+                }
             });
         }
         self.free_kids(kids);
@@ -4094,6 +4234,11 @@ impl<'a> Ck<'a> {
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         // `for i: T in a..b`: the binding type is the context of the range's literals
         let bt_pre = bind_ty.map(|b| self.lower_ty(b, false));
+        // the annotation's type is the binding's, also for a `_` pattern, which binds no local:
+        // the borrow checker reads it here
+        if let (Some(n), Some(t)) = (bind_ty, bt_pre) {
+            self.set(n, Ty::T(t));
+        }
         let it_hint = match bt_pre {
             Some(b) if !matches!(self.tys.kind(b), TypeKind::Vector { .. } | TypeKind::Ref { .. }) => {
                 Some(self.tys.intern(TypeKind::Range { elem: b, inclusive: false }))
@@ -4110,6 +4255,9 @@ impl<'a> Ck<'a> {
             };
             matches!(self.tys.kind(v), TypeKind::Vector { .. })
         });
+        if chunk {
+            self.chunk_loops.push(f);
+        }
         {
             let text = icx.node_text(iter).to_string();
             let at = icx.node_span(iter);
@@ -4217,15 +4365,13 @@ impl<'a> Ck<'a> {
                     self.mismatch(iter, Ty::T(it), want, None);
                 }
                 if let Some(tc) = tail {
-                    self.element_tail(tc, it);
-                    self.tail_clause(tc, b, ids::ERROR, Lanes::Fixed(1));
+                    self.element_loop_tail(tc);
                 }
             }
             b
         } else {
             if let Some(tc) = tail {
-                self.element_tail(tc, it);
-                self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
+                self.element_loop_tail(tc);
             }
             self.element_type(f, iter, it)
         };
@@ -4365,16 +4511,12 @@ impl<'a> Ck<'a> {
         matches!(self.w.lookup_method(&mut self.tys, base, name, genv, from), Lookup::Found { .. })
     }
 
-    /// E0601 case `element`: tail clause `tc` on a loop over the elements of `it` (no vector
-    /// binding). Only a chunk loop leaves elements for a tail.
-    fn element_tail(&mut self, tc: u32, it: TypeId) {
-        if it == ids::ERROR || self.tys.has_error(it) {
-            return;
-        }
-        let tn = self.show(it);
-        let a = self.icx.a(tc);
-        let d = mk("E0601", Some("element"), &[("type", &tn)], self.icx.tok_span(a), &[]);
+    /// A tail clause on a loop that is not a chunk loop: E0601 `element-loop` (an element loop
+    /// has no elements left over). Its body is still typed, with its bindings unknown.
+    fn element_loop_tail(&mut self, tc: u32) {
+        let d = mk("E0601", Some("element-loop"), &[], self.icx.node_span(tc), &[]);
         self.report(d);
+        self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
     }
 
     fn tail_clause(&mut self, tc: u32, bind: TypeId, lane: TypeId, n: Lanes) {

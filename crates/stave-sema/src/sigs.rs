@@ -115,6 +115,14 @@ pub struct FnSig {
     pub node: u32,
 }
 
+impl FnSig {
+    /// Whether the target's arch owns every feature this fn needs: else it is not built there
+    /// (no body is checked, a dispatch has no arm chain), and no call of it runs there.
+    pub fn built_on(&self, arch: stave_target::Arch) -> bool {
+        stave_target::FeatureSet::from_bits(self.features).is_none_or(|fs| fs.is_owned_by(arch))
+    }
+}
+
 /// A struct field or variant payload field (tuple payloads: fields named by index, `name` NONE).
 #[derive(Clone, Debug)]
 pub struct FieldDef {
@@ -122,7 +130,6 @@ pub struct FieldDef {
     pub decl: DeclId,
     pub name: Sym,
     pub ty: TypeId,
-    pub is_pub: bool,
     pub span: Span,
 }
 
@@ -334,6 +341,12 @@ pub struct Sigs {
     pub headless_impls: Vec<DeclId>,
     /// Trait impls per trait decl.
     pub impls_by_trait: FxHashMap<DeclId, Vec<DeclId>>,
+    /// Per trait decl and impl head (`None`: no head): the positions in
+    /// [`Sigs::impls_by_trait`] of its impls with that head, ascending. Only impls with the head
+    /// of a type, or with none, can apply to it.
+    pub trait_impls_by_head: FxHashMap<(DeclId, Option<TypeHead>), Vec<u32>>,
+    /// Final trait query answers of the current checking run ([`crate::traits::QueryCache`]).
+    pub queries: crate::traits::QueryCache,
 }
 
 impl Sigs {
@@ -493,7 +506,7 @@ pub(crate) fn lower_type<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_p
     });
     let t = lower_type_at(h, env, n, ret_pos);
     LOWERING.with(|c| c.set(c.get() - 1));
-    if outer && h.refusals() > before {
+    if outer && crate::types::claim_refusals(h, before) {
         too_deep(h, &env.icx, n);
     }
     t
@@ -885,7 +898,13 @@ pub(crate) fn const_param_arg<H: LowerHost + ?Sized>(
     let names = NameCx { prog: h.prog(), generics: &[] };
     let (e, f) = (types::display(&*h, &names, want), types::display(&*h, &names, t));
     let text = icx.node_text(n).to_string();
-    let d = mk("E0201", None, &[("expected", &e), ("found", &f), ("operand", &text)], icx.node_span(n), &[]);
+    let d = mk(
+        "E0201",
+        Some("no-cast"),
+        &[("expected", &e), ("found", &f), ("operand", &text)],
+        icx.node_span(n),
+        &[],
+    );
     h.report(d);
     ConstArg::Error
 }
@@ -1148,6 +1167,8 @@ pub(crate) struct SigBuilder<'p> {
     ungated: bool,
     /// E0702 spans already reported.
     wide: Vec<Span>,
+    /// The program's entry points (E0709), found at the first fn with `needs`.
+    entries: Option<crate::mono::Entries>,
 }
 
 impl Interner for SigBuilder<'_> {
@@ -1160,6 +1181,9 @@ impl Interner for SigBuilder<'_> {
     }
     fn refusals(&self) -> u32 {
         self.tys.refusals()
+    }
+    fn claimed_mut(&mut self) -> &mut u32 {
+        self.tys.claimed_mut()
     }
 
     fn fixed_ty(&self, f: TypeId) -> TypeId {
@@ -1255,6 +1279,7 @@ impl<'p> SigBuilder<'p> {
             bound_scope: None,
             ungated: false,
             wide: Vec::new(),
+            entries: None,
         };
         b.find_lang_items();
         b
@@ -1336,6 +1361,15 @@ impl<'p> SigBuilder<'p> {
         s.headless_impls.sort_by_key(item_of);
         for v in s.impls_by_trait.values_mut() {
             v.sort_by_key(item_of);
+        }
+        for (&tr, v) in &s.impls_by_trait {
+            for (k, &d) in v.iter().enumerate() {
+                let head = match s.decls.get(d.idx()) {
+                    Some(DeclSig::Impl(i)) => i.head,
+                    _ => None,
+                };
+                s.trait_impls_by_head.entry((tr, head)).or_default().push(k as u32);
+            }
         }
         (self.tys, s, self.diags)
     }
@@ -1524,6 +1558,7 @@ impl<'p> SigBuilder<'p> {
         };
         let saved = std::mem::replace(&mut self.cur_generics, env);
         let saved_scope = self.bound_scope.take();
+        let start = self.tys.refusals();
         let sig = match decl.kind {
             DeclKind::Fn | DeclKind::Method | DeclKind::TraitMethod => self.build_fn(d),
             DeclKind::Struct | DeclKind::Enum => self.build_adt(d),
@@ -1533,6 +1568,10 @@ impl<'p> SigBuilder<'p> {
             DeclKind::TypeAlias => self.build_alias(d),
             _ => DeclSig::None,
         };
+        // the declaration owns what its signature interned outside a written type
+        if crate::types::claim_refusals(&mut self.tys, start) {
+            self.diags.extend(mk("E0005", Some("type"), &[], decl.name_span, &[]));
+        }
         self.cur_generics = saved;
         self.bound_scope = saved_scope;
         self.sigs[d.idx()] = sig;
@@ -1568,31 +1607,23 @@ impl<'p> SigBuilder<'p> {
         }
     }
 
-    /// What fn `d` is when it may not declare `needs` (E0709): `main` of the root package, a
-    /// method of a trait or of a trait impl, or an `extern` export.
+    /// What fn `d` is when it may not declare `needs` (E0709): an entry point
+    /// ([`crate::mono::Entry`]: it runs on any CPU of the target), or a method of a trait or of
+    /// a trait impl. Only a plain fn or an inherent method that is no entry point may.
     fn needs_forbidden(&mut self, d: DeclId, decl: &crate::decls::Decl) -> Option<&'static str> {
-        if decl.flags.has(DeclFlags::EXTERN_EXPORT) {
-            return Some("an `extern` export");
-        }
-        match decl.kind {
-            DeclKind::TraitMethod => Some("a trait method"),
+        let plain = match decl.kind {
+            DeclKind::Fn => true,
             DeclKind::Method => {
                 self.ensure(decl.parent);
-                match &self.sigs[decl.parent.idx()] {
-                    DeclSig::Impl(i) if i.trait_ref.is_some() => Some("a trait method"),
-                    _ => None,
-                }
+                matches!(&self.sigs[decl.parent.idx()], DeclSig::Impl(i) if i.trait_ref.is_none())
             }
-            DeclKind::Fn => {
-                let main = self.prog.strings.lookup("main")?;
-                let is_main = self.prog.packages.iter().any(|p| {
-                    p.is_root
-                        && p.root_module.get().is_some_and(|m| self.prog.module_item(m, main) == Some(d))
-                });
-                is_main.then_some("`main`")
-            }
-            _ => None,
+            _ => false,
+        };
+        if !plain {
+            return Some("a trait method");
         }
+        let entries = self.entries.get_or_insert_with(|| crate::mono::Entries::new(self.prog));
+        entries.of(self.prog, d).map(crate::mono::Entry::what)
     }
 
     fn build_fn(&mut self, d: DeclId) -> DeclSig {
@@ -1723,7 +1754,8 @@ impl<'p> SigBuilder<'p> {
         {
             // E0709; the fn is checked as if it had no `needs` (no second error from the trait
             // impl signature compare).
-            let dg = mk("E0709", None, &[("what", what)], icx.node_span(nd), &[]);
+            let case = decl.flags.has(DeclFlags::TEST).then_some("test");
+            let dg = mk("E0709", case, &[("what", what)], icx.node_span(nd), &[]);
             self.diags.extend(dg);
             features = 0;
             needs_named = Vec::new();
@@ -1860,7 +1892,7 @@ impl<'p> SigBuilder<'p> {
                     Some(t) => lower_type(b, &env, t, false),
                     None => ids::ERROR,
                 };
-                out.push(FieldDef { decl: f, name: fd.name, ty, is_pub: fd.is_pub(), span: fd.name_span });
+                out.push(FieldDef { decl: f, name: fd.name, ty, span: fd.name_span });
             }
             out
         };
@@ -1879,7 +1911,6 @@ impl<'p> SigBuilder<'p> {
                                 decl: DeclId::NONE,
                                 name: Sym::NONE,
                                 ty,
-                                is_pub: true,
                                 span: icx.node_span(c),
                             });
                         }

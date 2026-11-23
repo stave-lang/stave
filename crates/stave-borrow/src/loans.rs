@@ -6,7 +6,8 @@
 //! points to: `from copy i`). Every tracked local (one whose type is ref-like) holds an origin set
 //! per program point; the sets are unioned through copies, moves, aggregates, field assignments,
 //! and call results ([`Flows`]: only the named arguments' origins reach the result; all other
-//! argument loans end at the call).
+//! argument loans end at the call). A local moved whole holds the empty set until it is written
+//! again ([`Flow::moved_out`]).
 //!
 //! **Contents.** Reading a ref-like value through `k` dereferences of a local `x` yields
 //! `contents^k(O(x))`, where `contents(L)` is the origin set of the borrowed place's value (taken
@@ -169,7 +170,8 @@ impl Atoms {
 
 /// The dataflow state at the point a walk has reached: the origin set of every tracked local, as
 /// an id of [`Flow::sets`], and the maybe-moved locals (a value moves whole: one mark per local).
-/// A walk has one state and changes it in place.
+/// A walk has one state and changes it in place. There is no `Clone`: every whole state comes
+/// from [`Flow::state`], which counts the ones it makes ([`Cost::states`]).
 pub struct State {
     o: Vec<u32>,
     /// The tracked locals whose set may be non-empty, each once (`in_held`).
@@ -307,6 +309,9 @@ pub struct Cost {
     pub counted: u64,
     /// Times the checks found the loans reached through the live ones again.
     pub rebuilt: u64,
+    /// Whole states made ([`Flow::state`] with no spare one): each has an entry per tracked
+    /// local and per local.
+    pub states: u64,
 }
 
 impl Cost {
@@ -320,6 +325,7 @@ impl Cost {
         self.atoms += o.atoms;
         self.counted += o.counted;
         self.rebuilt += o.rebuilt;
+        self.states += o.states;
     }
 }
 
@@ -580,7 +586,10 @@ impl<'b> Flow<'b> {
                 st.clear();
                 st
             }
-            None => State::new(self.ntracked, self.body.locals.len()),
+            None => {
+                self.cost.states += 1;
+                State::new(self.ntracked, self.body.locals.len())
+            }
         }
     }
 
@@ -960,9 +969,8 @@ impl<'b> Flow<'b> {
     /// (a store adds to it from the store on: what is stored later on the path is not in the
     /// place yet).
     pub fn loan_holds(&self, st: &State, l: usize) -> Set {
-        let place = &self.body.loans[l].place;
-        if self.grown && !place.has_deref() && self.is_ref_like(place.ty) {
-            let now = self.local_o(st, place.local);
+        if let Some(local) = self.read_local(l) {
+            let now = self.local_o(st, local);
             if self.watch && !self.exact && self.pre.get(l).is_some_and(|was| !was.is_subset(&now)) {
                 self.short.set(true);
             }
@@ -970,6 +978,14 @@ impl<'b> Flow<'b> {
         } else {
             self.contents[l].clone()
         }
+    }
+
+    /// The local whose set in the state is what loan `l`'s place holds ([`Flow::loan_holds`]):
+    /// once a store has grown a local, a ref-like local borrowed without a dereference. `None`:
+    /// the loan's contents.
+    pub fn read_local(&self, l: usize) -> Option<LocalId> {
+        let place = &self.body.loans[l].place;
+        (self.grown && !place.has_deref() && self.is_ref_like(place.ty)).then_some(place.local)
     }
 
     /// `contents(S)` in state `st`.
@@ -1401,11 +1417,7 @@ impl<'b> Flow<'b> {
                 }
                 let (s, ch) = self.rv_origins(st, rv, dest.ty);
                 changed |= ch;
-                for_each_op(rv, |o| {
-                    if o.kind == OpKind::Move {
-                        st.set_moved(o.place.local, true);
-                    }
-                });
+                for_each_op(rv, |o| self.moved_out(st, o));
                 // re-initialized: moves of the place or below it are undone
                 self.reinit(st, dest);
                 if dest.has_deref() {
@@ -1455,14 +1467,28 @@ impl<'b> Flow<'b> {
                 let p = Place::local(*l, TypeId::NONE);
                 self.reinit(st, &p);
             }
-            StmtKind::Return(o) | StmtKind::Read(o) => {
-                if o.kind == OpKind::Move {
-                    st.set_moved(o.place.local, true);
-                }
-            }
+            StmtKind::Return(o) | StmtKind::Read(o) => self.moved_out(st, o),
             StmtKind::Drop(_) => {}
         }
         changed
+    }
+
+    /// A move of operand `o` marks its local moved. A local moved whole holds no value until it
+    /// is written again, so it holds no origins: what its value borrowed went with the value
+    /// (to the destination, the callee's stores, or nowhere), nothing reads the local (E0502),
+    /// and its drop does not run. Where it was moved on some paths only, the join brings back
+    /// the set of the others, which their drop reads.
+    fn moved_out(&self, st: &mut State, o: &Operand) {
+        if o.kind != OpKind::Move {
+            return;
+        }
+        st.set_moved(o.place.local, true);
+        if o.place.proj.is_empty()
+            && let Some(&t) = self.tracked.get(o.place.local as usize)
+            && t != u32::MAX
+        {
+            st.put(t, 0);
+        }
     }
 
     /// A write of a whole local initializes it again; a write of a part of a moved local is a
@@ -1539,7 +1565,7 @@ pub fn for_each_op(rv: &Rvalue, mut f: impl FnMut(&Operand)) {
 }
 
 /// Visits every place a statement names.
-pub fn for_each_place(k: &StmtKind, mut f: impl FnMut(&Place)) {
+fn for_each_place(k: &StmtKind, mut f: impl FnMut(&Place)) {
     match k {
         StmtKind::Assign { dest, rv, .. } => {
             f(dest);
