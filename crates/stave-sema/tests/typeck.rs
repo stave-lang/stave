@@ -854,6 +854,26 @@ fn e0201_fn_arms_fixes_name_what_compiles() {
     assert_eq!(got.len(), 4, "{got:?}");
 }
 
+/// With a wanted fn type, an arm needing features neither that type nor the enclosing fn has is
+/// E0707, as the same arm converted alone (converting it first compiles no better); inside a fn
+/// with those features the arms convert.
+#[test]
+fn e0707_fn_arm_needing_features_the_wanted_type_lacks() {
+    let src = "fn plain(x: u64) -> u64 without(trap) { return x; }\n\
+         fn wide(x: u64) -> u64 needs(avx2) { return x; }\n\
+         fn pick(k: u32) -> u64 needs(avx2) { let f: fn(u64) -> u64 = match k { 0u32 => plain, _ => wide }; return f(1u64); }\n\
+         fn main() -> i32 {\n\
+         let k = 1u32;\n\
+         let f: fn(u64) -> u64 = match k { 0u32 => plain, _ => wide };\n\
+         let g: fn(u64) -> u64 = if k == 0u32 then wide else plain;\n\
+         return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> = tc.diagnostics.iter().map(|d| (d.code(), d.message())).collect();
+    let e0707 = "`fn(u64) -> u64 needs(avx2)` cannot be used as `fn(u64) -> u64`";
+    assert_eq!(got.iter().filter(|(c, m)| *c == "E0707" && m.contains(e0707)).count(), 2, "{got:?}");
+    assert_eq!(got.len(), 2, "{got:?}");
+}
+
 /// E0201 offers plain `as` only where the cast table admits it; otherwise the fix names the form
 /// that gives the expected type (a marked cast, `Option.Some` / `Result.Ok`, taking the payload
 /// out, a borrow, a copy through `*`), and with none of them no conversion at all.

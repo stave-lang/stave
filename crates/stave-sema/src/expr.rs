@@ -1250,7 +1250,9 @@ impl<'a> Ck<'a> {
     /// `needs` or `without`. An arm keeps its own fn type (a fn item gains a deny clause only
     /// where it alone is converted), and `as` converts no fn value, so the fix names what
     /// compiles: with a wanted fn type of that shape, converting the arm that is not usable as it
-    /// alone first (case `fn-arms-wanted`); else the fn type both arms convert to (case `fn-arms`).
+    /// alone first (case `fn-arms-wanted`), or E0707 when that arm needs features the wanted type
+    /// and the enclosing fn lack (no conversion of it compiles here); else the fn type both arms
+    /// convert to (case `fn-arms`).
     fn fn_arms_mismatch(&mut self, a: Option<u32>, b: u32, x: TypeId, y: TypeId, hint: Option<TypeId>) {
         if let Some(h) = hint
             && self.fn_shape_eq(h, x)
@@ -1258,6 +1260,17 @@ impl<'a> Ck<'a> {
             let y_ok = y == h || self.coercible(y, h).is_some();
             let (n, t) = if y_ok { (a.unwrap_or(b), x) } else { (b, y) };
             let (expected, found) = (self.show(h), self.show(t));
+            // An arm needing features neither the wanted type nor the enclosing fn has converts
+            // here neither alone nor as an arm: E0707, as for that arm alone.
+            if let (TypeKind::Fn { features: ft, .. }, TypeKind::Fn { features: fh, .. }) =
+                (self.tys.kind(t), self.tys.kind(h))
+                && ft & !(fh | self.proven_features()) != 0
+            {
+                let holes = [("from", found.as_str()), ("to", expected.as_str())];
+                let d = mk("E0707", None, &holes, self.icx.node_span(n), &[]);
+                self.report(d);
+                return;
+            }
             let operand = self.icx.node_text(n).to_string();
             let holes =
                 [("expected", expected.as_str()), ("found", found.as_str()), ("operand", operand.as_str())];
