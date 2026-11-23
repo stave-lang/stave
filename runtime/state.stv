@@ -32,7 +32,8 @@ pub const NRING: usize = 32;
 // A site-table row that names no site (runtime.panic SITE_NONE).
 pub const NO_SITE: u32 = 0xFFFF_FFFF;
 
-// 160 bytes, the same on every target.
+// 184 bytes, the same on every target. The compiler reads `alt_top` and `alt_size` at offsets
+// 160 and 168 (contracts/intrinsics.md "Alternate stack").
 pub struct Block {
     // this block's address
     pub this: usize,
@@ -46,6 +47,13 @@ pub struct Block {
     pub origin: u32,
     pub count: u32,
     pub ring: [u32; NRING],
+    // the thread's panic-report stack, [alt_top - alt_size, alt_top) (runtime.panic.alt_len);
+    // alt_size 0 while there is none. Main's is written by runtime.panic.install before
+    // main, a thread's by runtime.thread.start before the thread exists.
+    pub alt_top: usize,
+    pub alt_size: usize,
+    // 1 once runtime.panic.on_signal runs on this thread (it never returns)
+    pub in_signal: u32,
 }
 
 extern "stave-intrinsic" {
@@ -125,6 +133,9 @@ static mut STATE: State = State.{
         origin: 0,
         count: 0,
         ring: [0; NRING],
+        alt_top: 0,
+        alt_size: 0,
+        in_signal: 0,
     },
     free: [0; NCLASS],
     arena_cur: 0,

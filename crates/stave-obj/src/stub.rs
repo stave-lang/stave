@@ -13,6 +13,34 @@ pub const RUNTIME_ENTRY: &str = "runtime.start.entry";
 /// Name of the stack table (contracts/intrinsics.md "Runtime start and traps").
 pub const STACK_TABLE: &str = "__stave_stack_table";
 
+/// Name of the reserve table: per probing function, the bytes its entry probes below its frame
+/// (contracts/intrinsics.md "reserve table").
+pub const RESERVE_TABLE: &str = "__stave_reserve_table";
+
+/// Most bytes between two reads of a reserve probe (contracts/intrinsics.md "reserve table"):
+/// the runtime's guard below every stack (`runtime.config.GUARD`, 64 KiB) less the 4 KiB that a
+/// frame the prologue does not probe leaves unread above the stack pointer. A read at most a guard
+/// size below a stack byte that was written is in that stack or in its guard, so the reads cannot
+/// pass the guard.
+pub const PROBE_STRIDE: u64 = 61440;
+
+/// Byte offset of `alt_top` in a thread's block (`runtime.state.Block`, contracts/intrinsics.md
+/// "Thread pointer"): the top of the thread's alternate signal stack.
+pub const BLOCK_ALT_TOP: u32 = 160;
+
+/// Byte offset of `alt_size` in a thread's block: the size of that stack, 0 while it has none.
+pub const BLOCK_ALT_SIZE: u32 = 168;
+
+/// `__stave_reserve_table`: one `u64` per slot, the bytes the entry of the slot's function
+/// probes below its frame. Never empty, so the symbol has an address even with no slot.
+pub fn reserve_table(slots: &[u64]) -> DataObj {
+    let mut bytes: Vec<u8> = slots.iter().flat_map(|n| n.to_le_bytes()).collect();
+    if bytes.is_empty() {
+        bytes.resize(8, 0);
+    }
+    DataObj { bytes, align: 8, relocs: Vec::new() }
+}
+
 /// `__stave_stack_table`: `u64 default` (the `[run] stack` bytes; 0: the runtime's own default),
 /// `u64 main` (bytes of main's stack; 0: no bound, the default applies), `u64 count`, then
 /// `count` rows of 16 bytes `{code: u64, bytes: u64}`: the code address a fn value holds (an

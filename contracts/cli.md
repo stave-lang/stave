@@ -252,10 +252,12 @@ Common flags come after the subcommand (`stave build --release`, not `stave --re
   ``stack: thread `<fn>`: <n> bytes`` (a closure `std.thread` starts, e.g.
   `` `std.thread.join<u64, u64>.0` ``). `<n>` is the computed bound; the runtime maps it plus a
   4 KiB margin, rounded up to the page size. A stack without a bound reads
-  ``unbounded (<why>), [run] stack <n> bytes``, `<why>` one of ``reaches rec fn `<fn>` `` (a call cycle through that `rec fn`),
-  ``reaches a call cycle through `<fn>` `` (a drop cycle of a recursive type), ``calls a fn
-  value with unknown targets in `<fn>` ``, ``calls C code in `<fn>` ``, `the call graph is
-  incomplete`. The bound depends
+  ``unbounded (<why>), [run] stack <n> + <m> bytes``, `<why>` one of ``reaches rec fn `<fn>` `` (a call cycle through that `rec fn`),
+  ``reaches a call cycle through `<fn>` `` (a drop cycle of a recursive type), where `<m>` is
+  the bound with each cycle taken as one frame (intrinsics.md "stack table") and the runtime
+  maps `<n>` plus `<m>` plus the margin; or ``unbounded (<why>), [run] stack <n> bytes`` with
+  `<why>` one of ``calls a fn value with unknown targets in `<fn>` ``, ``calls C code in `<fn>` ``,
+  `the call graph is incomplete`, and the runtime maps `<n>`. The bound depends
   on the build mode and target (frame sizes); it never fails a build.
 - `--cache DIR`: incremental cache location. Default: `PKG_DIR/.stave-cache`. Planned: stage0 has
   no cache and refuses the flag as not implemented (exit 2).
@@ -348,6 +350,7 @@ non-path dependency, unknown target name, TOML syntax error, duplicate key, bad 
 in `stave.toml`; an unreadable source file is E1003. `[run] stack` (default
 `"8MiB"`, at least `"4KiB"`, size grammar of gpu-program.md "Manifest keys"; another value is
 E1203) is the stack size of `main` and of every runtime thread whose calls can reach a call
-cycle (recursion, or a drop cycle of a recursive type; a `rec fn` on no cycle does not count), on every target; on the CPU every other stack gets the
+cycle (recursion, or a drop cycle of a recursive type; a `rec fn` on no cycle does not count), on every target; on the CPU such a stack gets it
+plus the bound of what it can call outside the cycles, every other stack gets the
 computed bound of what it can call (intrinsics.md "stack table"), and each stack has a guard page
 below it.

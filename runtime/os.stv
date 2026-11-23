@@ -84,9 +84,15 @@ pub const MREMAP_MAYMOVE: u32 = 1;
 pub const SIGBUS: i32 = 7;
 pub const SIGSEGV: i32 = 11;
 pub const SIG_DFL: usize = 0;
+pub const SIG_BLOCK: i32 = 0;
 pub const SIG_UNBLOCK: i32 = 1;
+// the sigset word holding only SIGPIPE (13)
+pub const SIGPIPE_SET: u64 = 1u64 << 12;
+// the sigset word holding SIGSEGV (11) and SIGBUS (7)
+pub const FAULT_SET: u64 = (1u64 << 10) | (1u64 << 6);
 pub const SA_SIGINFO: u64 = 4;
 pub const SA_ONSTACK: u64 = 0x0800_0000;
+pub const SA_NODEFER: u64 = 0x4000_0000;
 pub const SA_RESTORER: u64 = 0x0400_0000;
 
 // clone flags of a thread (glibc's set: shared VM, files, signal handlers, thread group, its own

@@ -1,0 +1,45 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: StackOverflow at src/main.stv:33:8 in main.f4 (thread 0)"
+//~ RESOURCE-LIMIT
+// A `rec fn` recurses with small frames, then calls a `without(trap)` chain of four 1 MiB frames
+// at the bottom. Main's stack is `[run] stack` (64 KiB) plus the bound of the chain with the cycle
+// collapsed: the recursion takes more than 64 KiB, so the chain no longer fits below its bottom.
+// Each entry of `f4` reads the chain's pages before it runs, so the overflow is raised in `f4`,
+// which has `trap`, and never in the chain, which has not.
+fn f0(x: u64) -> u64 without(trap) {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[7] = x;
+    return buf[7];
+}
+
+fn f1(x: u64) -> u64 without(trap) {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[7] = f0(x);
+    return buf[7];
+}
+
+fn f2(x: u64) -> u64 without(trap) {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[7] = f1(x);
+    return buf[7];
+}
+
+fn f3(x: u64) -> u64 without(trap) {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[7] = f2(x);
+    return buf[7];
+}
+
+rec fn f4(x: u64, n: u32) -> u64 {
+    let mut buf: [u64; 64] = [0u64; 64];
+    buf[3] = x;
+    if n > 0u32 {
+        return f4(buf[3], n - 1u32);
+    }
+    return f3(buf[3]);
+}
+
+fn main() -> i32 {
+    let r = f4(1u64, 1000u32);
+    return 0;
+}

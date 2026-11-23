@@ -739,6 +739,10 @@ pub struct Func {
     /// The compiler-known item this function is an instance of (the front end resolved it in a
     /// built-in package); not printed. Stages find known functions by it, never by `path`.
     pub known: Option<crate::Known>,
+    /// The function runs on its thread's alternate signal stack: its entry moves the stack
+    /// pointer there unless it is there already (contracts/intrinsics.md "Alternate stack").
+    /// Set by lowering from [`crate::known::reports_on_alt_stack`]; not printed.
+    pub alt_stack: bool,
 }
 
 /// A source site row (contracts/intrinsics.md site table): what a [`Site`] indexes in
@@ -844,6 +848,7 @@ impl Module {
             symbol: None,
             variadic: false,
             known: None,
+            alt_stack: false,
         });
         id
     }
