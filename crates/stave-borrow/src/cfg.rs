@@ -1087,23 +1087,24 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             TypeKind::Adt { def, .. } => {
                 let prog = self.tys.prog;
-                let here = prog.item(self.icx.item).map(|i| i.module);
+                let here = prog.item(self.icx.item).map_or(stave_sema::ModuleId::NONE, |i| i.module);
                 let decl = prog.decl(def)?;
                 let adt = self.tys.sigs.adt(def)?;
                 if adt.is_enum {
                     return None;
                 }
-                let same = Some(decl.module) == here;
                 let fields: Vec<(String, bool)> = adt
                     .variants
                     .first()?
                     .fields
                     .iter()
-                    .map(|f| (prog.strings.get(f.name).to_string(), f.is_pub))
+                    .map(|f| {
+                        (prog.strings.get(f.name).to_string(), prog.hidden_field(f.decl, here).is_some())
+                    })
                     .collect();
                 let mut parts = Vec::new();
-                for (i, (name, is_pub)) in fields.into_iter().enumerate() {
-                    if !is_pub && !same {
+                for (i, (name, hidden)) in fields.into_iter().enumerate() {
+                    if hidden {
                         return None;
                     }
                     parts.push(match next(i) {
@@ -1768,15 +1769,23 @@ impl<'a, 'b> Builder<'a, 'b> {
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         let bind_ty = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
         let it_ty = self.nty(iter);
-        let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
-        let chunk_ref = bind_ty.is_some() && matches!(self.tys.kind(bt), TypeKind::Ref { .. });
-        let chunk_mut = bind_ty.is_some() && matches!(self.tys.kind(bt), TypeKind::Ref { mutable: true, .. });
-        // a chunk loop: the binding is a vector or a reference to one
+        // the annotated binding type, as the type checker recorded it on the annotation (a `_`
+        // pattern binds no local to hold it)
+        let bt = bind_ty.map_or(TypeId::NONE, |b| self.nty(b));
+        if bind_ty.is_some() && self.tys.is_unknown(bt) {
+            self.untyped();
+        }
         let vt = match self.tys.kind(bt) {
             TypeKind::Ref { inner, .. } => inner,
             _ => bt,
         };
-        let chunk = bind_ty.is_some() && matches!(self.tys.kind(vt), TypeKind::Vector { .. });
+        // chunk loop or element loop: the type checker's answer, which the lowering reads too
+        let chunk = self.tb.is_chunk_loop(f);
+        if chunk && !matches!(self.tys.kind(vt), TypeKind::Vector { .. }) {
+            self.untyped();
+        }
+        let chunk_ref = chunk && matches!(self.tys.kind(bt), TypeKind::Ref { .. });
+        let chunk_mut = chunk && matches!(self.tys.kind(bt), TypeKind::Ref { mutable: true, .. });
         enum Src {
             Range,
             Elems(Place, Option<DerefKind>),
@@ -1788,10 +1797,20 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let _ = self.read(iv, iter);
                 Src::Range
             }
+            // The source is read once, at the head, as the code does: the loop holds a reborrow
+            // of the referent to its end (every iteration and the tail), whatever the body then
+            // does to the place it was read from. The hold is `&mut` when the loop writes
+            // through it (an element loop over a `&mut` source, `&mut` chunks); a loop that only
+            // reads a `&mut` source holds a `&`.
             Some(ForKind::Seq { mutable }) => {
                 let Some(p) = self.place_of(iv, iter) else { return };
                 let k = if mutable { DerefKind::Mut } else { DerefKind::Shared };
-                Src::Elems(p, Some(k))
+                let inner = self.tys.deref(p.ty).map_or(TypeId::NONE, |x| x.0);
+                let span = self.span(iter);
+                let writes = mutable && (!chunk || chunk_mut);
+                let (rv, _) = self.borrow(p.with(Proj::Deref(k), inner), writes, false, span, iter);
+                let V::P(h) = rv else { return };
+                Src::Elems(h, Some(if writes { DerefKind::Mut } else { DerefKind::Shared }))
             }
             // an array value (a place is E0219): the loop's temporary
             Some(ForKind::Array) => {
@@ -1889,32 +1908,34 @@ impl<'a, 'b> Builder<'a, 'b> {
         match (&src, item) {
             (Src::Range, _) => {
                 let op = self.const_op(iter);
-                let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
-                if let V::P(p) = self.put_temp(Rvalue::Use(op), bt, iter) {
+                let et = match self.tys.kind(it_ty) {
+                    TypeKind::Range { elem, .. } => elem,
+                    _ => TypeId::NONE,
+                };
+                if let V::P(p) = self.put_temp(Rvalue::Use(op), et, iter) {
                     self.destructure(pat, p, Mode::Move, iter);
                 }
             }
-            (Src::Elems(_, _), Some(ep)) if chunk && chunk_ref => {
+            (Src::Elems(_, _), Some(ep)) if chunk_ref => {
                 let span = self.span(pat);
                 if let Some(v) = self.chunk_ref_bind(ep, chunk_mut, vt, span, iter) {
                     self.bind_pattern(pat, v, Mode::Move, iter);
                 }
             }
             (Src::Elems(_, dk), Some(ep)) => {
-                let by_ref = dk.is_some() && (bind_ty.is_none() || chunk_ref);
-                if by_ref {
+                // an element of a reference source is borrowed, annotated or not
+                if dk.is_some() && !chunk {
                     let m = matches!(dk, Some(DerefKind::Mut));
                     let span = self.span(iter);
                     let (rv, _) = self.borrow(ep, m, false, span, iter);
                     if let V::P(p) = rv {
                         self.destructure(pat, p, Mode::Move, iter);
                     }
-                } else if bind_ty.is_some() {
+                } else if chunk {
                     // a chunk by value: read the elements, bind a fresh vector
                     let span = self.span(iter);
                     let r = self.op_of_place(ep, span, iter, false);
                     self.push(StmtKind::Read(r), span, iter);
-                    let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
                     let op = self.const_op(iter);
                     if let V::P(p) = self.put_temp(Rvalue::Use(op), bt, iter) {
                         self.destructure(pat, p, Mode::Move, iter);
@@ -1984,13 +2005,26 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
-    /// `tail masked (v, m) { }` / `tail scalar (x) { }`: one pass over the remaining elements.
+    /// `tail masked (v, m) { }` (one pass over the remaining elements) / `tail scalar (x) { }`
+    /// (a pass per remaining element).
     fn tail_clause(&mut self, tc: u32, src: Place, dk: Option<DerefKind>, iter: u32) {
         let icx = self.icx;
         let kids = icx.kids_vec(tc);
         let Some(b) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block)) else { return };
         let binds: Vec<u32> =
             kids.iter().copied().filter(|&c| icx.kind(c) == Some(NodeKind::TailBind)).collect();
+        // `tail scalar` runs its body once per element left over: a loop, whose passes are
+        // iterations (a borrow made in one pass is live in the next if used there). Its `break` /
+        // `continue` belong to the enclosing loop.
+        let scalar = icx.is(icx.a(tc) + 1, Term::KwScalar);
+        let tail_loop = scalar.then(|| {
+            let (head, pass, exit) = (self.new_block(), self.new_block(), self.new_block());
+            self.goto(head);
+            self.switch_to(head);
+            self.terminate(Terminator::Branch(vec![pass, exit]));
+            self.switch_to(pass);
+            (head, exit)
+        });
         self.push_scope();
         let base = match dk {
             Some(k) => {
@@ -2032,6 +2066,11 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.block(b);
         let at = self.close_span(b);
         self.pop_scope(Some(at));
+        if let Some((head, exit)) = tail_loop {
+            self.goto(head);
+            self.body.loops.push((head, exit, self.body.blocks.len() as BlockId));
+            self.switch_to(exit);
+        }
     }
 
     /// A by-reference chunk binding over element place `ep` (`m`: `&mut`; `vt`: the vector

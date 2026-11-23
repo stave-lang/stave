@@ -1,0 +1,10 @@
+// E0705 case `dispatch` from `stave build`: a `dispatch fn` whose `_` arm names another
+// `dispatch fn` is rejected before lowering (an arm target is a fn with a body; name the inner
+// dispatch's arms instead).
+import std.io;
+fn wide(xs: &[f32]) -> f32 needs(avx2) { let v = f32x8.load(xs, 0); return v.reduce_add(); }
+fn kf(xs: &[f32]) -> f32 needs(fma) { return xs[0] * 8.0; }
+fn base(xs: &[f32]) -> f32 { return xs[0] * 8.0; }
+dispatch fn inner(xs: &[f32]) -> f32 { fma => kf, _ => base, }
+dispatch fn d(xs: &[f32]) -> f32 { avx2 => wide, _ => inner, } //~ ERROR E0705
+fn main() -> i32 { let a: [f32; 8] = [1.0; 8]; let s = d(&a); io.print(f"{s}\n"); return 0; }

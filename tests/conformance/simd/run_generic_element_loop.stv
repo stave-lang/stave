@@ -1,0 +1,81 @@
+//~ CHECK-ONLY
+// An annotation `&T`, `&mut T`, or `T` of a generic `T` makes an element loop, decided on the
+// definition: an instance with a vector `T` visits each vector element, never chunks of lanes.
+// crates/stave-driver/tests/interp_vs_native.rs runs this one in the IR interpreter and natively
+// against run_generic_element_loop.stdout.
+import std.io;
+
+fn count<T: Copy>(a: &[T]) -> u32 {
+    let mut k: u32 = 0;
+    for _: &T in a {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn count_array<T: Copy>(a: &[T; 4]) -> u32 {
+    let mut k: u32 = 0;
+    for x: &T in a {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn copy_out<T: Copy>(a: &[T], out: &mut [T]) {
+    let mut i: usize = 0;
+    for x: &T in a {
+        out[i] = *x;
+        i = i + 1;
+    }
+}
+
+fn fill<T: Copy>(a: &mut [T], v: T) -> u32 {
+    let mut k: u32 = 0;
+    for x: &mut T in a {
+        *x = v;
+        k = k + 1;
+    }
+    return k;
+}
+
+fn four<T: Copy>(x: T) -> [T; 4] {
+    return [x, x, x, x];
+}
+
+fn count_values<T: Copy>(x: T) -> u32 {
+    let mut k: u32 = 0;
+    for _: T in four(x) {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn main() -> i32 {
+    let a: [u32x4; 5] = [u32x4.splat(1), u32x4.splat(2), u32x4.splat(3), u32x4.splat(4), u32x4.splat(5)];
+    let n = count(&a);
+    let s: [u32; 3] = [1, 2, 3];
+    let m = count(&s);
+    io.print(f"count {n} {m}\n");
+    let b: [u32x4; 4] = [u32x4.splat(1), u32x4.splat(2), u32x4.splat(3), u32x4.splat(4)];
+    let c: [u32; 4] = [1, 2, 3, 4];
+    let p = count_array(&b);
+    let q = count_array(&c);
+    io.print(f"array {p} {q}\n");
+    let mut o: [u32x4; 5] = [u32x4.splat(0), u32x4.splat(0), u32x4.splat(0), u32x4.splat(0), u32x4.splat(0)];
+    copy_out(&a, &mut o);
+    let mut t: u32 = 0;
+    let mut i: usize = 0;
+    while i < 5 {
+        t = t + o[i].reduce_add_wrap();
+        i = i + 1;
+    }
+    io.print(f"copied {t}\n");
+    let mut w: [u32x4; 2] = [u32x4.splat(1), u32x4.splat(2)];
+    let f = fill(&mut w, u32x4.splat(7));
+    let ws = w[0].reduce_add_wrap() + w[1].reduce_add_wrap();
+    io.print(f"filled {f} {ws}\n");
+    let v = count_values(u32x4.splat(1));
+    let u = count_values(1u32);
+    io.print(f"values {v} {u}\n");
+    return 0;
+}

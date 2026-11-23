@@ -2743,7 +2743,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
-        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)",
+        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check; `temporary-old`: the operand `e` of an `old(e)`, which ends where it is evaluated, at fn entry; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)",
         retired: false,
         located: true,
         holes: &[
@@ -2763,7 +2763,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[
                     LabelTemplate { at: "primary", text: "{access} here" },
                     LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
-                    LabelTemplate { at: "use", text: "borrow used later here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
                 ],
                 fix: Some(FixTemplate {
                     description: "end the borrow before this point: move the later use before it, or copy the value out first",
@@ -2842,6 +2842,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "temporary-old",
+                message: "the temporary `{place}` ends with its `old(..)` operand at fn entry, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "temporary made here: it ends where the `old(..)` operand is evaluated, at fn entry" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "compute the Copy value inside `old(..)`, so that no borrow of `{place}` is kept: `old(f(x).len())`, not `old(f(x).as_slice()).len()`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "thread",
                 message: "cannot {access} `{place}`: it has a live {loan} borrow",
                 labels: &[
@@ -2849,7 +2863,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` by the thread spawned here: it may use `{loaned}` until the scope is left" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "leave the scope before this point (its threads are joined there), or use the place only inside the thread",
+                    description: "{access} `{place}` after the `scope` that runs the thread: its threads are joined only where it is left, so a `scope` around an endless loop never ends the borrow (open the `scope` inside the loop body instead)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3416,7 +3430,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0601",
         severity: Severity::Error,
         area: "simd",
-        rule: "chunk loop without a tail policy",
+        rule: "chunk loop without a tail policy; case `element-loop`: a tail clause on a loop that is not a chunk loop (its annotation, as written, is no vector or reference to one: a range, an iterator, an element loop, also a generic `T`)",
         retired: false,
         located: true,
         holes: &[
@@ -3431,6 +3445,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "element-loop",
+                message: "a tail clause on a loop that is not a chunk loop",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "tail clause of an element loop: it visits every element, none is left over" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the tail clause; for a chunk loop, annotate the binding with a vector type written out (`for v: f32x8 in xs`), not a generic one",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3895,12 +3921,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0705",
         severity: Severity::Error,
         area: "features",
-        rule: "dispatch arm signature differs from the dispatch signature",
+        rule: "dispatch arm signature differs from the dispatch signature, or the arm target is not a fn with a body. Case `dispatch`: the target is a `dispatch fn`",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "expected", kind: HoleKind::Type, choices: &[] },
             Hole { name: "found", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "target", kind: HoleKind::Path, choices: &[] },
         ],
         shapes: &[
             Shape {
@@ -3912,6 +3939,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give the arm's function the type `{expected}` (the dispatch signature, with needs = dispatch needs + the arm's features)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "dispatch",
+                message: "dispatch arm names `dispatch fn` `{target}`: an arm target is a fn with a body",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a `dispatch fn`" },
+                    LabelTemplate { at: "dispatch", text: "this dispatch" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name the arms of `{target}` in this dispatch directly, each fn that has the features of its arm",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4010,11 +4050,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0709",
         severity: Severity::Error,
         area: "features",
-        rule: "`main`, a trait method, or an `extern` export declares `needs`",
+        rule: "an entry point (`main`, a `test fn`, an `extern` export, an allocator fn, a runtime entry fn: code that runs with no typed call site, on any CPU of the target) or a trait method declares `needs`. Case `test`: a `test fn`",
         retired: false,
         located: true,
         holes: &[
-            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["`main`", "a trait method", "an `extern` export"] },
+            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["`main`", "a trait method", "an `extern` export", "a `test fn`", "an allocator fn", "a runtime entry fn"] },
         ],
         shapes: &[
             Shape {
@@ -4025,6 +4065,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `needs(...)` here, and call the feature-specific code through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "test",
+                message: "{what} cannot declare `needs`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`needs` here: the harness runs this test on any CPU" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `needs(...)`: move the body to a fn with `needs(...)` and call it through a `dispatch` fn whose `_` arm returns without it (the test then passes on a CPU without the features)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
