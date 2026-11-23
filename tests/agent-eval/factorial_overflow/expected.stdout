@@ -1,0 +1,3 @@
+20! = 2432902008176640000
+21! overflows u64
+largest u32 factorial: 12! = 479001600

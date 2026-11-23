@@ -1,0 +1,43 @@
+import std.io;
+import std.vec;
+
+view struct Best { name: &str, score: u32 }
+
+fn offer(b: &mut Best from name, name: &str, score: u32) {
+    if score > b.score {
+        b.name = name;
+        b.score = score;
+    }
+}
+
+fn winner(a: &Best, b: &Best) -> &str from copy a + copy b {
+    return if a.score >= b.score then a.name else b.name;
+}
+
+fn main() -> i32 {
+    let names: [&str; 4] = ["alice", "bob", "carol", "dave"];
+    let scores: [u32; 4] = [72, 55, 91, 40];
+    let mut best = Best.{ name: "nobody", score: 0 };
+    let mut over = vec.Vec::<&str>.new();
+    for i in 0..names.len() {
+        offer(&mut best, names[i], scores[i]);
+        if scores[i] > 50 {
+            over.push(names[i]);
+        }
+    }
+    io.print(f"best: {best.name} {best.score}\n");
+    io.print("over 50:");
+    let os = over.as_slice();
+    for i in 0..os.len() {
+        let n = os[i];
+        io.print(f" {n}");
+    }
+    io.print("\n");
+    let mut second = Best.{ name: "nobody", score: 0 };
+    offer(&mut second, names[3], scores[3]);
+    offer(&mut second, names[1], scores[1]);
+    io.print(f"second: {second.name} {second.score}\n");
+    let w = winner(&best, &second);
+    io.print(f"winner: {w}\n");
+    return 0;
+}

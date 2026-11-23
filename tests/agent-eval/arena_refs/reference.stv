@@ -1,0 +1,30 @@
+import std.arena;
+import std.io;
+import std.vec;
+
+struct P { x: i64, y: i64 }
+
+impl Copy for P {}
+
+fn main() -> i32 {
+    let mut a = arena.Arena.new(1024);
+    {
+        let mut ps = vec.Vec::<&P>.new();
+        for i in 0i64..5 {
+            ps.push(a.alloc(P.{ x: i + 1, y: i * i - 1 }));
+        }
+        let mut sx: i64 = 0;
+        let mut sy: i64 = 0;
+        for i in 0..ps.len() {
+            let p = ps.get_ref(i);
+            sx = sx + p.x;
+            sy = sy + p.y;
+        }
+        io.print(f"sum x {sx}\n");
+        io.print(f"sum y {sy}\n");
+    }
+    a.reset();
+    let q = a.alloc(P.{ x: 42, y: 0 });
+    io.print(f"after reset: {q.x}\n");
+    return 0;
+}

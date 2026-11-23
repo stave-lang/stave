@@ -1,0 +1,35 @@
+import std.io;
+
+fn main() -> i32 {
+    let data: [u64; 4] = [13, 97, 42, 8];
+    let mut evens: u64 = 0;
+    let mut odds: u64 = 0;
+    let mut best: u64 = 0;
+    scope {
+        spawn {
+            for i in 0u64..100 {
+                if i % 2 == 0 {
+                    evens = evens + i;
+                }
+            }
+        }
+        spawn {
+            for i in 0u64..100 {
+                if i % 2 == 1 {
+                    odds = odds + i;
+                }
+            }
+        }
+        spawn {
+            for i in 0..data.len() {
+                if data[i] > best {
+                    best = data[i];
+                }
+            }
+        }
+    }
+    io.print(f"evens {evens}\n");
+    io.print(f"odds {odds}\n");
+    io.print(f"max {best}\n");
+    return 0;
+}

@@ -1,0 +1,40 @@
+import std.io;
+
+enum MathErr { DivZero, Negative(i64) }
+
+fn div(a: i64, b: i64) -> Result<i64, MathErr> {
+    if b == 0 {
+        return Result.Err(MathErr.DivZero);
+    }
+    return Result.Ok(a / b);
+}
+
+fn isqrt(n: i64) -> Result<i64, MathErr> {
+    if n < 0 {
+        return Result.Err(MathErr.Negative(n));
+    }
+    let mut r: i64 = 0;
+    while (r + 1) * (r + 1) <= n {
+        r = r + 1;
+    }
+    return Result.Ok(r);
+}
+
+fn calc(a: i64, b: i64) -> Result<i64, MathErr> {
+    let q = div(a, b)?;
+    let r = isqrt(q)?;
+    return Result.Ok(r + 1);
+}
+
+fn main() -> i32 {
+    let cases: [(i64, i64); 4] = [(100, 4), (7, 0), (-50, 2), (99, 1)];
+    for i in 0..cases.len() {
+        let (a, b) = cases[i];
+        match calc(a, b) {
+            Result.Ok(v) => { io.print(f"calc({a}, {b}) = {v}\n"); }
+            Result.Err(MathErr.DivZero) => { io.print(f"calc({a}, {b}): division by zero\n"); }
+            Result.Err(MathErr.Negative(n)) => { io.print(f"calc({a}, {b}): negative {n}\n"); }
+        }
+    }
+    return 0;
+}

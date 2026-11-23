@@ -856,7 +856,13 @@ pub(crate) fn const_param_arg<H: LowerHost + ?Sized>(
     let names = NameCx { prog: h.prog(), generics: &[] };
     let (e, f) = (types::display(&*h, &names, want), types::display(&*h, &names, t));
     let text = icx.node_text(n).to_string();
-    let d = mk("E0201", None, &[("expected", &e), ("found", &f), ("operand", &text)], icx.node_span(n), &[]);
+    let d = mk(
+        "E0201",
+        Some("no-cast"),
+        &[("expected", &e), ("found", &f), ("operand", &text)],
+        icx.node_span(n),
+        &[],
+    );
     h.report(d);
     ConstArg::Error
 }
