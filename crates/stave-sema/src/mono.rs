@@ -387,7 +387,7 @@ fn own_package(w: &World<'_>, imp: DeclId, def: DeclId) -> bool {
 /// the borrow checker's CFG, the lowering, and the drop schedule read.
 pub fn drop_impl<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> bool {
     let TypeKind::Adt { def, .. } = *cx.kind(t) else { return false };
-    if !cx.has_params(t) {
+    if !has_params(cx, t) {
         return drop_method(w, cx, t).is_some();
     }
     let drop = w.sigs.lang.drop;
@@ -417,6 +417,33 @@ pub(crate) fn adt_fields<I: Interner + ?Sized>(
     Some(out)
 }
 
+/// Whether `t` mentions a generic parameter (type or const) or `SelfTy`
+/// ([`Interner::has_params`]), each distinct part visited once: a type built by doubling (a
+/// tuple of a tuple of ..) is a small graph but an exponential tree.
+fn has_params<I: Interner + ?Sized>(cx: &mut I, t: TypeId) -> bool {
+    let mut seen: FxHashSet<TypeId> = FxHashSet::default();
+    let mut stack = vec![t];
+    let mut kids = Vec::new();
+    while let Some(x) = stack.pop() {
+        if !seen.insert(x) {
+            continue;
+        }
+        let k = cx.kind(x);
+        match k {
+            TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => return true,
+            TypeKind::Array { len: ConstArg::Param(_), .. } => return true,
+            TypeKind::Adt { args, .. } if args.iter().any(|a| matches!(a, GArg::Const(ConstArg::Param(_)))) => {
+                return true;
+            }
+            _ => {}
+        }
+        kids.clear();
+        k.children(&mut kids);
+        stack.extend_from_slice(&kids);
+    }
+    false
+}
+
 /// Whether values of type `t` need drop glue: a `Drop` impl anywhere inside, not behind a
 /// pointer ([`drop_impl`]), or a type parameter that is not Copy under `env`. Exact for a
 /// concrete type; for a type with parameters, whether some instance may. The one answer every
@@ -424,7 +451,7 @@ pub(crate) fn adt_fields<I: Interner + ?Sized>(
 /// lock ranks of drops, the const rule (E0413). Memoized in `memo` (answers under one `env`).
 ///
 /// This is reachability over containment edges (ADT fields, tuple and array elements), walked
-/// with an explicit stack, so the answer is exact for a type of any finite nesting depth.
+/// with an explicit stack, so the answer is exact for a type within the type depth bound.
 pub fn needs_drop<I: Interner + ?Sized>(
     w: &World<'_>,
     cx: &mut I,
@@ -437,8 +464,15 @@ pub fn needs_drop<I: Interner + ?Sized>(
     }
     let mut seen: FxHashSet<TypeId> = FxHashSet::default();
     seen.insert(t);
-    let mut stack = vec![t];
-    while let Some(u) = stack.pop() {
+    let mut stack = vec![(t, 0u32)];
+    while let Some((u, depth)) = stack.pop() {
+        // Unreachable for a checked type (E0005 case `type`); past it glue is assumed, so the
+        // walk ends on a type that grows without bound (polymorphic recursion in a rejected
+        // program the borrow checker still reads)
+        if depth >= crate::typedepth::MAX_TYPE_DEPTH {
+            memo.insert(t, true);
+            return true;
+        }
         // memo `false`: nothing reachable from `u` has a Drop impl; `true`: something does
         match memo.get(&u) {
             Some(false) => continue,
@@ -468,7 +502,7 @@ pub fn needs_drop<I: Interner + ?Sized>(
         };
         for x in inner {
             if seen.insert(x) {
-                stack.push(x);
+                stack.push((x, depth + 1));
             }
         }
     }
@@ -604,4 +638,25 @@ pub(crate) fn depth_check(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ids;
+
+    /// `(x, x)` nested `n` times over `x`: `n + 1` distinct types, a tree of 2^n leaves.
+    fn doubled(t: &mut TypeTable, x: TypeId, n: u32) -> TypeId {
+        (0..n).fold(x, |a, _| t.mk_tuple(vec![a, a]))
+    }
+
+    #[test]
+    fn params_of_a_doubling_type_are_found_on_its_graph() {
+        let mut t = TypeTable::new();
+        let plain = doubled(&mut t, ids::U32, 200);
+        assert!(!has_params(&mut t, plain));
+        let p = t.intern(TypeKind::Param(0));
+        let generic = doubled(&mut t, p, 200);
+        assert!(has_params(&mut t, generic));
+    }
 }
