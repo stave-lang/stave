@@ -189,23 +189,14 @@ pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> 
             out.push(InstKey { decl: d, args: Vec::new() });
         }
     };
-    for p in &prog.packages {
-        if p.is_root
-            && let Some(m) = p.root_module.get()
-            && let Some(s) = sym(prog, "main")
-        {
-            add(&mut out, prog.module_item(m, s));
-        }
-    }
-    for (k, d) in prog.decls.iter().enumerate() {
+    let entries = Entries::new(prog);
+    for k in 0..prog.decls.len() {
         let id = DeclId(k as u32);
-        if d.flags.has(DeclFlags::EXTERN_EXPORT) || (test && d.flags.has(DeclFlags::TEST)) {
-            add(&mut out, Some(id));
-        }
-    }
-    for m in allocator_module(prog) {
-        for n in ["alloc", "free", "realloc"] {
-            add(&mut out, sym(prog, n).and_then(|s| prog.module_item(m, s)));
+        match entries.of(prog, id) {
+            Some(Entry::Main | Entry::Export | Entry::Allocator) => add(&mut out, Some(id)),
+            Some(Entry::Test) if test => add(&mut out, Some(id)),
+            // the runtime fns lowering calls are requested by the code that calls them
+            Some(Entry::Test | Entry::Runtime) | None => {}
         }
     }
     for k in [Known::StartEntry, Known::Trap, Known::TrapMsg, Known::OnSignal] {
@@ -216,6 +207,90 @@ pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> 
         out.sort();
     }
     out
+}
+
+/// Why a fn runs where no call written in the program names it: an entry point. It runs on any
+/// CPU of the target, so it declares no `needs` (E0709). Any other fn runs only where a typed
+/// call, a fn value of its type, or a dispatch arm reaches it, and the feature rules check
+/// those.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Entry {
+    /// `main` of the root package: the start code calls it.
+    Main,
+    /// A `test fn`: the test harness calls it (with parameters: once per generated input).
+    Test,
+    /// An `extern "C"` export: foreign code calls it.
+    Export,
+    /// A fn of the `allocator` declaration's module the runtime calls ([`ALLOCATOR_FNS`]).
+    Allocator,
+    /// A fn or method the compiler knows by path ([`Known`]): start code, the backend's stubs
+    /// (signal, thread start), the harness, or a call lowering inserts runs it.
+    Runtime,
+}
+
+impl Entry {
+    /// The E0709 `what` text.
+    pub(crate) fn what(self) -> &'static str {
+        match self {
+            Entry::Main => "`main`",
+            Entry::Test => "a `test fn`",
+            Entry::Export => "an `extern` export",
+            Entry::Allocator => "an allocator fn",
+            Entry::Runtime => "a runtime entry fn",
+        }
+    }
+}
+
+/// The fns of an `allocator` declaration's module that replace the runtime's.
+pub(crate) const ALLOCATOR_FNS: [&str; 3] = ["alloc", "free", "realloc"];
+
+/// The entry points of a program its decls do not mark: `main` and the allocator fns
+/// ([`Entry`]).
+pub(crate) struct Entries {
+    main: Vec<DeclId>,
+    alloc: Vec<DeclId>,
+}
+
+impl Entries {
+    pub(crate) fn new(prog: &Program) -> Entries {
+        let mut main = Vec::new();
+        for p in &prog.packages {
+            if p.is_root
+                && let Some(m) = p.root_module.get()
+                && let Some(d) = sym(prog, "main").and_then(|s| prog.module_item(m, s))
+            {
+                main.push(d);
+            }
+        }
+        let mut alloc = Vec::new();
+        for m in allocator_module(prog) {
+            for n in ALLOCATOR_FNS {
+                alloc.extend(sym(prog, n).and_then(|s| prog.module_item(m, s)));
+            }
+        }
+        Entries { main, alloc }
+    }
+
+    /// The entry point decl `d` is, if it is one.
+    pub(crate) fn of(&self, prog: &Program, d: DeclId) -> Option<Entry> {
+        let decl = prog.decl(d)?;
+        if !matches!(decl.kind, DeclKind::Fn | DeclKind::Method) {
+            return None;
+        }
+        if decl.flags.has(DeclFlags::TEST) {
+            Some(Entry::Test)
+        } else if decl.flags.has(DeclFlags::EXTERN_EXPORT) {
+            Some(Entry::Export)
+        } else if self.main.contains(&d) {
+            Some(Entry::Main)
+        } else if self.alloc.contains(&d) {
+            Some(Entry::Allocator)
+        } else if prog.known.of(d).is_some() {
+            Some(Entry::Runtime)
+        } else {
+            None
+        }
+    }
 }
 
 /// The module named by the `allocator` declaration, if any.

@@ -916,6 +916,13 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    /// The code of a fn the target does not build ([`crate::sigs::FnSig::built_on`]): a trap.
+    pub fn lower_unbuilt(&mut self, params: &[Ty], ret: Ty) -> FnOut {
+        self.fresh_env(params, ret);
+        self.f.b.unreachable();
+        self.dispatch_out(params, ret)
+    }
+
     fn dispatch_out(&mut self, params: &[Ty], ret: Ty) -> FnOut {
         let body = if self.err.is_none() { self.finish_fn() } else { None };
         FnOut {
@@ -1448,20 +1455,20 @@ impl<'a> FnCx<'a> {
         let Some(iter) = kids.iter().copied().find(|&c| icx.is_expr(c)) else { return };
         let Some(body) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block)) else { return };
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
-        if let Some(bt) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type)) {
-            let t = self.lower_type(bt);
-            let vt = match self.kind(t) {
-                TypeKind::Ref { inner, .. } => inner,
-                _ => t,
-            };
-            if matches!(self.kind(vt), TypeKind::Vector { .. }) {
-                self.chunk_loop(f, pat, t, iter, body, tail);
+        // chunk loop or element loop: the type checker decided it on the definition; an
+        // instance whose `T` is a vector still runs an element loop
+        if self.tb().is_chunk_loop(f) {
+            let Some(bt) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type)) else {
+                self.fail(f, "a chunk loop without its annotation");
                 return;
-            }
+            };
+            let t = self.lower_type(bt);
+            self.chunk_loop(f, pat, t, iter, body, tail);
+            return;
         }
         // the checker rejects a tail clause on an element loop (E0601 case `element`)
         if tail.is_some() {
-            self.fail(f, "a tail clause on an element loop");
+            self.fail(f, "a tail clause on an element loop (E0601 `element-loop` at check)");
             return;
         }
         let it_ty = self.nty(iter);

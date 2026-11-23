@@ -9,7 +9,8 @@
 //!
 //! **Ref-likeness** ([`Tys::ref_like`]): a type whose values carry an origin set: references, fn
 //! values, view ADTs, and anything containing one (`Option<&T>`, tuples, arrays), plus generic
-//! params bounded `T: view`. `stave_sema::kinds::is_view_in` is the same rule.
+//! params bounded `T: view`: `stave_sema::kinds::is_view_in` answers it (an exact walk, each
+//! distinct component type once).
 
 use rustc_hash::FxHashMap;
 use stave_sema::sigs::{FnSig, GenericParam, Sigs};
@@ -164,47 +165,7 @@ impl<'a> Tys<'a> {
         if let Some(&b) = self.memo(t).view.get(&t) {
             return b;
         }
-        let sigs = self.sigs;
-        let env = self.env;
-        let mut stack = vec![t];
-        let mut kids = Vec::new();
-        // each distinct component once: exact (the types are finitely many)
-        let mut seen = rustc_hash::FxHashSet::default();
-        let mut r = false;
-        while let Some(x) = stack.pop() {
-            if !seen.insert(x) {
-                continue;
-            }
-            match self.ov.kind(x) {
-                TypeKind::Ref { .. } | TypeKind::Fn { .. } => {
-                    r = true;
-                    break;
-                }
-                TypeKind::Ptr { .. } => {}
-                TypeKind::Param(i) => {
-                    if env.get(*i as usize).is_some_and(|g| g.view) {
-                        r = true;
-                        break;
-                    }
-                }
-                TypeKind::Adt { def, args } => {
-                    if sigs.adt(*def).is_some_and(|a| a.is_view) {
-                        r = true;
-                        break;
-                    }
-                    for a in args.iter() {
-                        if let GArg::Type(t) = a {
-                            stack.push(*t);
-                        }
-                    }
-                }
-                k => {
-                    kids.clear();
-                    k.children(&mut kids);
-                    stack.extend_from_slice(&kids);
-                }
-            }
-        }
+        let r = stave_sema::kinds::is_view_in(self.prog, &self.ov, t, self.env);
         self.memo(t).view.insert(t, r);
         r
     }

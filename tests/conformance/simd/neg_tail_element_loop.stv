@@ -1,0 +1,40 @@
+// A tail clause belongs to a chunk loop: on a range, an iterator, an element loop, or a loop
+// whose annotation is a generic `T` (also for a vector instance) it is E0601 `element-loop`.
+struct It { i: u32 }
+
+impl It {
+    fn next(&mut self) -> Option<u32> {
+        if self.i >= 3 {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+fn elements(a: &[u32]) -> u32 {
+    let mut k: u32 = 0;
+    for _: &u32 in a { k = k + 1; } tail scalar (x) { } //~ ERROR E0601
+    return k;
+}
+
+fn range() -> u32 {
+    let mut k: u32 = 0;
+    for _: u32 in 0..4 { k = k + 1; } tail scalar (x) { } //~ ERROR E0601
+    return k;
+}
+
+fn iterator() {
+    for _ in It.{ i: 0 } { } tail exact; //~ ERROR E0601
+}
+
+fn generic<T: Copy>(a: &[T]) -> u32 {
+    let mut k: u32 = 0;
+    for x: &T in a { k = k + 1; } tail scalar (y) { k = k + 100; } //~ ERROR E0601
+    return k;
+}
+
+fn main() {
+    let a: [u32x4; 3] = [u32x4.splat(1), u32x4.splat(2), u32x4.splat(3)];
+    let n = generic(&a);
+}

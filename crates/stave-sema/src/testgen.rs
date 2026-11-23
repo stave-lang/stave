@@ -624,10 +624,7 @@ impl Ck<'_> {
         let mut fields = Vec::with_capacity(v.fields.len());
         for f in &v.fields {
             let fname = prog.strings.get(f.name).to_string();
-            if let Some(fd) = prog.decl(f.decl)
-                && !fd.is_pub()
-                && fd.module != me
-            {
+            if let Some(fd) = prog.hidden_field(f.decl, me) {
                 return fail(NoGen::Private { name: fname, module: module_text(fd.module), field: true });
             }
             let ft = self.tys.subst(f.ty, args, None);

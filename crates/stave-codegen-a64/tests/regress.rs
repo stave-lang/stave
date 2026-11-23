@@ -1,6 +1,7 @@
-//! Regressions: scratch registers across far frame offsets, frame-size overflow, functions over
-//! the conditional-branch range, user fns named like compiler symbols, the thread child's stack
-//! alignment, references to fns without a body, zero-size statics.
+//! Regressions: scratch registers across far frame offsets, a fused compare's operand read later
+//! in its block, frame-size overflow, functions over the conditional-branch range, user fns named
+//! like compiler symbols, the thread child's stack alignment, references to fns without a body,
+//! zero-size statics.
 
 mod common;
 
@@ -45,6 +46,41 @@ fn fn_value_compare_in_a_large_frame() {
     let r = check(&p, "fn_eq_far");
     let words: Vec<u8> = r.stdout.chunks(8).map(|c| c[0]).collect();
     assert_eq!(words, [1, 0, 0, 1, 0, 1, 1, 0]);
+}
+
+/// A compare fused into its block's `cbr` is emitted at the terminator, after the block's other
+/// instructions: an operand that one of them reads later in the block must still be bound there,
+/// not dropped at that instruction as its last use (its home was never written).
+#[test]
+fn fused_compare_operand_used_later_in_the_block() {
+    let mut p = Prog::new();
+    let t = p.t;
+    let f = p.func("app.f", &[t.u64], Some(t.u64), |b, _| {
+        let x = b.param(0).unwrap();
+        let five = b.int(5);
+        let y = b.binary(Op::AddWrap, t.u64, x, five);
+        let seven = b.int(7);
+        let c = b.cmp(Op::Gt, t.bool, y, seven);
+        let one = b.int(1);
+        let z = b.binary(Op::Xor, t.u64, y, one);
+        let (yes, no) = (b.create_block(), b.create_block());
+        b.cbr(c, yes, &[], no, &[]);
+        b.switch_to(yes);
+        b.ret(Some(z.into()));
+        b.switch_to(no);
+        let k = b.int(99);
+        b.ret(Some(k));
+    });
+    p.set_main(|b, p| {
+        for x in [10, 0, 3] {
+            let x = b.int(x);
+            let r = b.call(f, Some(t.u64), &[x]).unwrap();
+            p.out(b, r, t.u64);
+        }
+    });
+    let r = check(&p, "fused_cmp_later_use");
+    let words: Vec<u8> = r.stdout.chunks(8).map(|c| c[0]).collect();
+    assert_eq!(words, [14, 99, 9]);
 }
 
 /// Slot sizes add up past `u32`: rejected like any frame larger than 1 GiB (a frame the checker's

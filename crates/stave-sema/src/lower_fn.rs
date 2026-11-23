@@ -2129,6 +2129,7 @@ fn empty_body() -> &'static TypedBody {
         sites: Vec::new(),
         implicit: Vec::new(),
         for_kinds: Vec::new(),
+        chunk_loops: Vec::new(),
         moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),

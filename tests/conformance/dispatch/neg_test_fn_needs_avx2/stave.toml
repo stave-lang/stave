@@ -1,0 +1,2 @@
+name = "test_fn_needs_avx2"
+kind = "bin"

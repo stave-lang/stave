@@ -326,6 +326,17 @@ impl Program {
         self.decls.get(d.idx())
     }
 
+    /// The declaration of struct field `f` when it is private to a module other than `from`:
+    /// field reads, struct literals, struct patterns, columns, generated test inputs, and fix
+    /// texts all ask this. Enum variant fields have no privacy.
+    pub fn hidden_field(&self, f: DeclId, from: ModuleId) -> Option<Decl> {
+        let fd = self.decl(f).copied()?;
+        (!fd.is_pub()
+            && self.decl(fd.parent).is_some_and(|p| p.kind == DeclKind::Struct)
+            && fd.module != from)
+            .then_some(fd)
+    }
+
     pub fn item(&self, i: ItemId) -> Option<&Item> {
         self.items.get(i.idx())
     }

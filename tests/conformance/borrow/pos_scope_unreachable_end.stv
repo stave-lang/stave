@@ -54,6 +54,18 @@ fn spawn_on_one_path(c: bool) {
     }
 }
 
+// A server loop that opens a `scope` per iteration joins that iteration's threads before the
+// write (the fix E0501 case `thread` names).
+fn server_scope_per_iteration() {
+    let mut x: u64 = 0;
+    loop {
+        scope {
+            spawn { let y = x; }
+        }
+        x = x + 1;
+    }
+}
+
 fn main() -> i32 {
     return 0;
 }

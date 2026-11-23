@@ -1,0 +1,32 @@
+//~ STDOUT run_dispatch_arms_direct.stdout
+// The fix for E0705 case `dispatch`: instead of naming an inner `dispatch fn` as an arm, the
+// dispatch names the inner one's arms directly, in the order they are tried.
+import std.io;
+
+fn wide(xs: &[f32]) -> f32 needs(avx2) {
+    let v = f32x8.load(xs, 0);
+    return v.reduce_add();
+}
+
+fn kf(xs: &[f32]) -> f32 needs(fma) {
+    return xs[0] * 8.0;
+}
+
+fn base(xs: &[f32]) -> f32 {
+    return xs[0] * 8.0;
+}
+
+dispatch fn d(xs: &[f32]) -> f32 {
+    avx2 => wide,
+    fma => kf,
+    _ => base,
+}
+
+fn main() -> i32 {
+    let a: [f32; 8] = [1.0; 8];
+    let f: fn(&[f32]) -> f32 = d;
+    let x = d(&a);
+    let y = f(&a);
+    io.print(f"{x} {y}\n");
+    return 0;
+}

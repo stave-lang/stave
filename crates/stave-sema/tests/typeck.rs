@@ -823,6 +823,52 @@ fn e0219_next_shape_and_e0609_lane_type_say_why() {
     assert_eq!(got.len(), 3, "{got:?}");
 }
 
+/// E0704 case `value` names the missing features no other missing one implies, as for a direct
+/// call: `avx2` (not the baseline's `sse42` or the implied `avx`), and both of two.
+#[test]
+fn e0704_value_names_the_missing_features() {
+    let src = "fn one(f: fn(u32) -> u32 needs(avx2)) -> u32 { return f(1u32); }\n\
+         fn two(f: fn(u32) -> u32 needs(avx2, fma)) -> u32 needs(avx) { return f(1u32); }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<&str> = tc.diagnostics.iter().filter(|d| d.code() == "E0704").map(|d| d.message()).collect();
+    let want = [
+        "a call through a value of type `fn(u32) -> u32 needs(avx2)` needs `avx2`, which the caller does not have",
+        "a call through a value of type `fn(u32) -> u32 needs(avx2, fma)` needs `avx2, fma`, which the caller \
+         does not have",
+    ];
+    assert_eq!(got, want, "{got:?}");
+}
+
+/// E0709 case `test` and E0705 case `dispatch` say what the rule is and how to write the code.
+#[test]
+fn e0709_test_and_e0705_dispatch_texts() {
+    let src = "fn base(x: u32) -> u32 { return x; }\n\
+         dispatch fn inner(x: u32) -> u32 { _ => base, }\n\
+         dispatch fn outer(x: u32) -> u32 { _ => inner, }\n\
+         test fn t() needs(avx2) { }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str, &str)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| (d.code(), d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(
+        got.iter().any(|(c, m, f)| *c == "E0705"
+            && *m == "dispatch arm names `dispatch fn` `main.inner`: an arm target is a fn with a body"
+            && f.starts_with("name the arms of `main.inner` in this dispatch directly")),
+        "{got:?}"
+    );
+    assert!(
+        got.iter().any(|(c, m, f)| *c == "E0709"
+            && *m == "a `test fn` cannot declare `needs`"
+            && f.contains("through a `dispatch` fn whose `_` arm")),
+        "{got:?}"
+    );
+}
+
 /// `TxN.load_first_fault` is reserved (E0208 `reserved`): the fix writes the masked load of the
 /// lanes in bounds with the vector's own mask type, also inside `emulate { }`.
 #[test]
@@ -876,6 +922,26 @@ fn e0201_fn_arms_fixes_name_what_compiles() {
     assert_eq!(has("`let g: fn(u64) -> u64 without(io) = twice;`"), 2, "{got:?}");
     assert!(got.iter().all(|(_, f)| !f.contains(" as fn")), "{got:?}");
     assert_eq!(got.len(), 4, "{got:?}");
+}
+
+/// With a wanted fn type, an arm needing features neither that type nor the enclosing fn has is
+/// E0707, as the same arm converted alone (converting it first compiles no better); inside a fn
+/// with those features the arms convert.
+#[test]
+fn e0707_fn_arm_needing_features_the_wanted_type_lacks() {
+    let src = "fn plain(x: u64) -> u64 without(trap) { return x; }\n\
+         fn wide(x: u64) -> u64 needs(avx2) { return x; }\n\
+         fn pick(k: u32) -> u64 needs(avx2) { let f: fn(u64) -> u64 = match k { 0u32 => plain, _ => wide }; return f(1u64); }\n\
+         fn main() -> i32 {\n\
+         let k = 1u32;\n\
+         let f: fn(u64) -> u64 = match k { 0u32 => plain, _ => wide };\n\
+         let g: fn(u64) -> u64 = if k == 0u32 then wide else plain;\n\
+         return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> = tc.diagnostics.iter().map(|d| (d.code(), d.message())).collect();
+    let e0707 = "`fn(u64) -> u64 needs(avx2)` cannot be used as `fn(u64) -> u64`";
+    assert_eq!(got.iter().filter(|(c, m)| *c == "E0707" && m.contains(e0707)).count(), 2, "{got:?}");
+    assert_eq!(got.len(), 2, "{got:?}");
 }
 
 /// E0201 offers plain `as` only where the cast table admits it; otherwise the fix names the form

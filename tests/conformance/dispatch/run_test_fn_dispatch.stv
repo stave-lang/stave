@@ -1,0 +1,37 @@
+//~ STDOUT run_test_fn_dispatch.stdout
+// The fix for E0709 on a `test fn`: the test reaches the feature code through a dispatch whose
+// `_` arm skips it, so it runs on any CPU (here `main` runs the same check).
+import std.debug;
+import std.io;
+
+fn wide_sum(xs: &[f32]) -> Option<f32> needs(avx2) {
+    return Option.Some(f32x8.load(xs, 0).reduce_add());
+}
+
+fn no_sum(xs: &[f32]) -> Option<f32> {
+    return Option.None;
+}
+
+dispatch fn try_wide_sum(xs: &[f32]) -> Option<f32> {
+    avx2 => wide_sum,
+    _ => no_sum,
+}
+
+fn sum_ok() -> bool {
+    let a: [f32; 8] = [1.0; 8];
+    return match try_wide_sum(&a) {
+        Option.Some(s) => s == 8.0,
+        Option.None => true,
+    };
+}
+
+test fn wide() {
+    debug.assert(sum_ok(), "sum");
+}
+
+fn main() -> i32 {
+    if sum_ok() {
+        io.print("ok\n");
+    }
+    return 0;
+}

@@ -1,0 +1,36 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// A signature naming a vector wider than the fn's features hold is E0702, and that is the fn's
+// one report: the drop of such a param (whether it runs, or the param is moved out, forgotten,
+// or passed on by `?`) and its moves into generics are no second E0704 for the same features.
+import std.mem;
+import std.vec;
+
+fn dropped(a: vec.Vec<Option<f32x8>>) -> usize { //~ ERROR E0702
+    return a.len();
+}
+
+fn forgotten(a: vec.Vec<Option<f32x8>>) -> usize { //~ ERROR E0702
+    let n = a.len();
+    mem.forget(a);
+    return n;
+}
+
+fn moved_out(a: vec.Vec<Option<f32x8>>) //~ ERROR E0702
+    -> vec.Vec<Option<f32x8>> { //~ ERROR E0702
+    return a;
+}
+
+fn passed_on(a: Result<u32, vec.Vec<Option<f32x8>>>) //~ ERROR E0702
+    -> Result<u32, vec.Vec<Option<f32x8>>> { //~ ERROR E0702
+    let x = a?;
+    return Result.Ok(x + 1);
+}
+
+fn cleared(a: &mut vec.Vec<Option<f32x8>>) { //~ ERROR E0702
+    a.clear();
+}
+
+fn main() -> i32 {
+    return 0;
+}
