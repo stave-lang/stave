@@ -139,15 +139,9 @@ fn is_shift(op: u8) -> bool {
 }
 
 impl<'a> Ck<'a> {
-    /// The declaration of struct field `f` when it is private to a module other than the one being
-    /// checked: field reads, struct literals, struct patterns, and columns all ask this. Enum
-    /// variant fields have no privacy.
+    /// [`crate::Program::hidden_field`] from the module being checked.
     pub(crate) fn hidden_field(&self, f: DeclId) -> Option<crate::decls::Decl> {
-        let fd = self.prog.decl(f).copied()?;
-        (!fd.is_pub()
-            && self.prog.decl(fd.parent).is_some_and(|p| p.kind == DeclKind::Struct)
-            && fd.module != self.icx.res_module())
-        .then_some(fd)
+        self.prog.hidden_field(f, self.icx.res_module())
     }
 
     /// Types expression node `n` with context type `hint` and records the type on `n`.
@@ -4273,6 +4267,11 @@ impl<'a> Ck<'a> {
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         // `for i: T in a..b`: the binding type is the context of the range's literals
         let bt_pre = bind_ty.map(|b| self.lower_ty(b, false));
+        // the annotation's type is the binding's, also for a `_` pattern, which binds no local:
+        // the borrow checker reads it here
+        if let (Some(n), Some(t)) = (bind_ty, bt_pre) {
+            self.set(n, Ty::T(t));
+        }
         let it_hint = match bt_pre {
             Some(b) if !matches!(self.tys.kind(b), TypeKind::Vector { .. } | TypeKind::Ref { .. }) => {
                 Some(self.tys.intern(TypeKind::Range { elem: b, inclusive: false }))
@@ -4289,6 +4288,9 @@ impl<'a> Ck<'a> {
             };
             matches!(self.tys.kind(v), TypeKind::Vector { .. })
         });
+        if chunk {
+            self.chunk_loops.push(f);
+        }
         {
             let text = icx.node_text(iter).to_string();
             let at = icx.node_span(iter);
@@ -4396,13 +4398,13 @@ impl<'a> Ck<'a> {
                     self.mismatch(iter, Ty::T(it), want, None);
                 }
                 if let Some(tc) = tail {
-                    self.tail_clause(tc, b, ids::ERROR, Lanes::Fixed(1));
+                    self.element_loop_tail(tc);
                 }
             }
             b
         } else {
             if let Some(tc) = tail {
-                self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
+                self.element_loop_tail(tc);
             }
             self.element_type(f, iter, it)
         };
@@ -4540,6 +4542,14 @@ impl<'a> Ck<'a> {
         let genv = self.genv();
         let from = self.package();
         matches!(self.w.lookup_method(&mut self.tys, base, name, genv, from), Lookup::Found { .. })
+    }
+
+    /// A tail clause on a loop that is not a chunk loop: E0601 `element-loop` (an element loop
+    /// has no elements left over). Its body is still typed, with its bindings unknown.
+    fn element_loop_tail(&mut self, tc: u32) {
+        let d = mk("E0601", Some("element-loop"), &[], self.icx.node_span(tc), &[]);
+        self.report(d);
+        self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
     }
 
     fn tail_clause(&mut self, tc: u32, bind: TypeId, lane: TypeId, n: Lanes) {

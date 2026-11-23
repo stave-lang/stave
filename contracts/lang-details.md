@@ -339,7 +339,8 @@ No syntax marks such a type.
 
 ## §3 Locks and completion waits
 
-The rank rule (LANG.md §3, E1405) is checked at every drop of the drop schedule ("Drops"), not
+Locks are ranked so that no lock-order cycle can form: safe code cannot deadlock on locks and
+joins. The rank rule (LANG.md §3, E1405) is checked at every drop of the drop schedule ("Drops"), not
 only at calls: a drop runs the dropped type's drop glue, which may take a lock. Two sets of
 guards are held there. The guards of the other values alive at that point; and the guards
 inside the dropped value itself, each until the glue reaches it (case `own`): `(L, guard)`
@@ -424,6 +425,21 @@ resolved `next`), never the instance type. The list is closed: a type not listed
 | an array or `[T]` place | E0219: write `&a` / `&mut a` | E0219 |
 | a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
 | any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
+
+The source is evaluated once, at the head, and the loop holds that value to its end, the tail
+clause included: a reference source is a loan of its referent for the whole loop (`&mut` when the
+loop writes through it: `&mut` elements or chunks; else `&`), whatever the body then assigns to
+the place it was read from (`s = &b;` in the body is legal; writing, freeing, or `&mut`-borrowing
+the old referent while the loop runs is E0501, also through `s` before it is reassigned). The
+checker reads that one value, as the code does.
+
+Chunk loop or element loop is decided once, by the type checker, on the definition, and stored
+with the loop: a chunk loop is a `for` whose annotation, as written, is a vector type or a
+reference to one. A generic `T` or `&T` annotation makes an element loop in every instance, a
+vector `T` included. A tail clause belongs to a chunk loop only (on any other loop: E0601
+`element-loop`). `tail scalar` runs its body once per element left over; each pass is an
+iteration for the borrow rules (a borrow made in one pass and used in the next is live in
+between).
 
 An iterator type is a struct, enum, or generic parameter whose `next` (method lookup, for `T`
 its bounds) is exactly `fn next(&mut self) -> Option<X>`: the loop passes the source and nothing

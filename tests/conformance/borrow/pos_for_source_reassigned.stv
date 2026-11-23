@@ -1,0 +1,48 @@
+// The source of a `for` is read once, at the head: reassigning the place it was read from in the
+// body is legal and does not change what the loop visits (the tail included).
+import std.io;
+
+fn sum(a: &[u32], b: &[u32]) -> u32 {
+    let mut s: &[u32] = a;
+    let mut k: u32 = 0;
+    for x in s {
+        k = k + *x;
+        s = b;
+    }
+    return k + s[0];
+}
+
+fn chunk_sum(a: &[u32], b: &[u32]) -> u32 {
+    let mut s: &[u32] = a;
+    let mut k: u32 = 0;
+    for c: u32x4 in s {
+        k = k + c.reduce_add_wrap();
+        s = b;
+    } tail scalar (x) {
+        k = k + x;
+        s = b;
+    }
+    return k;
+}
+
+fn fill(a: &mut [u32], b: &mut [u32]) {
+    let mut s: &mut [u32] = a;
+    for x in s {
+        *x = 7;
+        s = &mut *b;
+    }
+}
+
+fn main() -> i32 {
+    let a: [u32; 6] = [1, 2, 3, 4, 5, 6];
+    let b: [u32; 6] = [100, 200, 300, 400, 500, 600];
+    let k = sum(&a, &b);
+    let c = chunk_sum(&a, &b);
+    let mut x: [u32; 3] = [0, 0, 0];
+    let mut y: [u32; 3] = [0, 0, 0];
+    fill(&mut x, &mut y);
+    let f = x[0] + x[1] + x[2];
+    let g = y[0] + y[1] + y[2];
+    io.print(f"{k} {c} {f} {g}\n");
+    return 0;
+}
