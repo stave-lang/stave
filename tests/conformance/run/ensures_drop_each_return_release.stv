@@ -1,0 +1,41 @@
+//~ ARGS --release
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at ensures_drop_each_return_release.stv:15:20 in main.Z.drop"
+// An `ensures` clause is code at each return: the temporary it makes is dropped at the return
+// taken, whichever it is. `Z.drop` traps (a clause may not print), so the trap shows the drop
+// ran; without it the program exits with the value returned.
+struct Z {
+    pub id: u32,
+}
+
+impl Drop for Z {
+    fn drop(&mut self) {
+        let a = [0u32];
+        let i = self.id as usize;
+        self.id = a[i];
+    }
+}
+
+impl Z {
+    fn n(&self) -> u32 {
+        return self.id;
+    }
+}
+
+fn mz(i: u32) -> Z {
+    return Z.{ id: i };
+}
+
+fn three(i: u32) -> u32 ensures(result == mz(i + 2).n() - 2) {
+    if i == 0 {
+        return 0;
+    }
+    if i == 1 {
+        return 1;
+    }
+    return i;
+}
+
+fn main() -> i32 {
+    return three(1) as% i32;
+}

@@ -2064,11 +2064,32 @@ impl<'a> Ck<'a> {
         self.static_rules(n, ty, tspan);
     }
 
-    /// The rules of a `static` item: an immutable one is shared by every thread, so its type
-    /// must be Sync (E0417); `static mut` belongs to the built-in packages only (E0809).
+    /// The rules of a `const` or `static` item. A const is a new copy of its value at each use,
+    /// so its type has no drop glue (E0413 case `drop`: a destructor would run at each use, on
+    /// a value no check sees as an owner). An immutable static is shared by every thread, so
+    /// its type must be Sync (E0417); `static mut` belongs to the built-in packages only (E0809).
     fn static_rules(&mut self, n: u32, ty: TypeId, tspan: Option<Span>) {
         let icx = self.icx;
         let Some(decl) = self.prog.decl(self.decl).copied() else { return };
+        if decl.kind == DeclKind::Const {
+            if ty != ids::ERROR
+                && !self.tys.has_error(ty)
+                && !crate::kinds::is_view_concrete(self.prog, &self.tys, ty)
+                && crate::mono::needs_drop(&self.w, &mut self.tys, ty, &[], &mut FxHashMap::default())
+            {
+                let name = self.prog.strings.get(decl.name).to_string();
+                let tn = self.show(ty);
+                let d = mk(
+                    "E0413",
+                    Some("drop"),
+                    &[("name", &name), ("type", &tn)],
+                    tspan.unwrap_or(decl.name_span),
+                    &[],
+                );
+                self.report(d);
+            }
+            return;
+        }
         if decl.kind != DeclKind::Static {
             return;
         }

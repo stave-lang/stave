@@ -1,0 +1,58 @@
+//~ CHECK-ONLY
+// E0413 case `drop`: a `const` is a new copy of its value at each use, so its type has no drop
+// glue. An `impl Drop` anywhere inside the type counts: the type itself, an `Option`, an array,
+// a tuple, a field, an enum whose payload has one. A const is rejected at its declaration,
+// used or not. A type without drop glue is fine.
+import std.io;
+
+struct Q {
+    pub n: u32,
+}
+
+impl Drop for Q {
+    fn drop(&mut self) {
+        io.print("drop\n");
+    }
+}
+
+struct W {
+    pub q: Q,
+    pub k: u32,
+}
+
+enum E {
+    A,
+    B(Q),
+}
+
+struct P {
+    pub n: u32,
+}
+
+const K: Q = Q.{ n: 1 }; //~ ERROR E0413
+const O: Option<Q> = Option.None; //~ ERROR E0413
+const A: [Q; 2] = [Q.{ n: 1 }, Q.{ n: 2 }]; //~ ERROR E0413
+const T: (u32, Q) = (1, Q.{ n: 3 }); //~ ERROR E0413
+const F: W = W.{ q: Q.{ n: 4 }, k: 5 }; //~ ERROR E0413
+const V: E = E.A; //~ ERROR E0413
+const UNUSED: Q = Q.{ n: 6 }; //~ ERROR E0413
+const PLAIN: P = P.{ n: 7 };
+const PLAINS: [P; 2] = [P.{ n: 1 }, P.{ n: 2 }];
+
+fn main() -> i32 {
+    let a = K.n;
+    let b = PLAIN.n + PLAINS[1].n;
+    io.print(f"{a} {b}\n");
+    match O {
+        Option.Some(q) => {
+            let n = q.n;
+            io.print(f"{n}\n");
+        }
+        Option.None => {}
+    }
+    let _ = A;
+    let _ = T;
+    let _ = F.k;
+    let _ = V;
+    return 0;
+}

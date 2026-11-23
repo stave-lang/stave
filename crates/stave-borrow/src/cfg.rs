@@ -46,7 +46,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::Span;
-use stave_sema::drops::{Owner, Point, Row, Schedule};
+use stave_sema::drops::{Made, Owner, Point, Row, Schedule};
 use stave_sema::itemcx::ItemCx;
 use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, World};
@@ -269,12 +269,18 @@ pub struct Local {
     pub node: u32,
     /// What ends a temporary (`None`: no statement ends it, or no temporary).
     pub end: Option<TempEnd>,
-    /// A temporary: the innermost statement open when it was made ([`stave_sema::temps`]), its
-    /// owner key in the drop schedule.
+    /// A temporary: the innermost statement open when it was made ([`stave_sema::temps`]).
     pub stmt: u32,
+    /// A temporary: the value it holds (`None`: the value of expression `node`). With `stmt`
+    /// its owner key in the drop schedule, the key the lowering names for the same value
+    /// ([`Builder::owner_of`]).
+    pub made: Option<Made>,
     /// The local standing for the storage of an immutable `static` (never moved from). A
     /// `static mut` has a local of its own too, without this mark ([`Builder::path_val`]).
     pub static_root: bool,
+    /// The local standing for the storage of a `static` or `static mut`: a temporary that is
+    /// a place an assignment may write ([`Builder::assign_root`]).
+    pub static_item: bool,
     /// The environment of a closure literal with captures (the captured places' addresses): a
     /// slot of the frame of the body that evaluates the literal, which the fn value points to.
     /// It lives as long as that frame, is never written or moved, and is borrowed by every fn
@@ -358,6 +364,9 @@ pub struct Body {
     pub operand_moves: Vec<(u32, Span)>,
     /// E0505: what a match guard (or a closure written in one) does besides reading.
     pub guard_effects: Vec<(Span, GuardEffect)>,
+    /// E0503 case `temporary`: assignments whose target is not rooted in a local, a static, or
+    /// a dereference ([`Builder::assign_root`]): the target's span and text.
+    pub temp_writes: Vec<(Span, String)>,
     pub ret: RetCheck,
     /// The `from` clauses of the fn's params (a nested body: none).
     pub declared: Vec<Store>,
@@ -563,6 +572,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
             guard_effects: Vec::new(),
+            temp_writes: Vec::new(),
             operand_moves: Vec::new(),
             ret: RetCheck::None,
             declared: Vec::new(),
@@ -695,10 +705,19 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
-    /// The owner key of local `l` in the drop schedule.
+    /// The owner key of local `l` in the drop schedule: a temporary is named by its statement
+    /// and the value it holds.
     fn owner_of(&self, l: LocalId) -> Owner {
         let loc = &self.body.locals[l as usize];
-        if loc.temp { Owner::Temp(loc.stmt) } else { Owner::Local(loc.node) }
+        if !loc.temp {
+            return Owner::Local(loc.node);
+        }
+        let made = match loc.made {
+            None if loc.node != u32::MAX => stave_sema::drops::value_key(&self.icx, loc.node),
+            None => Made::tok(u32::MAX),
+            Some(m) => m,
+        };
+        Owner::Temp(loc.stmt, made)
     }
 
     /// The drop of the value in `p` at `point`: the statement every check reads, and its row in
@@ -761,9 +780,11 @@ impl<'a, 'b> Builder<'a, 'b> {
             temp: temp.is_some(),
             end: temp.and_then(|n| self.tb.stmt_ends.bound(n)).map(TempEnd::Stmt),
             stmt: self.stmts.last().copied().unwrap_or(stave_sema::temps::NONE),
+            made: None,
             guard: false,
             node: u32::MAX,
             static_root: false,
+            static_item: false,
             env: false,
         });
         let l = (self.body.locals.len() - 1) as LocalId;
@@ -1572,6 +1593,10 @@ impl<'a, 'b> Builder<'a, 'b> {
             let (lhs, op, rhs) = (kids[0], kids[1], kids[2]);
             let compound = !icx.is(icx.a(op), Term::Eq);
             let lv = self.expr(lhs);
+            if !self.assign_root(&lv) {
+                let span = self.span(lhs);
+                self.body.temp_writes.push((span, icx.node_text(lhs).to_string()));
+            }
             if self.in_guard > 0
                 && let V::P(p) = &lv
                 && !self.guard_reported(p)
@@ -1633,6 +1658,21 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
         let Some(&e) = kids.first() else { return };
         let _ = self.expr(e);
+    }
+
+    /// Whether the target `v` of an assignment (`=` or a compound `op=`) is a place rooted in a
+    /// local, a static, or a dereference. Any other target is a part of a value no binding
+    /// holds (a call result, a literal, a const, a value `if`): the statement drops it, so
+    /// the write would be lost.
+    fn assign_root(&self, v: &V) -> bool {
+        match v {
+            V::P(p) => {
+                let l = &self.body.locals[p.local as usize];
+                p.has_deref() || !l.temp || l.static_item
+            }
+            V::Never => true,
+            V::Const => false,
+        }
     }
 
     fn if_stmt(&mut self, n: u32) {
@@ -1931,6 +1971,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                         // dropped where the body ends or is left
                         let et = ep.ty;
                         let it = self.temp(et, iter);
+                        self.body.locals[it as usize].made = Some(Made::tok(icx.a(f)));
                         let span = self.span(iter);
                         let op = Operand { kind: OpKind::Copy, place: ep, span, node: iter, site: u32::MAX };
                         self.push(
@@ -1947,6 +1988,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             (Src::Iter(..), Some(ip)) => {
                 // the item `next` returned is a value of its own, taken out of its `Option`
                 let it = self.temp(ip.ty, iter);
+                // an iteration's item is named by the `for` token, the source by its expression
+                self.body.locals[it as usize].made = Some(Made::tok(icx.a(f)));
                 let span = self.span(iter);
                 let op = Operand { kind: OpKind::Copy, place: ip.clone(), span, node: iter, site: u32::MAX };
                 self.push(
@@ -3219,6 +3262,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let t = self.new_local(ty, false, span, String::new(), Some(u32::MAX));
         self.past_stmt(t);
         self.body.locals[t as usize].static_root = !decl.flags.has(stave_sema::DeclFlags::MUT);
+        self.body.locals[t as usize].static_item = true;
         let c = Operand {
             kind: OpKind::Const,
             place: Place::local(0, TypeId::NONE),
@@ -3308,10 +3352,19 @@ impl<'a, 'b> Builder<'a, 'b> {
             Cur::Val(self.expr(prim))
         };
         let mut p = prim_end + 1;
+        // the value of the chain so far in the drop schedule: the head's (through parentheses),
+        // then the chain up to the last token of the last step
+        let head_key = stave_sema::drops::value_key(&icx, prim);
+        let mut step_from: Option<usize> = None;
         for _ in 0..10_000_000 {
+            if let Some(from) = step_from.take() {
+                self.name_step_temps(from, n, p - 1);
+            }
             if !self.open() {
                 return V::Never;
             }
+            let rk = if p == prim_end + 1 { head_key } else { Made::step(&icx, n, p - 1) };
+            step_from = Some(self.body.locals.len());
             let t = icx.tk(p);
             if t == Term::Dot as u8 && icx.is(p + 1, Term::Ident) {
                 let seg = p + 1;
@@ -3336,7 +3389,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     p = q;
                     continue;
                 }
-                let recv = self.cur_value(cur, n);
+                let recv = self.cur_value(cur, n, rk);
                 if matches!(recv, V::Never) {
                     return V::Never;
                 }
@@ -3350,7 +3403,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                         a.map(|a| icx.kids_vec(a)).unwrap_or_default()
                     };
                     let last = close == pend;
-                    cur = Cur::Val(self.method_call(n, recv, seg, close, &args, last));
+                    cur = Cur::Val(self.method_call(n, recv, (seg, close, rk), &args, last));
                     p = close + 1;
                 } else {
                     cur = Cur::Val(self.field_step(recv, seg, n));
@@ -3359,7 +3412,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 continue;
             }
             if t == Term::Dot as u8 && icx.is(p + 1, Term::IntLit) {
-                let recv = self.cur_value(cur, n);
+                let recv = self.cur_value(cur, n, rk);
                 cur = Cur::Val(self.field_step(recv, p + 1, n));
                 p += 2;
                 continue;
@@ -3389,7 +3442,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     a.map(|a| icx.kids_vec(a)).unwrap_or_default()
                 };
                 let last = close == pend;
-                cur = Cur::Val(self.call(n, cur, p, &args, last));
+                cur = Cur::Val(self.call(n, cur, p, &args, last, rk));
                 p = close + 1;
                 continue;
             }
@@ -3397,19 +3450,22 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let close = icx.close(p);
                 let ie = kids.get(kid).copied();
                 kid += 1;
-                let base = self.cur_value(cur, n);
+                let base = self.cur_value(cur, n, rk);
                 cur = Cur::Val(self.index_step(base, ie, p, n));
                 p = close + 1;
                 continue;
             }
             if t == Term::Question as u8 {
-                let base = self.cur_value(cur, n);
+                let base = self.cur_value(cur, n, rk);
                 let last = p == pend;
                 cur = Cur::Val(self.try_step(n, base, p, last));
                 p += 1;
                 continue;
             }
             break;
+        }
+        if let Some(from) = step_from {
+            self.name_step_temps(from, n, p - 1);
         }
         match cur {
             Cur::Val(v) => v,
@@ -3418,13 +3474,33 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
-    /// The value of the chain of node `n` so far, used by its next step.
-    fn cur_value(&mut self, cur: Cur, n: u32) -> V {
+    /// The temporaries from local `from` on that a step of the chain of node `n` made for its
+    /// own values hold the chain up to the step's last token `end` in the drop schedule, as the
+    /// lowering names the value a next step takes.
+    fn name_step_temps(&mut self, from: usize, n: u32, end: u32) {
+        let key = Made::step(&self.icx, n, end);
+        for l in self.body.locals.get_mut(from..).unwrap_or(&mut []) {
+            if l.temp && l.node == n && l.made.is_none() {
+                l.made = Some(key);
+            }
+        }
+    }
+
+    /// The value of the chain of node `n` so far, used by its next step; `rk`: its value in the
+    /// drop schedule.
+    fn cur_value(&mut self, cur: Cur, n: u32, rk: Made) -> V {
         match cur {
             Cur::Val(v) => v,
             Cur::Path(r, tok) => {
                 let at = self.icx.chain_head(n).map_or(tok, |prim| self.icx.primary_end(prim));
-                self.path_val(r, tok, n, at)
+                let from = self.body.locals.len();
+                let v = self.path_val(r, tok, n, at);
+                if let V::P(p) = &v
+                    && p.local as usize >= from
+                {
+                    self.body.locals[p.local as usize].made = Some(rk);
+                }
+                v
             }
             Cur::TypeRel => V::Const,
         }
@@ -3565,7 +3641,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         out
     }
 
-    fn call(&mut self, n: u32, cur: Cur, paren: u32, args: &[u32], last: bool) -> V {
+    fn call(&mut self, n: u32, cur: Cur, paren: u32, args: &[u32], last: bool, rk: Made) -> V {
         let icx = self.icx;
         let tgt = self.tb.target(paren).cloned();
         let span = icx.range_span(icx.a(n), icx.close(paren));
@@ -3590,7 +3666,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.direct_call(method, &ga, Some(self_ty), args, last, n, (span, paren))
             }
             Some(Target::FnValue { .. }) => {
-                let fv = self.cur_value(cur, n);
+                let fv = self.cur_value(cur, n, rk);
                 let Some(fp) = self.place_of(fv, n) else { return V::Never };
                 let ft = fp.ty;
                 let fop = self.op_of_place(fp, span, n, false);
@@ -3731,7 +3807,15 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
-    fn method_call(&mut self, n: u32, recv: V, seg: u32, close: u32, args: &[u32], last: bool) -> V {
+    /// `rk`: the receiver's value in the drop schedule.
+    fn method_call(
+        &mut self,
+        n: u32,
+        recv: V,
+        (seg, close, rk): (u32, u32, Made),
+        args: &[u32],
+        last: bool,
+    ) -> V {
         let icx = self.icx;
         let rspan = icx.range_span(icx.a(n), seg.saturating_sub(2));
         let span = icx.range_span(icx.a(n), close);
@@ -3752,7 +3836,16 @@ impl<'a, 'b> Builder<'a, 'b> {
             _ => (Adjust::default(), None, node_ty),
         };
         let Some((rop, act)) = self.receiver(recv, adj, n, rspan) else { return V::Never };
-        let rop = if args.is_empty() { rop } else { self.hold(rop, span) };
+        let rop = if args.is_empty() {
+            rop
+        } else {
+            let from = self.body.locals.len();
+            let h = self.hold(rop, span);
+            if h.place.local as usize >= from {
+                self.body.locals[h.place.local as usize].made = Some(rk);
+            }
+            h
+        };
         let Some(mut ops) = self.args(args, span) else { return V::Never };
         ops.insert(0, rop);
         if let Some((t, res, a)) = act {
@@ -3776,6 +3869,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             // the code runs: the temporary holds what either operand borrows.
             let u = self.temp(ret, n);
             self.body.locals[u as usize].span = span;
+            // named by the method's name: the picked value is the call's
+            self.body.locals[u as usize].made = Some(Made::tok(seg));
             let op = Operand { kind: OpKind::Copy, place: rp.clone(), span, node: n, site: u32::MAX };
             self.push(
                 StmtKind::Assign { dest: Place::local(u, ret), rv: Rvalue::Use(op), init: true },
