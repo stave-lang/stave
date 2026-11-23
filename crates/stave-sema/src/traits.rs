@@ -1729,6 +1729,9 @@ pub fn builtin_op_impl<I: Interner + ?Sized>(cx: &I, name: &str, t: TypeId) -> b
     }
 }
 
+/// Impls seen so far, each with its position among the impls of its trait.
+type ByHead = Vec<(u32, DeclId)>;
+
 /// Impl conformance and marker checks over every impl (sequential, decl order).
 pub(crate) fn check_impls(
     prog: &Program,
@@ -1744,8 +1747,8 @@ pub(crate) fn check_impls(
     // the impls seen so far, per trait and head (`None`: no head), each with its position: two
     // impls with different heads never overlap, so each impl meets only those with its head or
     // none (all of them for one without a head)
-    let mut seen: FxHashMap<(DeclId, Option<TypeHead>), Vec<(u32, DeclId)>> = FxHashMap::default();
-    let mut seen_all: FxHashMap<DeclId, Vec<(u32, DeclId)>> = FxHashMap::default();
+    let mut seen: FxHashMap<(DeclId, Option<TypeHead>), ByHead> = FxHashMap::default();
+    let mut seen_all: FxHashMap<DeclId, ByHead> = FxHashMap::default();
     for d in impls {
         let Some(imp) = sigs.impl_def(d) else { continue };
         let Some(decl) = prog.decl(d) else { continue };
