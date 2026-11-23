@@ -178,6 +178,21 @@ impl Known {
     }
 }
 
+/// Whether the known item is a panic report entry, which runs on the alternate signal stack
+/// ([`crate::Func::alt_stack`]): every trap and every std panic enters the report through one of
+/// these. Any other item runs on the stack it is called on.
+pub fn reports_on_alt_stack(k: Known) -> bool {
+    matches!(
+        k,
+        Known::Trap
+            | Known::TrapMsg
+            | Known::TrapErr
+            | Known::Abort
+            | Known::RequiresFailed
+            | Known::EnsuresFailed
+    )
+}
+
 /// Whether `f` is the fn a failed `requires` check calls.
 pub fn is_requires_failed(f: &crate::Func) -> bool {
     f.known == Some(Known::RequiresFailed)

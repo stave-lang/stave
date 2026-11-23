@@ -24,6 +24,13 @@ pub const RESERVE_TABLE: &str = "__stave_reserve_table";
 /// pass the guard.
 pub const PROBE_STRIDE: u64 = 61440;
 
+/// Byte offset of `alt_top` in a thread's block (`runtime.state.Block`, contracts/intrinsics.md
+/// "Thread pointer"): the top of the thread's alternate signal stack.
+pub const BLOCK_ALT_TOP: u32 = 160;
+
+/// Byte offset of `alt_size` in a thread's block: the size of that stack, 0 while it has none.
+pub const BLOCK_ALT_SIZE: u32 = 168;
+
 /// `__stave_reserve_table`: one `u64` per slot, the bytes the entry of the slot's function
 /// probes below its frame. Never empty, so the symbol has an address even with no slot.
 pub fn reserve_table(slots: &[u64]) -> DataObj {

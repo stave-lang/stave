@@ -1090,7 +1090,39 @@ impl<'a, 'm> Gen<'a, 'm> {
         Ok((self.a.finish()?, calls_trap))
     }
 
+    /// The entry of a fn on the alternate stack ([`stave_ir::Func::alt_stack`]), before anything
+    /// touches the stack: unless `sp` is on the thread's alternate signal stack already, or the
+    /// thread has none yet, `sp` moves to its top, so the function's frame and everything it
+    /// calls lie there and the stack it was called on gets nothing. Reads the thread's block
+    /// (`tpidr_el0`, then [`stave_obj::stub::BLOCK_ALT_TOP`] and
+    /// [`stave_obj::stub::BLOCK_ALT_SIZE`]); `x15`, `x16`, `x17`.
+    fn alt_entry(&mut self) -> R<()> {
+        let params: Vec<Value> = self.b.params(stave_ir::Block(0)).to_vec();
+        let mut args = Vec::new();
+        abi::classify(params.iter().map(|&p| self.vty(p)), &mut args);
+        if args.iter().any(|a| matches!(a.loc, Loc::Stack(_))) {
+            // its entry leaves the stack its caller put them on
+            return Err(super::unsupported("stack arguments of a fn that runs on the alternate stack"));
+        }
+        let skip = self.a.new_label();
+        self.a.word(0xD53B_D050); // mrs x16, tpidr_el0
+        self.a.ldr(MemSize::X, S17, Addr::Off(S16, i64::from(stave_obj::stub::BLOCK_ALT_SIZE)))?;
+        self.a.cbz(X, S17, skip)?;
+        self.a.ldr(MemSize::X, S16, Addr::Off(S16, i64::from(stave_obj::stub::BLOCK_ALT_TOP)))?;
+        // top - sp below the size: on the alternate stack
+        self.a.mov(X, S15, SP)?;
+        self.a.sub(X, S15, S16, S15)?;
+        self.a.cmp(X, S15, S17)?;
+        self.a.b_cond(Cond::Lo, skip)?;
+        self.a.mov(X, SP, S16)?;
+        self.a.bind(skip)?;
+        Ok(())
+    }
+
     fn prologue(&mut self) -> R<()> {
+        if self.f.alt_stack {
+            self.alt_entry()?;
+        }
         self.a.stp(X, Reg::FP, Reg::LR, Addr::Pre(SP, -16))?;
         self.a.mov(X, Reg::FP, SP)?;
         let frame = i64::from(self.an.frame);

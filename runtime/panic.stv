@@ -19,7 +19,12 @@
 // - a false `requires` clause calls `requires_failed(clause)`, located at the user site, which
 //   user code stores before every call that can reach one; a false `ensures` clause calls
 //   `ensures_failed(site, clause)`, located at the return;
-// - the compiler's C-ABI stub `__stave_signal(sig, info, uctx)` calls `on_signal`.
+// - the compiler's C-ABI stub `__stave_signal(sig, info, uctx)` calls `on_signal`;
+// - `trap`, `trap_msg`, `trap_err`, `requires_failed`, `ensures_failed` and `abort` run on the
+//   thread's alternate signal stack: the compiler's entry of each moves there first unless it is
+//   there already (the block's `alt_top`/`alt_size`, contracts/intrinsics.md "Alternate stack"),
+//   so a report needs no stack where it was raised, and one raised during a report or in the
+//   signal handler stays below it.
 //
 // Site table (read-only data, address from `site_table()`; contracts/intrinsics.md is the source
 // of truth for both layouts), all little-endian:
@@ -382,6 +387,10 @@ fn install() -> bool {
         (*st).altstack_size = size;
     }
     if !unsafe("base..base+size is the fresh mapping above, used for nothing else and never unmapped; size is config.ALTSTACK rounded up") set_altstack(base, size) { return false; }
+    unsafe("st is runtime.state.STATE; main_block is the calling thread's, main's, and no other thread exists yet") {
+        (*st).main_block.alt_top = base + size;
+        (*st).main_block.alt_size = size;
+    }
     let none = 0usize as *mut u64;
     let h = unsafe("intrinsic: address of the compiler-emitted __stave_signal stub") signal_handler_addr() as u64;
     // The restorer is never used: the handler either exits or re-raises with the default
@@ -395,7 +404,7 @@ fn install() -> bool {
 
 // The calling thread's alternate signal stack (per thread; runtime.thread calls it for each
 // new thread). Returns false if the call failed.
-pub unsafe("base..base+size is used only as the calling thread's signal stack and stays mapped while it runs; size holds the kernel's signal frame and the handler's stack use (on_signal and the panic report, which no stack bound counts; config.ALTSTACK suffices), since nothing guards the region's bottom: a thread's altstack lies directly above its stack")
+pub unsafe("base..base+size is used only as the calling thread's signal stack and stays mapped while it runs; size holds the kernel's signal frame and the handler's stack use (on_signal and the panic report, which run there; the compiler computes the report's depth and the run suite keeps it within half of config.ALTSTACK), since nothing guards the region's bottom: a thread's altstack lies directly above its stack")
 fn set_altstack(base: usize, size: usize) -> bool {
     let ss: [u64; 3] = [base as u64, 0, size as u64];
     let none = 0usize as *mut u64;

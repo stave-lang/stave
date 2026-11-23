@@ -303,6 +303,31 @@ pub(crate) struct Cg<'a, 'm> {
     reserve: Option<(SymbolId, i32)>,
 }
 
+/// The entry of a fn on the alternate stack ([`stave_ir::Func::alt_stack`]), before anything
+/// touches the stack: unless `rsp` is on the thread's alternate signal stack already, or the
+/// thread has none yet, `rsp` moves to its top with a copy of the return address, so the
+/// function's frame and everything it calls lie there and the stack it was called on gets
+/// nothing below the call's return address. Reads the thread's block (`fs:[0]`, then
+/// [`stave_obj::stub::BLOCK_ALT_TOP`] and [`stave_obj::stub::BLOCK_ALT_SIZE`]); `S0`, `S1`.
+fn alt_entry(p: &mut Asm) -> Res<()> {
+    let skip = p.new_label();
+    // mov r11, fs:[0] (r11 is S0)
+    p.raw(&[0x64, 0x4C, 0x8B, 0x1C, 0x25, 0, 0, 0, 0]);
+    p.mov_rm(Size::Q, S1, Mem::base(S0, stave_obj::stub::BLOCK_ALT_SIZE as i32))?;
+    p.alu_ri(AluOp::Cmp, Size::Q, S1, 0)?;
+    p.jcc(Cond::E, skip)?;
+    p.mov_rm(Size::Q, S0, Mem::base(S0, stave_obj::stub::BLOCK_ALT_TOP as i32))?;
+    // top - rsp below the size: on the alternate stack
+    p.alu_rr(AluOp::Sub, Size::Q, S0, RSP);
+    p.alu_rr(AluOp::Cmp, Size::Q, S0, S1);
+    p.jcc(Cond::B, skip)?;
+    p.mov_rm(Size::Q, S1, Mem::base(RSP, 0))?;
+    p.alu_rr(AluOp::Add, Size::Q, RSP, S0);
+    p.push(S1);
+    p.bind(skip)?;
+    Ok(())
+}
+
 pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<(FuncCode, StackUse)> {
     let f = cx.m.func(fid).ok_or_else(|| bad("unknown function"))?;
     let b = f.body.as_ref().ok_or_else(|| bad("function has no body"))?;
@@ -2574,6 +2599,10 @@ impl<'a, 'm> Cg<'a, 'm> {
             return Err(bad("body has no entry block"));
         }
         let abi = self.abi_of(&f.params, f.ret)?;
+        if f.alt_stack && abi.args.iter().any(|l| matches!(l, Loc::Stack(_))) {
+            // its entry leaves the stack its caller put them on
+            return Err(unsup("stack arguments of a fn that runs on the alternate stack"));
+        }
         self.ret_abi = abi.ret.clone();
         let params = b.params(stave_ir::Block(0));
         if params.len() != abi.args.len() {
@@ -3402,6 +3431,9 @@ impl<'a, 'm> Cg<'a, 'm> {
         let mut p = Asm::new();
         if let Some(Some((file, line, col))) = self.cx.lines.get(fn_site.0 as usize) {
             p.line(*file, *line, *col);
+        }
+        if self.f.alt_stack {
+            alt_entry(&mut p)?;
         }
         p.push(RBP);
         if self.realign {

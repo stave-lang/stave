@@ -566,14 +566,19 @@ bound for a node that calls C code, for one with a fn-value call but no such edg
 call while some function made into a value has no node; the call in `runtime.thread.run_queued` is
 left out: it runs a queued spawn body at the join only in an image without a stack table, the IR
 interpreter; natively a failed thread creation panics, so no spawn body runs on the joiner's
-stack), or for one on or above a cycle. A node with a trap stub
-adds twice the depth of `runtime.panic.trap`, which holds while nothing `runtime.panic.begin`
-reaches has a trap stub (checked; else no bound). A *member* is a node whose strongly connected
+stack), or for one on or above a cycle. The panic report entries (`runtime.panic.trap` and the
+other `-> never` report fns) run on the thread's alternate signal stack: their entry moves the
+stack pointer there before it touches the stack (contracts/intrinsics.md "Alternate stack"), so
+on a user stack their node weighs 16 bytes (the return address) and has no out-edges, and a node
+with a trap stub adds 16 bytes; the report's own depth there is twice the deepest entry or
+`on_signal`, which holds while nothing `runtime.panic.begin` reaches has a trap stub (checked;
+else no bound for the report or for any trapping stack). A *member* is a node whose strongly connected
 component is a cycle; every member is `trap` (a call-cycle member, or a node of a drop cycle, whose
 set holds its `Vec.drop`'s cycle `trap`). A member's *reserve* is the most its callees off its
 component can use (another member counted as the 16 bytes its call puts down before that member's
-entry runs) and its own trap stub's depth; a function with a member node probes the largest of its
-members' reserves: its entry, after the frame, reads one word at most every 60 KiB from the stack
+entry runs) and its own trap stub's 16 bytes. A function *probes* when one of its member nodes
+calls, off its component, a node that is neither a member nor a report entry, or has a call whose
+targets are not known; it probes the largest of its members' reserves: its entry, after the frame, reads one word at most every 60 KiB from the stack
 pointer down to the reserve below the frame's lowest byte, and that byte; each node of such a function adds the
 reserve as a leaf, which the bound and every reserve above it count (repeated until no reserve
 grows). Main's stack and each thread start function's get the bound plus 4 KiB, rounded up to the
@@ -585,16 +590,21 @@ members) plus 4 KiB; one that reaches an unresolved node gets `[run] stack`. **G
 frames live at once on a thread are the nodes of one path of the bound's graph from its start. On
 a bounded stack that path is at most the bound, so the guard is never reached. On another stack,
 if no member is on the path, the path is one of the acyclic bound, which fits; else let `x` be the
-last member on it: when `x`'s entry ran, it found `frame + reserve` bytes above the guard (each read
-is at most a guard width below a written stack byte or an earlier read, so the first one below
-the stack is in the guard), and
-what is below `x` is off every cycle, so it is at most the reserve. So `StackOverflow` is raised
+last member on it. What is below `x` is off every cycle. If `x`'s function probes, its entry found
+`frame + reserve` bytes above the guard (each read is at most a guard width below a written stack
+byte or an earlier read, so the first one below the stack is in the guard), and what is below is
+at most the reserve. If it does not, all that is below `x` is a report entry, which writes only
+the return address `x`'s call instruction pushes (in `x`'s code) and then runs on the alternate
+stack; `x`'s own frame is paged by its prologue, so its first byte past the stack is in the guard,
+in `x`'s code. So `StackOverflow` is raised
 only in the entry or frame of a member, and every `without(trap)` fn and what it calls run without
 it. **What would break it.** A fn-value call whose real target the call graph misses (a fn-value
 write the flow misses): the bound counts the target it shows, and a bigger frame or a recursion
 behind the real one runs into the guard of a stack the build summary calls bounded. A frame larger
-than the backend reports, and stack use outside frames beyond the 4 KiB margin (signal handlers run
-on the alternate stack). A guard narrower than the probe's stride plus a page. Below a member, an unresolved node counts what is known of it (its frame
+than the backend reports, and stack use outside frames beyond the 4 KiB margin (signal handlers and
+the report run on the alternate stack). A report deeper than its alternate stack, whose bottom no
+guard protects (the run suite keeps it within half of `runtime.config.ALTSTACK`, the other half
+for the kernel's signal frame). A guard narrower than the probe's stride plus a page. Below a member, an unresolved node counts what is known of it (its frame
 and its resolved callees), C code and an unresolved fn-value target count nothing: their frames
 can reach the guard below the member. A function with a member node and an acyclic node below its
 own reserve: the repetition stops after 8 rounds with the reserve it has. A cycle of the bound's

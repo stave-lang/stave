@@ -12,10 +12,15 @@
 //! - each `spawn` body is a root with its own bound (`stack_spawn.stv`);
 //! - a trap in the deepest frame of a bounded chain, on main and on a spawned thread, still
 //!   prints the whole panic report (`run/stack_trap_main`, `borrow/stack_trap_spawn`);
+//! - a `rec fn` whose only calls off its cycle are traps gets no probe; recursing without end
+//!   with small, guard-sized, and larger frames, on main and on a spawned thread, it ends in its
+//!   own `StackOverflow` report; a trap at the deepest level that still fits prints its own
+//!   report (the report runs on the alternate stack), and one level deeper is `StackOverflow`;
+//! - the thread-block offsets the back ends read are the runtime's;
 //! - a drop cycle of a recursive type has no bound;
 //! - every run-suite program, debug and release, maps every fn value it makes to the call graph
-//!   (no stack is unbounded for an unresolved fn-value call), and gets a bound unless it reaches
-//!   a call cycle or a drop cycle.
+//!   (no stack is unbounded for an unresolved fn-value call), gets a bound unless it reaches a
+//!   call cycle or a drop cycle, and has a panic report that fits half the alternate stack.
 //!
 //! A leg that cannot run here (no qemu-aarch64, not Linux) builds only, or fails when
 //! `STAVE_REQUIRE_LEGS` lists it.
@@ -80,6 +85,29 @@ fn run(out: &Output, target: Triple, name: &str, cwd: &Path) -> Option<exec::Ran
     out.image.as_ref().unwrap().write_file(&bin).unwrap();
     let spec = RunSpec { args: &[], runner: how, cwd: Some(cwd), inherit: false };
     Some(exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display())))
+}
+
+/// `runtime.config` constant `name` (a `usize` literal).
+fn config_const(name: &str) -> u64 {
+    let cfg = std::fs::read_to_string(repo().join("runtime/config.stv")).unwrap();
+    let prefix = format!("pub const {name}: usize = ");
+    cfg.lines()
+        .find_map(|l| l.strip_prefix(prefix.as_str()))
+        .and_then(|v| v.trim_end_matches(';').parse().ok())
+        .unwrap_or_else(|| panic!("runtime.config.{name}"))
+}
+
+/// Builds the one-file program `src` as `<tmp>/<name>.stv`.
+fn build_src(tmp: &TempDir, name: &str, src: &str, target: Triple, release: bool) -> Output {
+    let p = tmp.path().join(format!("{name}.stv"));
+    std::fs::write(&p, src).unwrap();
+    build(&p, target, release)
+}
+
+/// The paths of the functions that probe their reserve at entry.
+fn probing(out: &Output) -> Vec<String> {
+    let m = out.module.as_ref().unwrap();
+    out.stack.as_ref().unwrap().probes.iter().map(|&f| m.func(f).unwrap().path.clone()).collect()
 }
 
 fn bytes(d: Depth, what: &str) -> u64 {
@@ -202,13 +230,223 @@ fn a_trap_at_the_bottom_of_the_bound_reports_in_full() {
 /// a written stack byte: the runtime's guard below every stack must be at least that wide.
 #[test]
 fn the_probe_stride_cannot_pass_the_guard() {
-    let cfg = std::fs::read_to_string(repo().join("runtime/config.stv")).unwrap();
-    let guard: u64 = cfg
-        .lines()
-        .find_map(|l| l.strip_prefix("pub const GUARD: usize = "))
-        .and_then(|v| v.trim_end_matches(';').parse().ok())
-        .expect("runtime.config.GUARD");
+    let guard = config_const("GUARD");
     assert!(stave_obj::stub::PROBE_STRIDE + 4096 <= guard, "guard {guard}");
+}
+
+const FIB_ACK: &str = r#"import std.io;
+
+rec fn fib(n: u64) -> u64 {
+    if n < 2u64 {
+        return n;
+    }
+    return fib(n - 1u64) + fib(n - 2u64);
+}
+
+rec fn ack(m: u64, n: u64) -> u64 {
+    if m == 0u64 {
+        return n + 1u64;
+    }
+    if n == 0u64 {
+        return ack(m - 1u64, 1u64);
+    }
+    return ack(m - 1u64, ack(m, n - 1u64));
+}
+
+fn main() {
+    let a = fib(20u64);
+    let b = ack(2u64, 3u64);
+    io.print(f"{a} {b}\n");
+}
+"#;
+
+/// A `rec fn` whose calls off its cycle are only traps: nothing runs below it but its own code and
+/// the report, which runs on the alternate stack, so it gets no probe; `stack_rec`'s `f4`, which
+/// calls a chain off its cycle, does.
+#[test]
+fn only_traps_below_a_cycle_need_no_probe() {
+    let tmp = TempDir::new("stkp").unwrap();
+    for target in targets() {
+        for release in [false, true] {
+            let what = format!("[{target}, release {release}]");
+            let out = build_src(&tmp, "fib_ack", FIB_ACK, target, release);
+            assert_eq!(probing(&out), Vec::<String>::new(), "fib_ack {what}");
+            let out = build(&run_dir().join("stack_rec"), target, release);
+            assert_eq!(probing(&out), vec!["main.f4".to_string()], "stack_rec {what}");
+        }
+    }
+}
+
+/// `down` recursing without end with a frame of `WORDS` words; `MAIN` calls it.
+const DOWN: &str = r#"import std.io;
+
+rec fn down(n: u64) -> u64 {
+    let mut buf: [u64; WORDS] = [0u64; WORDS];
+    let i = (n % WORDSu64) as usize;
+    buf[i] = n;
+    if n == 0u64 {
+        return buf[i];
+    }
+    return down(n - 1u64) +% buf[i];
+}
+
+MAIN"#;
+
+const ON_MAIN: &str = r#"fn main() {
+    let r = DOWN;
+    io.print(f"{r}\n");
+}
+"#;
+
+const ON_SPAWN: &str = r#"fn main() {
+    let mut b: u64 = 0;
+    scope {
+        spawn { b = DOWN; }
+    }
+    io.print(f"{b}\n");
+}
+"#;
+
+/// A `rec fn` recursing without end, with frames of 64 bytes, about the guard (60 KiB), and
+/// larger than it (100 KiB), on main and on a spawned thread: each run ends in the
+/// `StackOverflow` report of the recursing fn, exit 101, never a signal.
+#[test]
+fn unbounded_recursion_reports_stack_overflow() {
+    let tmp = TempDir::new("stko").unwrap();
+    for words in [8u32, 7600, 12800] {
+        for (place, thread, main) in [("main", 0, ON_MAIN), ("spawn", 1, ON_SPAWN)] {
+            let src = DOWN
+                .replace("WORDS", &words.to_string())
+                .replace("MAIN", &main.replace("DOWN", "down(1000000000u64)"));
+            let name = format!("ov_{words}_{place}");
+            let want = format!(":3:8 in main.down (thread {thread})\n");
+            for target in targets() {
+                for release in [false, true] {
+                    let what = format!("{name} [{target}, release {release}]");
+                    let out = build_src(&tmp, &name, &src, target, release);
+                    let Some(got) = run(&out, target, &name, tmp.path()) else { continue };
+                    let err = String::from_utf8_lossy(&got.stderr);
+                    assert_eq!(got.exit, 101, "{what}: {err}");
+                    assert!(
+                        err.starts_with("panic: StackOverflow at ")
+                            && err.ends_with(&want)
+                            && err.lines().count() == 1,
+                        "{what}: {err}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `down` traps Bounds at depth `k`, the first argument.
+const TRAP_AT: &str = r#"import std.io;
+import std.env;
+import std.num;
+
+rec fn down(n: u64, k: u64) -> u64 {
+    let mut buf: [u64; 4] = [0u64; 4];
+    let i = (n % 4u64) as usize;
+    buf[i] = n;
+    if n == k {
+        return buf[i + 4];
+    }
+    return down(n + 1u64, k) +% buf[i];
+}
+
+fn depth() -> u64 {
+    let a = env.arg(1);
+    return match a {
+        Option.Some(s) => match num.parse_u64(s.as_str()) {
+            Option.Some(k) => k,
+            Option.None => 0u64,
+        },
+        Option.None => 0u64,
+    };
+}
+
+MAIN"#;
+
+/// A Bounds trap at depth `k` of a small-frame `rec fn`, on main and on a spawned thread: at the
+/// largest `k` that reports Bounds (bisection), with less than a frame of stack left, the report
+/// prints in full; around it every run ends in one report line, Bounds up to that `k` and
+/// `StackOverflow` past it, exit 101.
+#[test]
+fn a_trap_at_the_deepest_level_prints_its_report() {
+    let tmp = TempDir::new("stkt").unwrap();
+    for (place, thread, main) in [("main", 0, ON_MAIN), ("spawn", 1, ON_SPAWN)] {
+        let src = TRAP_AT.replace("MAIN", &main.replace("DOWN", "down(0u64, depth())"));
+        let name = format!("trap_at_{place}");
+        let bounds = format!("panic: Bounds at {name}.stv:10:19 in main.down (thread {thread})\n");
+        for target in targets() {
+            for release in [false, true] {
+                let what = format!("{name} [{target}, release {release}]");
+                let out = build_src(&tmp, &name, &src, target, release);
+                let Some(how) = runner(target) else { continue };
+                let bin = tmp.path().join(&name);
+                out.image.as_ref().unwrap().write_file(&bin).unwrap();
+                let at = |k: u64| {
+                    let args = [k.to_string()];
+                    let spec = RunSpec { args: &args, runner: how, cwd: Some(tmp.path()), inherit: false };
+                    let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{what}: {e}"));
+                    (got.exit, String::from_utf8_lossy(&got.stderr).into_owned())
+                };
+                let is_bounds = |k: u64| at(k).1.ends_with(&bounds);
+                let (mut lo, mut hi) = (0u64, 1u64 << 20);
+                assert!(is_bounds(lo) && !is_bounds(hi), "{what}: {:?}", at(lo));
+                while hi - lo > 1 {
+                    let mid = lo + (hi - lo) / 2;
+                    if is_bounds(mid) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                for k in lo.saturating_sub(2)..=lo + 2 {
+                    let (exit, err) = at(k);
+                    let want = if k <= lo {
+                        err.ends_with(&bounds)
+                    } else {
+                        err.starts_with("panic: StackOverflow at ")
+                    };
+                    assert!(
+                        exit == 101 && err.lines().count() == 1 && want,
+                        "{what}: k_max {lo}, k {k}: {exit} {err}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The back ends read a thread's alternate stack from its block at
+/// `stave_obj::stub::BLOCK_ALT_TOP` and `BLOCK_ALT_SIZE`: the offsets of `runtime.state.Block`'s
+/// `alt_top` and `alt_size` (fields laid out in order, each at its alignment).
+#[test]
+fn the_block_offsets_are_the_runtimes() {
+    let state = std::fs::read_to_string(repo().join("runtime/state.stv")).unwrap();
+    let nring: u64 = state
+        .lines()
+        .find_map(|l| l.strip_prefix("pub const NRING: usize = "))
+        .and_then(|v| v.trim_end_matches(';').parse().ok())
+        .expect("runtime.state.NRING");
+    let body = state.split("pub struct Block {").nth(1).and_then(|b| b.split('}').next()).expect("Block");
+    let mut off = 0u64;
+    let mut at = std::collections::HashMap::new();
+    for l in body.lines().map(str::trim).filter(|l| l.starts_with("pub ")) {
+        let (name, ty) = l.trim_start_matches("pub ").trim_end_matches(',').split_once(": ").unwrap();
+        let (size, align) = match ty {
+            "usize" | "u64" => (8, 8),
+            "u32" => (4, 4),
+            "[u32; NRING]" => (4 * nring, 4),
+            _ => panic!("Block field {name}: {ty}"),
+        };
+        off = off.div_ceil(align) * align;
+        at.insert(name.to_string(), off);
+        off += size;
+    }
+    assert_eq!(at.get("alt_top").copied(), Some(u64::from(stave_obj::stub::BLOCK_ALT_TOP)));
+    assert_eq!(at.get("alt_size").copied(), Some(u64::from(stave_obj::stub::BLOCK_ALT_SIZE)));
 }
 
 /// Two `spawn` bodies, one deep and one shallow: two rows with their own bounds.
@@ -280,8 +518,11 @@ fn run_suite_programs_are_resolved() {
     }
     programs.sort();
     let target = Triple::parse("x86_64-linux").unwrap();
+    // the other half holds the kernel's signal frame
+    let report_room = config_const("ALTSTACK") / 2;
     let mut bad = Vec::new();
     let mut bounded = 0;
+    let mut deepest = 0;
     for p in &programs {
         let src = if p.is_dir() { p.join("src/main.stv") } else { p.clone() };
         let text = std::fs::read_to_string(&src).unwrap_or_default();
@@ -295,6 +536,10 @@ fn run_suite_programs_are_resolved() {
             o.release = release;
             let out = pipeline::run(p, &Library::in_dir(&repo()), &o).unwrap();
             let Some(r) = &out.stack else { continue };
+            match r.alt {
+                Ok(a) if a <= report_room => deepest = deepest.max(a),
+                a => bad.push(format!("{} (release {release}): report {a:?}", p.display())),
+            }
             let all = std::iter::once(r.main).chain(r.threads.iter().map(|t| t.depth));
             for d in all {
                 match d {
@@ -312,4 +557,5 @@ fn run_suite_programs_are_resolved() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
     assert!(bounded > 80, "{bounded} bounded stacks");
+    assert!(deepest > 0, "no report depth");
 }

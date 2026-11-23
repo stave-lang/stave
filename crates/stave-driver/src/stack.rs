@@ -16,25 +16,41 @@
 //! when a function made into a fn value has no node, is unresolved, and so is one that calls C
 //! code (`ccall`, or an `extern "C"` import). A node is a *member* when its strongly connected
 //! component is a cycle (more than one node, or a self-edge): a call cycle (named by its
-//! `rec fn`), a drop cycle of a recursive type, or one the added edges close. A function with a
-//! member node *probes*: it gets a slot of the reserve table, and its entry, after the frame,
-//! touches every page down to its reserve below the frame (the back ends), so that a stack too
-//! short for what runs below it faults in that entry, a member, and never further down.
+//! `rec fn`), a drop cycle of a recursive type, or one the added edges close.
+//!
+//! **Alternate stack.** A node whose functions are all [`stave_ir::Func::alt_stack`] (the panic
+//! report entries) runs on the thread's alternate signal stack: on the stacks user code runs on
+//! its call puts down `ENTRY` (16 bytes) and nothing else, so there it weighs `ENTRY`, has no trap stub,
+//! and its out-edges are left out (components, depths, and reserves are over the graph without
+//! them). The report's own depth ([`Report::alt`]) is over every edge: the deepest such node or
+//! `runtime.panic.on_signal`, twice (a trap raised while one is reported stays on that stack,
+//! calls `runtime.panic.begin` first, which exits, so it adds at most one more such path; that
+//! needs every function `begin` reaches to be free of trap stubs, which the pass checks, else
+//! the report and every trapping stack are unbounded).
+//!
+//! **Probe.** A member's own code faults in the guard for its frame (paged by the prologue) and
+//! for the return address of each call it makes; a member it calls faults in its own entry; an
+//! alternate-stack node puts nothing below that return address. A function *probes* when it
+//! has a member node that calls anything else off its component, or whose callees are not all
+//! known, or any member node if `runtime.panic.trap` does not run on the alternate stack: it
+//! gets a slot of the reserve table, and its entry, after the frame, reads its
+//! reserve below the frame (the back ends), so that a stack too short for what runs below it
+//! faults in that entry, a member, and never further down. Decided here, before code
+//! generation, from the graph alone; the back ends and [`compute`] read [`Graph::slots`].
 //!
 //! **Depth** of a node: its weight plus the largest depth among its successors and its *leaf*:
-//! if its code has a trap stub, the depth `T` of a trap, twice the depth of `runtime.panic.trap`
-//! (a trap raised while one is reported calls `runtime.panic.begin` first, which exits, so it
-//! adds at most one more such path; that needs every function `begin` reaches to be free of trap
-//! stubs, which the pass checks, else every trapping stack is unbounded), and, for a node of a
-//! probing function, that function's reserve, which its entry touches. Computed sinks first by
+//! if its code has a trap stub, `ENTRY` (the call of `runtime.panic.trap`, which moves to the
+//! alternate stack; the whole report depth if that fn does not), and, for a node of a probing
+//! function, that function's reserve, which its entry touches. Computed sinks first by
 //! out-degree peeling, on flat arrays without recursion. A node that is unresolved, on a cycle,
 //! or reaches either has no bound. A `rec fn` on no cycle of this graph is bounded like any fn.
 //!
 //! **Reserve** of a member: the largest depth among its successors outside its component, and its
 //! own trap leaf, where every member counts as the 16 bytes its caller's call puts down before
-//! the member's entry probes (what is below a member is that member's own reserve), and what an
-//! unresolved node calls counts as nothing (it is not known). A probing function's reserve is the
-//! largest of its members'. A function with a member node and a node off every cycle below it
+//! the member's entry (what is below a member is that member's own), and what an unresolved
+//! node calls counts as nothing (it is not known). A member of a function that does not probe
+//! has a reserve of at most `ENTRY`, which its own call instruction writes. A probing
+//! function's reserve is the largest of its members'. A function with a member node and a node off every cycle below it
 //! feeds its own reserve: the computation repeats until no reserve grows, at most
 //! [`RESERVE_ROUNDS`] times.
 //!
@@ -59,9 +75,9 @@ use stave_sema::callgraph::{CallGraph, EdgeKind, NodeKind};
 /// `[run] stack` when the manifest has none (contracts/gpu-program.md; `runtime.config.RUN_STACK`).
 pub const DEFAULT_RUN_STACK: u64 = 8 << 20;
 
-/// Bytes added to every computed bound in the table. Signal handlers run on the alternate signal
-/// stack and system calls use no user stack; the margin covers what no frame size counts (none
-/// is known).
+/// Bytes added to every computed bound in the table. Signal handlers and the panic report run on
+/// the alternate signal stack and system calls use no user stack; the margin covers what no frame
+/// size counts (none is known).
 pub const MARGIN: u64 = 4096;
 
 /// The `__stave_main` stub (return address and saved frame pointer on x86-64, `x29, x30` on
@@ -134,6 +150,9 @@ pub struct Report {
     pub reserve: Vec<u64>,
     /// By reserve-table slot: the function.
     pub probes: Vec<FuncId>,
+    /// The panic report's depth on the alternate signal stack: the deepest report entry or the
+    /// signal handler, twice (a trap during the report).
+    pub alt: Depth,
 }
 
 impl Report {
@@ -364,7 +383,7 @@ fn calls_of(m: &Module, f: FuncId, called: &IntrinsicCalls, made: &mut [bool]) -
     c
 }
 
-/// What a caller's call puts on the stack before a member's entry probes: the return address
+/// What a caller's call puts on the stack before the callee's entry: the return address
 /// (x86-64), rounded to the stack alignment.
 const ENTRY: u64 = 16;
 
@@ -384,10 +403,17 @@ pub struct Graph {
     /// Per node: the functions that stand for it.
     funcs_of: Vec<Vec<FuncId>>,
     pseudo_func: Vec<FuncId>,
+    /// Edges of the stacks user code runs on: those of an alternate-stack node are left out.
     start: Vec<u32>,
     to: Vec<u32>,
     /// Per edge: through a fn value.
     ind: Vec<bool>,
+    /// Every edge, the alternate-stack nodes' too: the report's own graph.
+    full_start: Vec<u32>,
+    full_to: Vec<u32>,
+    /// Per node: it runs on the alternate stack (every function that stands for it is
+    /// [`stave_ir::Func::alt_stack`]).
+    alt: Vec<bool>,
     poison: Vec<Option<Why>>,
     /// Per node: its component, numbered sinks first (an edge between two components goes to
     /// the smaller number).
@@ -398,6 +424,9 @@ pub struct Graph {
     slots: Vec<u32>,
     nslots: usize,
     incomplete: bool,
+    /// `runtime.panic.trap` runs on the alternate stack (or the module has none: the backends'
+    /// fallback report): a trap stub puts down only its call's return address.
+    trap_on_alt: bool,
 }
 
 impl Graph {
@@ -561,14 +590,24 @@ pub fn graph(m: &Module, input: &Input<'_>) -> Graph {
     }
     edges.sort_unstable();
     edges.dedup();
-    let mut start = vec![0u32; total + 1];
-    for &(a, _, _) in &edges {
-        start[a as usize + 1] += 1;
-    }
-    for x in 0..total {
-        start[x + 1] += start[x];
-    }
-    let to: Vec<u32> = edges.iter().map(|e| e.1).collect();
+    let csr = |edges: &[(u32, u32, bool)]| {
+        let mut start = vec![0u32; total + 1];
+        for &(a, _, _) in edges {
+            start[a as usize + 1] += 1;
+        }
+        for x in 0..total {
+            start[x + 1] += start[x];
+        }
+        (start, edges.iter().map(|e| e.1).collect::<Vec<u32>>())
+    };
+    let (full_start, full_to) = csr(&edges);
+    // a node of mixed functions counts as one that runs where it is called
+    let alt: Vec<bool> = funcs_of
+        .iter()
+        .map(|fs| !fs.is_empty() && fs.iter().all(|f| m.func(*f).is_some_and(|x| x.alt_stack)))
+        .collect();
+    edges.retain(|e| !alt[e.0 as usize]);
+    let (start, to) = csr(&edges);
     let ind: Vec<bool> = edges.iter().map(|e| e.2).collect();
     let comp = components(&start, &to);
     let ncomp = comp.iter().map(|&c| c as usize + 1).max().unwrap_or(0);
@@ -582,10 +621,29 @@ pub fn graph(m: &Module, input: &Input<'_>) -> Graph {
             cycle[comp[a as usize] as usize] = true;
         }
     }
+    // A member's own code faults in the guard for its frame and for the return address of each
+    // call it makes; a member it calls faults in its own entry, and an alternate-stack node puts
+    // nothing below that return address. Anything else it calls off its component may run
+    // below it, so the member probes for it; so does a member whose callees are not all known.
+    // A trap stub whose report runs where it is called puts that report below: every member
+    // probes.
+    let trap_on_alt =
+        m.known_body(Known::Trap).is_none_or(|t| ids[t.index()].iter().all(|&x| alt[x as usize]));
+    let member = |x: usize| cycle[comp[x] as usize];
+    let probes = |x: u32| {
+        let xi = x as usize;
+        member(xi)
+            && (!trap_on_alt
+                || poison[xi].is_some()
+                || to[start[xi] as usize..start[xi + 1] as usize].iter().any(|&y| {
+                    let yi = y as usize;
+                    comp[yi] != comp[xi] && !member(yi) && !alt[yi]
+                }))
+    };
     let mut slots = vec![NO_SLOT; nf];
     let mut nslots = 0usize;
     for f in 0..nf {
-        if has_body(f) && ids[f].iter().any(|&x| cycle[comp[x as usize] as usize]) {
+        if has_body(f) && ids[f].iter().any(|&x| probes(x)) {
             slots[f] = nslots as u32;
             nslots += 1;
         }
@@ -599,12 +657,16 @@ pub fn graph(m: &Module, input: &Input<'_>) -> Graph {
         start,
         to,
         ind,
+        full_start,
+        full_to,
+        alt,
         poison,
         comp,
         cycle,
         slots,
         nslots,
         incomplete: g.truncated,
+        trap_on_alt,
     }
 }
 
@@ -612,17 +674,23 @@ pub fn graph(m: &Module, input: &Input<'_>) -> Graph {
 /// function.
 pub fn compute(bg: &Graph, m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -> Report {
     let g = input.graph;
-    let Graph { n, total, ref ids, ref start, ref to, ref ind, ref poison, ref comp, ref cycle, .. } = *bg;
+    let Graph {
+        n, total, ref ids, ref start, ref to, ref ind, ref poison, ref comp, ref cycle, ref alt, ..
+    } = *bg;
     let frame = |f: FuncId| uses.get(f.index()).copied().unwrap_or_default();
-    let mut weight = vec![0u64; total];
-    let mut traps = vec![false; total];
+    // the report's graph weighs every frame; on the stacks user code runs on, the call of an
+    // alternate-stack node puts down `ENTRY` and nothing of it traps there
+    let mut full_weight = vec![0u64; total];
+    let mut full_traps = vec![false; total];
     for (f, v) in ids.iter().enumerate() {
         let u = frame(FuncId(f as u32));
         for &x in v {
-            weight[x as usize] = weight[x as usize].max(u64::from(u.frame));
-            traps[x as usize] |= u.traps;
+            full_weight[x as usize] = full_weight[x as usize].max(u64::from(u.frame));
+            full_traps[x as usize] |= u.traps;
         }
     }
+    let weight: Vec<u64> = (0..total).map(|x| if alt[x] { ENTRY } else { full_weight[x] }).collect();
+    let traps: Vec<bool> = (0..total).map(|x| full_traps[x] && !alt[x]).collect();
     let at = |x: u32| bg.at(x);
     let member = |x: u32| cycle[comp[x as usize] as usize];
 
@@ -643,20 +711,35 @@ pub fn compute(bg: &Graph, m: &Module, input: &Input<'_>, uses: &[StackUse], mai
         xs.iter().try_fold(0, |acc, &x| finish(done, x).map(|d| acc.max(d)))
     };
 
-    // the depth of a trap, from the depths without trap stubs: the report's own path, plus one
-    // more trap raised anywhere on it, which calls `runtime.panic.begin` first and exits there.
-    // That holds only if nothing `begin` reaches traps (else a trap there starts over).
+    // The report's depth on the alternate stack, from the report's graph without trap stubs: the
+    // deepest report entry or signal handler, plus one more trap raised anywhere on it, which
+    // stays on that stack, calls `runtime.panic.begin` first and exits there. That holds only
+    // if nothing `begin` reaches traps (else a trap there starts over).
+    let (fs, ft) = (&bg.full_start[..], &bg.full_to[..]);
     let zero = vec![Ok(0); total];
-    let first = longest(start, to, &weight, &zero, poison);
-    let trap = match (m.known_body(Known::Trap), m.known_body(Known::PanicBegin)) {
-        (Some(t), Some(b)) => match trapping_node(start, to, &traps, &ids[b.index()]) {
+    let first = longest(fs, ft, &full_weight, &zero, poison);
+    let entries: Vec<u32> = (0..total as u32)
+        .filter(|&x| alt[x as usize])
+        .chain(m.known_body(Known::OnSignal).into_iter().flat_map(|f| ids[f.index()].iter().copied()))
+        .collect();
+    let report_depth = entries.iter().try_fold(0u64, |acc, &x| match first[x as usize] {
+        Some(d) => d.map(|d| acc.max(d)),
+        None => Err(Why::Cycle(at(x))),
+    });
+    let alt_depth = match (m.known_body(Known::Trap), m.known_body(Known::PanicBegin)) {
+        (Some(_), Some(b)) => match trapping_node(fs, ft, &full_traps, &ids[b.index()]) {
             Some(x) => Err(Why::Cycle(at(x))),
-            None => over(&first, &ids[t.index()]).map(|d| d.saturating_mul(2)),
+            None => report_depth.map(|d| d.saturating_mul(2)),
         },
         (Some(t), None) => Err(Why::Cycle(at(ids[t.index()].first().copied().unwrap_or(0)))),
-        // `__stave_panic_fallback`: called, no frame
-        (None, _) => Ok(16),
+        // `__stave_panic_fallback`: no report
+        (None, _) => Ok(0),
     };
+    // a trap stub's call of `runtime.panic.trap` on the alternate stack (or of
+    // `__stave_panic_fallback`) puts down its return address; a `runtime.panic.trap` that runs
+    // where it is called puts down the whole report; an unbounded report leaves every trapping
+    // stack without a bound
+    let trap = if bg.trap_on_alt { alt_depth.map(|_| ENTRY) } else { alt_depth };
     let leaf: Vec<Depth> = traps.iter().map(|&t| if t { trap } else { Ok(0) }).collect();
 
     // nodes sinks first: by component, which numbers every callee's component below its caller's
@@ -689,6 +772,14 @@ pub fn compute(bg: &Graph, m: &Module, input: &Input<'_>, uses: &[StackUse], mai
                         r = r.max(acyc[y as usize]);
                     }
                 }
+                // what [`graph`] decided: a member without a slot has nothing below its calls,
+                // or no code in this build
+                debug_assert!(
+                    !slots_of[xi].is_empty()
+                        || r <= ENTRY
+                        || bg.funcs_of[xi].iter().all(|f| m.func(*f).is_none_or(|g| g.body.is_none())),
+                    "member {x} unprobed with {r}"
+                );
                 for &s in &slots_of[xi] {
                     next[s] = next[s].max(r);
                 }
@@ -826,7 +917,15 @@ pub fn compute(bg: &Graph, m: &Module, input: &Input<'_>, uses: &[StackUse], mai
             probes[k as usize] = FuncId(f as u32);
         }
     }
-    Report { run_stack: input.run_stack, main: main_d, main_acyclic, threads, reserve, probes }
+    Report {
+        run_stack: input.run_stack,
+        main: main_d,
+        main_acyclic,
+        threads,
+        reserve,
+        probes,
+        alt: alt_depth,
+    }
 }
 
 /// The build summary's stack lines (contracts/cli.md): main first, then one per thread start
@@ -1018,6 +1117,7 @@ mod tests {
             threads: Vec::new(),
             reserve: Vec::new(),
             probes: Vec::new(),
+            alt: Ok(0),
         };
         assert_eq!(r.bytes(Ok(100), None), 100 + MARGIN);
         assert_eq!(r.bytes(Err(Why::Incomplete), None), 0);

@@ -1286,6 +1286,7 @@ fn assemble(
                 name_site,
                 symbol: if f.closure.is_some() { None } else { symbol.clone() },
                 known: if f.closure.is_some() { None } else { known },
+                alt_stack: f.closure.is_none() && known.is_some_and(stave_ir::known::reports_on_alt_stack),
             });
         }
     }

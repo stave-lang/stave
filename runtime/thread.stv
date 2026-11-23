@@ -122,6 +122,8 @@ fn start(f: fn()) -> usize {
                 origin: state.NO_SITE,
                 count: 0,
                 ring: [0u32; state.NRING],
+                alt_top: base + guard + size + alt,
+                alt_size: alt,
             },
         });
     }

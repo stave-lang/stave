@@ -90,9 +90,16 @@ that calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> nev
 the `signal_handler_addr()` intrinsic. A SIGSEGV with `si_addr` in `[guard_lo, guard_hi)` reports
 `StackOverflow` at the faulting fn's name token (PC table); any other SIGSEGV/SIGBUS re-raises with
 the default action. Frames larger than `runtime.config.GUARD` (64 KiB) must be probed page by page
-by the prologue, or an overflow can jump the guard. A fn on a call cycle reads its reserve below
-its frame at entry every 60 KiB (contracts/intrinsics.md "reserve table"), which needs a guard of
-at least 64 KiB on every stack.
+by the prologue, or an overflow can jump the guard. A fn on a call cycle that calls other code
+off its cycle reads its reserve below its frame at entry every 60 KiB (contracts/intrinsics.md
+"reserve table"), which needs a guard of at least 64 KiB on every stack.
+
+**Alternate stack.** The trap entries above and `abort` run on the thread's alternate signal
+stack: the compiler's entry of each moves the stack pointer to the block's `alt_top` unless it
+is already in that stack or `alt_size` is 0 (contracts/intrinsics.md "Alternate stack"). So a
+trap at any depth reports without stack below the trapping frame; a trap during the report stays
+there and exits in `begin`. `runtime.panic.install` writes main's two words, `runtime.thread.start`
+a thread's, before any user code runs on it.
 
 **Tables** (read-only data; little-endian; addresses from `site_table()`, `pc_table()`, and
 `stack_table()`):

@@ -22,7 +22,8 @@ pub const RUN_STACK: usize = 8388608;
 // and the compiler's reserve probes read every 60 KiB, which needs at least 64 KiB here.
 pub const GUARD: usize = 65536;
 
-// Alternate signal stack per thread for the SIGSEGV handler (>= MINSIGSTKSZ on both arches).
+// Alternate signal stack per thread for the SIGSEGV handler and the panic report (>= MINSIGSTKSZ
+// on both arches); half is for the kernel's signal frame.
 pub const ALTSTACK: usize = 65536;
 
 unsafe("a is 8-byte aligned and readable") fn ld64(a: usize) -> u64 {
