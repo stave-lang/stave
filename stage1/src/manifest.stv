@@ -1,0 +1,717 @@
+// `stave.toml`: the TOML subset of stage0's manifest reader, and the keys package discovery
+// needs (`name`, `[dependencies]`, `[target.<t>.dependencies]`).
+//
+// The parse is stage0's line by line: comments `#`, bare, quoted, and dotted keys, `[a.b]`
+// headers (parents created implicitly), one-line inline tables, basic and literal strings,
+// integers, floats, booleans, arrays (over lines). A syntax error or a redefined key stops the
+// parse; every line before it stays, so the keys read back are the ones stage0 reads.
+//
+// Tables are flat: ids (0 = the root) with a kind, and entry rows naming their table, in
+// insertion order.
+import text;
+import std.mem;
+import std.string;
+import std.vec;
+
+const TK_HEADER: u8 = 1;
+const TK_IMPLICIT: u8 = 2;
+const TK_INLINE: u8 = 3;
+
+const V_STR: u8 = 0;
+const V_OTHER: u8 = 1;
+const V_TABLE: u8 = 2;
+
+// Nesting bound of arrays and inline tables.
+const MAX_DEPTH: usize = 64;
+
+struct Doc {
+    table_kind: vec.Vec<u8>,
+    e_table: vec.Vec<u32>,
+    e_key: vec.Vec<vec.Vec<u8>>,
+    e_kind: vec.Vec<u8>,
+    e_str: vec.Vec<vec.Vec<u8>>,
+    e_sub: vec.Vec<u32>,
+}
+
+// A parsed value: a string's bytes, a table id, or another value (array, number, boolean).
+struct Val {
+    kind: u8,
+    s: vec.Vec<u8>,
+    sub: u32,
+}
+
+impl Doc {
+    fn new() -> Doc {
+        let mut k = vec.Vec::<u8>.new();
+        k.push(0);
+        return Doc.{
+            table_kind: k,
+            e_table: vec.Vec::<u32>.new(),
+            e_key: vec.Vec::<vec.Vec<u8>>.new(),
+            e_kind: vec.Vec::<u8>.new(),
+            e_str: vec.Vec::<vec.Vec<u8>>.new(),
+            e_sub: vec.Vec::<u32>.new(),
+        };
+    }
+
+    fn new_table(&mut self, kind: u8) -> u32 {
+        self.table_kind.push(kind);
+        return (self.table_kind.len() - 1) as% u32;
+    }
+
+    // The entry of table t named key.
+    fn find(&self, t: u32, key: &[u8]) -> Option<usize> {
+        for i in 0..self.e_table.len() {
+            if self.e_table.as_slice()[i] == t && text.eq(self.e_key.get_ref(i).as_slice(), key) {
+                return Option.Some(i);
+            }
+        }
+        return Option.None;
+    }
+
+    fn push(&mut self, t: u32, key: &[u8], v: Val) {
+        let mut k = vec.Vec::<u8>.new();
+        k.extend_from_slice(key);
+        let Val.{ kind, s, sub } = v;
+        self.e_table.push(t);
+        self.e_key.push(k);
+        self.e_kind.push(kind);
+        self.e_str.push(s);
+        self.e_sub.push(sub);
+    }
+
+    // The table an entry holds, if it holds one.
+    fn sub_table(&self, e: usize) -> Option<u32> {
+        if self.e_kind.as_slice()[e] != V_TABLE { return Option.None; }
+        return Option.Some(self.e_sub.as_slice()[e]);
+    }
+
+    fn kind_of(&self, t: u32) -> u8 {
+        return self.table_kind.as_slice()[t as usize];
+    }
+
+    // Inserts v under the dotted key below table t; Err on a redefinition or a step through a
+    // non-table (parents made on the way stay).
+    fn insert_dotted(&mut self, t: u32, key: &vec.Vec<vec.Vec<u8>>, v: Val) -> Result<(), u32> {
+        let n = key.len();
+        let mut cur = t;
+        for k in 0..n {
+            let name = key.get_ref(k).as_slice();
+            if k + 1 == n {
+                if self.find(cur, name).is_some() { return Result.Err(0); }
+                self.push(cur, name, v);
+                return Result.Ok(());
+            }
+            let mut pos: usize = 0;
+            match self.find(cur, name) {
+                Option.Some(p) => { pos = p; }
+                Option.None => {
+                    let id = self.new_table(TK_IMPLICIT);
+                    self.push(cur, name, table_val(id));
+                    pos = self.e_kind.len() - 1;
+                }
+            }
+            match self.sub_table(pos) {
+                Option.Some(tt) => {
+                    if self.kind_of(tt) == TK_INLINE { return Result.Err(0); }
+                    cur = tt;
+                }
+                Option.None => { return Result.Err(0); }
+            }
+        }
+        return Result.Ok(());
+    }
+
+    // The table at a header path, made as needed; Err if a step is no table or the table was
+    // already made by a header.
+    fn header_table(&mut self, path: &vec.Vec<vec.Vec<u8>>) -> Result<u32, u32> {
+        let n = path.len();
+        let mut cur: u32 = 0;
+        for k in 0..n {
+            let last = k + 1 == n;
+            let name = path.get_ref(k).as_slice();
+            let mut pos: usize = 0;
+            match self.find(cur, name) {
+                Option.Some(p) => {
+                    pos = p;
+                    match self.sub_table(p) {
+                        Option.Some(tt) => {
+                            let tk = self.kind_of(tt);
+                            if tk == TK_IMPLICIT && last {
+                                *self.table_kind.get_mut(tt as usize) = TK_HEADER;
+                            } else if tk == TK_INLINE || last {
+                                return Result.Err(0);
+                            }
+                        }
+                        Option.None => { return Result.Err(0); }
+                    }
+                }
+                Option.None => {
+                    let id = self.new_table(if last then TK_HEADER else TK_IMPLICIT);
+                    self.push(cur, name, table_val(id));
+                    pos = self.e_kind.len() - 1;
+                }
+            }
+            cur = self.e_sub.as_slice()[pos];
+        }
+        return Result.Ok(cur);
+    }
+
+    // The table at an existing header path.
+    fn existing(&self, path: &vec.Vec<vec.Vec<u8>>) -> Option<u32> {
+        let mut cur: u32 = 0;
+        for k in 0..path.len() {
+            match self.find(cur, path.get_ref(k).as_slice()) {
+                Option.Some(p) => {
+                    match self.sub_table(p) {
+                        Option.Some(t) => { cur = t; }
+                        Option.None => { return Option.None; }
+                    }
+                }
+                Option.None => { return Option.None; }
+            }
+        }
+        return Option.Some(cur);
+    }
+}
+fn table_val(id: u32) -> Val {
+    return Val.{ kind: V_TABLE, s: vec.Vec::<u8>.new(), sub: id };
+}
+
+fn other_val() -> Val {
+    return Val.{ kind: V_OTHER, s: vec.Vec::<u8>.new(), sub: 0 };
+}
+
+// Parser state: the input and the offset.
+view struct P {
+    s: &[u8],
+    i: usize,
+}
+
+impl P {
+    fn peek(&self) -> u8 {
+        return if self.i < self.s.len() then self.s[self.i] else 0;
+    }
+
+    fn peek_at(&self, k: usize) -> u8 {
+        let j = self.i + k;
+        return if j < self.s.len() then self.s[j] else 0;
+    }
+
+    fn at_end(&self) -> bool {
+        return self.i >= self.s.len();
+    }
+
+    fn pos(&self) -> u32 {
+        return self.i as% u32;
+    }
+
+    // Spaces and tabs.
+    fn ws(&mut self) {
+        while self.peek() == 32 || self.peek() == 9 { self.i = self.i + 1; }
+    }
+
+    fn comment(&mut self) {
+        if self.peek() == 35 {
+            while !self.at_end() && self.peek() != 10 { self.i = self.i + 1; }
+        }
+    }
+
+    // Whitespace, newlines, and comments (inside arrays).
+    fn ws_nl(&mut self) {
+        loop {
+            self.ws();
+            self.comment();
+            if self.peek() == 10 {
+                self.i = self.i + 1;
+            } else if self.peek() == 13 && self.peek_at(1) == 10 {
+                self.i = self.i + 2;
+            } else {
+                return;
+            }
+        }
+    }
+
+    // Optional whitespace and comment, then a newline or the end.
+    fn eol(&mut self) -> Result<(), u32> {
+        self.ws();
+        self.comment();
+        if self.peek() == 10 {
+            self.i = self.i + 1;
+            return Result.Ok(());
+        }
+        if self.peek() == 13 && self.peek_at(1) == 10 {
+            self.i = self.i + 2;
+            return Result.Ok(());
+        }
+        if self.at_end() { return Result.Ok(()); }
+        return Result.Err(self.pos());
+    }
+
+    fn simple_key(&mut self) -> Result<vec.Vec<u8>, u32> {
+        let c = self.peek();
+        if c == 34 { return self.basic_string(); }
+        if c == 39 { return self.literal_string(); }
+        let lo = self.i;
+        while is_bare(self.peek()) { self.i = self.i + 1; }
+        if self.i == lo { return Result.Err(self.pos()); }
+        let mut k = vec.Vec::<u8>.new();
+        k.extend_from_slice(&self.s[lo..self.i]);
+        return Result.Ok(k);
+    }
+
+    fn key(&mut self) -> Result<vec.Vec<vec.Vec<u8>>, u32> {
+        let mut parts = vec.Vec::<vec.Vec<u8>>.new();
+        parts.push(self.simple_key()?);
+        loop {
+            let save = self.i;
+            self.ws();
+            if self.peek() == 46 {
+                self.i = self.i + 1;
+                self.ws();
+                parts.push(self.simple_key()?);
+            } else {
+                self.i = save;
+                return Result.Ok(parts);
+            }
+        }
+    }
+
+    fn hex_char(&mut self, digits: usize, out: &mut vec.Vec<u8>) -> Result<(), u32> {
+        let mut v: u32 = 0;
+        for k in 0..digits {
+            let c = self.peek();
+            let d: u32 = if c >= 48 && c <= 57 then (c - 48) as u32 else if c >= 97 && c <= 102 then (c - 87) as u32 else if c >= 65 && c <= 70 then (c - 55) as u32 else 16;
+            if d == 16 { return Result.Err(self.pos()); }
+            v = v * 16 + d;
+            self.i = self.i + 1;
+        }
+        if v > 1114111 || (v >= 55296 && v <= 57343) { return Result.Err(self.pos()); }
+        push_utf8(out, v);
+        return Result.Ok(());
+    }
+
+    fn basic_string(&mut self) -> Result<vec.Vec<u8>, u32> {
+        self.i = self.i + 1;
+        // multi-line strings are not supported
+        if self.peek() == 34 && self.peek_at(1) == 34 { return Result.Err(self.pos()); }
+        let mut out = vec.Vec::<u8>.new();
+        loop {
+            let c = self.peek();
+            if c == 34 {
+                self.i = self.i + 1;
+                break;
+            }
+            if c == 92 {
+                self.i = self.i + 1;
+                let e = self.peek();
+                self.i = self.i + 1;
+                if e == 34 || e == 92 {
+                    out.push(e);
+                } else if e == 110 {
+                    out.push(10);
+                } else if e == 116 {
+                    out.push(9);
+                } else if e == 114 {
+                    out.push(13);
+                } else if e == 98 {
+                    out.push(8);
+                } else if e == 102 {
+                    out.push(12);
+                } else if e == 101 {
+                    out.push(27);
+                } else if e == 117 {
+                    self.hex_char(4, &mut out)?;
+                } else if e == 85 {
+                    self.hex_char(8, &mut out)?;
+                } else {
+                    self.i = self.i - 1;
+                    return Result.Err(self.pos());
+                }
+                continue;
+            }
+            if c == 10 || c == 13 || self.at_end() { return Result.Err(self.pos()); }
+            out.push(c);
+            self.i = self.i + 1;
+        }
+        let (ok, bad) = text.utf8_valid_up_to(out.as_slice());
+        if ok != out.len() { return Result.Err(self.pos()); }
+        return Result.Ok(out);
+    }
+
+    fn literal_string(&mut self) -> Result<vec.Vec<u8>, u32> {
+        self.i = self.i + 1;
+        let lo = self.i;
+        loop {
+            let c = self.peek();
+            if c == 39 { break; }
+            if c == 10 || c == 13 || self.at_end() { return Result.Err(self.pos()); }
+            self.i = self.i + 1;
+        }
+        let mut out = vec.Vec::<u8>.new();
+        out.extend_from_slice(&self.s[lo..self.i]);
+        self.i = self.i + 1;
+        let (ok, bad) = text.utf8_valid_up_to(out.as_slice());
+        if ok != out.len() { return Result.Err(self.pos()); }
+        return Result.Ok(out);
+    }
+
+    fn number(&mut self) -> Result<Val, u32> {
+        let lo = self.i;
+        while is_number_byte(self.peek()) { self.i = self.i + 1; }
+        let t = &self.s[lo..self.i];
+        if is_int(t) || is_float(t) { return Result.Ok(other_val()); }
+        self.i = lo;
+        return Result.Err(self.pos());
+    }
+
+    rec fn value(&mut self, d: &mut Doc, depth: usize) -> Result<Val, u32> {
+        if depth > MAX_DEPTH { return Result.Err(self.pos()); }
+        let c = self.peek();
+        if c == 34 {
+            let s = self.basic_string()?;
+            return Result.Ok(Val.{ kind: V_STR, s: s, sub: 0 });
+        }
+        if c == 39 {
+            let s = self.literal_string()?;
+            return Result.Ok(Val.{ kind: V_STR, s: s, sub: 0 });
+        }
+        if c == 91 {
+            self.i = self.i + 1;
+            loop {
+                self.ws_nl();
+                if self.peek() == 93 {
+                    self.i = self.i + 1;
+                    break;
+                }
+                let item = self.value(d, depth + 1)?;
+                self.ws_nl();
+                let b = self.peek();
+                if b == 44 {
+                    self.i = self.i + 1;
+                } else if b == 93 {
+                    self.i = self.i + 1;
+                    break;
+                } else {
+                    return Result.Err(self.pos());
+                }
+            }
+            return Result.Ok(other_val());
+        }
+        if c == 123 {
+            self.i = self.i + 1;
+            let t = d.new_table(TK_INLINE);
+            loop {
+                self.ws();
+                if self.peek() == 125 {
+                    self.i = self.i + 1;
+                    break;
+                }
+                let key = self.key()?;
+                self.ws();
+                if self.peek() != 61 { return Result.Err(self.pos()); }
+                self.i = self.i + 1;
+                self.ws();
+                let v = self.value(d, depth + 1)?;
+                d.insert_dotted(t, &key, v)?;
+                self.ws();
+                let b = self.peek();
+                if b == 44 {
+                    self.i = self.i + 1;
+                } else if b == 125 {
+                    self.i = self.i + 1;
+                    break;
+                } else {
+                    return Result.Err(self.pos());
+                }
+            }
+            return Result.Ok(table_val(t));
+        }
+        if c == 116 && text.starts_with(&self.s[self.i..self.s.len()], mem.str_bytes("true")) {
+            self.i = self.i + 4;
+            return Result.Ok(other_val());
+        }
+        if c == 102 && text.starts_with(&self.s[self.i..self.s.len()], mem.str_bytes("false")) {
+            self.i = self.i + 5;
+            return Result.Ok(other_val());
+        }
+        if (c >= 48 && c <= 57) || c == 43 || c == 45 || c == 105 || c == 110 { return self.number(); }
+        return Result.Err(self.pos());
+    }
+
+    // One header or key/value line.
+    fn line(&mut self, d: &mut Doc, current: &mut vec.Vec<vec.Vec<u8>>) -> Result<(), u32> {
+        if self.peek() == 91 {
+            self.i = self.i + 1;
+            // arrays of tables are not supported
+            if self.peek() == 91 { return Result.Err(self.pos()); }
+            self.ws();
+            let path = self.key()?;
+            self.ws();
+            if self.peek() != 93 { return Result.Err(self.pos()); }
+            self.i = self.i + 1;
+            self.eol()?;
+            let t = d.header_table(&path)?;
+            *current = path;
+            return Result.Ok(());
+        }
+        let key = self.key()?;
+        self.ws();
+        if self.peek() != 61 { return Result.Err(self.pos()); }
+        self.i = self.i + 1;
+        self.ws();
+        let v = self.value(d, 0)?;
+        self.eol()?;
+        let t = if current.len() == 0 then Option.Some(0u32) else d.existing(&*current);
+        return match t {
+            Option.Some(t) => d.insert_dotted(t, &key, v),
+            Option.None => Result.Err(0),
+        };
+    }
+}
+
+fn is_bare(c: u8) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 45;
+}
+
+fn is_number_byte(c: u8) -> bool {
+    return is_bare(c) || c == 43 || c == 46;
+}
+
+fn is_dec(c: u8) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn digit_value(c: u8) -> u32 {
+    return if is_dec(c) then (c - 48) as u32 else if c >= 97 && c <= 122 then (c - 87) as u32 else if c >= 65 && c <= 90 then (c - 55) as u32 else 99;
+}
+
+// stage0's integer rule: optional sign, `0x`/`0o`/`0b` (unsigned only) or decimal without a
+// leading zero, `_` only between digits, value within i64.
+fn is_int(t: &[u8]) -> bool {
+    if t.len() == 0 { return false; }
+    let signed = t[0] == 45 || t[0] == 43;
+    let body = if signed then &t[1..t.len()] else t;
+    let mut radix: u32 = 10;
+    let mut digits = body;
+    if body.len() >= 2 && body[0] == 48 && (body[1] == 120 || body[1] == 111 || body[1] == 98) {
+        radix = if body[1] == 120 then 16 else if body[1] == 111 then 8 else 2;
+        digits = &body[2..body.len()];
+        if signed { return false; }
+    } else if body.len() > 1 && body[0] == 48 {
+        return false;
+    }
+    let n = digits.len();
+    if n == 0 || digits[0] == 95 || digits[n - 1] == 95 { return false; }
+    for k in 1..n {
+        if digits[k] == 95 && digits[k - 1] == 95 { return false; }
+    }
+    // the digits without `_`, read as from_str_radix does (an optional sign of its own)
+    let mut v: u64 = 0;
+    let mut inner_neg = false;
+    let mut seen = false;
+    let mut first = true;
+    for k in 0..n {
+        let c = digits[k];
+        if c == 95 { continue; }
+        if first && (c == 43 || c == 45) {
+            first = false;
+            inner_neg = c == 45;
+            continue;
+        }
+        first = false;
+        let dv = digit_value(c) as u64;
+        if dv >= (radix as u64) { return false; }
+        seen = true;
+        let limit: u64 = if inner_neg then 9223372036854775808 else 9223372036854775807;
+        if v > (limit - dv) / (radix as u64) { return false; }
+        v = v * (radix as u64) + dv;
+    }
+    return seen;
+}
+
+// stage0's float rule: `inf` / `nan` after an optional sign, or (without `_`) a decimal starting
+// with a digit and holding `.`, `e`, or `E` that Rust's f64 parser accepts:
+// `D+ ('.' D*)? ([eE] [+-]? D+)?`.
+fn is_float(t: &[u8]) -> bool {
+    let body = if t.len() > 0 && (t[0] == 43 || t[0] == 45) then &t[1..t.len()] else t;
+    if text.eq_str(body, "inf") || text.eq_str(body, "nan") { return true; }
+    let mut c = vec.Vec::<u8>.new();
+    for k in 0..body.len() {
+        if body[k] != 95 { c.push(body[k]); }
+    }
+    let s = c.as_slice();
+    let n = s.len();
+    if n == 0 || !is_dec(s[0]) { return false; }
+    let mut marked = false;
+    for k in 0..n {
+        if s[k] == 46 || s[k] == 101 || s[k] == 69 { marked = true; }
+    }
+    if !marked { return false; }
+    let mut i: usize = 0;
+    while i < n && is_dec(s[i]) { i = i + 1; }
+    if i < n && s[i] == 46 {
+        i = i + 1;
+        while i < n && is_dec(s[i]) { i = i + 1; }
+    }
+    if i < n && (s[i] == 101 || s[i] == 69) {
+        i = i + 1;
+        if i < n && (s[i] == 43 || s[i] == 45) { i = i + 1; }
+        let d0 = i;
+        while i < n && is_dec(s[i]) { i = i + 1; }
+        if i == d0 { return false; }
+    }
+    return i == n;
+}
+
+fn push_utf8(out: &mut vec.Vec<u8>, v: u32) {
+    if v < 128 {
+        out.push(v as% u8);
+    } else if v < 2048 {
+        out.push((192 | (v >> 6)) as% u8);
+        out.push((128 | (v & 63)) as% u8);
+    } else if v < 65536 {
+        out.push((224 | (v >> 12)) as% u8);
+        out.push((128 | ((v >> 6) & 63)) as% u8);
+        out.push((128 | (v & 63)) as% u8);
+    } else {
+        out.push((240 | (v >> 18)) as% u8);
+        out.push((128 | ((v >> 12) & 63)) as% u8);
+        out.push((128 | ((v >> 6) & 63)) as% u8);
+        out.push((128 | (v & 63)) as% u8);
+    }
+}
+
+// One dependency entry: its name and, for a `{ path = "…" }` table, the path.
+pub struct Dep {
+    pub name: string.String,
+    pub path: Option<string.String>,
+}
+
+// What discovery reads from a manifest: `name` (a string), and the dependency tables in
+// manifest order, each with the target it applies to ("" for `[dependencies]`).
+pub struct Manifest {
+    pub name: Option<string.String>,
+    pub dep_target: vec.Vec<string.String>,
+    pub deps: vec.Vec<Dep>,
+}
+
+// The names a `[target.<t>]` table may use.
+fn known_target(t: &[u8]) -> bool {
+    return text.eq_str(t, "x86_64-linux") || text.eq_str(t, "x86_64-linux-v2") || text.eq_str(t, "x86_64-linux-v3") || text.eq_str(t, "x86_64-linux-v4") || text.eq_str(t, "aarch64-linux") || text.eq_str(t, "aarch64-linux+sve") || text.eq_str(t, "aarch64-linux+sve2") || text.eq_str(t, "gpu-sm86");
+}
+
+pub fn parse(src: &[u8]) -> Manifest {
+    let mut d = Doc.new();
+    let mut p = P.{ s: src, i: 0 };
+    let mut current = vec.Vec::<vec.Vec<u8>>.new();
+    loop {
+        p.ws_nl();
+        if p.at_end() { break; }
+        match p.line(&mut d, &mut current) {
+            Result.Ok(_) => {}
+            Result.Err(_) => { break; }
+        }
+    }
+    return read_back(&d);
+}
+
+fn entry_string(d: &Doc, e: usize) -> Option<string.String> {
+    if d.e_kind.as_slice()[e] != V_STR { return Option.None; }
+    return Option.Some(text.string_of(d.e_str.get_ref(e).as_slice()));
+}
+
+fn read_deps(d: &Doc, t: u32, target: &[u8], m: &mut Manifest) {
+    for e in 0..d.e_table.len() {
+        if d.e_table.as_slice()[e] != t { continue; }
+        let mut path: Option<string.String> = Option.None;
+        match d.sub_table(e) {
+            Option.Some(dt) => {
+                for k in 0..d.e_table.len() {
+                    if d.e_table.as_slice()[k] == dt && text.eq_str(d.e_key.get_ref(k).as_slice(), "path") {
+                        path = entry_string(d, k);
+                    }
+                }
+            }
+            Option.None => {}
+        }
+        m.dep_target.push(text.string_of(target));
+        m.deps.push(Dep.{ name: text.string_of(d.e_key.get_ref(e).as_slice()), path: path });
+    }
+}
+
+fn read_back(d: &Doc) -> Manifest {
+    let mut m = Manifest.{ name: Option.None, dep_target: vec.Vec::<string.String>.new(), deps: vec.Vec::<Dep>.new() };
+    for e in 0..d.e_table.len() {
+        if d.e_table.as_slice()[e] != 0 { continue; }
+        let key = d.e_key.get_ref(e).as_slice();
+        if text.eq_str(key, "name") {
+            m.name = entry_string(d, e);
+        } else if text.eq_str(key, "dependencies") {
+            match d.sub_table(e) {
+                Option.Some(t) => { read_deps(d, t, mem.str_bytes(""), &mut m); }
+                Option.None => {}
+            }
+        } else if text.eq_str(key, "target") {
+            match d.sub_table(e) {
+                Option.Some(t) => {
+                    for te in 0..d.e_table.len() {
+                        if d.e_table.as_slice()[te] != t { continue; }
+                        let tkey = d.e_key.get_ref(te).as_slice();
+                        if !known_target(tkey) { continue; }
+                        match d.sub_table(te) {
+                            Option.Some(tt) => {
+                                for de in 0..d.e_table.len() {
+                                    if d.e_table.as_slice()[de] == tt && text.eq_str(d.e_key.get_ref(de).as_slice(), "dependencies") {
+                                        match d.sub_table(de) {
+                                            Option.Some(dt) => { read_deps(d, dt, tkey, &mut m); }
+                                            Option.None => {}
+                                        }
+                                    }
+                                }
+                            }
+                            Option.None => {}
+                        }
+                    }
+                }
+                Option.None => {}
+            }
+        }
+    }
+    return m;
+}
+
+// The dependencies in effect for target `name` of arch table `alias` ("" for none): the base
+// table, then the arch table, then the target's own table; a later entry replaces an earlier
+// one of the same name in place.
+pub fn effective_deps(m: &Manifest, name: &str, alias: &str) -> vec.Vec<Dep> {
+    let mut out = vec.Vec::<Dep>.new();
+    apply(m, mem.str_bytes(""), &mut out);
+    if mem.str_bytes(alias).len() > 0 { apply(m, mem.str_bytes(alias), &mut out); }
+    if !text.eq_str(mem.str_bytes(name), alias) { apply(m, mem.str_bytes(name), &mut out); }
+    return out;
+}
+
+fn copy_dep(d: &Dep) -> Dep {
+    let path = match &d.path {
+        Option.Some(p) => Option.Some(string.String.from_str(p.as_str())),
+        Option.None => Option.None,
+    };
+    return Dep.{ name: string.String.from_str(d.name.as_str()), path: path };
+}
+
+fn apply(m: &Manifest, target: &[u8], out: &mut vec.Vec<Dep>) {
+    for k in 0..m.deps.len() {
+        if !text.eq(m.dep_target.get_ref(k).as_bytes(), target) { continue; }
+        let d = m.deps.get_ref(k);
+        let mut hit = out.len();
+        for j in 0..out.len() {
+            if text.eq(out.get_ref(j).name.as_bytes(), d.name.as_bytes()) { hit = j; }
+        }
+        if hit < out.len() {
+            *out.get_mut(hit) = copy_dep(d);
+        } else {
+            out.push(copy_dep(d));
+        }
+    }
+}
