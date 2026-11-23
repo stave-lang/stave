@@ -1,0 +1,52 @@
+//~ CHECK-ONLY
+// The source of a `for` is read once, at the head, and the loop holds it to its end (the tail
+// too): a reference source keeps its referent borrowed although the body reassigns the place it
+// was read from, so changing the old referent in the loop is E0501.
+import std.vec;
+
+fn elements(v: &mut vec.Vec<u32>, b: &[u32]) -> u32 {
+    let mut s: &[u32] = v.as_slice();
+    let mut k: u32 = 0;
+    for x in s {
+        k = k + *x;
+        s = b;
+        v.clear(); //~ ERROR E0501
+    }
+    return k;
+}
+
+fn chunks(v: &mut vec.Vec<u32>, b: &[u32]) -> u32 {
+    let mut s: &[u32] = v.as_slice();
+    let mut k: u32 = 0;
+    for _: u32x4 in s {
+        k = k + 1;
+        s = b;
+        v.clear(); //~ ERROR E0501
+    } tail scalar (x) {
+        k = k + x;
+    }
+    return k;
+}
+
+fn in_tail(v: &mut vec.Vec<u32>, b: &[u32]) -> u32 {
+    let mut s: &[u32] = v.as_slice();
+    let mut k: u32 = 0;
+    for c: u32x4 in s { } tail scalar (x) {
+        k = k + x;
+        s = b;
+        v.clear(); //~ ERROR E0501
+    }
+    return k;
+}
+
+fn writes(v: &mut vec.Vec<u32>, b: &mut [u32]) {
+    let mut s: &mut [u32] = v.as_mut_slice();
+    for x in s {
+        *x = 5;
+        s = &mut *b;
+        v.clear(); //~ ERROR E0501
+        //~^ ERROR E0501
+    }
+}
+
+fn main() { }

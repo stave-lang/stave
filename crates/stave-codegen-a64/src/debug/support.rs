@@ -49,6 +49,9 @@ pub struct Symbols {
     /// Declared by [`prepare`]; the caller defines it ([`stave_obj::stub::stack_table`]) before
     /// linking.
     pub stack_table: SymbolId,
+    /// Declared by [`prepare`]; the caller defines it ([`stave_obj::stub::reserve_table`]) before
+    /// linking.
+    pub reserve_table: SymbolId,
     /// Per site: the line-table position.
     pub lines: Vec<Option<(FileId, u32, u32)>>,
 }
@@ -135,6 +138,9 @@ pub struct Codegen<'a> {
     pub(crate) tys: Vec<Ty>,
     pub(crate) intr: Vec<Intr>,
     pub(crate) release: bool,
+    /// Per `FuncId`: the reserve-table slot of a function that probes its reserve at entry
+    /// ([`Codegen::reserve_slots`]).
+    pub(crate) reserve_slots: &'a [u32],
 }
 
 /// Per-thread reusable buffers.
@@ -149,13 +155,20 @@ impl<'a> Codegen<'a> {
         let layouts = Layouts::compute(&m.types);
         let tys = (0..m.types.len()).map(|i| classify(&m.types, &layouts, TypeId(i as u32))).collect();
         let intr = m.intrinsics.iter().map(|n| intr_kind(n)).collect();
-        Codegen { m, syms, layouts, tys, intr, release: false }
+        Codegen { m, syms, layouts, tys, intr, release: false, reserve_slots: &[] }
     }
 
     /// Release code generation: values used across blocks own a callee-saved register for their
     /// whole life (`analysis`, stave-opt `regalloc`). Off: they live in their home slots.
     pub fn release(mut self, on: bool) -> Codegen<'a> {
         self.release = on;
+        self
+    }
+
+    /// Per `FuncId`: the slot of `__stave_reserve_table` whose bytes the function's entry probes
+    /// below its frame, page by page, or `u32::MAX` (no probe; also every function past the end).
+    pub fn reserve_slots(mut self, slots: &'a [u32]) -> Codegen<'a> {
+        self.reserve_slots = slots;
         self
     }
 
@@ -185,24 +198,37 @@ impl<'a> Codegen<'a> {
             e.func.get_or_insert(f);
             e
         })?;
+        let frame = 16u32.saturating_add(s.an.frame).saturating_add(self.below_frame(f) as u32);
+        Ok((code, StackUse { frame, traps }))
+    }
+
+    /// The bytes `f`'s code puts below its frame: the 16 bytes `call_on_stack` pushes.
+    fn below_frame(&self, f: FuncId) -> u64 {
         let on_stack = self.m.func(f).and_then(|x| x.body.as_ref()).is_some_and(|b| {
             b.insts.op.iter().any(
                 |op| matches!(op, Op::Intrinsic(id) if self.intr.get(id.index()) == Some(&Intr::CallOnStack)),
             )
         });
-        let frame = 16u32.saturating_add(s.an.frame).saturating_add(if on_stack { 16 } else { 0 });
-        Ok((code, StackUse { frame, traps }))
+        if on_stack { 16 } else { 0 }
     }
 
     fn compile_inner(&self, fid: FuncId, s: &mut FuncScratch) -> R<(FuncCode, bool)> {
         let func = self.m.func(fid).ok_or_else(|| bad("unknown function"))?;
         let body = func.body.as_ref().ok_or_else(|| bad("function has no body"))?;
         s.an.run(self, func, body)?;
+        let reserve = match self.reserve_slots.get(fid.index()) {
+            Some(&k) if k != u32::MAX => Some((i64::from(k) * 8, self.below_frame(fid))),
+            _ => None,
+        };
         let mut vreg = std::mem::take(&mut s.vreg);
-        let mut r = Gen::new(self, func, body, &s.an, &mut vreg, false).run();
+        let mut g = Gen::new(self, func, body, &s.an, &mut vreg, false);
+        g.reserve = reserve;
+        let mut r = g.run();
         // A function beyond the ±1 MiB reach of b.cond / cbz is redone with long branches.
         if let Err(Error { kind: super::ErrorKind::Enc(crate::enc::EncError::BranchRange(_)), .. }) = r {
-            r = Gen::new(self, func, body, &s.an, &mut vreg, true).run();
+            let mut g = Gen::new(self, func, body, &s.an, &mut vreg, true);
+            g.reserve = reserve;
+            r = g.run();
         }
         s.vreg = vreg;
         r
@@ -362,6 +388,7 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
     rows[..8].copy_from_slice(&cnt.to_le_bytes());
     let pc_table = b.rodata(SYM_PC_TABLE, DataObj { bytes: rows, align: 8, relocs })?;
     let stack_table = b.declare(SYM_STACK_TABLE);
+    let reserve_table = b.declare(stave_obj::stub::RESERVE_TABLE);
     // Stubs.
     let main_stub = match main {
         Some(mf) => {
@@ -412,6 +439,7 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
         site_table,
         pc_table,
         stack_table,
+        reserve_table,
         lines,
     })
 }
@@ -563,5 +591,6 @@ pub fn build_image(m: &Module, cfg: &BuildConfig) -> Result<ObjectImage, Error> 
         b.define_func(sym, code)?;
     }
     b.define_rodata(syms.stack_table, stave_obj::stub::stack_table(0, 0, &[]))?;
+    b.define_rodata(syms.reserve_table, stave_obj::stub::reserve_table(&[]))?;
     Ok(b.link()?)
 }

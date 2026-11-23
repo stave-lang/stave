@@ -6,6 +6,7 @@
 use stave_ir::{CastKind, Op, Operand, PanicKind};
 use stave_syntax::{NodeKind, Term};
 
+use crate::drops::Made;
 use crate::lower_fn::{Base, E, FnCx, Home, Place, Proj, Ty};
 use crate::mono::{InstKey, Req, Resolved};
 use crate::resolve::{DeferKind, Res};
@@ -13,6 +14,10 @@ use crate::sigs::TraitRef;
 use crate::traits::Adjust;
 use crate::typeck::{Coercion, Target};
 use crate::types::{ConstArg, FloatBits, GArg, Interner, TypeId, TypeKind};
+
+/// The longest array repeat `[e; n]` lowered as one `make` of `n` operands; a longer one is
+/// filled by a loop ([`FnCx::repeat_fill`]).
+const REPEAT_MAKE_MAX: u64 = 16;
 
 /// A postfix chain's state between steps.
 enum Cur {
@@ -228,14 +233,17 @@ impl<'a> FnCx<'a> {
     }
 
     /// An rvalue base of a droppable type becomes a statement temporary (so its unmoved parts
-    /// are dropped at the end of the statement).
-    fn own_temp(&mut self, p: Place) -> Place {
+    /// are dropped at the end of the statement). `made`: the value in the drop schedule
+    /// ([`crate::drops::Owner::Temp`]).
+    fn own_temp(&mut self, p: Place, made: Made) -> Place {
         if let Base::Val(v, t) = p.base
             && p.proj.is_empty()
             && p.root.is_none()
-            && self.needs_drop(t)
         {
-            return self.slot_temp(v, t);
+            if self.needs_drop(t) {
+                return self.slot_temp(v, t, made);
+            }
+            self.no_temp(made);
         }
         p
     }
@@ -309,7 +317,8 @@ impl<'a> FnCx<'a> {
                     }
                     _ => {
                         let Some(v) = self.read(&p) else { return E::Never };
-                        let (m, mt, _) = self.slot_temp_at(v, s);
+                        let made = crate::drops::value_key(&self.icx, self.f.cur);
+                        let (m, mt, _) = self.slot_temp_at(v, s, made);
                         let r = self.t_ref(false, s);
                         self.convert_ptr(m, mt, r)
                     }
@@ -547,7 +556,7 @@ impl<'a> FnCx<'a> {
             let e = self.expr(c, None);
             let Some(p) = self.place_of(e) else { return E::Never };
             let p = match p.base {
-                Base::Val(..) => self.own_temp(p),
+                Base::Val(..) => self.own_temp(p, crate::drops::value_key(&self.icx, c)),
                 _ => p,
             };
             let Some(v) = self.addr(&p, Some(rt)) else { return E::Never };
@@ -890,9 +899,6 @@ impl<'a> FnCx<'a> {
         if kids.len() == 2 && icx.is(icx.end_tok(kids[0]) + 1, Term::Semi) {
             let Some(v) = self.val(kids[0], Some(elem)) else { return E::Never };
             let Some(len) = len.value() else { return self.fail(n, "array length") };
-            if len > (1 << 20) {
-                return self.fail(n, "array repeat literal too long for the IR (no splat op)");
-            }
             if self.g.borrows
                 && len >= 2
                 && !self.is_copy(elem)
@@ -901,8 +907,7 @@ impl<'a> FnCx<'a> {
                 // each element after the first is a second owner of the one value
                 self.f.events.push(stave_ir::EventMark { value, kind: stave_ir::EventKind::Repeat });
             }
-            let vs = vec![v; len as usize];
-            return E::V(self.opn(Op::Make, ty, &vs), ty);
+            return self.repeat_fill(v, elem, ty, len);
         }
         let mut vs = Vec::with_capacity(kids.len());
         let mut held = Vec::new();
@@ -914,6 +919,45 @@ impl<'a> FnCx<'a> {
         }
         self.release(&held);
         E::V(self.opn(Op::Make, ty, &vs), ty)
+    }
+
+    /// Array `ty` of `len` copies of the lowered value `v` of type `elem`. Up to
+    /// [`REPEAT_MAKE_MAX`] elements it is one `make` of `len` operands. A longer array is a
+    /// frame slot filled by a counted loop that stores `v` into each element (no loop for a
+    /// zero-size element), so the code does not grow with `len`; the result is then the slot's
+    /// place, which owns nothing: more than one copy of a value needs it to be Copy.
+    pub(crate) fn repeat_fill(&mut self, v: Operand, elem: Ty, ty: Ty, len: u64) -> E {
+        if len <= REPEAT_MAKE_MAX {
+            let vs = vec![v; len as usize];
+            return E::V(self.opn(Op::Make, ty, &vs), ty);
+        }
+        let s = self.new_slot(ty);
+        let pt = self.t_ref(true, ty);
+        // each evaluation is a new temporary
+        self.event(stave_ir::EventKind::Begin, s, pt);
+        if self.layout(elem).is_none_or(|l| l.0 > 0) {
+            let us = self.t_usize();
+            let (head, hv) = self.f.b.create_block_with(&[FnCx::ir(us)]);
+            let body = self.f.b.create_block();
+            let exit = self.f.b.create_block();
+            let z = self.int(0);
+            self.f.b.br(head, &[z]);
+            self.f.b.switch_to(head);
+            let i = Operand::Value(hv[0]);
+            let nn = self.int(len as i128);
+            let bt = self.t_bool();
+            let c = self.op2(Op::Lt, bt, i, nn);
+            self.f.b.cbr(c, body, &[], exit, &[]);
+            self.f.b.switch_to(body);
+            let ep = self.t_ref(true, elem);
+            let a = self.op2(Op::ElemAddr, ep, s, i);
+            self.f.b.store(a, v);
+            let one = self.int(1);
+            let next = self.op2(Op::AddWrap, us, i, one);
+            self.f.b.br(head, &[next]);
+            self.f.b.switch_to(exit);
+        }
+        E::P(Place { base: Base::Mem(s, pt), proj: Vec::new(), ty, root: None })
     }
 
     // ---------- paths ----------
@@ -938,13 +982,7 @@ impl<'a> FnCx<'a> {
                 }
             }
             Res::Decl(d) => match self.decl_kind(d) {
-                Some(crate::decls::DeclKind::Const) => {
-                    let Some(c) = self.g.sigs.konst(d) else { return self.fail_at(Some(tok), "const") };
-                    let (ty, Some(v)) = (c.ty, c.value.clone()) else {
-                        return self.fail_at(Some(tok), "const without a value");
-                    };
-                    self.const_val(&v, ty, tok)
-                }
+                Some(crate::decls::DeclKind::Const) => self.const_use(d, tok),
                 Some(crate::decls::DeclKind::Static) => self.static_place(d, tok),
                 Some(crate::decls::DeclKind::Fn | crate::decls::DeclKind::Method) => {
                     let end = icx.end_tok(node);
@@ -991,6 +1029,24 @@ impl<'a> FnCx<'a> {
         let i = self.int(idx as i128);
         let p = Operand::Value(self.f.b.op(stave_ir::Op::Intrinsic(id), FnCx::ir(pt), &[i]));
         E::P(Place { base: Base::Mem(p, pt), proj: Vec::new(), ty, root: None })
+    }
+
+    /// The value of const `d`. One with more than [`crate::lower::CONST_INLINE_CELLS`] value
+    /// cells is read from its image (a read-only static), so the code does not grow with the
+    /// value; a smaller one is built in place.
+    pub fn const_use(&mut self, d: crate::ids::DeclId, tok: u32) -> E {
+        let Some(c) = self.g.sigs.konst(d) else { return self.fail_at(Some(tok), "const") };
+        let (ty, Some(v)) = (c.ty, c.value.clone()) else {
+            return self.fail_at(Some(tok), "const without a value");
+        };
+        if self.g.statics.contains_key(&d) {
+            let p = self.static_place(d, tok);
+            return match self.operand_of(p) {
+                Some(o) => E::V(o, ty),
+                None => E::Never,
+            };
+        }
+        self.const_val(&v, ty, tok)
     }
 
     /// A const value of type `ty`.
@@ -1043,6 +1099,14 @@ impl<'a> FnCx<'a> {
                 }
                 E::V(self.opn(Op::EnumMake, ty, &ops), ty)
             }
+            Val::Rep(x, n) => {
+                let TypeKind::Array { elem, .. } = self.kind(ty) else {
+                    return self.fail_at(Some(tok), "const repeat of a type that is not an array");
+                };
+                let e = self.const_val(x, elem, tok);
+                let Some(o) = self.operand_of(e) else { return E::Never };
+                self.repeat_fill(o, elem, ty, *n)
+            }
         }
     }
 
@@ -1072,10 +1136,14 @@ impl<'a> FnCx<'a> {
             Cur::Val(self.expr(prim, if only { want } else { None }))
         };
         let mut p = prim_end + 1;
+        // the value of the chain so far in the drop schedule: the head's (through parentheses),
+        // then the chain up to the last token of the last step
+        let head_key = crate::drops::value_key(&icx, prim);
         for _ in 0..10_000_000 {
             if !self.open() {
                 return E::Never;
             }
+            let rk = if p == prim_end + 1 { head_key } else { Made::step(&icx, n, p - 1) };
             let t = icx.tk(p);
             if t == Term::Dot as u8 && icx.is(p + 1, Term::Ident) {
                 let seg = p + 1;
@@ -1114,17 +1182,17 @@ impl<'a> FnCx<'a> {
                         a.map(|a| icx.kids_vec(a)).unwrap_or_default()
                     };
                     let last = close == pend;
-                    cur = Cur::Val(self.method_call(n, recv, seg, &args, last));
+                    cur = Cur::Val(self.method_call(n, recv, seg, &args, last, rk));
                     p = close + 1;
                 } else {
-                    cur = Cur::Val(self.field_step(recv, seg));
+                    cur = Cur::Val(self.field_step(recv, seg, rk));
                     p = q;
                 }
                 continue;
             }
             if t == Term::Dot as u8 && icx.is(p + 1, Term::IntLit) {
                 let recv = self.cur_value(cur, prim);
-                cur = Cur::Val(self.field_step(recv, p + 1));
+                cur = Cur::Val(self.field_step(recv, p + 1, rk));
                 p += 2;
                 continue;
             }
@@ -1154,7 +1222,7 @@ impl<'a> FnCx<'a> {
                 let ie = kids.get(kid).copied();
                 kid += 1;
                 let base = self.cur_value(cur, prim);
-                cur = Cur::Val(self.index_step(base, ie, p));
+                cur = Cur::Val(self.index_step(base, ie, p, rk));
                 p = close + 1;
                 continue;
             }
@@ -1191,18 +1259,19 @@ impl<'a> FnCx<'a> {
         Some(p)
     }
 
-    fn field_step(&mut self, recv: E, tok: u32) -> E {
+    /// `rk`: the receiver's value in the drop schedule.
+    fn field_step(&mut self, recv: E, tok: u32, rk: Made) -> E {
         let (index, derefs) = match self.target(tok) {
             Some(Target::Field { index, derefs, .. }) => (*index, *derefs),
             Some(Target::TupleField { index, derefs }) => (*index, *derefs),
             Some(Target::Column { index, derefs }) => {
                 let (i, d) = (*index, *derefs);
-                return self.column_step(recv, tok, i, d);
+                return self.column_step(recv, tok, i, d, rk);
             }
             _ => return self.fail_at(Some(tok), "field without a target"),
         };
         let Some(p) = self.place_of(recv) else { return E::Never };
-        let p = self.own_temp(p);
+        let p = self.own_temp(p, rk);
         let Some(mut p) = self.derefs(p, derefs) else { return E::Never };
         let ft = match self.kind(p.ty) {
             TypeKind::Tuple(ts) => ts.get(index as usize).copied(),
@@ -1268,9 +1337,9 @@ impl<'a> FnCx<'a> {
     /// place. Layout (std/soa.stv): one buffer `ptr` of `cap` rows, column k at byte
     /// `cap * (sizes of fields 0..k)`; the products cannot overflow (the buffer holds
     /// `cap * row size` bytes), so they wrap.
-    fn column_step(&mut self, recv: E, tok: u32, index: u32, derefs: u32) -> E {
+    fn column_step(&mut self, recv: E, tok: u32, index: u32, derefs: u32, rk: Made) -> E {
         let Some(p) = self.place_of(recv) else { return E::Never };
-        let p = self.own_temp(p);
+        let p = self.own_temp(p, rk);
         let Some(p) = self.derefs(p, derefs) else { return E::Never };
         let Some((row, [ptr, len, cap])) = self.soa_parts(p.ty) else {
             return self.fail_at(Some(tok), "column of a non-Soa value");
@@ -1363,18 +1432,18 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    fn index_step(&mut self, base: E, ie: Option<u32>, tok: u32) -> E {
+    fn index_step(&mut self, base: E, ie: Option<u32>, tok: u32, rk: Made) -> E {
         let derefs = match self.target(tok) {
             Some(Target::Index { derefs }) => *derefs,
             Some(Target::Slice { derefs }) => {
                 let d = *derefs;
-                return self.slice_step(base, ie, tok, d);
+                return self.slice_step(base, ie, tok, d, rk);
             }
             _ => return self.fail_at(Some(tok), "index without a target"),
         };
         let Some(ie) = ie else { return self.fail_at(Some(tok), "index") };
         let Some(p) = self.place_of(base) else { return E::Never };
-        let p = self.own_temp(p);
+        let p = self.own_temp(p, rk);
         let Some(mut p) = self.derefs(p, derefs) else { return E::Never };
         let us = self.t_usize();
         let Some(i) = self.val(ie, Some(us)) else { return E::Never };
@@ -1387,8 +1456,7 @@ impl<'a> FnCx<'a> {
             && (k < 0 || k as u128 >= n as u128)
         {
             self.trapping(tok, Op::Panic(PanicKind::Bounds), None, &[]);
-            self.f.b.unreachable();
-            return E::Never;
+            self.after_trap();
         }
         p.proj.push(Proj::Elem(i, et, tok));
         p.ty = et;
@@ -1398,11 +1466,12 @@ impl<'a> FnCx<'a> {
     /// `xs[a..b]` (`xs[a..=b]`: end `b + 1`): the slice place of elements `a..end` of an array
     /// or slice of length `n`, after the tests `end <= n` (inclusive: `b < n`, so `b + 1` cannot
     /// overflow) and `a <= end`, each a branch to `panic.bounds`. Constant operands are tested
-    /// here: a range out of a constant length is an unconditional `panic.bounds`.
-    fn slice_step(&mut self, base: E, ie: Option<u32>, tok: u32, derefs: u32) -> E {
+    /// here: a range out of a constant length is an unconditional `panic.bounds`, and the code
+    /// after it takes the empty slice at the start ([`FnCx::after_trap`]).
+    fn slice_step(&mut self, base: E, ie: Option<u32>, tok: u32, derefs: u32, rk: Made) -> E {
         let Some(ie) = ie else { return self.fail_at(Some(tok), "slice") };
         let Some(p) = self.place_of(base) else { return E::Never };
-        let p = self.own_temp(p);
+        let p = self.own_temp(p, rk);
         let Some(p) = self.derefs(p, derefs) else { return E::Never };
         let rt = self.nty(ie);
         let inclusive = matches!(self.kind(rt), TypeKind::Range { inclusive: true, .. });
@@ -1429,8 +1498,10 @@ impl<'a> FnCx<'a> {
             || ke.is_some_and(|e| e > i128::from(u64::MAX));
         if out {
             self.trapping(tok, Op::Panic(PanicKind::Bounds), None, &[]);
-            self.f.b.unreachable();
-            return E::Never;
+            self.after_trap();
+            let Some((bp, bt)) = self.addr_t(&p, None) else { return E::Never };
+            let z = self.int(0);
+            return self.sub_slice(bp, bt, elem, z, z);
         }
         let Some((bp, bt)) = self.addr_t(&p, None) else { return E::Never };
         let n = match kn {
@@ -1468,6 +1539,11 @@ impl<'a> FnCx<'a> {
             },
             (None, _) => self.op2(Op::SubWrap, us, end, a),
         };
+        self.sub_slice(bp, bt, elem, a, n)
+    }
+
+    /// The slice place of the `n` elements from `a` on behind pointer `bp` (type `bt`).
+    fn sub_slice(&mut self, bp: Operand, bt: Ty, elem: Ty, a: Operand, n: Operand) -> E {
         let mutable = self.pointee(bt).is_some_and(|x| x.1);
         let st = self.tys.intern(TypeKind::Slice { elem, align: 0 });
         let ept = self.ptr_like(bt, elem);
@@ -1569,7 +1645,7 @@ impl<'a> FnCx<'a> {
         let t = self.e_ty(&e);
         let v = self.operand_of(e)?;
         if self.try_in(rest) {
-            self.hold(v, t, held);
+            self.hold(v, t, held, crate::drops::value_key(&self.icx, n));
         }
         Some((v, t))
     }
@@ -1832,10 +1908,10 @@ impl<'a> FnCx<'a> {
         E::V(self.opn(op, ty, &ops), ty)
     }
 
-    /// The receiver after typeck's adjustment.
-    fn receiver(&mut self, recv: E, adj: Adjust, want: Option<Ty>) -> Option<Operand> {
+    /// The receiver after typeck's adjustment; `rk`: its value in the drop schedule.
+    fn receiver(&mut self, recv: E, adj: Adjust, want: Option<Ty>, rk: Made) -> Option<Operand> {
         let p = self.place_of(recv)?;
-        let p = if adj.autoref.is_some() { self.own_temp(p) } else { p };
+        let p = if adj.autoref.is_some() { self.own_temp(p, rk) } else { p };
         let p = self.derefs(p, adj.derefs)?;
         match adj.autoref {
             Some(m) => {
@@ -1855,7 +1931,7 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    fn method_call(&mut self, n: u32, recv: E, seg: u32, args: &[u32], last: bool) -> E {
+    fn method_call(&mut self, n: u32, recv: E, seg: u32, args: &[u32], last: bool, rk: Made) -> E {
         let _ = last;
         self.cur_tok = seg;
         match self.target(seg).cloned() {
@@ -1863,7 +1939,7 @@ impl<'a> FnCx<'a> {
                 Some(Resolved::Inst(k)) => {
                     let Some((ps, _)) = self.inst_sig(&k) else { return self.fail_at(Some(seg), "callee") };
                     let by_value = adjust.autoref.is_none();
-                    let Some(rv) = self.receiver(recv, adjust, ps.first().copied()) else {
+                    let Some(rv) = self.receiver(recv, adjust, ps.first().copied(), rk) else {
                         return E::Never;
                     };
                     let mut held = Vec::new();
@@ -1871,7 +1947,7 @@ impl<'a> FnCx<'a> {
                         && self.try_in(args)
                         && let Some(&t) = ps.first()
                     {
-                        self.hold(rv, t, &mut held);
+                        self.hold(rv, t, &mut held, rk);
                     }
                     let Some(mut vs) = self.args_after(args, ps.get(1..).unwrap_or(&[]), held) else {
                         return E::Never;
@@ -1880,7 +1956,7 @@ impl<'a> FnCx<'a> {
                     self.call_inst(k, &vs, seg)
                 }
                 Some(Resolved::BuiltinOp(name)) => {
-                    let Some(rv) = self.receiver(recv, adjust, None) else { return E::Never };
+                    let Some(rv) = self.receiver(recv, adjust, None, rk) else { return E::Never };
                     let ty = self.nty(n);
                     let Some(mut vs) = self.args(args, &[ty]) else { return E::Never };
                     vs.insert(0, rv);
@@ -2049,9 +2125,12 @@ impl<'a> FnCx<'a> {
                 }
                 let r = self.opn(Op::Select, rt, &[c, a, b]);
                 if self.needs_drop(rt) {
-                    // the operand not selected is a statement temporary, picked without a branch
+                    // the operand not selected is a statement temporary, picked without a
+                    // branch, named by the method's name (the picked value is the call's)
                     let u = self.opn(Op::Select, rt, &[c, b, a]);
-                    let _ = self.slot_temp(u, rt);
+                    let _ = self.slot_temp(u, rt, Made::tok(seg));
+                } else {
+                    self.no_temp(Made::tok(seg));
                 }
                 E::V(r, rt)
             }
@@ -2146,7 +2225,7 @@ impl<'a> FnCx<'a> {
         }
         // the string is a temporary of the statement until it is moved out
         let mt = self.t_ref(true, st);
-        let l = self.new_temp(st, Home::Slot(ts), false);
+        let l = self.new_temp(st, Home::Slot(ts), false, crate::drops::value_key(&icx, n));
         E::P(Place { base: Base::Mem(ts, mt), proj: Vec::new(), ty: st, root: Some(l) })
     }
 
@@ -2181,9 +2260,10 @@ impl<'a> FnCx<'a> {
             }
             match res {
                 Res::Decl(d) if self.decl_kind(d) == Some(crate::decls::DeclKind::Const) => {
-                    let Some(c) = self.g.sigs.konst(d) else { return false };
-                    let (ty, Some(v)) = (c.ty, c.value.clone()) else { return false };
-                    self.const_val(&v, ty, tok)
+                    if self.g.sigs.konst(d).is_none_or(|c| c.value.is_none()) {
+                        return false;
+                    }
+                    self.const_use(d, tok)
                 }
                 Res::Decl(d) if self.decl_kind(d) == Some(crate::decls::DeclKind::Static) => {
                     self.static_place(d, tok)
@@ -2264,7 +2344,7 @@ impl<'a> FnCx<'a> {
         let disp = self.g.sigs.lang.display;
         let w = self.g.world();
         let Some((imp, iargs)) =
-            w.find_impl(&mut self.tys, d, &TraitRef { trait_decl: disp, args: Vec::new() }, &[], 0)
+            w.find_impl(&mut self.tys, d, &TraitRef { trait_decl: disp, args: Vec::new() }, &[])
         else {
             self.fail_at(Some(tok), "no Display impl for an f-string hole");
             return false;
@@ -2302,10 +2382,10 @@ impl<'a> FnCx<'a> {
 }
 
 /// Type lowering host for cast types (the signature-phase lowering over the body's overlay).
-struct TyHost<'x, 'a> {
-    tys: &'x mut crate::types::Overlay<'a>,
-    prog: &'a crate::Program,
-    sigs: &'a crate::sigs::Sigs,
+pub(crate) struct TyHost<'x, 'a> {
+    pub(crate) tys: &'x mut crate::types::Overlay<'a>,
+    pub(crate) prog: &'a crate::Program,
+    pub(crate) sigs: &'a crate::sigs::Sigs,
 }
 
 impl Interner for TyHost<'_, '_> {
@@ -2314,6 +2394,12 @@ impl Interner for TyHost<'_, '_> {
     }
     fn intern(&mut self, k: TypeKind) -> TypeId {
         self.tys.intern(k)
+    }
+    fn refusals(&self) -> u32 {
+        self.tys.refusals()
+    }
+    fn claimed_mut(&mut self) -> &mut u32 {
+        self.tys.claimed_mut()
     }
     fn fixed_ty(&self, f: TypeId) -> TypeId {
         self.tys.fixed_ty(f)
@@ -2355,8 +2441,8 @@ impl crate::consteval::CEnv for TyHost<'_, '_> {
     fn adt_def(&mut self, d: crate::ids::DeclId) -> Option<crate::sigs::AdtDef> {
         self.sigs.adt(d).cloned()
     }
-    fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        crate::traits::layout_of(self.tys, self.sigs, t, 0)
+    fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout> {
+        crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: self.tys, sigs: self.sigs }, t)
     }
     fn lang(&self) -> &crate::sigs::LangItems {
         &self.sigs.lang
@@ -2364,4 +2450,6 @@ impl crate::consteval::CEnv for TyHost<'_, '_> {
     fn fn_types(&mut self, d: crate::ids::DeclId) -> Option<(Vec<TypeId>, TypeId)> {
         self.sigs.fn_sig(d).map(|f| (f.params.clone(), f.ret))
     }
+    // The checker lowered the same type first and stopped on the same internal error.
+    fn internal(&mut self, _msg: String) {}
 }

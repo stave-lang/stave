@@ -1,0 +1,89 @@
+//~ CHECK-ONLY
+// A local moved on some paths only still holds its value on the others, and its scope-end drop
+// uses what it borrows there. A value moved into another local, or passed on to a fn that
+// returns it, takes its borrows along. A local written again after the move borrows what the
+// new value borrows. See pos_moved_holds_nothing.stv for the moves that end the borrows.
+import std.mem;
+import std.vec;
+
+view struct Holder { v: vec.Vec<&u32>, n: u32 }
+
+fn pass(v: vec.Vec<&u32>) -> vec.Vec<&u32> from v {
+    return v;
+}
+
+fn one_branch(c: bool) {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    if c { mem.drop(ps); }
+    x = 2; //~ ERROR E0501
+}
+
+fn one_arm(c: bool) {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    match c {
+        true => { mem.drop(ps); }
+        false => {}
+    }
+    x = 2; //~ ERROR E0501
+}
+
+fn some_iterations() -> usize {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    for i in 0u32..3 {
+        ps.push(&x);
+        if i == 1 {
+            mem.drop(ps);
+            ps = vec.Vec::<&u32>.new();
+        }
+        x = x + i; //~ ERROR E0501
+    }
+    return ps.len();
+}
+
+fn moved_on() {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    let q = ps;
+    x = 2; //~ ERROR E0501
+    mem.drop(q);
+}
+
+fn passed_on() -> usize {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    let q = pass(ps);
+    x = 2; //~ ERROR E0501
+    return q.len();
+}
+
+fn binding_keeps() -> usize {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    let h = Holder.{ v: ps, n: 0 };
+    let Holder.{ v, n: _ } = h;
+    x = 2; //~ ERROR E0501
+    return v.len();
+}
+
+fn borrows_again() -> usize {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    mem.drop(ps);
+    ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    x = 2; //~ ERROR E0501
+    return ps.len();
+}
+
+fn main() -> i32 {
+    return 0;
+}

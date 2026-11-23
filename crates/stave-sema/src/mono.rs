@@ -45,7 +45,7 @@ use crate::decls::{DeclFlags, DeclKind};
 use crate::ids::{DeclId, Sym};
 use crate::itemcx::{Brackets, ItemCx};
 use crate::package::PackageKind;
-use crate::sigs::{Sigs, TraitRef};
+use crate::sigs::{GenericParam, Sigs, TraitRef};
 use crate::traits::World;
 use crate::typeck::{Typeck, TypedBody};
 use crate::types::{ConstArg, GArg, Interner, Overlay, TypeId, TypeKind, TypeTable};
@@ -189,23 +189,14 @@ pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> 
             out.push(InstKey { decl: d, args: Vec::new() });
         }
     };
-    for p in &prog.packages {
-        if p.is_root
-            && let Some(m) = p.root_module.get()
-            && let Some(s) = sym(prog, "main")
-        {
-            add(&mut out, prog.module_item(m, s));
-        }
-    }
-    for (k, d) in prog.decls.iter().enumerate() {
+    let entries = Entries::new(prog);
+    for k in 0..prog.decls.len() {
         let id = DeclId(k as u32);
-        if d.flags.has(DeclFlags::EXTERN_EXPORT) || (test && d.flags.has(DeclFlags::TEST)) {
-            add(&mut out, Some(id));
-        }
-    }
-    for m in allocator_module(prog) {
-        for n in ["alloc", "free", "realloc"] {
-            add(&mut out, sym(prog, n).and_then(|s| prog.module_item(m, s)));
+        match entries.of(prog, id) {
+            Some(Entry::Main | Entry::Export | Entry::Allocator) => add(&mut out, Some(id)),
+            Some(Entry::Test) if test => add(&mut out, Some(id)),
+            // the runtime fns lowering calls are requested by the code that calls them
+            Some(Entry::Test | Entry::Runtime) | None => {}
         }
     }
     for k in [Known::StartEntry, Known::Trap, Known::TrapMsg, Known::OnSignal] {
@@ -216,6 +207,90 @@ pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> 
         out.sort();
     }
     out
+}
+
+/// Why a fn runs where no call written in the program names it: an entry point. It runs on any
+/// CPU of the target, so it declares no `needs` (E0709). Any other fn runs only where a typed
+/// call, a fn value of its type, or a dispatch arm reaches it, and the feature rules check
+/// those.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Entry {
+    /// `main` of the root package: the start code calls it.
+    Main,
+    /// A `test fn`: the test harness calls it (with parameters: once per generated input).
+    Test,
+    /// An `extern "C"` export: foreign code calls it.
+    Export,
+    /// A fn of the `allocator` declaration's module the runtime calls ([`ALLOCATOR_FNS`]).
+    Allocator,
+    /// A fn or method the compiler knows by path ([`Known`]): start code, the backend's stubs
+    /// (signal, thread start), the harness, or a call lowering inserts runs it.
+    Runtime,
+}
+
+impl Entry {
+    /// The E0709 `what` text.
+    pub(crate) fn what(self) -> &'static str {
+        match self {
+            Entry::Main => "`main`",
+            Entry::Test => "a `test fn`",
+            Entry::Export => "an `extern` export",
+            Entry::Allocator => "an allocator fn",
+            Entry::Runtime => "a runtime entry fn",
+        }
+    }
+}
+
+/// The fns of an `allocator` declaration's module that replace the runtime's.
+pub(crate) const ALLOCATOR_FNS: [&str; 3] = ["alloc", "free", "realloc"];
+
+/// The entry points of a program its decls do not mark: `main` and the allocator fns
+/// ([`Entry`]).
+pub(crate) struct Entries {
+    main: Vec<DeclId>,
+    alloc: Vec<DeclId>,
+}
+
+impl Entries {
+    pub(crate) fn new(prog: &Program) -> Entries {
+        let mut main = Vec::new();
+        for p in &prog.packages {
+            if p.is_root
+                && let Some(m) = p.root_module.get()
+                && let Some(d) = sym(prog, "main").and_then(|s| prog.module_item(m, s))
+            {
+                main.push(d);
+            }
+        }
+        let mut alloc = Vec::new();
+        for m in allocator_module(prog) {
+            for n in ALLOCATOR_FNS {
+                alloc.extend(sym(prog, n).and_then(|s| prog.module_item(m, s)));
+            }
+        }
+        Entries { main, alloc }
+    }
+
+    /// The entry point decl `d` is, if it is one.
+    pub(crate) fn of(&self, prog: &Program, d: DeclId) -> Option<Entry> {
+        let decl = prog.decl(d)?;
+        if !matches!(decl.kind, DeclKind::Fn | DeclKind::Method) {
+            return None;
+        }
+        if decl.flags.has(DeclFlags::TEST) {
+            Some(Entry::Test)
+        } else if decl.flags.has(DeclFlags::EXTERN_EXPORT) {
+            Some(Entry::Export)
+        } else if self.main.contains(&d) {
+            Some(Entry::Main)
+        } else if self.alloc.contains(&d) {
+            Some(Entry::Allocator)
+        } else if prog.known.of(d).is_some() {
+            Some(Entry::Runtime)
+        } else {
+            None
+        }
+    }
 }
 
 /// The module named by the `allocator` declaration, if any.
@@ -275,7 +350,7 @@ pub(crate) fn resolve_trait_method<I: Interner + ?Sized>(
         return Some(Resolved::BuiltinOp(op));
     }
     let tr = TraitRef { trait_decl, args: trait_args.to_vec() };
-    let (imp, impl_args) = w.find_impl(cx, self_ty, &tr, &[], 0)?;
+    let (imp, impl_args) = w.find_impl(cx, self_ty, &tr, &[])?;
     let idef = w.sigs.impl_def(imp)?;
     let m = idef.methods.iter().copied().find(|&m| w.prog.decl(m).is_some_and(|d| d.name == name))?;
     let mut args = impl_args;
@@ -286,12 +361,42 @@ pub(crate) fn resolve_trait_method<I: Interner + ?Sized>(
 /// The `Drop.drop` impl method instance of `t`, if `t` implements `Drop`.
 pub(crate) fn drop_method<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> Option<InstKey> {
     let drop = w.sigs.lang.drop;
-    if drop.is_none() || !matches!(cx.kind(t), TypeKind::Adt { .. }) {
+    let TypeKind::Adt { def, .. } = *cx.kind(t) else { return None };
+    if drop.is_none() {
         return None;
     }
-    let (imp, args) = w.find_impl(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[], 0)?;
+    let (imp, args) = w.find_impl(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[])?;
+    if !own_package(w, imp, def) {
+        return None;
+    }
     let m = *w.sigs.impl_def(imp)?.methods.first()?;
     Some(InstKey { decl: m, args })
+}
+
+/// Whether impl `imp` is declared in the package of ADT `def`: an `impl Drop` of another
+/// package is E0419 and drops nothing.
+fn own_package(w: &World<'_>, imp: DeclId, def: DeclId) -> bool {
+    let package = |d: DeclId| w.prog.decl(d).and_then(|x| w.prog.module(x.module)).map(|m| m.package);
+    package(imp) == package(def)
+}
+
+/// Whether a value of type `t` runs a `Drop` impl of its own when dropped (not only the glue of
+/// its parts). A concrete type: the impl its instance resolves to ([`drop_method`]), so a Copy
+/// instance of a type with a `Drop` impl for another instance has none. A type with parameters
+/// (in a generic body): some instance may, so any `Drop` impl of its ADT counts. The one answer
+/// the borrow checker's CFG, the lowering, and the drop schedule read.
+pub fn drop_impl<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> bool {
+    let TypeKind::Adt { def, .. } = *cx.kind(t) else { return false };
+    if !has_params(cx, t) {
+        return drop_method(w, cx, t).is_some();
+    }
+    let drop = w.sigs.lang.drop;
+    w.sigs.impls_by_trait.get(&drop).is_some_and(|is| {
+        is.iter().any(|&i| {
+            w.sigs.impl_def(i).is_some_and(|d| d.head == Some(crate::TypeHead::Adt(def)))
+                && own_package(w, i, def)
+        })
+    })
 }
 
 /// Field types of the variants of a concrete ADT type (struct: one variant).
@@ -313,15 +418,51 @@ pub(crate) fn adt_fields<I: Interner + ?Sized>(
     Some(out)
 }
 
-/// Whether values of the concrete type `t` need drop glue (a `Drop` impl anywhere inside, not
-/// behind a pointer). Memoized in `memo`.
+/// Whether `t` mentions a generic parameter (type or const) or `SelfTy`
+/// ([`Interner::has_params`]), each distinct part visited once: a type built by doubling (a
+/// tuple of a tuple of ..) is a small graph but an exponential tree.
+fn has_params<I: Interner + ?Sized>(cx: &mut I, t: TypeId) -> bool {
+    let mut seen: FxHashSet<TypeId> = FxHashSet::default();
+    let mut stack = vec![t];
+    let mut kids = Vec::new();
+    while let Some(x) = stack.pop() {
+        if !seen.insert(x) {
+            continue;
+        }
+        let k = cx.kind(x);
+        match k {
+            TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => return true,
+            TypeKind::Array { len: ConstArg::Param(_), .. } => return true,
+            TypeKind::Adt { args, .. }
+                if args.iter().any(|a| matches!(a, GArg::Const(ConstArg::Param(_)))) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        kids.clear();
+        k.children(&mut kids);
+        stack.extend_from_slice(&kids);
+    }
+    false
+}
+
+/// Whether values of type `t` need drop glue: a `Drop` impl anywhere inside, not behind a
+/// pointer ([`drop_impl`]), or a type parameter that is not Copy under `env`. Exact for a
+/// concrete type; for a type with parameters, whether some instance may. The one answer every
+/// stage reads: the borrow checker's CFG and drop schedule, the lowering, the call graph, the
+/// lock ranks of drops, the const rule (E0413). Memoized in `memo` (answers under one `env`).
 ///
 /// This is reachability over containment edges (ADT fields, tuple and array elements), walked
-/// with an explicit stack, so the answer is exact for a type of any finite nesting depth.
-pub(crate) fn needs_drop<I: Interner + ?Sized>(
+/// with an explicit stack and a visited set: it ends on the finite set of types the interner
+/// accepts (a type past the height limit is refused there, E0005, and has no parts here). Every
+/// answer it records is final: a type found to reach a `Drop` impl does, and a search that ended
+/// without one visited everything reachable.
+pub fn needs_drop<I: Interner + ?Sized>(
     w: &World<'_>,
     cx: &mut I,
     t: TypeId,
+    env: &[GenericParam],
     memo: &mut FxHashMap<TypeId, bool>,
 ) -> bool {
     if let Some(&b) = memo.get(&t) {
@@ -342,12 +483,17 @@ pub(crate) fn needs_drop<I: Interner + ?Sized>(
         }
         let inner: Vec<TypeId> = match cx.kind(u).clone() {
             TypeKind::Adt { .. } => {
-                if drop_method(w, cx, u).is_some() {
+                if drop_impl(w, cx, u) {
                     memo.insert(u, true);
                     memo.insert(t, true);
                     return true;
                 }
                 adt_fields(w.sigs, cx, u).map_or_else(Vec::new, |vs| vs.into_iter().flatten().collect())
+            }
+            TypeKind::Param(_) if !w.is_copy(cx, u, env) => {
+                memo.insert(u, true);
+                memo.insert(t, true);
+                return true;
             }
             TypeKind::Tuple(ts) => ts.to_vec(),
             TypeKind::Array { elem, .. } => vec![elem],
@@ -491,4 +637,25 @@ pub(crate) fn depth_check(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ids;
+
+    /// `(x, x)` nested `n` times over `x`: `n + 1` distinct types, a tree of 2^n leaves.
+    fn doubled(t: &mut TypeTable, x: TypeId, n: u32) -> TypeId {
+        (0..n).fold(x, |a, _| t.mk_tuple(vec![a, a]))
+    }
+
+    #[test]
+    fn params_of_a_doubling_type_are_found_on_its_graph() {
+        let mut t = TypeTable::new();
+        let plain = doubled(&mut t, ids::U32, 200);
+        assert!(!has_params(&mut t, plain));
+        let p = t.intern(TypeKind::Param(0));
+        let generic = doubled(&mut t, p, 200);
+        assert!(has_params(&mut t, generic));
+    }
 }

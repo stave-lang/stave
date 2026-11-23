@@ -496,6 +496,13 @@ impl Ck<'_> {
                 ok = false;
                 continue;
             }
+            // the size first, on the type (memoised): a generator holds one node per scalar
+            if crate::consteval::cells(self, t).is_some_and(|c| c > MAX_SCALARS) {
+                let tn = self.show(t);
+                self.report(mk("E0214", Some("size"), &[("type", &tn)], at, &[]));
+                ok = false;
+                continue;
+            }
             match self.param_gen(t, true, 0) {
                 Ok(values) => params.push(Param { name: icx.tok_str(icx.a(p)).to_string(), values }),
                 Err(why) => {
@@ -617,10 +624,7 @@ impl Ck<'_> {
         let mut fields = Vec::with_capacity(v.fields.len());
         for f in &v.fields {
             let fname = prog.strings.get(f.name).to_string();
-            if let Some(fd) = prog.decl(f.decl)
-                && !fd.is_pub()
-                && fd.module != me
-            {
+            if let Some(fd) = prog.hidden_field(f.decl, me) {
                 return fail(NoGen::Private { name: fname, module: module_text(fd.module), field: true });
             }
             let ft = self.tys.subst(f.ty, args, None);

@@ -1,0 +1,41 @@
+//~ CHECK-ONLY
+// `Copy` through an impl with a `Copy` bound holds at every legal height: a trait query has no
+// depth limit of its own (contracts/lang-details.md "Size limits"). Impls that need each other
+// prove nothing: a goal met again while it is in progress does not hold.
+struct W<T> {
+    pub v: T,
+}
+
+type A0<T> = W<T>;
+type A1<T> = A0<A0<T>>;
+type A2<T> = A1<A1<T>>;
+type A3<T> = A2<A2<T>>;
+type A4<T> = A3<A3<T>>;
+type A5<T> = A4<A4<T>>;
+type A6<T> = A5<A5<T>>;
+type A7<T> = A6<A6<T>>;
+type A8<T> = A7<A7<T>>;
+type A9<T> = A8<A8<T>>;
+
+impl<T: Copy> Copy for W<T> {}
+
+// 998 `W` levels over `u8`: 999 high, and an array of it one level more
+type H = A9<A8<A7<A6<A5<A2<A1<u8>>>>>>>;
+
+fn fill(x: H) -> usize {
+    let a = [x; 2];
+    return a.len();
+}
+
+trait Ping {}
+trait Pong {}
+impl<T: Pong> Ping for T {}
+impl<T: Ping> Pong for T {}
+
+fn need<T: Ping>(t: T) -> u8 {
+    return 0;
+}
+
+fn main() -> i32 {
+    return need(1u8) as i32; //~ ERROR E0901
+}

@@ -40,7 +40,6 @@ fn again() -> usize {
     let mut i: usize = 0;
     while i < 2 {
         set_link(&mut l, &mut b); //~ ERROR E0501
-//~^ ERROR E0501
         i = i + 1;
     }
     return l.to.count;

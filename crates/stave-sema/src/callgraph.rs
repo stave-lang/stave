@@ -241,6 +241,10 @@ pub struct CallGraph {
     /// Instances were left out: an instantiation chain too deep (E0902 reported, or a chain only
     /// fn values or implied calls make), or too many instances. The graph is then incomplete.
     pub truncated: bool,
+    /// Where the graph's type overlay refused a type for its height
+    /// ([`crate::types::MAX_TYPE_HEIGHT`]): per instance that made one, its site
+    /// ([`CallGraph::site_of`]). Each is E0005 case `type`.
+    pub refused_at: Vec<Span>,
     /// Where the first instance was left out: the requesting node's span and the instance's
     /// generic (`None` for drop glue).
     pub truncated_at: Option<(Span, Option<DeclId>)>,
@@ -326,6 +330,20 @@ impl CallGraph {
             NodeKind::Fn { .. } => Some(n),
             NodeKind::Closure { parent, .. } => Some(parent),
             NodeKind::Table { .. } | NodeKind::Glue { .. } => None,
+        }
+    }
+
+    /// Where node `n` was first asked for: the site of its first in-edge, else its own span.
+    pub fn site_of(&self, n: usize) -> Span {
+        let first = match (self.in_start.get(n), self.in_start.get(n + 1)) {
+            (Some(&s), Some(&e)) if e > s => {
+                self.in_edges.get(s as usize).and_then(|&i| self.out.get(i as usize))
+            }
+            _ => None,
+        };
+        match first {
+            Some(e) => e.site,
+            None => self.nodes.get(n).map_or(Span::new(FileId(u32::MAX), 0, 0), |x| x.span),
         }
     }
 
@@ -1289,6 +1307,8 @@ struct Walk<'a> {
     untracked_params: Vec<(u32, u32)>,
     truncated: bool,
     truncated_at: Option<(Span, Option<DeclId>)>,
+    /// Nodes whose expansion made a refusal ([`crate::types::claim_refusals`]).
+    refused_in: Vec<u32>,
 }
 
 impl<'a> Walk<'a> {
@@ -1367,7 +1387,7 @@ impl<'a> Walk<'a> {
             return k == 2;
         }
         let w = World { prog: self.prog, sigs: self.sigs };
-        let r = crate::mono::needs_drop(&w, &mut self.cx, t, &mut self.drop_memo);
+        let r = crate::mono::needs_drop(&w, &mut self.cx, t, &[], &mut self.drop_memo);
         if global && let Some(k) = self.drop_known.get_mut(t.idx()) {
             *k = 1 + r as u8;
         }
@@ -1397,6 +1417,8 @@ impl<'a> Walk<'a> {
     /// Glue node `i` of `t`: its `Drop` impl, then the glue of every part that needs dropping.
     fn expand_glue(&mut self, i: u32, t: TypeId) {
         let site = Site::At(self.nodes[i as usize].span);
+        // the glue's own parameter type: a refusal here is this node's ([`build`])
+        crate::drops::glue_param(&mut self.cx, t);
         let w = World { prog: self.prog, sigs: self.sigs };
         let glue = crate::drops::glue(&w, &mut self.cx, t);
         if let Some(k) = glue.method
@@ -1840,13 +1862,13 @@ impl<'a> Walk<'a> {
         if si == Some(ti) && (sm || !tm) {
             return;
         }
-        let mut seen: Vec<TypeId> = Vec::new();
+        // each distinct component once (exact: every fn table it reaches is marked)
+        let mut seen: rustc_hash::FxHashSet<TypeId> = rustc_hash::FxHashSet::default();
         let mut work: Vec<TypeId> = [Some(ti), si].into_iter().flatten().collect();
         while let Some(t) = work.pop() {
-            if seen.contains(&t) || seen.len() > 4096 {
+            if !seen.insert(t) {
                 continue;
             }
-            seen.push(t);
             match self.cx.kind(t).clone() {
                 TypeKind::Fn { .. } => {
                     if let Some(tb) = self.table(t) {
@@ -2255,6 +2277,7 @@ pub(crate) fn build(
         untracked_params: Vec::new(),
         truncated: false,
         truncated_at: None,
+        refused_in: Vec::new(),
     };
     for (i, b) in bodies.iter().enumerate() {
         if evs[i].is_some() && sigs.fn_sig(b.decl).is_some_and(|s| s.generics.is_empty()) {
@@ -2268,11 +2291,19 @@ pub(crate) fn build(
         w.root(n, RootKind::Main, site);
     }
     let mut next = 0;
+    // each node owns the refusals its expansion makes; node 0 the rest
     while next < w.nodes.len() {
+        let start = w.cx.refusals();
         w.expand(next as u32);
+        if crate::types::claim_refusals(&mut w.cx, start) {
+            w.refused_in.push(next as u32);
+        }
         next += 1;
     }
     w.solve_flow();
+    if crate::types::claim_refusals(&mut w.cx, 0) {
+        w.refused_in.push(0);
+    }
     finish(w)
 }
 
@@ -2393,6 +2424,7 @@ fn finish(w: Walk<'_>) -> CallGraph {
         scc_level,
         level_start,
         scc_drop: Vec::new(),
+        refused_at: Vec::new(),
         local_types: w.cx.local,
         truncated: w.truncated,
         truncated_at: w.truncated_at,
@@ -2407,6 +2439,7 @@ fn finish(w: Walk<'_>) -> CallGraph {
                 && ns.iter().all(|&v| drop_path[v as usize])
         })
         .collect();
+    g.refused_at = w.refused_in.iter().map(|&n| g.site_of(n as usize)).collect();
     g
 }
 

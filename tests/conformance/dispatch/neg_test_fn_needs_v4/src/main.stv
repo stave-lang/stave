@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0709 case `test`: `stave test` runs each `test fn` as the entry of its own executable, on any
+// CPU, so a `test fn` cannot declare `needs`. The body is then checked without the features:
+// its 512-bit vectors are E0702.
+import std.io;
+test fn w4() needs(v4) { //~ ERROR E0709
+    let v = f32x16.splat(1.0) + f32x16.splat(2.0); //~ ERROR E0702
+    //~^ ERROR E0702
+    let s = v.reduce_add();
+    io.print(f"{s}\n");
+}
+fn main() -> i32 { return 0; }

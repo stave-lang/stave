@@ -24,7 +24,7 @@ use crate::resolve::{DeferKind, Res};
 use crate::sigs::{GenericParam, TraitRef, VariantShape};
 use crate::traits::{Adjust, Lookup, MethodRef};
 use crate::typeck::{Ck, Coercion, PendingCheck, Target, Ty};
-use crate::types::{self, ConstArg, GArg, Interner, TypeId, TypeKind, ids};
+use crate::types::{self, ConstArg, GArg, IntBits, Interner, TypeId, TypeKind, ids};
 
 /// A postfix chain's state between steps.
 #[derive(Clone, Debug)]
@@ -96,6 +96,20 @@ const OPS: [(Term, &str); 13] = [
     (Term::LtLtPercent, "WrapShl"),
 ];
 
+/// Whether `==` on a value of kind `k` gives one `bool`: the scalar kinds. It is the test a
+/// literal or const pattern lowers to, so a pattern of any other type is E0206 case `pattern`.
+pub(crate) fn scalar_eq(k: &TypeKind) -> bool {
+    matches!(
+        k,
+        TypeKind::Int { .. }
+            | TypeKind::Float(_)
+            | TypeKind::Bool
+            | TypeKind::Char
+            | TypeKind::Ptr { .. }
+            | TypeKind::Fn { .. }
+    )
+}
+
 fn op_trait(op: u8) -> Option<&'static str> {
     if op == Term::GtGt as u8 {
         return Some("Shr");
@@ -139,15 +153,9 @@ fn is_shift(op: u8) -> bool {
 }
 
 impl<'a> Ck<'a> {
-    /// The declaration of struct field `f` when it is private to a module other than the one being
-    /// checked: field reads, struct literals, struct patterns, and columns all ask this. Enum
-    /// variant fields have no privacy.
+    /// [`crate::Program::hidden_field`] from the module being checked.
     pub(crate) fn hidden_field(&self, f: DeclId) -> Option<crate::decls::Decl> {
-        let fd = self.prog.decl(f).copied()?;
-        (!fd.is_pub()
-            && self.prog.decl(fd.parent).is_some_and(|p| p.kind == DeclKind::Struct)
-            && fd.module != self.icx.res_module())
-        .then_some(fd)
+        self.prog.hidden_field(f, self.icx.res_module())
     }
 
     /// Types expression node `n` with context type `hint` and records the type on `n`.
@@ -228,7 +236,7 @@ impl<'a> Ck<'a> {
         let eq_only = op == Term::EqEq as u8 || op == Term::BangEq as u8;
         match self.tys.kind(t).clone() {
             TypeKind::Int { .. } | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char => Ty::T(ids::BOOL),
-            TypeKind::Ptr { .. } | TypeKind::Fn { .. } if eq_only => Ty::T(ids::BOOL),
+            ref k if eq_only && scalar_eq(k) => Ty::T(ids::BOOL),
             TypeKind::Vector { lane, n: lanes } => {
                 self.gate_compare(icx.a(opn), op, t);
                 let w = types::lane_bits(self.tys.kind(lane)) as u8;
@@ -635,7 +643,7 @@ impl<'a> Ck<'a> {
             })
         } else {
             let tref = TraitRef { trait_decl: tr, args: Vec::new() };
-            let Some((imp, args)) = self.w.find_impl(&mut self.tys, t, &tref, genv, 0) else {
+            let Some((imp, args)) = self.w.find_impl(&mut self.tys, t, &tref, genv) else {
                 self.e0206(tok, t);
                 return Ty::ERR;
             };
@@ -710,9 +718,13 @@ impl<'a> Ck<'a> {
     /// scope; a general form when it names none.
     fn copy_bounds_of(&self, t: TypeId) -> String {
         let mut seen = std::collections::BTreeSet::new();
+        let mut visited = rustc_hash::FxHashSet::default();
         let mut stack = vec![t];
         let mut kids = Vec::new();
         while let Some(x) = stack.pop() {
+            if !visited.insert(x) {
+                continue;
+            }
             let k = self.tys.kind(x);
             if let TypeKind::Param(p) = k {
                 seen.insert(*p);
@@ -1072,83 +1084,7 @@ impl<'a> Ck<'a> {
     }
 
     fn scalar_cast_ok(&mut self, op: u8, from: TypeId, to: TypeId) -> bool {
-        let fk = self.tys.kind(from).clone();
-        let tk = self.tys.kind(to).clone();
-        let is64 = |t: TypeId| matches!(t, ids::U64 | ids::USIZE | ids::I64 | ids::ISIZE);
-        let sig_bits = |k: &TypeKind| -> u32 {
-            match k {
-                TypeKind::Float(types::FloatBits::F16) => 11,
-                TypeKind::Float(types::FloatBits::B16) => 8,
-                TypeKind::Float(types::FloatBits::F32) => 24,
-                TypeKind::Float(types::FloatBits::F64) => 53,
-                _ => 0,
-            }
-        };
-        let int_mag = |k: &TypeKind| -> Option<(bool, u32)> {
-            match k {
-                TypeKind::Int { signed, bits } => Some((*signed, bits.bits())),
-                _ => None,
-            }
-        };
-        let is_ptr = |k: &TypeKind| matches!(k, TypeKind::Ptr { .. });
-        let fint = int_mag(&fk);
-        let tint = int_mag(&tk);
-        let ffloat = matches!(fk, TypeKind::Float(_));
-        let tfloat = matches!(tk, TypeKind::Float(_));
-        if op == Term::KwAs as u8 {
-            if let (Some((fs, fb)), Some((ts, tb))) = (fint, tint) {
-                return (fs == ts && tb >= fb) || (!fs && ts && tb > fb);
-            }
-            if matches!(fk, TypeKind::Bool) && tint.is_some() {
-                return true;
-            }
-            if matches!(fk, TypeKind::Char) {
-                return matches!(to, ids::U32 | ids::U64 | ids::I64 | ids::USIZE | ids::ISIZE);
-            }
-            if from == ids::U8 && matches!(tk, TypeKind::Char) {
-                return true;
-            }
-            if let (Some((fs, fb)), true) = (fint, tfloat) {
-                let need = if fs { fb - 1 } else { fb };
-                return need <= sig_bits(&tk);
-            }
-            if ffloat && tfloat {
-                return matches!(
-                    (&fk, &tk),
-                    (
-                        TypeKind::Float(types::FloatBits::F16 | types::FloatBits::B16),
-                        TypeKind::Float(types::FloatBits::F32 | types::FloatBits::F64)
-                    ) | (TypeKind::Float(types::FloatBits::F32), TypeKind::Float(types::FloatBits::F64))
-                );
-            }
-            if is_ptr(&fk) && is_ptr(&tk) {
-                return true;
-            }
-            if (is_ptr(&fk) && is64(to)) || (is64(from) && is_ptr(&tk)) {
-                return true;
-            }
-            return false;
-        }
-        if op == Term::AsPercent as u8 {
-            return tint.is_some()
-                && (fint.is_some() || matches!(fk, TypeKind::Bool | TypeKind::Char) || is_ptr(&fk));
-        }
-        if op == Term::AsPipe as u8 {
-            return tint.is_some() && (fint.is_some() || ffloat || matches!(fk, TypeKind::Char));
-        }
-        if op == Term::AsTilde as u8 {
-            return tfloat && (fint.is_some() || ffloat);
-        }
-        if op == Term::AsQuestion as u8 {
-            if tint.is_some() {
-                return fint.is_some() || ffloat || matches!(fk, TypeKind::Char);
-            }
-            if matches!(tk, TypeKind::Char) || tfloat {
-                return fint.is_some() || (ffloat && tfloat);
-            }
-            return false;
-        }
-        false
+        scalar_cast_ok(op, self.tys.kind(from), self.tys.kind(to))
     }
 
     fn range_expr(&mut self, n: u32, hint: Option<TypeId>) -> Ty {
@@ -1250,7 +1186,9 @@ impl<'a> Ck<'a> {
     /// `needs` or `without`. An arm keeps its own fn type (a fn item gains a deny clause only
     /// where it alone is converted), and `as` converts no fn value, so the fix names what
     /// compiles: with a wanted fn type of that shape, converting the arm that is not usable as it
-    /// alone first (case `fn-arms-wanted`); else the fn type both arms convert to (case `fn-arms`).
+    /// alone first (case `fn-arms-wanted`), or E0707 when that arm needs features the wanted type
+    /// and the enclosing fn lack (no conversion of it compiles here); else the fn type both arms
+    /// convert to (case `fn-arms`).
     fn fn_arms_mismatch(&mut self, a: Option<u32>, b: u32, x: TypeId, y: TypeId, hint: Option<TypeId>) {
         if let Some(h) = hint
             && self.fn_shape_eq(h, x)
@@ -1258,6 +1196,17 @@ impl<'a> Ck<'a> {
             let y_ok = y == h || self.coercible(y, h).is_some();
             let (n, t) = if y_ok { (a.unwrap_or(b), x) } else { (b, y) };
             let (expected, found) = (self.show(h), self.show(t));
+            // An arm needing features neither the wanted type nor the enclosing fn has converts
+            // here neither alone nor as an arm: E0707, as for that arm alone.
+            if let (TypeKind::Fn { features: ft, .. }, TypeKind::Fn { features: fh, .. }) =
+                (self.tys.kind(t), self.tys.kind(h))
+                && ft & !(fh | self.proven_features()) != 0
+            {
+                let holes = [("from", found.as_str()), ("to", expected.as_str())];
+                let d = mk("E0707", None, &holes, self.icx.node_span(n), &[]);
+                self.report(d);
+                return;
+            }
             let operand = self.icx.node_text(n).to_string();
             let holes =
                 [("expected", expected.as_str()), ("found", found.as_str()), ("operand", operand.as_str())];
@@ -1468,12 +1417,18 @@ impl<'a> Ck<'a> {
                 (Ty::Lit(_), Some(h)) => self.coerce(e, et, h, None),
                 (t, _) => self.force(t),
             };
+            let nd = self.diags.len();
             self.check_expr(cnt, ids::USIZE, None);
+            let typed = self.diags.len() == nd;
             let env = self.env();
-            let len = crate::consteval::eval_u64(self, &env, cnt, ids::USIZE);
+            let (len, deferred) = crate::consteval::eval_u64_deferred(self, &env, cnt, ids::USIZE);
+            if typed {
+                self.report(deferred);
+            }
             if et == ids::ERROR || len == ConstArg::Error {
                 return Ty::ERR;
             }
+            let at = self.tys.intern(TypeKind::Array { elem: et, len });
             // The one value of `e` fills every slot, so more than one slot needs Copy. Length 0
             // needs it too: the lowering evaluates `e` and keeps no slot to drop it from.
             if len != ConstArg::Value(1) && !self.tys.has_error(et) {
@@ -1484,7 +1439,7 @@ impl<'a> Ck<'a> {
                     self.report(d);
                 }
             }
-            return Ty::T(self.tys.intern(TypeKind::Array { elem: et, len }));
+            return Ty::T(at);
         }
         if kids.is_empty() {
             self.free_kids(kids);
@@ -1865,7 +1820,7 @@ impl<'a> Ck<'a> {
         // the use of the method, a call or a fn value, reaches the site check, which names the
         // unmet bound (E0414, E0901, E0910, E1407) instead of failing inference (E0202).
         self.w
-            .impl_applies(&mut self.tys, idef, t, genv, 0)
+            .impl_applies(&mut self.tys, idef, t, genv)
             .or_else(|| self.w.impl_applies_but_views(&mut self.tys, idef, t, genv))
             .or_else(|| self.w.impl_head_args(&mut self.tys, idef, t))
     }
@@ -2649,11 +2604,11 @@ impl<'a> Ck<'a> {
     fn unresolved(&self, t: TypeId, binds: &[Option<GArg>]) -> bool {
         let mut stack = vec![t];
         let mut kids = Vec::new();
-        let mut steps = 0;
+        // each distinct component once: types share them
+        let mut seen = rustc_hash::FxHashSet::default();
         while let Some(x) = stack.pop() {
-            steps += 1;
-            if steps > 100_000 {
-                return true;
+            if !seen.insert(x) {
+                continue;
             }
             let k = self.tys.kind(x);
             match k {
@@ -2751,6 +2706,9 @@ impl<'a> Ck<'a> {
         hint: Option<TypeId>,
     ) {
         let mut pending: Vec<(usize, Ty)> = Vec::new();
+        // an argument of the error type has its diagnostic, and the params it would have
+        // decided are not reported again
+        let mut arg_err = false;
         for (i, &a) in args.iter().enumerate() {
             let Some(&p) = params.get(i) else {
                 // past the params only through `...` (the arity check rejects the rest)
@@ -2777,6 +2735,7 @@ impl<'a> Ck<'a> {
                         if x != ids::ERROR && x != ids::NEVER {
                             self.infer(p, x, binds);
                         }
+                        arg_err |= x == ids::ERROR || self.tys.has_error(x);
                         pending.push((i, Ty::T(x)));
                     }
                 }
@@ -2807,7 +2766,7 @@ impl<'a> Ck<'a> {
             self.note_reborrow(a, t2, want);
         }
         if binds.iter().any(|b| b.is_none()) {
-            if !lit_err {
+            if !lit_err && !arg_err {
                 self.e0202_infer(at);
             }
             for b in binds.iter_mut() {
@@ -2969,6 +2928,7 @@ impl<'a> Ck<'a> {
 
     /// A call `(args)` on state `st`.
     fn call(&mut self, n: u32, st: St, paren: u32, args: &[u32], hint: Option<TypeId>) -> Ty {
+        self.call_args.push((paren, args.to_vec()));
         let icx = self.icx;
         let ctok = self.callee_tok(n, paren);
         let cspan = icx.tok_span(ctok);
@@ -3143,7 +3103,7 @@ impl<'a> Ck<'a> {
                 // A concrete type must have a layout here: lowering has no other answer.
                 if !self.tys.has_params(t)
                     && !self.tys.has_error(t)
-                    && crate::traits::layout_of(&mut self.tys, self.sigs, t, 0).is_none()
+                    && crate::traits::layout_of(&mut self.tys, self.sigs, t).is_none()
                 {
                     let tn = self.show(t);
                     let d = mk("E0911", None, &[("type", &tn)], self.icx.node_span(n), &[]);
@@ -3704,6 +3664,7 @@ impl<'a> Ck<'a> {
         args: &[u32],
         hint: Option<TypeId>,
     ) -> Ty {
+        self.call_args.push((seg, args.to_vec()));
         let icx = self.icx;
         let recv = self.force(recv);
         let name = icx.sym(seg);
@@ -4111,7 +4072,7 @@ impl<'a> Ck<'a> {
                             .map_or(icx.tok_span(name_tok), |&x| icx.tok_span(icx.a(x).saturating_sub(2)));
                         let d = mk(
                             "E0105",
-                            None,
+                            Some("literal-field"),
                             &[("name", &nm), ("scope", &scope)],
                             icx.tok_span(name_tok),
                             &[("first", first)],
@@ -4273,6 +4234,11 @@ impl<'a> Ck<'a> {
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         // `for i: T in a..b`: the binding type is the context of the range's literals
         let bt_pre = bind_ty.map(|b| self.lower_ty(b, false));
+        // the annotation's type is the binding's, also for a `_` pattern, which binds no local:
+        // the borrow checker reads it here
+        if let (Some(n), Some(t)) = (bind_ty, bt_pre) {
+            self.set(n, Ty::T(t));
+        }
         let it_hint = match bt_pre {
             Some(b) if !matches!(self.tys.kind(b), TypeKind::Vector { .. } | TypeKind::Ref { .. }) => {
                 Some(self.tys.intern(TypeKind::Range { elem: b, inclusive: false }))
@@ -4289,6 +4255,9 @@ impl<'a> Ck<'a> {
             };
             matches!(self.tys.kind(v), TypeKind::Vector { .. })
         });
+        if chunk {
+            self.chunk_loops.push(f);
+        }
         {
             let text = icx.node_text(iter).to_string();
             let at = icx.node_span(iter);
@@ -4396,13 +4365,13 @@ impl<'a> Ck<'a> {
                     self.mismatch(iter, Ty::T(it), want, None);
                 }
                 if let Some(tc) = tail {
-                    self.tail_clause(tc, b, ids::ERROR, Lanes::Fixed(1));
+                    self.element_loop_tail(tc);
                 }
             }
             b
         } else {
             if let Some(tc) = tail {
-                self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
+                self.element_loop_tail(tc);
             }
             self.element_type(f, iter, it)
         };
@@ -4542,6 +4511,14 @@ impl<'a> Ck<'a> {
         matches!(self.w.lookup_method(&mut self.tys, base, name, genv, from), Lookup::Found { .. })
     }
 
+    /// A tail clause on a loop that is not a chunk loop: E0601 `element-loop` (an element loop
+    /// has no elements left over). Its body is still typed, with its bindings unknown.
+    fn element_loop_tail(&mut self, tc: u32) {
+        let d = mk("E0601", Some("element-loop"), &[], self.icx.node_span(tc), &[]);
+        self.report(d);
+        self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
+    }
+
     fn tail_clause(&mut self, tc: u32, bind: TypeId, lane: TypeId, n: Lanes) {
         let icx = self.icx;
         let a = icx.a(tc);
@@ -4589,4 +4566,89 @@ impl<I: Interner> ParamPlaceholder for I {
     fn mk_param_placeholder(&mut self, i: usize) -> TypeId {
         self.mk_param(i as u32)
     }
+}
+
+/// Whether operator `op` of the `as` family casts a value of kind `fk` to kind `tk` (scalars,
+/// vector lanes, raw pointers): the one rule of the checker and of const evaluation.
+pub(crate) fn scalar_cast_ok(op: u8, fk: &TypeKind, tk: &TypeKind) -> bool {
+    let is64 = |k: &TypeKind| matches!(k, TypeKind::Int { bits: IntBits::B64 | IntBits::Size, .. });
+    let sig_bits = |k: &TypeKind| -> u32 {
+        match k {
+            TypeKind::Float(types::FloatBits::F16) => 11,
+            TypeKind::Float(types::FloatBits::B16) => 8,
+            TypeKind::Float(types::FloatBits::F32) => 24,
+            TypeKind::Float(types::FloatBits::F64) => 53,
+            _ => 0,
+        }
+    };
+    let int_mag = |k: &TypeKind| -> Option<(bool, u32)> {
+        match k {
+            TypeKind::Int { signed, bits } => Some((*signed, bits.bits())),
+            _ => None,
+        }
+    };
+    let is_ptr = |k: &TypeKind| matches!(k, TypeKind::Ptr { .. });
+    let fint = int_mag(fk);
+    let tint = int_mag(tk);
+    let ffloat = matches!(*fk, TypeKind::Float(_));
+    let tfloat = matches!(tk, TypeKind::Float(_));
+    if op == Term::KwAs as u8 {
+        if let (Some((fs, fb)), Some((ts, tb))) = (fint, tint) {
+            return (fs == ts && tb >= fb) || (!fs && ts && tb > fb);
+        }
+        if matches!(*fk, TypeKind::Bool) && tint.is_some() {
+            return true;
+        }
+        if matches!(*fk, TypeKind::Char) {
+            return matches!(
+                tk,
+                TypeKind::Int { signed: false, bits: IntBits::B32 | IntBits::B64 | IntBits::Size }
+                    | TypeKind::Int { signed: true, bits: IntBits::B64 | IntBits::Size }
+            );
+        }
+        if matches!(*fk, TypeKind::Int { signed: false, bits: IntBits::B8 }) && matches!(*tk, TypeKind::Char)
+        {
+            return true;
+        }
+        if let (Some((fs, fb)), true) = (fint, tfloat) {
+            let need = if fs { fb - 1 } else { fb };
+            return need <= sig_bits(tk);
+        }
+        if ffloat && tfloat {
+            return matches!(
+                (fk, tk),
+                (
+                    TypeKind::Float(types::FloatBits::F16 | types::FloatBits::B16),
+                    TypeKind::Float(types::FloatBits::F32 | types::FloatBits::F64)
+                ) | (TypeKind::Float(types::FloatBits::F32), TypeKind::Float(types::FloatBits::F64))
+            );
+        }
+        if is_ptr(fk) && is_ptr(tk) {
+            return true;
+        }
+        if (is_ptr(fk) && is64(tk)) || (is64(fk) && is_ptr(tk)) {
+            return true;
+        }
+        return false;
+    }
+    if op == Term::AsPercent as u8 {
+        return tint.is_some()
+            && (fint.is_some() || matches!(*fk, TypeKind::Bool | TypeKind::Char) || is_ptr(fk));
+    }
+    if op == Term::AsPipe as u8 {
+        return tint.is_some() && (fint.is_some() || ffloat || matches!(*fk, TypeKind::Char));
+    }
+    if op == Term::AsTilde as u8 {
+        return tfloat && (fint.is_some() || ffloat);
+    }
+    if op == Term::AsQuestion as u8 {
+        if tint.is_some() {
+            return fint.is_some() || ffloat || matches!(*fk, TypeKind::Char);
+        }
+        if matches!(*tk, TypeKind::Char) || tfloat {
+            return fint.is_some() || (ffloat && tfloat);
+        }
+        return false;
+    }
+    false
 }

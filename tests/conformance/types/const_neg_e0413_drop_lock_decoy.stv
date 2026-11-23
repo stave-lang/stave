@@ -1,0 +1,40 @@
+// A `const` whose type has drop glue is rejected at its declaration (E0413), so no use of it
+// makes a value whose destructor no check sees: here `K.n` beside a scrutinee of the same type,
+// with `Q.drop` taking the lock `g` holds.
+import std.io;
+import std.sync;
+import std.mem;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct Q {
+    pub n: u32,
+}
+
+impl Drop for Q {
+    fn drop(&mut self) {
+        let g = M.lock();
+        io.print("dropQ ");
+    }
+}
+
+const K: Q = Q.{ n: 1 }; //~ ERROR E0413
+
+fn idq(q: Q, n: u32) -> Q {
+    return q;
+}
+
+fn main() -> i32 {
+    let c = true;
+    let g = M.lock();
+    match idq(Q.{ n: 2 }, K.n) {
+        x if c => {
+            mem.forget(x);
+        }
+        y => {
+            mem.forget(y);
+        }
+    }
+    io.print("after match\n");
+    return 0;
+}

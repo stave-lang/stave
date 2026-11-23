@@ -1,0 +1,14 @@
+pub struct P { pub x: u32, pub y: u32 }
+impl Copy for P {}
+pub enum E { A(u32), C }
+
+pub const CS: &str = "a";
+pub const CT: (u8, u8) = (1, 2);
+pub const CP: P = P.{ x: 1, y: 2 };
+pub const CO: Option<u32> = Option.Some(3);
+pub const CE: E = E.C;
+pub const CA: [u8; 2] = [1, 2];
+pub const CI: u32 = 7;
+pub const CB: bool = true;
+pub const CC: char = 'z';
+pub const CF: f32 = 1.5f32;

@@ -1,0 +1,23 @@
+//~ CHECK-ONLY
+// `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter has a value per instance
+// only, so it is no length or const argument where the generic fn is checked (E0904 `generic`).
+fn g<const N: usize>() -> usize {
+    return N;
+}
+
+fn len<T>() -> usize {
+    let a = [0u8; size_of::<T>()]; //~ ERROR E0904
+    return a.len();
+}
+
+fn param<T>(x: [u8; align_of::<(T, u8)>()]) -> usize { //~ ERROR E0904
+    return x.len();
+}
+
+fn arg<T>() -> usize {
+    return g::<{size_of::<T>()}>(); //~ ERROR E0904
+}
+
+fn main() -> i32 {
+    return (len::<u32>() + arg::<u16>()) as% i32;
+}

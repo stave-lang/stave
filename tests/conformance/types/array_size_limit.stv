@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// Size limits (contracts/lang-details.md "Size limits"): compile-time data (an array literal of
+// a const-expr) takes at most 2^26 bytes (E0904 `size`); a `[e; n]` in a fn body is a run-time
+// fill with no count limit; a value a fn holds takes at most 2^28 bytes (E0911 `size`), checked
+// per instance of a generic fn (E0911 `instance`). Zero-size elements take no bytes.
+struct S {
+    a: [u8; 1024],
+}
+
+impl Copy for S {}
+
+const NESTED: [[u8; 65536]; 65536] = [[0u8; 65536]; 65536]; //~ ERROR E0904
+static WIDE: [[u8; 16777216]; 8] = [[0u8; 16777216]; 8]; //~ ERROR E0904
+static TABLE: [u8; 16777216] = [7u8; 16777216];
+static AT_LIMIT: [u8; 67108864] = [0u8; 67108864];
+const OF_STRUCTS: [S; 2048] = [S.{ a: [0u8; 1024] }; 2048];
+const UNITS: [(); 2000000] = [(); 2000000];
+
+fn body() -> usize {
+    let a = [0u8; 20000000];
+    let b = [[0u8; 0]; 2000000];
+    let c = [(); 2000000];
+    let d = [[0u16; 1024]; 1024];
+    return a.len() + b.len() + c.len() + d.len();
+}
+
+fn big(x: [u8; 300000000]) -> usize { //~ ERROR E0911
+    return x.len();
+}
+
+fn fill<const N: usize>() -> usize { //~ ERROR E0911
+    let a = [0u8; N];
+    return a.len();
+}
+
+fn main() -> i32 {
+    return (fill::<300000000>() + fill::<4000000>()) as% i32;
+}

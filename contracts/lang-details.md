@@ -58,6 +58,36 @@ reference for what a program may write and what it means.
   same limit and answers the rejecting side past it (not Copy, not Send / Sync / Flat / Frozen, no
   layout: E0911, needs a drop).
 
+## §2 Size limits
+
+Each limit is decided in one place; every reader of a size takes a size past `u64` as a reject.
+
+| limited | bound | diagnostic | decided in |
+|---|---|---|---|
+| height of a type (a type is one level above its tallest component; written, from an alias, or built by substitution) | 1,000 | E0005 `type` | the type table: a taller type is never interned (the error type); the refusal is reported at the span that owned it (the written type, expression, statement, body, declaration, or call-graph instance being checked), and `typedepth` reports instances whose body types would pass it. A closure's environment `&mut (&mut T0, ..)` is such a type too (`closures::env_type`), so a capture more than 997 high is E0005 |
+| bytes of a type | `u64` | E0911 `overflow` (a value of it) | `traits::type_bytes`, the one size function |
+| compile-time data: every tuple, array, struct, or variant value a const-expr builds (so every `const` and `static`) | 2^26 bytes | E0904 `size`, at the literal | `consteval::data_size`, on the literal's type before the value is built |
+| all compile-time data of a program: every `static` and `const` (file data and zero fill, each rounded up to its alignment) | 2^30 bytes | E0904 `total`, at the program's largest one (unused `const`s count; so do the built-in packages') | `typeck::data_total` |
+| a value a fn holds: parameter, binding, array / tuple / struct literal, value `if` / `match`, return value | 2^28 bytes | E0911 `size` (concrete), `instance` (per instance) | `typeck::frame_of` |
+| frame sum of a fn instance: its parameters, bindings, and return value; every expression value but a place read in place (a local, `self`, a `static`, a part of a place, a dereference that is borrowed, assigned to, split into parts, or initializes a binding), two slots for a value `if` / `match` (its result and the live arm, whatever the arm count); each call's result, by-value receiver, and arguments, whatever the callee (fn item, method, fn value, closure, built-in) | 704,643,072 bytes | E0911 `frame`, per instance naming it | `typeck::frame_of` |
+
+- `[e; n]` is one value repeated, in const evaluation (never `n` values) and in a fn body (a
+  fill at run time: `e` once, stored into each element; no count limit of its own). A const
+  used twice is one value (`(C, C)` costs a step, not a copy), so doubling consts stop at the
+  data limit without building it. An all-zero `static` takes no file bytes; a const of more
+  than 64 value cells is read from its image where it is used.
+- Reason: const evaluation and the image hold compile-time data. Both targets reach a static
+  PC-relatively from code laid out before all data: x86-64 by a `rel32` (±2 GiB), AArch64 by
+  `ADRP` (±4 GiB); half of the x86-64 range is kept for code and the rest of the image, so the
+  program's data bound is 2^30 bytes on both. A back end keeps each value of
+  a fn in a slot of its frame, and a frame holds at most 1 GiB: the measured frames are at most
+  1.5 times the frame sum (a filled local, a whole aggregate loaded to read a part), on x86-64
+  and AArch64, debug and release, so the frame bound is (1 GiB - 16 MiB) / 1.5. A trait query
+  has no depth limit: a goal met again while in progress is cut, and the types are finite. The
+  height bound makes the types of a program finitely many, so every walk over them with a
+  visited set ends; polymorphic recursion (`P<T>` holding a `P<(T, T)>`) grows one level per
+  instance and stops there.
+
 ## §2 Contracts
 
 - A false `requires` panics at the call: the last call user code made into a fn with contracts, a
@@ -196,7 +226,9 @@ in place of its field (depth first); of an enum, only the matched variant's payl
 3. With a guard (`S.{ a, b: _ } if p(&a) => ..`): inside the guard the names are read-only
    views of the scrutinee, nothing is moved or dropped; if the guard fails the value is intact
    for the next arm; the move and the drop of `b` happen only when it passes. A guard only
-   reads (E0505), so the value it sees is the value the arm takes.
+   reads (E0505), so the value it sees is the value the arm takes. A guard that would move,
+   write, or `?` is a test in the arm: `3 if eat(o) => a` is `3 => { if eat(o) { a } else {
+   .. } }`, the `else` standing for the later arms.
 4. Nested patterns and payloads: `E.Two(a, _)` drops the second payload at arm entry;
    `W.{ p: P.{ x, y: _ }, q: _ }` drops `p.y`, then `q`. An or-pattern drops what the
    alternative that matched ignores.
@@ -259,6 +291,18 @@ when that owner ends.
   the type's `drop` and the drops of the fields before it run ("Locks and completion waits").
 - **Compound assignment.** `p op= e` drops nothing: every operand of an operator is Copy where
   it is used (§2 Operator traits), so the old value of `p` has no drop glue.
+- **Assignment targets.** The target of `=` and of every `op=` is a place rooted in a local, a
+  `static`, or a dereference (`x.f`, `a[i]`, `S0.n`, `*r`, `f().x` with `f` returning `&mut S`).
+  A target rooted in a temporary (`mk().a`, `[1u32, 2u32][0]`, `S.{ a: 1u32 }.a`, `arr()[0]`,
+  `(if c then a else b).f`) or in a `const` (`C.a`, `C`) is E0503 case `temporary`, with or
+  without drop glue: the statement drops the value, so the write would be lost. Bind it with
+  `let mut t = mk();` first. A `&mut` of a temporary is a borrow, not a target: `mk().set(1)`
+  (a `&mut self` call), `f(&mut arr()[1])`, `*&mut arr()[0] = 5` write through the reference
+  into the temporary, which the statement then drops.
+- **Consts.** A `const` is a new copy of its value at each use, so its type has no drop glue
+  (E0413 case `drop`, at the declaration): a destructor would run at each use of the name, on a
+  value no binding owns. One value with a destructor is a `static` (never dropped); a new one
+  at each use is a fn call (`fn k() -> Q { return Q.{ n: 1 }; }`).
 - **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
   made first, and only if the operand that makes it ran (the right side of `&&` / `||`). These
   are statements of their own for this rule: the condition of an `if` or `while` (each
@@ -299,12 +343,17 @@ when that owner ends.
   the move check, the lock-rank and join rules read exactly the scheduled drops; the code
   generator asks the schedule for every drop it emits, and a drop without a row, or the drops
   of one end or exit in another order than their rows, stop the build as a compiler error. So
-  does a row the generator never decided: every scheduled drop of a local, of an overwritten
-  value, and of a part a pattern ignores must have been emitted or left out for a stated
-  reason (the owner holds no value there, the type has no drop glue in this instance) where the
-  generator lowered that point. Temporaries are compared in the first direction only. The parts a pattern ignores and the steps of a value's drop glue
-  are each computed by one function both sides call. Whether a scheduled drop runs is the
-  owner's init bit: one per owner, a temporary included.
+  does a row the generator never decided: every scheduled drop must have been emitted or left
+  out for a stated reason (the owner holds no value there, the type has no drop glue in this
+  instance) where the generator lowered that point; a statement lowered at each return (an
+  `ensures` clause) does so in every copy. A row is one value: a temporary is named by its
+  statement and the first and last token of the expression whose value it holds (through
+  parentheses; a step of a postfix chain by the chain up to the step's last token, the item of
+  a `for` iteration by the `for` token, the operand `select` does not pick by the method's
+  name), which both sides compute from the syntax, so `&e` and `e` are two values; and each row
+  is consumed by at most one emitted drop. The parts a pattern ignores and the steps of a value's drop glue are each
+  computed by one function both sides call. Whether a scheduled drop runs is the owner's init
+  bit: one per owner, a temporary included.
 
 ## §3 Temporaries end with their statement
 
@@ -319,7 +368,7 @@ whatever holds it: a `let` (`let r = &f();`), an assignment, a field of a litera
 mk().first();`), a binding of a `match` over `&mk()`, a value `if` / `match`. Write `let t =
 f(); let r = &t;`. A branch of a value `if` and an arm of a value `match` are statements, so
 `ok(if c then &f() else &x)` is E0501 too: bind `let t = f();` before the `if`. There is no exception for constants: `&4u32`, `&[1, 2, 3]`, `&S.{ a: 1 }`,
-`&()`, `&C` of a `const` item, `&size_of::<T>()`, and a variant without payload make a temporary
+`&()`, `&C` of a `const` item (no drop glue, "Drops"), `&size_of::<T>()`, and a variant without payload make a temporary
 at each evaluation, as `&f()` does; data that outlives the statement is a local or a `static`. A
 string literal is no temporary: it is a `&str` to static data. A `static` is a place.
 
@@ -339,7 +388,8 @@ No syntax marks such a type.
 
 ## §3 Locks and completion waits
 
-The rank rule (LANG.md §3, E1405) is checked at every drop of the drop schedule ("Drops"), not
+Locks are ranked so that no lock-order cycle can form: safe code cannot deadlock on locks and
+joins. The rank rule (LANG.md §3, E1405) is checked at every drop of the drop schedule ("Drops"), not
 only at calls: a drop runs the dropped type's drop glue, which may take a lock. Two sets of
 guards are held there. The guards of the other values alive at that point; and the guards
 inside the dropped value itself, each until the glue reaches it (case `own`): `(L, guard)`
@@ -424,6 +474,21 @@ resolved `next`), never the instance type. The list is closed: a type not listed
 | an array or `[T]` place | E0219: write `&a` / `&mut a` | E0219 |
 | a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
 | any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
+
+The source is evaluated once, at the head, and the loop holds that value to its end, the tail
+clause included: a reference source is a loan of its referent for the whole loop (`&mut` when the
+loop writes through it: `&mut` elements or chunks; else `&`), whatever the body then assigns to
+the place it was read from (`s = &b;` in the body is legal; writing, freeing, or `&mut`-borrowing
+the old referent while the loop runs is E0501, also through `s` before it is reassigned). The
+checker reads that one value, as the code does.
+
+Chunk loop or element loop is decided once, by the type checker, on the definition, and stored
+with the loop: a chunk loop is a `for` whose annotation, as written, is a vector type or a
+reference to one. A generic `T` or `&T` annotation makes an element loop in every instance, a
+vector `T` included. A tail clause belongs to a chunk loop only (on any other loop: E0601
+`element-loop`). `tail scalar` runs its body once per element left over; each pass is an
+iteration for the borrow rules (a borrow made in one pass and used in the next is live in
+between).
 
 An iterator type is a struct, enum, or generic parameter whose `next` (method lookup, for `T`
 its bounds) is exactly `fn next(&mut self) -> Option<X>`: the loop passes the source and nothing
@@ -511,7 +576,8 @@ the same features. The type checker decides them once per instance on the call g
 - A non-generic fn that calls, drops, or makes a fn value of such an instance needs those
   features as for a declared `needs` (E0704 case `inherited`, naming the type argument); where no
   feature of the target's arch holds the vector (256 bits on AArch64), E0702 case `inherited` at
-  that use. Where the fn's own body holds the same vectors, its E0702 is the only report. A
+  that use. Where the fn's own body or signature holds the same vectors, its E0702 is the only
+report. A
   generic instance never fails this rule: it inherits. A dispatch arm with `needs(avx2)` reaches
   `id::<f32x8>`; the `_` arm reaches `id::<f32x4>`, another instance, with no features.
 - So at `f32x8`: `id<T>(x: T) -> T` inherits `avx2`, and so do `mem.swap` (it copies a `T`) and
@@ -534,3 +600,39 @@ Reason the instance and not the generic: a declared `needs` on a generic would m
 without the features at every type argument (`Vec.push` at `u8` included), and a rule on the
 written signature misses a vector reached through a type parameter in the body and rejects
 generics that only borrow one.
+
+## §4 Entry points and dispatch arm targets
+
+An entry point runs where no call written in the program names it, so on any CPU of the target:
+the start code calls `main` of the root package, `stave test` each `test fn` (with parameters:
+once per generated input), foreign code an `extern "C"` export, the runtime the `alloc` / `free` /
+`realloc` of the `allocator` declaration's module, and start code, the backend's stubs (signal
+handler, thread start), and code lowering inserts the fns the compiler knows by path
+(contracts/intrinsics.md "Paths fixed by the compiler"). None declares `needs` (E0709; a `test fn`:
+case `test`), and neither does a trait method (a call through a bound names no impl). Every other
+way code runs has a typed call site the feature rules check: a direct call (E0704), a fn value or
+closure of a type with `needs` (E0704 case `value`, E0707: a thread's body, a `Once` or `with_lock`
+closure, an iterator adapter), a dispatch arm (E0705), drop glue (E0704 cases `inherited` and
+`drops`; a `Drop` impl is a trait method), a contract clause (it runs with its fn's features).
+Statics and consts are const-exprs: no initializer code runs. A test reaches feature code through
+a dispatch whose `_` arm skips the work:
+
+```text
+fn wide_sum(xs: &[f32]) -> Option<f32> needs(avx2) { return Option.Some(f32x8.load(xs, 0).reduce_add()); }
+fn no_sum(xs: &[f32]) -> Option<f32> { return Option.None; }
+dispatch fn try_wide_sum(xs: &[f32]) -> Option<f32> { avx2 => wide_sum, _ => no_sum, }
+test fn wide() {
+    let a: [f32; 8] = [1.0; 8];
+    match try_wide_sum(&a) {
+        Option.Some(s) => { debug.assert(s == 8.0, "sum"); }
+        Option.None => { }
+    }
+}
+```
+
+A dispatch arm target is a fn or method with a body: not a `dispatch fn` (E0705 case `dispatch`;
+name its arms in the outer dispatch instead), an extern import, or a trait signature.
+
+A fn or dispatch needing another arch's features is not built, but code the target builds may
+make and pass on a fn value of it: every call of it or through its type needs those features
+(E0704, E0707), so none runs there, and its code there is a trap.

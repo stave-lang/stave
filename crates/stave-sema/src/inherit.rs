@@ -340,9 +340,9 @@ fn wide_held(
     h.is_some_and(|w| w.1 > width)
 }
 
-/// The body gate's result: its diagnostics, and per fn it rejected what holding its own values
-/// needs beyond its `needs` and the target baseline (the call rule leaves out a use that misses
-/// no more than that: one cause, one diagnostic).
+/// The body gate's result: its diagnostics, and per fn it or the signature gate rejected what
+/// holding its own values needs beyond its `needs` and the target baseline (the call rule leaves
+/// out a use that misses no more than that: one cause, one diagnostic).
 pub(crate) struct Gated {
     pub diagnostics: Vec<Diagnostic>,
     pub needs: FxHashMap<crate::ids::DeclId, Need>,
@@ -374,7 +374,20 @@ pub(crate) fn gate_bodies(
         let have = target.baseline().union(FeatureSet::from_bits(sig.features).unwrap_or_default());
         let width = crate::gates::feature_vector_bits(have);
         let sig_types = sig.params.iter().copied().chain(std::iter::once(sig.ret));
-        if sig_types.filter(|t| !t.is_none()).any(|t| crate::gates::wide_part(&cx, t, width).is_some()) {
+        let sig_wide: Vec<(TypeId, u32)> = sig_types
+            .filter(|t| !t.is_none())
+            .filter_map(|t| crate::gates::wide_part(&cx, t, width))
+            .collect();
+        if !sig_wide.is_empty() {
+            // The signature's E0702 is this fn's one report: the vectors it names count as held,
+            // so the call rule reports no use of the same features (a param's drop, a move into
+            // a generic).
+            let mut need = Need::default();
+            for &(v, bits) in &sig_wide {
+                need.join(Need::of(target, v, bits));
+            }
+            need.feats &= !have.bits();
+            out.needs.insert(b.decl, need);
             continue;
         }
         let Some(icx) = brackets.get(b.item.idx()).and_then(|br| ItemCx::new(prog, b.item, br)) else {
@@ -383,7 +396,6 @@ pub(crate) fn gate_bodies(
         let mut keep =
             |cx: &mut crate::types::Overlay<'_>, t: TypeId| wide_held(cx, &mut memo, sigs, t, width);
         let found = held_values(&icx, &mut cx, sigs, b, &mut keep);
-        let Some(&(span, t)) = found.iter().min_by_key(|x| x.0.offset) else { continue };
         let mut need = Need::default();
         for &(_, t) in &found {
             if let Some((v, bits)) = memo.get(&t).copied().flatten() {
@@ -391,7 +403,10 @@ pub(crate) fn gate_bodies(
             }
         }
         need.feats &= !have.bits();
-        out.needs.insert(b.decl, need);
+        if !found.is_empty() {
+            out.needs.insert(b.decl, need);
+        }
+        let Some(&(span, t)) = found.iter().min_by_key(|x| x.0.offset) else { continue };
         let Some((v, bits)) = memo.get(&t).copied().flatten() else { continue };
         let ty = crate::types::display(&cx, &NameCx { prog, generics: &[] }, v);
         out.diagnostics.extend(crate::gates::too_wide(&ty, bits, width, span));
@@ -661,7 +676,7 @@ pub(crate) fn check(
     // A call whose type argument is built from the one of a call written inside its argument
     // list, for the same caller and features, is one cause with it: the value it takes is the
     // one made there.
-    let built_from = |a: TypeId, b: TypeId| a != b && mentions(&cx, a, b, 0);
+    let built_from = |a: TypeId, b: TypeId| a != b && mentions(&cx, a, b);
     diagnostics.extend(
         uses.iter()
             .filter(|u| {
@@ -712,16 +727,23 @@ fn call_end(prog: &Program, brackets: &[Brackets], caller: crate::ids::DeclId, s
 }
 
 /// Whether `b` is `a` or occurs in it.
-fn mentions<I: Interner + ?Sized>(cx: &I, a: TypeId, b: TypeId, depth: u32) -> bool {
-    if a == b {
-        return true;
-    }
-    if depth > 64 {
-        return false;
-    }
+fn mentions<I: Interner + ?Sized>(cx: &I, a: TypeId, b: TypeId) -> bool {
+    // each distinct component once: types share them
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut stack = vec![a];
     let mut parts = Vec::new();
-    cx.kind(a).children(&mut parts);
-    parts.into_iter().any(|p| mentions(cx, p, b, depth + 1))
+    while let Some(t) = stack.pop() {
+        if t == b {
+            return true;
+        }
+        if !seen.insert(t) {
+            continue;
+        }
+        parts.clear();
+        cx.kind(t).children(&mut parts);
+        stack.extend_from_slice(&parts);
+    }
+    false
 }
 
 /// What brings a caller the features it lacks.

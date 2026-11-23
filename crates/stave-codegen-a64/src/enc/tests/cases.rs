@@ -110,6 +110,23 @@ fn add_sub() {
     );
 }
 
+/// `add/sub` with `sp` as `rd` or `rn` take the extended-register form (`uxtx #0`, bit 21 set),
+/// where register 31 is `sp`; the shifted-register form would read it as `xzr`. Words from the
+/// field layout `sf op S 01011 00 1 Rm option imm3 Rn Rd`; the last, without `sp`, is the
+/// shifted-register form.
+#[test]
+fn addsub_reg_with_sp_is_extended() {
+    let mut a = Asm::new();
+    a.add(X, SP, SP, x(17)).unwrap();
+    a.sub(X, SP, SP, x(17)).unwrap();
+    a.add(X, x(0), SP, x(17)).unwrap();
+    a.sub(X, x(0), SP, x(17)).unwrap();
+    a.add(X, x(17), SP, x(17)).unwrap();
+    a.add(X, x(0), x(1), x(17)).unwrap();
+    let w: Vec<u32> = a.bytes().chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    assert_eq!(w, [0x8B31_63FF, 0xCB31_63FF, 0x8B31_63E0, 0xCB31_63E0, 0x8B31_63F1, 0x8B11_0020]);
+}
+
 #[test]
 fn logical_and_shifts() {
     check(

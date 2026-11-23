@@ -75,7 +75,37 @@ pub fn verify_types(m: &Module) -> Result<Vec<VerifyError>, Vec<VerifyError>> {
         }
     }
     errs.extend(verify_static_refs(m).into_iter().map(module_err));
+    if types_ok {
+        errs.extend(verify_static_layout(m).into_iter().map(module_err));
+    }
     if types_ok { Ok(errs) } else { Err(errs) }
+}
+
+/// Every static's `init` holds exactly its type's size, and a static with address words has a
+/// type aligned to a multiple of 8: each word is 8-aligned within the static, and the back ends
+/// place a static at its type's alignment, so only then is the word 8-aligned in memory.
+fn verify_static_layout(m: &Module) -> Vec<String> {
+    let mut errs = Vec::new();
+    if m.statics.is_empty() {
+        return errs;
+    }
+    let layouts = crate::layout::Layouts::compute(&m.types);
+    for (i, st) in m.statics.iter().enumerate() {
+        let l = match layouts.get_layout(st.ty) {
+            Ok(l) => l,
+            Err(e) => {
+                errs.push(format!("static {i}: type t{} has no layout ({e})", st.ty.0));
+                continue;
+            }
+        };
+        if st.init.len() as u64 != l.size {
+            errs.push(format!("static {i}: {} initial bytes for a type of size {}", st.init.len(), l.size));
+        }
+        if !st.refs.is_empty() && !l.align.is_multiple_of(8) {
+            errs.push(format!("static {i}: address words in a type aligned to {}", l.align));
+        }
+    }
+    errs
 }
 
 /// The address words of every static: ascending, non-overlapping, 8-aligned words wholly inside
@@ -739,6 +769,7 @@ impl<'a> FnVerifier<'a> {
                     None => match (self.operand_cls(b, args[0]), self.operand_cls(b, args[1])) {
                         (None, None) => Ok(()),
                         (Some(Cls::Float(x)), Some(Cls::Float(y))) if x == y => Ok(()),
+                        (Some(Cls::Fn), Some(Cls::Fn)) if matches!(op, Op::Eq | Op::Ne) => Ok(()),
                         _ => Err("compare of mismatched constants".into()),
                     },
                 }
@@ -1052,6 +1083,23 @@ impl<'a> FnVerifier<'a> {
                 let g = self.m.func(fi).ok_or("callee out of range")?;
                 if ty != g.ret {
                     return Err("call result type differs from the callee's return type".into());
+                }
+                if g.variadic && args.len() > g.params.len() + 1 {
+                    let (fixed, extra) = args[1..].split_at(g.params.len());
+                    self.check_args(b, fixed, &g.params)?;
+                    for (k, &o) in extra.iter().enumerate() {
+                        // the C-passable variadic args (E0813); an int constant is typed by context
+                        let ok = match self.operand_cls(b, o) {
+                            None => matches!(o, Operand::Const(_)),
+                            Some(Cls::Int(it)) => it.bits == 32 || it.bits == 64,
+                            Some(c) => matches!(c, Cls::Float(FloatBits::F64) | Cls::Ptr),
+                        };
+                        if !ok {
+                            let at = g.params.len() + k;
+                            return Err(format!("variadic argument {at}: not a C variadic type"));
+                        }
+                    }
+                    return Ok(());
                 }
                 self.check_args(b, &args[1..], &g.params)
             }

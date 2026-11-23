@@ -7,15 +7,18 @@
 //! part a moving pattern ignores, the value an assignment overwrites). The rows are made once per
 //! body by the builder of the borrow CFG (stave-borrow `cfg`), each together with the CFG
 //! statement that models the drop, so every check that reads the CFG (loans, moves, lock ranks,
-//! joins) reads the schedule. The lowering asks the schedule for every drop it emits
-//! ([`Schedule::has`]) and for the order of the drops of each end and exit
-//! ([`Schedule::in_order`]): a drop without a row, or in another order, is code no check has
-//! seen, an internal error of the build. The other way round, the rows of code that can run
-//! are due ([`Schedule::require`]): where the lowering lowers their point it must have decided
-//! each one for a local, an overwritten value, or an ignored part, so a drop it leaves out
-//! fails the build too. A temporary's row is not due: the CFG gives every value a temporary,
-//! the code only the ones that need a slot. Whether a scheduled drop runs is the owner's init bit: the CFG's dataflow and the
-//! lowering's owner states (or dynamic flags) both follow the moves.
+//! joins) reads the schedule. A row is one value: a temporary is named by its statement and
+//! the first and last token of the expression whose value it holds ([`Owner::Temp`], [`Made`],
+//! [`value_key`]), which both stages compute from the syntax where they make it. The lowering
+//! asks the schedule for every drop it emits ([`Schedule::has`]), each row at most once, and
+//! for the order of the drops of each end and exit ([`Schedule::in_order`]): a drop without a
+//! row, a second drop of one row, or a drop in another order is code no check has seen, an
+//! internal error of the build. The other way round, the rows of code that can run are due
+//! ([`Schedule::require`]): where the lowering lowers their point it must have decided each
+//! one, so a drop it leaves out, or a value the checks keep alive that the code never made,
+//! fails the build too. The lowering's side of both directions is a [`Ledger`]. Whether a
+//! scheduled drop runs is the owner's init bit: the CFG's dataflow and the lowering's owner
+//! states (or dynamic flags) both follow the moves.
 //!
 //! **Parts of a pattern.** A pattern that binds a non-Copy part by value takes its whole value;
 //! the parts it does not bind are dropped at its binding point, in the order of
@@ -25,7 +28,7 @@
 //! impl, then the glue of its parts in declaration order. The glue function, the call graph's
 //! glue node, and the lock check of a value's own guards ([`crate::ranks`]) are made from it.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use stave_syntax::{NodeKind, Term};
 
 use crate::Program;
@@ -60,8 +63,10 @@ pub enum Point {
 pub enum Owner {
     /// The local of this binding node (a param: its node).
     Local(u32),
-    /// A temporary of the statement with this node ([`crate::temps`]).
-    Temp(u32),
+    /// A temporary of the statement with this node ([`crate::temps`]) holding the value named
+    /// by [`Made`]. Both stages name a temporary so, each from the syntax where it makes the
+    /// temporary: one row is one value.
+    Temp(u32, Made),
     /// The part with this index in [`ignored_parts`] of the pattern at the point.
     Part(u32),
     /// The value the assignment at the point overwrites.
@@ -76,6 +81,49 @@ pub enum Head {
     Adt(DeclId),
     Tuple(u32),
     Array,
+}
+
+/// The value a temporary holds ([`Owner::Temp`]): the first and last token of the source text
+/// it is the value of. Two values of one statement never share it: expression nodes with the
+/// same first and last token are a node and its only child, one value, and a value no
+/// expression stands for is named by a token no expression is made of ([`Made::tok`]). The
+/// lowering refuses a second value with one key ([`Ledger::made`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Made {
+    pub from: u32,
+    pub to: u32,
+}
+
+impl Made {
+    /// The value named by a single token that is no expression: the operand `select` does not
+    /// pick (its method name), the item of a `for` iteration (the `for` keyword).
+    pub fn tok(t: u32) -> Made {
+        Made { from: t, to: t }
+    }
+
+    /// The value of postfix chain `n` up to the step ending at token `end`.
+    pub fn step(icx: &ItemCx<'_>, n: u32, end: u32) -> Made {
+        Made { from: icx.a(n), to: end }
+    }
+}
+
+/// The [`Made`] of a temporary that holds the value of expression `n`, looking through
+/// parentheses (`(e)` is the value of `e`).
+pub fn value_key(icx: &ItemCx<'_>, mut n: u32) -> Made {
+    for _ in 0..1_000_000 {
+        let a = icx.a(n);
+        if icx.kind(n) != Some(NodeKind::Primary)
+            || !icx.is(a, Term::LParen)
+            || icx.is(icx.close(a) - 1, Term::Comma)
+        {
+            break;
+        }
+        match icx.only_child(n) {
+            Some(c) => n = c,
+            None => break,
+        }
+    }
+    Made { from: icx.a(n), to: icx.end_tok(n) }
 }
 
 /// The [`Head`] of type `t`.
@@ -182,6 +230,106 @@ impl Schedule {
     }
 }
 
+/// What a lowering of one body did with the rows of its [`Schedule`]: the one record both
+/// directions of the comparison read. A statement lowered more than once (an `ensures` clause,
+/// at each return) is a copy of its own each time: each copy must emit or decide its rows by
+/// itself ([`Ledger::open`]).
+#[derive(Clone, Debug, Default)]
+pub struct Ledger {
+    /// The scheduled drops decided: emitted, or left out because the owner holds no value
+    /// there or its type has no drop glue in this instance.
+    asked: FxHashSet<(Point, Owner)>,
+    /// The scheduled drops emitted, each once.
+    consumed: FxHashSet<(Point, Owner)>,
+    /// The values of each statement the lowering made, by key: `true` a temporary, `false` a
+    /// value whose type has no drop glue in this instance (no temporary, no drop).
+    made: FxHashMap<(u32, Made), bool>,
+    /// The statements lowered, by node, with their first token.
+    opened: FxHashMap<u32, u32>,
+}
+
+impl Ledger {
+    /// Statement `stmt`, the tokens `span`, is lowered from here. Lowered again, the copy before
+    /// it must have decided every due row of those tokens; then the record of those tokens is
+    /// cleared, so this copy emits and decides them again. `tok`: the token a row belongs to
+    /// ([`Ledger::left_out`]).
+    pub fn open(
+        &mut self,
+        sched: Option<&Schedule>,
+        stmt: u32,
+        span: (u32, u32),
+        tok: impl Fn(Point, Owner) -> u32,
+        local_due: impl Fn(u32) -> bool,
+    ) -> Result<(), String> {
+        if self.opened.insert(stmt, span.0).is_none() {
+            return Ok(());
+        }
+        if let Some(s) = sched
+            && let Some((point, owner)) = self.left_out(s, Some(span), &tok, &local_due)
+        {
+            return Err(format!("a scheduled drop the lowering left out: {owner:?} at {point:?}"));
+        }
+        let (lo, hi) = span;
+        let inside = |p: Point, o: Owner| (lo..=hi).contains(&tok(p, o));
+        self.asked.retain(|&(p, o)| !inside(p, o));
+        self.consumed.retain(|&(p, o)| !inside(p, o));
+        self.made.retain(|&(st, m), _| !inside(Point::End, Owner::Temp(st, m)));
+        // the statements inside are opened afresh by this copy
+        self.opened.retain(|&n, a| n == stmt || !(lo..=hi).contains(a));
+        Ok(())
+    }
+
+    /// A value of statement `stmt` named `key` is made: a temporary (`temp`) or, its type
+    /// having no drop glue in this instance, none. A key names one value, so a second value
+    /// with the key is a compiler bug: a decision for one would be read as one for the other.
+    pub fn made(&mut self, stmt: u32, key: Made, temp: bool) -> Result<(), String> {
+        match self.made.insert((stmt, key), temp) {
+            Some(was) if was || temp => {
+                Err(format!("two values of one statement named alike: {key:?} in {stmt}"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The drop of `owner` at `point` is decided where its point is lowered.
+    pub fn decide(&mut self, point: Point, owner: Owner) {
+        self.asked.insert((point, owner));
+    }
+
+    /// A drop of `owner` at `point`, of a value whose type has head `head`, is emitted: the
+    /// schedule must have its row, and no drop of this copy may have consumed it.
+    pub fn emit(&mut self, sched: &Schedule, point: Point, owner: Owner, head: Head) -> Result<(), String> {
+        if !sched.has(point, owner, head) {
+            return Err(format!("a drop the schedule does not have: {owner:?} at {point:?}"));
+        }
+        if !self.consumed.insert((point, owner)) {
+            return Err(format!("a scheduled drop emitted twice: {owner:?} at {point:?}"));
+        }
+        Ok(())
+    }
+
+    /// The first due row (of the tokens `span`, else of the body) the lowering did not decide.
+    /// A row is not due for a value the lowering found without drop glue in this instance: a
+    /// local for which `local_due` is false, a temporary made with `temp` false.
+    pub fn left_out(
+        &self,
+        sched: &Schedule,
+        span: Option<(u32, u32)>,
+        tok: impl Fn(Point, Owner) -> u32,
+        local_due: impl Fn(u32) -> bool,
+    ) -> Option<(Point, Owner)> {
+        sched.due().iter().copied().find(|&(point, owner)| {
+            let due = match owner {
+                Owner::Temp(stmt, key) => self.made.get(&(stmt, key)) != Some(&false),
+                Owner::Local(n) => local_due(n),
+                Owner::Part(_) | Owner::Old => true,
+            };
+            let mine = span.is_none_or(|(lo, hi)| (lo..=hi).contains(&tok(point, owner)));
+            due && mine && !self.asked.contains(&(point, owner))
+        })
+    }
+}
+
 /// The schedules of a program's checked bodies, by fn decl.
 pub type Schedules = FxHashMap<DeclId, Schedule>;
 
@@ -220,6 +368,13 @@ impl Parts {
 pub struct Glue {
     pub method: Option<InstKey>,
     pub parts: Parts,
+}
+
+/// The parameter of the drop glue of `t`: `&mut t`. The call graph builds it for every glue
+/// node, so a type too tall for it is E0005 at the drop that needs the glue, and lowering builds
+/// the same type.
+pub fn glue_param<I: Interner + ?Sized>(cx: &mut I, t: TypeId) -> TypeId {
+    cx.mk_ref(true, t)
 }
 
 /// The [`Glue`] of `t`.
@@ -509,7 +664,7 @@ mod tests {
     fn a_row_is_found_by_point_owner_and_head() {
         let mut s = Schedule::default();
         s.add(row(Point::End, Owner::Local(7), Head::Tuple(2)));
-        s.add(row(Point::Try(40), Owner::Temp(12), Head::Any));
+        s.add(row(Point::Try(40), Owner::Temp(12, Made::tok(13)), Head::Any));
         s.add(row(Point::Bind(9), Owner::Part(1), Head::Array));
         for sealed in [false, true] {
             if sealed {
@@ -517,11 +672,11 @@ mod tests {
             }
             assert!(s.has(Point::End, Owner::Local(7), Head::Tuple(2)));
             // an instance's type under a definition's type parameter, and the reverse
-            assert!(s.has(Point::Try(40), Owner::Temp(12), Head::Array));
+            assert!(s.has(Point::Try(40), Owner::Temp(12, Made::tok(13)), Head::Array));
             assert!(s.has(Point::End, Owner::Local(7), Head::Any));
             assert!(!s.has(Point::End, Owner::Local(7), Head::Tuple(3)));
             assert!(!s.has(Point::End, Owner::Local(8), Head::Tuple(2)));
-            assert!(!s.has(Point::Return(40), Owner::Temp(12), Head::Any));
+            assert!(!s.has(Point::Return(40), Owner::Temp(12, Made::tok(13)), Head::Any));
             assert!(!s.has(Point::Bind(9), Owner::Part(0), Head::Array));
         }
     }
@@ -529,7 +684,7 @@ mod tests {
     #[test]
     fn drops_of_one_point_keep_their_order() {
         let mut s = Schedule::default();
-        let (a, b, c) = (Owner::Temp(3), Owner::Local(5), Owner::Local(4));
+        let (a, b, c) = (Owner::Temp(3, Made::tok(4)), Owner::Local(5), Owner::Local(4));
         s.add(row(Point::Jump(20), a, Head::Any));
         s.add(row(Point::End, c, Head::Any));
         s.add(row(Point::Jump(20), a, Head::Any));
@@ -544,5 +699,137 @@ mod tests {
         assert!(!s.in_order(Point::Jump(20), &[a, a, a]));
         assert!(!s.in_order(Point::End, &[c, c]));
         assert!(!s.in_order(Point::Return(20), &[a]));
+    }
+
+    // The ledger tests below stand for a lowering by the calls it makes; nodes are their first
+    // token, so a row belongs to the token `tok` gives.
+
+    fn tok(p: Point, o: Owner) -> u32 {
+        match (p, o) {
+            (Point::Return(t) | Point::Try(t) | Point::Jump(t), _) => t,
+            (Point::Bind(n) | Point::Assign(n), _) | (Point::End, Owner::Local(n)) => n,
+            (Point::End, Owner::Temp(_, m)) => m.to,
+            (Point::End, Owner::Part(_) | Owner::Old) => u32::MAX,
+        }
+    }
+
+    fn all(_: u32) -> bool {
+        true
+    }
+
+    fn sched(due: &[(Point, Owner)]) -> Schedule {
+        let mut s = Schedule::default();
+        for &(p, o) in due {
+            s.add(row(p, o, Head::Any));
+            s.require(p, o);
+        }
+        s.seal();
+        s
+    }
+
+    fn left_out(l: &Ledger, s: &Schedule) -> Option<(Point, Owner)> {
+        l.left_out(s, None, tok, all)
+    }
+
+    /// `let _ = &mk(2);` (statement 10, tokens `&` 13, `mk` 14, `)` 17): the temporary of
+    /// `mk(2)` has glue, the reference has none.
+    #[test]
+    fn a_value_without_glue_excuses_only_its_own_row() {
+        let (stmt, val, rf) = (10, Made { from: 14, to: 17 }, Made { from: 13, to: 17 });
+        let s = sched(&[(Point::End, Owner::Temp(stmt, val))]);
+        let lower = |emit: usize| {
+            let mut l = Ledger::default();
+            l.open(Some(&s), stmt, (10, 18), tok, all).unwrap();
+            l.made(stmt, val, true).unwrap();
+            l.made(stmt, rf, false).unwrap();
+            let mut r = Ok(());
+            for _ in 0..emit {
+                l.decide(Point::End, Owner::Temp(stmt, val));
+                r = r.and(l.emit(&s, Point::End, Owner::Temp(stmt, val), Head::Any));
+            }
+            (l, r)
+        };
+        let (l, r) = lower(1);
+        assert!(r.is_ok() && left_out(&l, &s).is_none());
+        // the drop of the temporary removed: the reference's record does not decide it
+        let (l, _) = lower(0);
+        assert_eq!(left_out(&l, &s), Some((Point::End, Owner::Temp(stmt, val))));
+        // doubled
+        assert!(lower(2).1.is_err());
+        // a key the two values shared would be one record for two values: refused
+        let mut l = Ledger::default();
+        let shared = Made::tok(17);
+        l.made(stmt, shared, true).unwrap();
+        assert!(l.made(stmt, shared, false).is_err());
+        let mut l = Ledger::default();
+        l.made(stmt, shared, false).unwrap();
+        assert!(l.made(stmt, shared, true).is_err());
+        // a value without glue of another statement or key decides nothing here
+        let mut l = Ledger::default();
+        l.made(stmt + 1, val, false).unwrap();
+        assert!(left_out(&l, &s).is_some());
+    }
+
+    /// `ensures(result == mz(i + 2).n() - 2)` (statement 50, tokens 50..=60, the temporary of
+    /// `mz(..)` 52..=55, a statement nested in it at 53) lowered at three returns.
+    #[test]
+    fn each_copy_of_a_statement_decides_its_rows() {
+        let (stmt, inner, val) = (50, 53, Made { from: 52, to: 55 });
+        let key = (Point::End, Owner::Temp(stmt, val));
+        let s = sched(&[key]);
+        // per copy: how many times the drop is emitted
+        let lower = |copies: &[usize]| -> Result<Ledger, String> {
+            let mut l = Ledger::default();
+            for &emit in copies {
+                l.open(Some(&s), stmt, (50, 60), tok, all)?;
+                l.open(Some(&s), inner, (53, 56), tok, all)?;
+                l.made(stmt, val, true)?;
+                for _ in 0..emit {
+                    l.decide(key.0, key.1);
+                    l.emit(&s, key.0, key.1, Head::Any)?;
+                }
+            }
+            Ok(l)
+        };
+        let l = lower(&[1, 1, 1]).unwrap();
+        assert!(left_out(&l, &s).is_none());
+        // removed at the second return: refused when the third copy opens
+        assert!(lower(&[1, 0, 1]).unwrap_err().contains("left out"));
+        // removed at the last return: refused at the end of the body
+        let l = lower(&[1, 1, 0]).unwrap();
+        assert_eq!(left_out(&l, &s), Some(key));
+        // moved from the second copy to the first
+        assert!(lower(&[2, 0, 1]).unwrap_err().contains("twice"));
+        // a statement lowered once is not a copy
+        assert!(lower(&[1]).is_ok());
+    }
+
+    /// `let x = rd(&mk(2)) + small[6] + rd(&mk(3)); let e = mk(4);` (statement 20, the
+    /// temporaries end at 24 and 36, `e` at 40): a lowering that stops at the index decides
+    /// nothing after it, and no row is excused for that.
+    #[test]
+    fn rows_after_a_known_trap_are_due() {
+        let (stmt, a, b) = (20, Made { from: 22, to: 24 }, Made { from: 33, to: 36 });
+        let rows = [(Point::End, Owner::Temp(stmt, a)), (Point::End, Owner::Temp(stmt, b))];
+        let mut all_rows = rows.to_vec();
+        all_rows.push((Point::End, Owner::Local(40)));
+        let s = sched(&all_rows);
+        let mut l = Ledger::default();
+        l.open(Some(&s), stmt, (20, 38), tok, all).unwrap();
+        l.made(stmt, a, true).unwrap();
+        l.decide(rows[0].0, rows[0].1);
+        l.emit(&s, rows[0].0, rows[0].1, Head::Any).unwrap();
+        assert_eq!(l.left_out(&s, Some((20, 38)), tok, all), Some(rows[1]));
+        // the rest of the statement and the next one lowered after the trap: all decided
+        l.made(stmt, b, true).unwrap();
+        l.decide(rows[1].0, rows[1].1);
+        assert_eq!(left_out(&l, &s), Some((Point::End, Owner::Local(40))));
+        l.decide(Point::End, Owner::Local(40));
+        assert!(left_out(&l, &s).is_none());
+        // a local without glue in the instance is not due
+        let mut l = Ledger::default();
+        l.decide(rows[0].0, rows[0].1);
+        l.decide(rows[1].0, rows[1].1);
+        assert!(l.left_out(&s, None, tok, |n| n != 40).is_none());
     }
 }

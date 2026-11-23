@@ -4,10 +4,11 @@
 // source of truth for the layout), all little-endian:
 //     +0 default: u64 (`[run] stack` bytes; 0: RUN_STACK)   +8 main: u64 (0: no bound)
 //     +16 count: u64; then count rows of 16 bytes:
-//     +0 code: u64 (the code address of a fn value a thread starts with)   +8 bytes: u64 (0: no bound)
+//     +0 code: u64 (the code address of a fn value a thread starts with)   +8 bytes: u64 (0: none)
 // A stack whose calls reach no call cycle gets its computed bound (plus the compiler's margin),
-// whatever `[run] stack` says; any other stack gets `[run] stack`. Without a table (the IR
-// interpreter: address 0) every stack gets RUN_STACK.
+// whatever `[run] stack` says; one whose calls reach a cycle gets `[run] stack` plus the bound
+// outside the cycles (the compiler adds them); a stack without bytes gets `[run] stack`. Without a
+// table (the IR interpreter: address 0) every stack gets RUN_STACK.
 
 extern "stave-intrinsic" {
     fn stack_table() -> usize;
@@ -17,11 +18,18 @@ extern "stave-intrinsic" {
 pub const RUN_STACK: usize = 8388608;
 
 // PROT_NONE guard region below every stack. 64 KiB rather than one page so that a
-// frame of up to 64 KiB still faults inside it; larger frames must be probed by the compiler.
+// frame of up to 64 KiB still faults inside it; larger frames must be probed by the compiler,
+// and the compiler's reserve probes read every 60 KiB, which needs at least 64 KiB here.
 pub const GUARD: usize = 65536;
 
-// Alternate signal stack per thread for the SIGSEGV handler (>= MINSIGSTKSZ on both arches).
-pub const ALTSTACK: usize = 65536;
+// Per thread, above its stack, the alternate stacks (runtime.panic.alt_len), each with a
+// PROT_NONE guard page below it:
+// - the panic report's stack: the report entries move there (contracts/intrinsics.md "Alternate
+//   stack"); the compiler computes the report's depth, which the run suite keeps within it;
+// - the signal stack (`sigaltstack`) for the SIGSEGV handler: the kernel's signal frame
+//   (>= MINSIGSTKSZ on both arches) and `on_signal`, which moves to the report's stack to report.
+pub const REPORT_STACK: usize = 65536;
+pub const ALTSTACK: usize = 32768;
 
 unsafe("a is 8-byte aligned and readable") fn ld64(a: usize) -> u64 {
     return unsafe("a is 8-byte aligned and readable (caller)") *(a as *const u64);

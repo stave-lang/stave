@@ -1,0 +1,72 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0705: an arm target is a fn with a body. Case `dispatch`: a `dispatch fn` as a feature arm,
+// as the `_` arm, in a dispatch reached only as a fn value or never, and two dispatches naming
+// each other. A name that is no fn (a type, a built-in) is E0705 too.
+fn wide(x: u32) -> u32 needs(avx2) {
+    return x;
+}
+
+fn kf(x: u32) -> u32 needs(fma) {
+    return x;
+}
+
+fn fast(x: u32) -> u32 needs(sve) {
+    return x;
+}
+
+fn base(x: u32) -> u32 {
+    return x;
+}
+
+dispatch fn inner(x: u32) -> u32 {
+    fma => kf,
+    _ => base,
+}
+
+dispatch fn inner_avx2(x: u32) -> u32 needs(avx2) {
+    _ => wide,
+}
+
+dispatch fn feature_arm(x: u32) -> u32 {
+    avx2 => inner_avx2, //~ ERROR E0705
+    _ => base,
+}
+
+dispatch fn default_arm(x: u32) -> u32 {
+    avx2 => wide,
+    sve => fast,
+    _ => inner, //~ ERROR E0705
+}
+
+dispatch fn as_value(x: u32) -> u32 {
+    _ => inner, //~ ERROR E0705
+}
+
+dispatch fn unused(x: u32) -> u32 {
+    _ => inner, //~ ERROR E0705
+}
+
+dispatch fn ping(x: u32) -> u32 {
+    avx2 => wide,
+    _ => pong, //~ ERROR E0705
+}
+
+dispatch fn pong(x: u32) -> u32 {
+    _ => ping, //~ ERROR E0705
+}
+
+dispatch fn a_type(x: u32) -> u32 {
+    _ => u32, //~ ERROR E0705
+}
+
+dispatch fn a_builtin(x: u32) -> u32 {
+    avx2 => size_of, //~ ERROR E0705
+    _ => base,
+}
+
+fn main() -> i32 {
+    let f: fn(u32) -> u32 = as_value;
+    let s = feature_arm(1u32) + default_arm(2u32) + f(3u32) + ping(4u32) + a_type(5u32) + a_builtin(6u32);
+    return 0;
+}

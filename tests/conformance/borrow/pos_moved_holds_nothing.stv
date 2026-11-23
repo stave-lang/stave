@@ -1,0 +1,85 @@
+//~ EXIT 30
+// A local moved whole holds no value, so it borrows nothing until it is written again: its
+// scope-end drop does not run, and what the moved value borrowed may be written or end after
+// the move. The value takes its borrows along: into `mem.drop`, another local, a struct literal,
+// a pattern's binding. Where the local is moved on some paths only, the others keep it: see
+// neg_e0501_moved_some_paths.stv.
+import std.mem;
+import std.vec;
+
+struct P { x: i64 }
+
+view struct W { r: &mut P }
+
+impl Drop for W {
+    fn drop(&mut self) { self.r.x = self.r.x + 1; }
+}
+
+view struct Holder { v: vec.Vec<&u32>, n: u32 }
+
+fn dropped() -> u32 {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    mem.drop(ps);
+    x = 2;
+    return x;
+}
+
+fn in_loop() -> u32 {
+    let mut x: u32 = 1;
+    for i in 0u32..3 {
+        let mut ps = vec.Vec::<&u32>.new();
+        ps.push(&x);
+        mem.drop(ps);
+        x = x + i;
+    }
+    return x;
+}
+
+fn in_branch(c: bool) -> u32 {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    if c {
+        mem.drop(ps);
+        x = 5;
+        return x;
+    }
+    return 0;
+}
+
+fn into_local() -> u32 {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    let q = ps;
+    mem.drop(q);
+    x = 3;
+    return x;
+}
+
+fn into_struct() -> u32 {
+    let mut x: u32 = 1;
+    let mut ps = vec.Vec::<&u32>.new();
+    ps.push(&x);
+    let h = Holder.{ v: ps, n: 0 };
+    let Holder.{ v, n: _ } = h;
+    mem.drop(v);
+    x = 4;
+    return x;
+}
+
+fn destructor_ran() -> i64 {
+    let mut a = P.{ x: 1 };
+    let w = W.{ r: &mut a };
+    mem.drop(w);
+    a.x = a.x + 10;
+    return a.x;
+}
+
+fn main() -> i32 {
+    let n = dropped() + in_loop() + in_branch(true) + in_branch(false) + into_local() + into_struct();
+    let d = destructor_ran();
+    return (n as i64 + d) as% i32;
+}

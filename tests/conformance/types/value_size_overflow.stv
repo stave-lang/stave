@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// A type whose size does not fit in 64 bits has no value (E0911 `overflow`), checked in a
+// concrete fn and per instance of a generic one; a type whose size does fit is held to the
+// value limit as usual.
+fn param(x: [[u8; 1099511627776]; 1099511627776]) -> u8 { //~ ERROR E0911
+    return 0;
+}
+
+fn local<const N: usize>() -> u64 { //~ ERROR E0911
+    let a = [1u64; N];
+    return a[0];
+}
+
+fn main() -> i32 {
+    return local::<4611686018427387904>() as% i32;
+}

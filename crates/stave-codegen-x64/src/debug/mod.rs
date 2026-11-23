@@ -83,7 +83,9 @@
 //! not lower (`simd::k`), conversions *to* f16 / bf16,
 //! alignment above the widest vector, intrinsics outside the x86-64 table, references to
 //! functions without a body (C imports need an external linker). Stack overflow is detected by the
-//! runtime's guard page, not by an inline check. When `ObjectImage::patch_func` moves a function,
+//! runtime's guard page, not by an inline check; a function with an
+//! [`Options::reserve_slots`] slot reads its reserve below its frame at entry, so the guard
+//! faults there. When `ObjectImage::patch_func` moves a function,
 //! its PC-table row follows it (`Abs64Body`) but keeps its position, so the table is no longer
 //! sorted by address until the next full link.
 
@@ -196,6 +198,9 @@ pub struct Options {
     /// The module baseline: the features every function may use (a target's
     /// `Triple::baseline`). A function adds its own `Func::features`.
     pub features: FeatureSet,
+    /// Per `FuncId`: the slot of `__stave_reserve_table` whose bytes the function's entry probes
+    /// below its frame, page by page, or `u32::MAX` (no probe; also every function past the end).
+    pub reserve_slots: Vec<u32>,
 }
 
 impl Default for Options {
@@ -210,6 +215,7 @@ impl Default for Options {
             threads: 0,
             release: false,
             features: FeatureSet::of(Feature::Sse42),
+            reserve_slots: Vec::new(),
         }
     }
 }
@@ -312,6 +318,9 @@ pub struct Ctx<'m> {
     pub(crate) site_table_sym: SymbolId,
     pub(crate) pc_table_sym: SymbolId,
     pub(crate) stack_table_sym: SymbolId,
+    /// `__stave_reserve_table` and [`Options::reserve_slots`].
+    pub(crate) reserve_sym: Option<SymbolId>,
+    pub(crate) reserve_slots: Vec<u32>,
     /// Line-table position per site row.
     pub(crate) lines: Vec<Option<(FileId, u32, u32)>>,
     /// Per `FuncId`: site of the name token.
@@ -344,6 +353,11 @@ pub struct Emitted {
     pub stack: Vec<StackUse>,
     /// Declared, defined by the caller ([`stave_obj::stub::stack_table`]) or else by [`link`].
     pub stack_table: SymbolId,
+    /// Declared, defined by the caller ([`stave_obj::stub::reserve_table`]) or else by [`link`]
+    /// (every slot 0).
+    pub reserve_table: SymbolId,
+    /// Slots of the reserve table the code reads.
+    pub reserve_count: usize,
 }
 
 impl Ctx<'_> {
@@ -439,6 +453,9 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
     let site_table_sym = stubs::site_table(&files, &rows, b)?;
     let pc_table_sym = b.declare(stubs::PC_TABLE);
     let stack_table_sym = b.declare(stave_obj::stub::STACK_TABLE);
+    let reserve_sym = b.declare(stave_obj::stub::RESERVE_TABLE);
+    let reserve_count =
+        o.reserve_slots.iter().filter(|&&s| s != u32::MAX).map(|&s| s as usize + 1).max().unwrap_or(0);
     let lines = rows.iter().map(|r| file_ids.get(r.file as usize).map(|&fi| (fi, r.line, r.col))).collect();
     let fn_sites: Vec<Site> = if o.fn_sites.is_empty() {
         m.funcs.iter().map(|f| f.name_site).collect()
@@ -469,6 +486,8 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         site_table_sym,
         pc_table_sym,
         stack_table_sym,
+        reserve_sym: Some(reserve_sym),
+        reserve_slots: o.reserve_slots.clone(),
         lines,
         fn_sites: fn_sites.clone(),
         static_sym,
@@ -507,6 +526,8 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         nanos: all_nanos,
         stack,
         stack_table: stack_table_sym,
+        reserve_table: reserve_sym,
+        reserve_count,
     })
 }
 
@@ -577,11 +598,15 @@ pub fn compile_module(m: &Module, o: &Options) -> Result<ObjectImage, Error> {
 /// Defines the PC table and links. The table's `pc_lo` words are [`stave_obj::RelocKind::Abs64Body`]
 /// relocations: they resolve to each function's first instruction even when the jump table is
 /// enabled (and follow a function that `ObjectImage::patch_func` moves). A stack table the caller
-/// did not define is the empty one: every stack gets the runtime's default.
+/// did not define is the empty one: every stack gets the runtime's default; a reserve table the
+/// caller did not define has every slot 0.
 pub fn link(mut b: ImageBuilder, e: &Emitted) -> Result<ObjectImage, Error> {
     b.define_rodata(e.pc_table, stubs::pc_table(&e.pc_rows))?;
     if !b.is_defined(e.stack_table) {
         b.define_rodata(e.stack_table, stave_obj::stub::stack_table(0, 0, &[]))?;
+    }
+    if !b.is_defined(e.reserve_table) {
+        b.define_rodata(e.reserve_table, stave_obj::stub::reserve_table(&vec![0; e.reserve_count]))?;
     }
     Ok(b.link()?)
 }
@@ -605,6 +630,8 @@ pub fn bench_ctx(m: &Module) -> Ctx<'_> {
         site_table_sym: SymbolId(u32::MAX - 5),
         pc_table_sym: SymbolId(u32::MAX - 6),
         stack_table_sym: SymbolId(u32::MAX - 9),
+        reserve_sym: None,
+        reserve_slots: Vec::new(),
         lines: Vec::new(),
         fn_sites: Vec::new(),
         static_sym: (0..m.statics.len() as u32).map(|i| SymbolId(u32::MAX - 10 - i)).collect(),

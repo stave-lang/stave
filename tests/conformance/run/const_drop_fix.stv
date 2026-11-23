@@ -1,0 +1,36 @@
+//~ STDOUT const_drop_fix.stdout
+// The two forms that replace a `const` whose type has drop glue (E0413): a `static` is one value,
+// read in place and never dropped; a fn returns a new value at each call, dropped at the end of
+// the statement that made it. A const of a type without drop glue is read in place.
+import std.io;
+
+struct Q {
+    pub n: u32,
+}
+
+impl Drop for Q {
+    fn drop(&mut self) {
+        let n = self.n;
+        io.print(f"dropQ{n}\n");
+    }
+}
+
+struct P {
+    pub n: u32,
+}
+
+static K: Q = Q.{ n: 1 };
+
+fn k() -> Q {
+    return Q.{ n: 2 };
+}
+
+const C: P = P.{ n: 3 };
+
+fn main() -> i32 {
+    let a = K.n;
+    let b = k().n;
+    let c = C.n;
+    io.print(f"{a} {b} {c}\n");
+    return 0;
+}

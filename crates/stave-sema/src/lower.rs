@@ -311,10 +311,18 @@ fn lower_in_pool(
     let sigs = &tc.sigs;
     let lang = LangFns::find(prog);
     let mut statics_list: Vec<DeclId> = Vec::new();
-    for (k, d) in prog.decls.iter().enumerate() {
-        let id = DeclId(k as u32);
-        if d.kind == DeclKind::Static && sigs.konst(id).is_some_and(|c| c.value.is_some()) {
-            statics_list.push(id);
+    {
+        let mut ov = crate::types::Overlay::new(&table);
+        let mut h = crate::lower_expr::TyHost { tys: &mut ov, prog, sigs };
+        for (k, d) in prog.decls.iter().enumerate() {
+            let id = DeclId(k as u32);
+            let Some(c) = sigs.konst(id).filter(|c| c.value.is_some()) else { continue };
+            let image = d.kind == DeclKind::Const
+                && !h.has_params(c.ty)
+                && crate::consteval::cells(&mut h, c.ty).is_some_and(|n| n > CONST_INLINE_CELLS);
+            if d.kind == DeclKind::Static || image {
+                statics_list.push(id);
+            }
         }
     }
     let statics: FxHashMap<DeclId, u32> =
@@ -627,7 +635,24 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 }));
             }
             let needs = inst_features(g.sigs, g.inherited, k);
-            if decl.flags.has(DeclFlags::DISPATCH) {
+            // A fn the target does not build is reached only as a fn value made in code the
+            // target builds: every call of it, or through a value of its type, needs features the
+            // target's arch lacks (E0704, E0707), so no call runs. Its code is a trap, where the
+            // target can pass its params and return at all (else it stays declared only).
+            let max = crate::gates::max_vector_bits(prog.target);
+            let passable = sig
+                .params
+                .iter()
+                .chain(std::iter::once(&sig.ret))
+                .all(|&t| t.is_none() || crate::gates::wide_part(&g.tc.types, t, max).is_none());
+            let unbuilt = !sig.built_on(prog.target.arch());
+            if unbuilt && passable {
+                let mut cx = FnCx::new(g, icx, path);
+                let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
+                let out = cx.lower_unbuilt(&ps, ret);
+                return finish_job(cx, out, name);
+            }
+            if decl.flags.has(DeclFlags::DISPATCH) && !unbuilt {
                 let mut cx = FnCx::new(g, icx, path);
                 cx.needs = needs;
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
@@ -648,7 +673,8 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 return finish_job(cx, out, name);
             }
             let body = g.tc.body(k.decl).filter(|b| !b.has_error);
-            let declared_only = body.is_none()
+            let declared_only = unbuilt
+                || body.is_none()
                 || decl.flags.has(DeclFlags::EXTERN_IMPORT)
                 || sig.abi == crate::sigs::Abi::Intrinsic;
             if declared_only {
@@ -709,6 +735,16 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
 }
 
 fn finish_job(mut cx: FnCx<'_>, out: FnOut, name: Option<(stave_diag::FileId, u32)>) -> JobOut {
+    // the checker reported every type too tall for an instance (E0005 case `type`), so lowering
+    // never builds one: its error type would be lowered as a value
+    if cx.tys.refused > 0 && cx.err.is_none() {
+        cx.err = Some(crate::lower_fn::LowerError {
+            kind: crate::lower_fn::LowerErrorKind::Internal,
+            func: cx.path.clone(),
+            at: String::from("?"),
+            msg: "lowering built a type taller than the type height limit".into(),
+        });
+    }
     let mut funcs = vec![out];
     let mut cl = std::mem::take(&mut cx.outs);
     cl.sort_by_key(|f| f.closure);
@@ -1046,7 +1082,7 @@ fn assemble(
     let mut all_strs: Vec<Vec<u8>> = outs.iter().flat_map(|o| o.strs.iter().cloned()).collect();
     for &d in statics_list {
         if let Some(v) = sigs.konst(d).and_then(|c| c.value.as_ref()) {
-            str_bytes(v, &mut all_strs);
+            str_bytes(v, &mut all_strs, &mut FxHashSet::default());
         }
     }
     all_strs.sort_by(|a, b| {
@@ -1107,6 +1143,10 @@ fn assemble(
         let symbol = match job {
             Job::Inst(k) => c_symbol(prog, sigs, k.decl),
             Job::Glue(_) => None,
+        };
+        let variadic = match job {
+            Job::Inst(k) => sigs.fn_sig(k.decl).is_some_and(|s| s.variadic),
+            Job::Glue(_) => false,
         };
         let known = match job {
             Job::Inst(k) => prog.known.of(k.decl),
@@ -1277,7 +1317,9 @@ fn assemble(
                 body,
                 name_site,
                 symbol: if f.closure.is_some() { None } else { symbol.clone() },
+                variadic: variadic && f.closure.is_none(),
                 known: if f.closure.is_some() { None } else { known },
+                alt_stack: f.closure.is_none() && known.is_some_and(stave_ir::known::reports_on_alt_stack),
             });
         }
     }
@@ -1321,12 +1363,20 @@ fn ty_final_pure(tr: &Tr, fin: &[stave_ir::TypeId], t: u32) -> stave_ir::TypeId 
     }
 }
 
-/// The string bytes a const value holds, appended to `out`.
-fn str_bytes(v: &crate::consteval::Val, out: &mut Vec<Vec<u8>>) {
+/// The most value cells a const's value is built from in the code where it is used; a larger
+/// const is read from its image, a read-only static ([`crate::lower_expr`] `const_use`).
+pub(crate) const CONST_INLINE_CELLS: u64 = 64;
+
+/// The string bytes a const value holds, appended to `out`. A shared part (`seen`, by address)
+/// is visited once: the value's distinct parts, not its leaves.
+fn str_bytes(v: &crate::consteval::Val, out: &mut Vec<Vec<u8>>, seen: &mut FxHashSet<usize>) {
     use crate::consteval::Val;
     match v {
         Val::Str(s) => out.push(s.to_vec()),
-        Val::Agg(vs) | Val::Variant(_, vs) => vs.iter().for_each(|x| str_bytes(x, out)),
+        Val::Agg(vs) | Val::Variant(_, vs) if seen.insert(vs.as_ptr() as usize) => {
+            vs.iter().for_each(|x| str_bytes(x, out, seen));
+        }
+        Val::Rep(v, _) if seen.insert(std::sync::Arc::as_ptr(v) as usize) => str_bytes(v, out, seen),
         _ => {}
     }
 }
@@ -1352,6 +1402,10 @@ fn write_val(
     use crate::consteval::Val;
     use stave_ir::layout::Shape;
     let Ok(l) = lay.get_layout(t) else { return };
+    // nothing to write; and a zero-size value may have any number of leaves
+    if l.size == 0 {
+        return;
+    }
     let put = |out: &mut ValOut<'_>, at: usize, n: usize, bits: u64| {
         for (k, byte) in bits.to_le_bytes().iter().enumerate().take(n.min(8)) {
             if let Some(x) = out.bytes.get_mut(at + k) {
@@ -1379,7 +1433,7 @@ fn write_val(
             put(out, off + 8, 8, s.len() as u64);
         }
         (Shape::Fields(fs), Val::Agg(vs)) => {
-            for ((fo, ft), fv) in fs.iter().zip(vs) {
+            for ((fo, ft), fv) in fs.iter().zip(vs.iter()) {
                 write_val(types, lay, *ft, fv, out, off + *fo as usize);
             }
         }
@@ -1388,10 +1442,40 @@ fn write_val(
                 write_val(types, lay, *elem, fv, out, off + k * *stride as usize);
             }
         }
+        (Shape::Array { elem, stride, .. }, Val::Rep(v, n)) => {
+            // the element once, then its bytes (and address words) copied: the buffer starts
+            // zeroed, so an all-zero element needs nothing more
+            let (stride, n) = (*stride as usize, *n as usize);
+            let refs0 = out.refs.len();
+            write_val(types, lay, *elem, v, out, off);
+            let new_refs: Vec<stave_ir::DataRef> = out.refs[refs0..].to_vec();
+            let end = (off + stride).min(out.bytes.len());
+            if n < 2
+                || stride == 0
+                || (new_refs.is_empty() && out.bytes[off.min(end)..end].iter().all(|b| *b == 0))
+            {
+                return;
+            }
+            let mut done = 1;
+            while done < n {
+                let k = done.min(n - done);
+                let (src, dst) = (off, off + done * stride);
+                if dst + k * stride > out.bytes.len() {
+                    break;
+                }
+                out.bytes.copy_within(src..src + k * stride, dst);
+                done += k;
+            }
+            for i in 1..n {
+                for r in &new_refs {
+                    out.refs.push(stave_ir::DataRef { offset: r.offset + (i * stride) as u32, ..*r });
+                }
+            }
+        }
         (Shape::Enum(vs), Val::Variant(vi, fs)) => {
             put(out, off, 4, *vi as u64);
             if let Some(fl) = vs.get(*vi as usize) {
-                for ((fo, ft), fv) in fl.iter().zip(fs) {
+                for ((fo, ft), fv) in fl.iter().zip(fs.iter()) {
                     write_val(types, lay, *ft, fv, out, off + *fo as usize);
                 }
             }

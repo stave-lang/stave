@@ -103,6 +103,48 @@ end drops the new one.
 check. A transfer function that leaves out of the destination's set a loan the new value holds.
 Reading the loans live after a statement from the state before it.
 
+## Loans through a redefined pointer: the place names the new pointee
+
+**Claim.** Take a loan L of a place `x.π * ρ`, made through a `&mut` or `&` pointer held at
+`x.π`, and an access at a point where every path from L's creation to that point redefines `x`
+entirely. Then no use of a reference L stands for can conflict with the access through L's
+place. The loan stays live and keeps everything it carries live, but the access is not checked
+against it. So `for .. { let p = a.alloc(..); ps.push(p); }` reborrows each new `*p` while
+`ps` holds the earlier ones.
+
+**Assumptions.** A redefinition is a whole assignment to `x` or the end of its storage
+(`check::stmt_def`): a `let` in a loop body, `x = e`, a pattern binding, the end of the
+iteration's scope. A borrow carries its loan, the origins of the pointers it reborrows through
+after the last `&` one, and that one's (stave-borrow `loans`, **Contents**). So the value
+holding L also holds the loans that made the pointer at `x.π` when L was made, back to the
+local or param it came from.
+
+**Argument.** L stands for the memory reached from the pointer `p0` that `x.π` held when L was
+made. After the redefinition `x.π` holds another pointer, and the place names the memory
+reached from that one. The new value can reach `p0`'s memory only in these ways:
+- From `p0` itself, taken out of `x` before the redefinition. A move of `x`, a `&mut` of `x`
+  or of a part on the way to `x.π` (`mem.swap`, `mem.replace`, a callee given `&mut x`) are
+  deep accesses above L, so they conflict with L while it is still bound to the old value. A
+  `&mut` pointer is not Copy. A `&` one may be copied, but a loan made through a `&` conflicts
+  only with writes and `&mut` borrows through it, which are E0503.
+- From a value that holds L: the reborrow itself, kept in a vector, an `Option`, or a view.
+  Taking it out moves it (the holder no longer has it), or reborrows through the holder, which
+  makes a loan of the holder's place. The new `x` carries that loan, so the holder stays
+  borrowed while the new `x` is used.
+- Through the original lender: it is still borrowed by the loans L carries, so a new borrow of
+  it conflicts there (`p = &mut x` again after `ps.push(p)`).
+
+In each case one usable path to the memory remains, and the loan on that path is checked.
+
+**Not claimed.** Nothing is claimed for a loan whose first dereference is a raw pointer
+(Copy, and aliasing through it is the unsafe code's obligation). Nothing is claimed for a root
+that is a closure capture or a static, or when the redefinition the checker does not see
+happens through a pointer to `x` or by a write to a field of `x`: such a loan keeps its
+conflicts. A loan made in the statement of an access that comes after that statement's
+borrows (its write, the drop the write stands for) also keeps them. A path that reaches the
+access without the redefinition keeps the conflict: a pointer reborrowed twice without being
+redefined between is still E0501.
+
 ## Stores of a call: the result does not depend on order
 
 **Claim.** Applying the stores of one call until nothing changes ends, and the sets it ends at
@@ -199,18 +241,26 @@ use of what the dropped value borrows (E0501), and a call of its drop glue at th
 the lock-rank and join rules (E1405, E1406) and for the types a body drops.
 
 **Assumptions.** A body's drop schedule (stave-sema `drops`, contracts/lang-details.md
-"Drops") has one row per drop: point and owner. The builder of the borrow CFG makes each row
+"Drops") has one row per drop: point and owner, an owner naming one value (a temporary by its
+statement and the first and last token of the expression whose value it holds, computed from
+the syntax by both sides; two values of one statement never share them, and the lowering fails
+the build when two values it makes do). The builder of the borrow CFG makes each row
 together with the drop statement it stands for, in one function, and makes no drop statement
 elsewhere; for a write through a dereference the assignment statement stands for the drop of
 the old value (it uses the pointer, and the lock check reads it as a drop). The lowering emits
 a drop only through one function, which fails the build when the schedule of the body has no
 row for the point, the owner, and the outermost constructor of the dropped type (an instance
 is checked against its definition's schedule, whose keys are nodes and tokens of the source),
-or when the drops of one scope end, statement end, or exit are emitted in an order the rows of
-that point do not have. In the other direction, when a body is lowered every row of its
-schedule for a local, an overwritten value, or an ignored part must have been decided by that
-function's callers at its point (emitted, or left out because the owner holds no value there
-or the type has no drop glue in the instance): a row never decided fails the build.
+when a drop emitted before already consumed that row, or when the drops of one scope end,
+statement end, or exit are emitted in an order the rows of that point do not have. In the
+other direction, when a body is lowered every row of its schedule in code the CFG reaches must
+have been decided by that function's callers at its point (emitted, or left out because the
+owner holds no value there or the type of that value has no drop glue in the instance): a row
+never decided fails the build. A statement lowered more than once (an `ensures` clause, at
+each return) is checked per copy, both ways. Code after a trap the lowering knows runs (an
+index out of a constant length) is lowered as after a run-time trap, into a block nothing
+reaches that the post-pass deletes, so no row is excused for it. A `const` has a type without drop
+glue (E0413), so reading one in place makes no owner in either.
 Which parts a moving pattern ignores, in what order, and what a type's drop glue runs, in what
 order, are each one function called by both.
 
@@ -223,19 +273,50 @@ the CFG keeps a temporary on the drop list from the statement that makes it to t
 that moves it out, so an exit taken between an operand's evaluation and the expression that
 consumes it drops it; the lowering holds it as an owner over the same interval. The checks are
 then conservative in one direction only: a drop statement for a value that was moved on this
-path does nothing in the code and is at most a use the code does not make.
+path does nothing in the code and is at most a use the code does not make. It uses nothing a
+loan check reads, because a local moved whole holds the empty origin set until it is written
+again. The value took its borrows along: into the destination, into a callee's declared
+stores, or nowhere (a callee param without a `from` clause keeps nothing past the call). The
+local itself is not read (E0502 is judged on the moved marks, not on the sets), and no loan
+of it is live across the move (the move conflicts with one). Where the local is moved on some
+paths only, the join of the sets is the set of the other paths, and that is what the drop on
+them reads.
 
-**Not claimed.** That two temporaries of one statement with the same outermost type are told
-apart: a row is found by point, owner, and type constructor, and a temporary's owner key is
-its statement. That a scheduled drop of a temporary is emitted: the CFG gives every value a
-temporary and keeps some the code never makes (the `Option` a `for` loop's `next` returned,
-a scrutinee an arm took), so a temporary's row may go unused, and a value the code would
-neither consume nor own would not be noticed by this check. Bodies the borrow checker does not build (const and `static mut` initializers)
-have no schedule and are not compared.
+**Not claimed.** Bodies the borrow checker does not build (const and `static mut`
+initializers) have no schedule and are not compared.
 
 **What would break it.** A drop emitted by code that does not ask the schedule (the one
 function refuses a drop nobody asked for). A row added without its statement. A statement the
 checks read as something weaker than a use of the value and a call of its glue.
+
+## Destructors: a drop reaches what the value references
+
+**Claim.** When a drop runs a destructor that can reach a borrow, no reference made through the
+dropped value's references is used after the drop. Such a drop is a deep access of the
+dropped place.
+
+**Assumptions.** A destructor is `drop(&mut self)` of an ADT with a `Drop` impl. It can read and
+write through every `&mut` and read through every `&` the value holds. The borrow CFG keeps
+one answer per dropped type, `Body::deep_drop` (stave-borrow `Tys::drop_reaches_refs`). That
+answer is yes when the drop glue reaches, through fields, enum payloads, tuple and array
+elements, and type arguments, an ADT with a `Drop` impl whose type is ref-like. It is also yes
+for a view-bounded param that is not Copy and for an unknown type. A type that is not ref-like
+holds no reference, so its destructor reaches only its own storage.
+
+**Argument.** A shallow drop conflicts only with loans of the dropped place and of places in its
+own storage. A reborrow `&mut *w.r` is a loan of a place below the dereference of `w.r`, so a
+shallow drop lets it pass, while `W.drop` writes `*w.r`. A deep drop conflicts with every live
+loan of a place below the dropped one, except below a `&`. There the destructor can only read,
+and no `&mut` loan is made below a `&` (E0503). The drop statements are the ones of the
+schedule: scope ends, exits, a statement's temporaries, the parts a pattern ignores, and the
+old value of an assignment. An assignment through a dereference stands for its old value's drop
+and is checked as that drop too. At a return the exit's drops come after the `Return`
+statement, so the returned value no longer counts as live there. The loans the returned value
+holds are checked against each deep drop of that exit, because the destructor runs while the
+caller already holds the result.
+
+**Not claimed.** A destructor reaching memory through a raw pointer field is the unsafe code's
+obligation. The drop of a moved value runs nothing and is no access.
 
 ## Whole moves: no value is left with a moved-out part
 
@@ -428,8 +509,10 @@ in the caller's checked IR. That IR is lowered for the nodes the checks reach, a
 them, so every build mode traps at the same instructions. **Guarantees.** No run of a fn with
 `without(D)`, or of a value of `fn(..) without(D)`, performs an effect of D: every op it runs
 belongs to a node on a path of edges from it, and that node has the op's effect on its own. For
-`trap`: no panic but `StackOverflow`, which no instruction raises; it needs a call cycle (itself
-`trap`) or a wrong stack bound. **What would break it.** A missing edge (a write of a fn-typed place
+`trap`: no panic but `StackOverflow`, which no instruction raises; it is raised only in the entry
+of a member of a cycle of the stack bound's graph (itself `trap`, as a call-cycle member or a
+node whose set reaches one), never in code on no cycle, or else the stack bound is wrong (The
+stack bound, below). **What would break it.** A missing edge (a write of a fn-typed place
 the flow misses): the denied effect runs in a callee the set never sees. A conversion that
 checks fewer values than its expression can have (the last arm of a value `if` only). A boundary fn whose body
 does more than its row, an import whose `without` is false, and an IR built differently from the one
@@ -551,9 +634,10 @@ needs `rec`, and so does one that pops or clears children of its own type; on a 
 glue the built-in fns (`Vec.drop`, `Vec.clear` of the user type) are there only through that impl
 and need no marker. **What would break it.** A missing edge (a fn-value write the flow misses): a
 cycle the check never sees. A built-in `Drop` impl that drops a value it makes. Neither kind of
-cycle has a stack bound: a stack that reaches one keeps `[run] stack`.
+cycle has a stack bound: a stack that reaches one gets `[run] stack` above what runs outside the
+cycles, and each member probes the stack below it (The stack bound).
 
-## The stack bound: a bounded stack is never overrun
+## The stack bound: code on no cycle never overruns a stack
 
 **Assumes.** The bound's graph is the call graph without `Spawn` edges (a spawn body runs on its own
 stack), plus a node per lowered function the call graph has none for and each direct call of the
@@ -563,17 +647,51 @@ bound for a node that calls C code, for one with a fn-value call but no such edg
 call while some function made into a value has no node; the call in `runtime.thread.run_queued` is
 left out: it runs a queued spawn body at the join only in an image without a stack table, the IR
 interpreter; natively a failed thread creation panics, so no spawn body runs on the joiner's
-stack), or for one on or above a cycle. A node with a trap stub
-adds twice the depth of `runtime.panic.trap`, which holds while nothing `runtime.panic.begin`
-reaches has a trap stub (checked; else no bound). Main's stack and each thread start function's get
-the bound plus 4 KiB, rounded up to the page, above a 64 KiB `PROT_NONE` guard; an unbounded stack
-gets `[run] stack`. **Guarantees.** The frames live at once on a thread are the nodes of one path of
-the bound's graph from its start, so a bounded thread never reaches its guard; a stack that reaches
-a cycle keeps `[run] stack` and traps `StackOverflow` at the guard. **What would break it.** A
-fn-value call whose real target the call graph misses (a fn-value write the flow misses): the bound
-counts the target it shows, and a bigger frame or a recursion behind the real one runs into the
-guard of a stack the build summary calls bounded. A frame larger than the backend reports, and stack
-use outside frames beyond the 4 KiB margin (signal handlers run on the alternate stack).
+stack), or for one on or above a cycle. The panic report entries (`runtime.panic.trap` and the
+other `-> never` report fns) run on the thread's alternate signal stack: their entry moves the
+stack pointer there before it touches the stack (contracts/intrinsics.md "Alternate stack"), so
+on a user stack their node weighs 16 bytes (the return address) and has no out-edges, and a node
+with a trap stub adds 16 bytes; the report's own depth there is twice the deepest entry or
+`on_signal`, which holds while nothing `runtime.panic.begin` reaches has a trap stub (checked;
+else no bound for the report or for any trapping stack). A *member* is a node whose strongly connected
+component is a cycle; every member is `trap` (a call-cycle member, or a node of a drop cycle, whose
+set holds its `Vec.drop`'s cycle `trap`). A member's *reserve* is the most its callees off its
+component can use (another member counted as the 16 bytes its call puts down before that member's
+entry runs) and its own trap stub's 16 bytes. A function *probes* when one of its member nodes
+makes a call other than a direct call of a node with code in its own component or of a report
+entry (a node without code, such as a fn-type table through which an untracked fn-value call
+goes, stands for the call, and its targets count below the caller), or has a call whose targets
+are not known; it probes the largest of its members' reserves: its entry, after the frame, reads one word at most every 60 KiB from the stack
+pointer down to the reserve below the frame's lowest byte, and that byte; each node of such a function adds the
+reserve as a leaf, which the bound and every reserve above it count (repeated until no reserve
+grows). Main's stack and each thread start function's get the bound plus 4 KiB, rounded up to the
+page, above a `PROT_NONE` guard of `runtime.config.GUARD` (64 KiB, rounded up to the page:
+`runtime.start.entry` maps main's, `runtime.thread.start` each thread's; a test keeps the probe's
+stride a page below it); a stack that reaches a cycle gets `[run] stack` plus its
+acyclic bound (each component one node: its largest weight and leaf, the callees of all its
+members) plus 4 KiB; one that reaches an unresolved node gets `[run] stack`. **Guarantees.** The
+frames live at once on a thread are the nodes of one path of the bound's graph from its start. On
+a bounded stack that path is at most the bound, so the guard is never reached. On another stack,
+if no member is on the path, the path is one of the acyclic bound, which fits; else let `x` be the
+last member on it. What is below `x` is off every cycle. If `x`'s function probes, its entry found
+`frame + reserve` bytes above the guard (each read is at most a guard width below a written stack
+byte or an earlier read, so the first one below the stack is in the guard), and what is below is
+at most the reserve. If it does not, all that is below `x` is a report entry, which writes only
+the return address `x`'s call instruction pushes (in `x`'s code) and then runs on the alternate
+stack; `x`'s own frame is paged by its prologue, so its first byte past the stack is in the guard,
+in `x`'s code. So `StackOverflow` is raised
+only in the entry or frame of a member, and every `without(trap)` fn and what it calls run without
+it. **What would break it.** A fn-value call whose real target the call graph misses (a fn-value
+write the flow misses): the bound counts the target it shows, and a bigger frame or a recursion
+behind the real one runs into the guard of a stack the build summary calls bounded. A frame larger
+than the backend reports, and stack use outside frames beyond the 4 KiB margin (signal handlers and
+the report run on the alternate stacks). A report deeper than its stack faults in the guard below
+it and ends the process (exit 101, no report line); the run suite keeps it within
+`runtime.config.REPORT_STACK` and the signal handler within half of `runtime.config.ALTSTACK`. A guard narrower than the probe's stride plus a page. Below a member, an unresolved node counts what is known of it (its frame
+and its resolved callees), C code and an unresolved fn-value target count nothing: their frames
+can reach the guard below the member. A function with a member node and an acyclic node below its
+own reserve: the repetition stops after 8 rounds with the reserve it has. A cycle of the bound's
+graph whose members have no `trap` (one only lowering's added edges close; none is known).
 
 ## Threads of a `scope`: their captures stay borrowed until the join
 

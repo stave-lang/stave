@@ -1,0 +1,47 @@
+//~ EXIT 101
+//~ STDOUT trap_mid_statement.stdout
+//~ STDERR-CONTAINS "panic: Bounds at trap_mid_statement_try.stv:38:30 in main.f"
+// An index out of a constant length between an argument already made and a `?` in a later
+// one: the trap comes first, the `?` exit never runs.
+import std.io;
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let i = self.id;
+        io.print(f"d{i} ");
+    }
+}
+
+fn mk(i: u32) -> D {
+    return D.{ id: i };
+}
+
+fn rd(d: &D) -> u32 {
+    return d.id;
+}
+
+fn eat3(a: D, n: u32, b: D) -> u32 {
+    return a.id + n + b.id;
+}
+
+fn opt(i: u32) -> Option<u32> {
+    return if i == 0 then Option.None else Option.Some(i);
+}
+
+fn f(k: u32) -> Option<u32> {
+    let small = [1u32, 2u32];
+    let d = mk(5);
+    let x = eat3(mk(6), small[6], mk(opt(k)?));
+    return Option.Some(x + d.id);
+}
+
+fn main() -> i32 {
+    io.print("before\n");
+    let w = f(0);
+    io.print("after\n");
+    return 0;
+}
