@@ -186,6 +186,28 @@ fn check_reports_resolution_and_type_errors() {
     assert!(err.contains(": error[E0201]: "), "{err}");
 }
 
+/// A line feed in a file or package name is part of a module path: diagnostics write it `\n`.
+#[test]
+fn line_feed_in_module_names_is_not_an_internal_error() {
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli_line_feed_names");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("src")).unwrap();
+    std::fs::create_dir_all(tmp.join("d/src")).unwrap();
+    std::fs::write(
+        tmp.join("stave.toml"),
+        "name = \"app\"\nkind = \"bin\"\n[dependencies]\ndd = { path = \"d\" }\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.join("src/main.stv"), "import dd;\nfn main() -> i32 { return 0; }\n").unwrap();
+    std::fs::write(tmp.join("src/a\nb.stv"), "fn f() {}\nfn f() {}\n").unwrap();
+    std::fs::write(tmp.join("d/stave.toml"), "name = \"x\\ny\"\nkind = \"lib\"\n").unwrap();
+    std::fs::write(tmp.join("d/src/lib.stv"), "fn g() {}\nfn g() {}\n").unwrap();
+    let (c, _, err) = stave_env(&["check", &tmp.display().to_string()], &[]);
+    assert_eq!(c, 1, "{err}");
+    assert!(err.contains("error[E0105]"), "{err}");
+    assert!(!err.contains("internal compiler error"), "{err}");
+}
+
 #[test]
 fn single_file_argument() {
     let f = repo().join("tests/conformance/syntax/recover_two_items.stv");

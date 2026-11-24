@@ -1,0 +1,73 @@
+//~ CHECK-ONLY
+// A diagnostic quotes the source text of an expression or type; a quoted text that spans lines
+// is shown on one line (whitespace runs become one space), never an internal error. Each case
+// has its primary span start on the line before the annotation (`//~^`).
+struct S {
+    a: [u32; 4],
+}
+
+struct Arg {
+    i: u64,
+}
+
+impl Arg {
+    fn next(&mut self, k: u64) -> Option<u64> {
+        self.i = self.i + k;
+        return Option.None;
+    }
+}
+
+fn mk() -> [u32; 4] {
+    return [1u32; 4];
+}
+
+fn range_of_chars() -> u32 {
+    let mut s = 0u32;
+    for c in 'a'
+        .. 'd' { //~^ ERROR E0219
+        s += c as u32;
+    }
+    return s;
+}
+
+fn place(s: &S) {
+    for x in s
+        .a { //~^ ERROR E0219
+    }
+}
+
+fn mut_binding() {
+    let mut arr = [0u32; 8];
+    for v: &mut u32x4 in arr
+        { //~^ ERROR E0219
+        *v = u32x4.splat(5u32);
+    }
+}
+
+fn mut_chunk_over_value() {
+    for v: &mut u32x4 in mk(
+    ) { //~^ ERROR E0219
+        *v = u32x4.splat(5u32);
+    }
+}
+
+fn mut_chunk_over_shared(s: &[u32]) {
+    for v: &mut u32x4 in s
+        { //~^ ERROR E0503
+        *v = u32x4.splat(5u32);
+    } tail scalar (x) {
+    }
+}
+
+fn next_shape() {
+    let mut it = Arg.{ i: 0 };
+    for x in (it
+    ) { //~^ ERROR E0219
+    }
+}
+
+fn not_a_source(n: u32) {
+    for x in n
+        + 1 { //~^ ERROR E0219
+    }
+}
