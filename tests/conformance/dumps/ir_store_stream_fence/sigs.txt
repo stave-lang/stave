@@ -1,0 +1,54 @@
+t0 int u 8
+t1 int u 32
+t2 int u 64
+t3 int u size
+t4 int s 32
+t5 float 32
+t6 str
+t7 ref t4
+t8 ref t6
+t9 ref t18
+t10 ref t25
+t11 ref mut t19
+t12 ref mut t20
+t13 ref mut t22
+t14 ref mut t24
+t15 ref mut t25
+t16 ptr const t1
+t17 ptr mut t2
+t18 slice t0
+t19 slice t5
+t20 slice t5 align 16
+t21 tuple
+t22 adt d17
+t23 vec t5 4
+t24 param 0
+t25 self
+d0 module d0 - 39 - - 0 pub file 0 path[39]
+d1 module d1 - 25 - - 0 pub file 1 path[1 25]
+d2 module d2 - 22 - - 0 pub file 2 path[21 22]
+d3 module d3 - 28 - - 0 pub file 4 path[21 28]
+d4 module d4 - 36 - - 0 pub file 3 path[21 36]
+d5 enum d2 - 26 6 6 0 pub gen[17 0]
+d6 variant d2 d5 4 6 2 0 pub
+d7 variant d2 d5 18 6 5 1 pub,tuple payload[t24]
+d8 trait d2 - 33 7 0 0 pub gen[]
+d9 trait d2 - 37 9 13 0 pub gen[]
+d10 trait-method d2 d9 32 9 12 0 pub,has-self gen[20 2 bound d11] params[t10 t14] ret t21 self ref abi stave needs[] deny[] from[] pfrom[]
+d11 trait d2 - 42 8 9 0 pub gen[]
+d12 trait-method d2 d11 34 8 8 0 pub,has-self gen[] params[t15 t8] ret t21 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d13 impl d2 - - 10 18 0 trait-impl gen[] self t4 trait d9
+d14 method d2 d13 32 10 17 0 trait-impl,has-self gen[20 6 bound d11] params[t7 t14] ret t21 self ref abi stave needs[] deny[] from[] pfrom[]
+d15 impl d2 - - 11 24 0 trait-impl gen[] self t6 trait d9
+d16 method d2 d15 32 11 23 0 trait-impl,has-self gen[20 6 bound d11] params[t8 t14] ret t21 self ref abi stave needs[] deny[] from[] pfrom[]
+d17 struct d3 - 5 14 4 0 pub gen[]
+d18 field d3 d17 3 14 2 0 - ty t3
+d19 impl d3 - - 15 14 0 trait-impl gen[] self t22 trait d11
+d20 method d3 d19 34 15 13 0 trait-impl,has-self gen[] params[t13 t8] ret t21 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d21 fn d4 - 43 12 7 0 pub gen[] params[t8] ret t21 self - abi stave needs[] deny[] from[] pfrom[]
+d22 fn d0 - 6 0 10 0 - gen[] params[t5] ret t5 self - abi stave needs[] deny[] from[] pfrom[]
+d23 fn d0 - 14 3 23 0 - gen[] params[t17 t2] ret t21 self - abi stave needs[] deny[] from[] pfrom[]
+d24 fn d0 - 19 1 76 0 - gen[] params[t12 t23 t5] ret t5 self - abi stave needs[] deny[] from[] pfrom[]
+d25 fn d0 - 29 2 25 0 - gen[] params[t11 t5] ret t21 self - abi stave needs[] deny[] from[] pfrom[]
+d26 fn d0 - 31 4 23 0 - gen[] params[t9 t16] ret t21 self - abi stave needs[] deny[] from[] pfrom[]
+d27 fn d0 - 39 5 6 0 - gen[] params[] ret t4 self - abi stave needs[] deny[] from[] pfrom[]

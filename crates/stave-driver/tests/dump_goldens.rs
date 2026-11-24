@@ -1,6 +1,6 @@
 //! Dump goldens: `tests/conformance/dumps/<case>/input` is a package; the
-//! expected `tokens.txt items.txt ast.txt strings.txt names.txt types.txt diags.txt` sit next to
-//! it (formats: contracts/stage-gates.md). `stats.txt` must be written
+//! expected `tokens.txt items.txt ast.txt strings.txt names.txt sigs.txt types.txt diags.txt` sit
+//! next to it (formats: contracts/stage-gates.md). `stats.txt` must be written
 //! and is never compared. Dumps cover the whole program, so the cases build against the pinned
 //! stand-in library `tests/conformance/dumps/_lib` (`std/`, an empty `runtime/`; the CLI test
 //! uses it through `STAVE_STD_DIR`): the goldens do not move with the shipped std/.
@@ -9,7 +9,8 @@
 //! package `input` plus the expected `ir.txt` of a debug lowering (`stave check --dump=ir`) and, when
 //! present, `ir.release.txt` of a `--release` lowering (instance root sets; the `ir_bounds_*`
 //! cases: the bounds checks left in each mode, which must be the same ones). A case whose input
-//! has an error diagnostic has no `ir.txt`, and none may be written for it.
+//! has an error diagnostic has no `ir.txt`, and none may be written for it. Every `ir_` case also
+//! has the `sigs.txt` of a check.
 //!
 //! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!).
 
@@ -18,19 +19,28 @@ use std::path::{Path, PathBuf};
 #[path = "../../../tests/support/checked_ir.rs"]
 mod checked_ir;
 
-use stave_driver::dump::{DumpStage, write_dumps};
+use stave_driver::dump::{DumpStage, render_to_vec, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
 
-const CASES: [&str; 5] = ["valid_small", "dropped_item", "unbalanced", "multi_file", "intern_collision"];
+const CASES: [&str; 7] = [
+    "valid_small",
+    "dropped_item",
+    "unbalanced",
+    "multi_file",
+    "intern_collision",
+    "sigs_decls",
+    "sigs_errors",
+];
 /// The `ir_` cases that also have a golden of the release lowering.
 const RELEASE_CASES: [&str; 3] = ["ir_bounds_kept", "ir_bounds_removed", "ir_roots"];
-const COMPARED: [DumpStage; 7] = [
+const COMPARED: [DumpStage; 8] = [
     DumpStage::Tokens,
     DumpStage::Items,
     DumpStage::Ast,
     DumpStage::Strings,
     DumpStage::Names,
+    DumpStage::Sigs,
     DumpStage::Types,
     DumpStage::Diags,
 ];
@@ -165,7 +175,13 @@ fn golden_properties() {
                 assert!(read(&dir.join("diags.txt")).contains("\"code\":\"E0016\""));
             }
             "dropped_item" => assert_eq!(items.lines().filter(|l| l.ends_with(" dropped")).count(), 1),
-            "valid_small" | "intern_collision" => assert!(read(&dir.join("diags.txt")).is_empty()),
+            "valid_small" | "intern_collision" | "sigs_decls" => {
+                assert!(read(&dir.join("diags.txt")).is_empty())
+            }
+            "sigs_errors" => {
+                let d = read(&dir.join("diags.txt"));
+                assert!(d.contains("\"code\":\"E0101\"") && d.contains("\"code\":\"E0203\""), "{d}");
+            }
             "multi_file" => {
                 // F = rank of (package, path): multi_file's src/main.stv, src/util.stv,
                 // src/util/math.stv, then runtime's empty.stv (no tokens), std's core.stv, io.stv,
@@ -253,6 +269,165 @@ fn semantic_dump_properties() {
             assert!(names.contains(" -> decl "), "{case}: items resolve");
         }
     }
+}
+
+/// A dump's type table (`t<T> key` lines) with every key expanded: each `t<T>` component is
+/// replaced by its own expanded key in parentheses, so two tables can be compared modulo their T
+/// numbering. The error type (no line) expands to `error`.
+fn deep_keys(text: &str) -> Vec<(u32, String)> {
+    let table: std::collections::BTreeMap<u32, &str> = text
+        .lines()
+        .filter_map(|l| {
+            let (t, key) = l.split_once(' ')?;
+            Some((t.strip_prefix('t')?.parse().ok()?, key))
+        })
+        .collect();
+    fn expand(
+        t: u32,
+        table: &std::collections::BTreeMap<u32, &str>,
+        memo: &mut std::collections::BTreeMap<u32, String>,
+    ) -> String {
+        if let Some(s) = memo.get(&t) {
+            return s.clone();
+        }
+        let Some(key) = table.get(&t) else { return "error".to_string() };
+        let parts: Vec<String> = key
+            .split(' ')
+            .map(|w| match w.strip_prefix('t').and_then(|n| n.parse::<u32>().ok()) {
+                Some(c) => format!("({})", expand(c, table, memo)),
+                None => w.to_string(),
+            })
+            .collect();
+        let s = parts.join(" ");
+        memo.insert(t, s.clone());
+        s
+    }
+    let mut memo = std::collections::BTreeMap::new();
+    table.keys().map(|&t| (t, expand(t, &table, &mut memo))).collect()
+}
+
+/// The numbers of the `<prefix><n>` words of a line.
+fn refs(line: &str, prefix: char) -> Vec<u32> {
+    line.split([' ', '[', ']', ','])
+        .filter_map(|w| w.strip_prefix(prefix).and_then(|n| n.parse().ok()))
+        .collect()
+}
+
+const DECL_KINDS: [&str; 14] = [
+    "module",
+    "fn",
+    "struct",
+    "enum",
+    "trait",
+    "const",
+    "static",
+    "alias",
+    "impl",
+    "field",
+    "variant",
+    "method",
+    "trait-method",
+    "error",
+];
+
+/// `sigs` field rules, and its table against the `types` table of the same build: the `sigs`
+/// table is dense from t0, its keys are distinct, and the keys both tables hold are in the same
+/// order in both (a renumbering of a subset of one canonical order). Same bytes at 1 and 8
+/// threads.
+#[test]
+fn sigs_table_is_a_renumbered_subset_of_types() {
+    let mut cases: Vec<String> = CASES.iter().map(|c| c.to_string()).collect();
+    cases.extend(ir_cases());
+    for case in &cases {
+        let out = output(case, 1);
+        let sigs = String::from_utf8(render_to_vec(DumpStage::Sigs, &out).unwrap()).unwrap();
+        let types = String::from_utf8(render_to_vec(DumpStage::Types, &out).unwrap()).unwrap();
+        let out8 = output(case, 8);
+        assert_eq!(sigs.as_bytes(), render_to_vec(DumpStage::Sigs, &out8).unwrap(), "{case}: 1 vs 8 threads");
+        check_lines(&format!("{case}/sigs.txt"), &sigs);
+        let n_types = sigs.lines().take_while(|l| l.starts_with('t')).count() as u32;
+        let decls: Vec<&str> = sigs.lines().skip(n_types as usize).collect();
+        for (k, l) in sigs.lines().take(n_types as usize).enumerate() {
+            assert!(l.starts_with(&format!("t{k} ")), "{case}: table not dense from t0: {l}");
+        }
+        assert!(!decls.is_empty(), "{case}: no decl lines");
+        for (k, l) in decls.iter().enumerate() {
+            let f: Vec<&str> = l.split(' ').collect();
+            assert!(f.len() >= 9, "{case}: {l}");
+            assert_eq!(f[0], format!("d{k}"), "{case}: decl lines not by D from d0: {l}");
+            assert!(DECL_KINDS.contains(&f[1]), "{case}: kind: {l}");
+            let sig = match f[1] {
+                "fn" | "method" | "trait-method" => Some(" params["),
+                "struct" | "enum" | "trait" => Some(" gen["),
+                "impl" => Some(" trait "),
+                "const" | "static" | "field" => Some(" ty "),
+                "alias" => Some(" target "),
+                "module" => Some(" path["),
+                _ => None,
+            };
+            if let Some(s) = sig {
+                assert!(l.contains(s), "{case}: no `{}` field: {l}", s.trim());
+            }
+            if f[1] == "error" {
+                assert_eq!(f.len(), 9, "{case}: an error decl has no signature: {l}");
+            }
+            for t in refs(l, 't') {
+                assert!(t <= n_types, "{case}: t{t} not in the table: {l}");
+            }
+            for d in refs(l, 'd') {
+                assert!((d as usize) < decls.len(), "{case}: d{d} is no decl: {l}");
+            }
+        }
+        for l in sigs.lines().take(n_types as usize) {
+            for t in refs(l.split_once(' ').unwrap().1, 't') {
+                assert!(t <= n_types, "{case}: t{t} not in the table: {l}");
+            }
+        }
+        // A `fntype` key does not print the deny clause, so two fn types that differ only there
+        // share a text; they are adjacent in the order, and the first of each text stands for it.
+        let mut local = deep_keys(&sigs);
+        let mut seen = std::collections::BTreeSet::new();
+        for (t, k) in &local {
+            assert!(seen.insert(k.clone()) || k.contains("fntype"), "{case}: t{t} repeats the key {k}");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        local.retain(|(_, k)| seen.insert(k.clone()));
+        let mut global: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for (t, k) in deep_keys(&types) {
+            global.entry(k).or_insert(t);
+        }
+        let common: Vec<(u32, u32)> =
+            local.iter().filter_map(|(t, k)| global.get(k).map(|&g| (*t, g))).collect();
+        assert!(
+            common.windows(2).all(|w| w[0].1 < w[1].1),
+            "{case}: sigs and types disagree on the order: {common:?}"
+        );
+        if !out.has_errors() {
+            assert!(!common.is_empty(), "{case}: no type in both tables");
+        }
+    }
+}
+
+/// `sigs.txt` of every `ir_` case (a check, the pinned library).
+#[test]
+fn sigs_goldens_of_ir_cases() {
+    let bless = std::env::var_os("STAVE_BLESS").is_some();
+    let mut failures = Vec::new();
+    for case in ir_cases() {
+        let got = String::from_utf8(render_to_vec(DumpStage::Sigs, &output(&case, 2)).unwrap()).unwrap();
+        let want_path = dumps_dir(&case).join("sigs.txt");
+        if bless {
+            std::fs::write(&want_path, &got).unwrap();
+            continue;
+        }
+        match std::fs::read_to_string(&want_path) {
+            Ok(want) if want == got => {}
+            Ok(want) => failures
+                .push(format!("{case}/sigs.txt: differs from the golden\n--- want\n{want}--- got\n{got}")),
+            Err(e) => failures.push(format!("{}: {e}", want_path.display())),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

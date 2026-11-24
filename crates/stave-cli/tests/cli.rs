@@ -219,15 +219,15 @@ fn single_file_argument() {
 /// Lines of `tests/conformance/dumps/_lib` (std/core.stv, std/io.stv, std/string.stv, runtime/empty.stv).
 const STD_LINES: u64 = 40;
 
-const GOLDEN_DUMPS: &str = "--dump=tokens,items,ast,strings,names,types,diags,stats";
-const GOLDEN_FILES: [&str; 7] =
-    ["tokens.txt", "items.txt", "ast.txt", "strings.txt", "names.txt", "types.txt", "diags.txt"];
+const GOLDEN_DUMPS: &str = "--dump=tokens,items,ast,strings,names,sigs,types,diags,stats";
+const GOLDEN_FILES: [&str; 8] =
+    ["tokens.txt", "items.txt", "ast.txt", "strings.txt", "names.txt", "sigs.txt", "types.txt", "diags.txt"];
 
 #[test]
 fn dumps_match_goldens_under_stave_threads_and_shuffle() {
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli_dumps");
     let lib = golden_lib();
-    for case in ["valid_small", "dropped_item", "unbalanced", "multi_file"] {
+    for case in ["valid_small", "dropped_item", "unbalanced", "multi_file", "sigs_decls", "sigs_errors"] {
         for (threads, shuffle) in [("1", ""), ("2", ""), ("12", ""), ("12", "7"), ("3", "3735928559")] {
             let dir = tmp.join(format!("{case}_{threads}_{shuffle}"));
             let _ = std::fs::remove_dir_all(&dir);
