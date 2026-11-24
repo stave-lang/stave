@@ -158,52 +158,72 @@ impl Fs {
         }
     }
 
-    /// The `.stv` files of a built-in package directory: [`Fs::stave_files`] minus the files inside
-    /// a subdirectory that holds its own `stave.toml` (a nested package).
+    /// The `.stv` files of a built-in package directory: the files of [`Fs::tree_files`] that are
+    /// not inside a nested package, sorted by bytes.
     pub fn builtin_files(&self, dir: &Path) -> Vec<String> {
-        let mut nested: BTreeMap<String, bool> = BTreeMap::new();
-        let mut out = Vec::new();
-        for rel in self.stave_files(dir) {
-            let parts: Vec<&str> = rel.split('/').collect();
-            let mut inside = false;
-            for k in 1..parts.len() {
-                let d = parts[..k].join("/");
-                let is_pkg = *nested
-                    .entry(d.clone())
-                    .or_insert_with(|| self.is_file(&dir.join(&d).join("stave.toml")));
-                if is_pkg {
-                    inside = true;
-                    break;
-                }
-            }
-            if !inside {
-                out.push(rel);
-            }
-        }
+        let mut out: Vec<String> =
+            self.tree_files(dir).into_iter().filter(|f| !f.manifest && !f.nested).map(|f| f.rel).collect();
+        out.sort();
         out
     }
 
     /// Every `.stv` file below `dir`, as `/`-separated relative paths, sorted by bytes.
     pub fn stave_files(&self, dir: &Path) -> Vec<String> {
-        let mut out = Vec::new();
+        let mut out: Vec<String> =
+            self.tree_files(dir).into_iter().filter(|f| !f.manifest).map(|f| f.rel).collect();
+        out.sort();
+        out
+    }
+
+    /// Every `.stv` file and every `stave.toml` below `dir`, as `/`-separated relative paths in
+    /// directory order (the entries of a directory by name, subdirectories in place). A directory
+    /// with its own `stave.toml` below `dir` is another package (a path dependency): its files,
+    /// its manifest included, are `nested`. This is the one definition of which files belong to a
+    /// package directory and which to a package inside it.
+    pub fn tree_files(&self, dir: &Path) -> Vec<TreeFile> {
+        let mut rels = Vec::new();
         match self {
-            Fs::Disk => walk(dir, String::new(), 0, &mut out),
+            Fs::Disk => walk(dir, String::new(), 0, &mut rels),
             Fs::Mem(m) => {
                 let dir = normalize(dir);
                 for p in m.keys() {
                     if let Ok(rel) = p.strip_prefix(&dir)
-                        && rel.extension().is_some_and(|e| e == "stv")
+                        && let Some(name) = rel.file_name().map(|n| n.to_string_lossy())
+                        && (name.ends_with(".stv") || name == "stave.toml")
                     {
                         let parts: Vec<String> =
                             rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-                        out.push(parts.join("/"));
+                        rels.push(parts.join("/"));
                     }
                 }
             }
         }
-        out.sort();
-        out
+        let mut is_package: BTreeMap<String, bool> = BTreeMap::new();
+        rels.into_iter()
+            .map(|rel| {
+                let parts: Vec<&str> = rel.split('/').collect();
+                let nested = (1..parts.len()).any(|k| {
+                    let d = parts[..k].join("/");
+                    *is_package
+                        .entry(d.clone())
+                        .or_insert_with(|| self.is_file(&dir.join(&d).join("stave.toml")))
+                });
+                let manifest = parts.last() == Some(&"stave.toml");
+                TreeFile { rel, manifest, nested }
+            })
+            .collect()
     }
+}
+
+/// A file of a package directory's tree ([`Fs::tree_files`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeFile {
+    /// `/`-separated, relative to the package directory.
+    pub rel: String,
+    /// A `stave.toml` (else a `.stv` file).
+    pub manifest: bool,
+    /// Inside a subdirectory that holds its own `stave.toml`.
+    pub nested: bool,
 }
 
 fn walk(dir: &Path, prefix: String, depth: usize, out: &mut Vec<String>) {
@@ -218,7 +238,7 @@ fn walk(dir: &Path, prefix: String, depth: usize, out: &mut Vec<String>) {
         let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
         if path.is_dir() {
             walk(&path, rel, depth + 1, out);
-        } else if name.ends_with(".stv") && path.is_file() {
+        } else if (name.ends_with(".stv") || name == "stave.toml") && path.is_file() {
             out.push(rel);
         }
     }
@@ -977,6 +997,16 @@ mod tests {
         }
         let fs = Fs::Mem(m);
         assert_eq!(fs.builtin_files(Path::new("/rt")), vec!["os.stv".to_string(), "sub/x.stv".to_string()]);
+        let tree: Vec<(String, bool, bool)> =
+            fs.tree_files(Path::new("/rt")).into_iter().map(|f| (f.rel, f.manifest, f.nested)).collect();
+        let want = [
+            ("os.stv", false, false),
+            ("stave.toml", true, false),
+            ("sub/x.stv", false, false),
+            ("x86_64/stave.toml", true, true),
+            ("x86_64/sys.stv", false, true),
+        ];
+        assert_eq!(tree, want.map(|(r, m, n)| (r.to_string(), m, n)));
     }
 
     /// A dependency bound under a built-in package's name is E1002 `builtin-name` at that name,

@@ -319,11 +319,11 @@ test fn random_and_shuffled() {
 }
 
 fn one_file(src: &[u8], pkg: &str, rel: &str, module: &str) -> (source.SourceSet, files.FileList) {
-    let mut s = source.SourceSet.{ bytes: vec.Vec::<u8>.new(), file_off: vec.Vec::<u64>.new(), read_ok: vec.Vec::<bool>.new() };
+    let mut s = source.SourceSet.{ bytes: vec.Vec::<u8>.new(), file_off: vec.Vec::<u64>.new(), read_err: vec.Vec::<u8>.new() };
     s.file_off.push(0);
     s.bytes.extend_from_slice(src);
     s.file_off.push(src.len() as u64);
-    s.read_ok.push(true);
+    s.read_err.push(source.READ_OK);
     let mut fl = files.FileList.empty();
     fl.package.push(string.String.from_str(pkg));
     fl.rel_path.push(string.String.from_str(rel));

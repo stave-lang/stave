@@ -19,5 +19,5 @@ pub use order::{Sink, canonical_order};
 pub use span::{FileId, FileTableError, LineIndex, LocateError, Location, SourceFile, SourceFiles, Span};
 pub use template::{
     EditTemplate, Entry, FixTemplate, Hole, HoleKind, LabelTemplate, RenderError, Rendered, RenderedEdit,
-    RenderedFix, RenderedLabel, Shape, entries, entry, render,
+    RenderedFix, RenderedLabel, Shape, entries, entry, render, spelled,
 };

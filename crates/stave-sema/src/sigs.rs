@@ -783,7 +783,7 @@ fn e0209<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32) {
 }
 
 fn not_a_type<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32) {
-    let text = icx.node_text(n).to_string();
+    let text = icx.node_spelled(n);
     let d = mk(
         "E0101",
         Some("not-type"),
@@ -1002,7 +1002,7 @@ pub(crate) fn lower_garg<H: LowerHost>(
             GArg::Type(h.intern(TypeKind::Slice { elem, align }))
         }
         _ => {
-            let text = icx.node_text(ga).to_string();
+            let text = icx.node_spelled(ga);
             let d = mk(
                 "E0101",
                 Some("not-type"),
@@ -1519,7 +1519,7 @@ impl<'p> SigBuilder<'p> {
         let decl = self.prog.decl(d)?;
         if decl.kind != DeclKind::Trait {
             if decl.kind != DeclKind::Error {
-                let text = icx.node_text(n).to_string();
+                let text = icx.node_spelled(n);
                 let dg = mk("E0101", Some("not-trait"), &[("name", &text)], icx.node_span(n), &[]);
                 self.diags.extend(dg);
             }

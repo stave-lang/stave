@@ -14,7 +14,7 @@ use stave_opt::regalloc;
 
 use super::abi;
 use super::emit::NOREG;
-use super::support::{Codegen, Intr};
+use super::support::Codegen;
 use super::ty::{Sc, Ty};
 use super::{R, bad, unsupported};
 
@@ -714,7 +714,7 @@ impl Analysis {
                         }
                     }
                     Op::Intrinsic(id) => {
-                        if let Some(Intr::Ccall(n)) = cg.intr.get(id.index()) {
+                        if let Some(Some(stave_ir::intrinsics::Kind::Ccall(n))) = cg.intr.get(id.index()) {
                             out = out.max(u32::from(n.saturating_sub(8)) * 8);
                         }
                     }

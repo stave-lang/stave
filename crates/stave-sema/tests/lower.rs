@@ -75,8 +75,8 @@ fn run(m: &mut Module, abi: SyscallAbi, files: &[(String, Vec<u8>)]) -> Run {
     let entry = m.find_func("runtime.start.entry").expect("runtime.start.entry");
     let trap = m.find_func("runtime.panic.trap").expect("runtime.panic.trap");
     let mut host = BufferHost::new(abi);
-    host.values.insert("main_addr".into(), stub.0 as u64);
-    host.values.insert("signal_handler_addr".into(), 0);
+    host.values.insert(stave_ir::intrinsics::Kind::MainAddr, stub.0 as u64);
+    host.values.insert(stave_ir::intrinsics::Kind::SignalHandlerAddr, 0);
     for (k, v) in files {
         host.files.insert(k.as_bytes().to_vec(), v.clone());
     }
@@ -88,8 +88,8 @@ fn run(m: &mut Module, abi: SyscallAbi, files: &[(String, Vec<u8>)]) -> Run {
     let bytes = stave_sema::lower::site_table_bytes(m, st);
     it.mem.write(st, &bytes).expect("site table write");
     let pc = it.mem.alloc(8, 8).expect("pc table");
-    it.host.values.insert("site_table".into(), st);
-    it.host.values.insert("pc_table".into(), pc);
+    it.host.values.insert(stave_ir::intrinsics::Kind::SiteTable, st);
+    it.host.values.insert(stave_ir::intrinsics::Kind::PcTable, pc);
     let sp = it.process_stack(&[b"prog"], &[]).expect("process stack");
     let mut out = it.run(entry, vec![Val::S(sp)]).unwrap_or_else(|e| panic!("run: {e:?}"));
     if let Outcome::Trap(t) = out {
@@ -252,6 +252,56 @@ fn ir_dump_is_deterministic() {
             assert!(t == base, "{name}: shuffle {seed} differs");
         }
     }
+}
+
+#[test]
+fn module_decls_match_the_decl_ids_the_ir_refers_to() {
+    use stave_ir::types::{AdtKind, TypeKey};
+    let (mut structs, mut enums) = (false, false);
+    for name in ["fib", "json_lite", "wordcount", "hello"] {
+        let p = repo().join("tests/conformance/run").join(name);
+        let prog = Program::load(&config(&p, "x86_64-linux", None));
+        let tc = stave_sema::check(&prog);
+        let m = stave_sema::lower(&prog, &tc, Mode::Debug).unwrap_or_else(|_| panic!("{name}: lowering"));
+        let ids: Vec<u32> = m.decls.iter().map(|d| d.id.0).collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "{name}: decls not strictly ascending: {ids:?}");
+        // referenced = the `Adt` defs of every module type, and `cell`
+        let mut refs: Vec<u32> = m
+            .types
+            .keys()
+            .iter()
+            .filter_map(|k| if let TypeKey::Adt { def, .. } = k { Some(def.0) } else { None })
+            .chain(m.cell.map(|c| c.0))
+            .collect();
+        refs.sort();
+        refs.dedup();
+        assert_eq!(ids, refs, "{name}: an entry is unreferenced or a reference has no entry");
+        // every `d<N>` of the dump has an entry
+        let dump = stave_ir::print_checked(&m);
+        let mut printed = 0;
+        for tok in dump.split(|c: char| !c.is_ascii_alphanumeric()) {
+            let Some(n) = tok.strip_prefix('d').and_then(|n| n.parse::<u32>().ok()) else { continue };
+            printed += 1;
+            assert!(ids.contains(&n), "{name}: d{n} printed without an entry");
+        }
+        assert!(printed > 0, "{name}: no d<N> in the dump");
+        for d in &m.decls {
+            assert_eq!(d.path, prog.decl_path(stave_sema::DeclId(d.id.0)), "{name}: d{}", d.id.0);
+            assert!(!d.path.is_empty());
+            match d.kind {
+                AdtKind::Struct => structs = true,
+                AdtKind::Enum => enums = true,
+            }
+        }
+        // the kind agrees with the shape of every instance type
+        for (i, k) in m.types.keys().iter().enumerate() {
+            let TypeKey::Adt { def, .. } = k else { continue };
+            let want = m.types.shape(stave_ir::TypeId(i as u32)).map(|s| s.kind);
+            let got = m.decls.iter().find(|d| d.id == *def).map(|d| d.kind);
+            assert!(want.is_none() || want == got, "{name}: t{i}");
+        }
+    }
+    assert!(structs && enums, "the programs cover both kinds");
 }
 
 #[test]

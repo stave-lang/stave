@@ -2,8 +2,8 @@
 //
 // - Bracket depth is a prefix sum over +1 (`( [ { .{`), -1 (`) ] }`), and 0 (every other token),
 //   per file (`bracket.depth_of`). A file is balanced iff the sum never goes below 0, ends at 0,
-//   and every bracket pair (`bracket.mates`) has matching kinds. An unbalanced file, one deeper
-//   than `MAX_DEPTH`, and one the lexer stopped (E0001, E0002) have no items.
+//   and every bracket pair (`bracket.mates`) has matching kinds. An unbalanced file, a balanced
+//   one deeper than `MAX_DEPTH`, and one the lexer stopped (E0001, E0002) have no items.
 // - A token starts an item iff its depth is 0, it is an item keyword, and it is the first token
 //   of the file or follows `;` or `}`: a mark per token, the starts are the marked tokens in
 //   order (`select.indices`). The tokens before the first start are an item (kind `ITEM_PRE`);
@@ -126,13 +126,12 @@ fn brackets(cls: &Classes, kind: &[u8], lo: usize, hi: usize, out: &mut Items) -
     let mut state = FILE_OK;
     if mn < 0 || d[d.len() - 1] != 0 {
         state = FILE_UNBALANCED;
-    } else if mx > MAX_DEPTH {
-        state = FILE_TOO_DEEP;
     } else {
         // balanced, so every opener has a mate
         for k in 0..m.len() {
             if st[k] == 1 && cls.closer[kind[lo + k] as usize] != kind[lo + (m[k] as usize)] { state = FILE_UNBALANCED; }
         }
+        if state == FILE_OK && mx > MAX_DEPTH { state = FILE_TOO_DEEP; }
     }
     out.depth.extend_from_slice(d);
     let base = lo as% u32;

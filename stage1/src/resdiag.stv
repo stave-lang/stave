@@ -1,6 +1,6 @@
-// The diagnostics of `modules`, `decls`, and `resolve` as rows, not rendered: the diagnostics
-// stage turns them into messages. One row per diagnostic stage0 raises there: its code, its
-// primary span (file F, byte offset, byte length), up to three ids, and a row of related spans
+// The diagnostics of `modules`, `decls`, and `resolve` as rows, not rendered: `diag_names` turns
+// them into rows of `diag.Diags`. One row per diagnostic stage0 raises there: its code, its
+// primary span (file F, byte offset, byte length), up to four ids, and a row of related spans
 // (`rel`: (F, offset, length) triples, in stage0's label order).
 //
 // The ids by code (NONE where unused):
@@ -10,7 +10,8 @@
 // - E0103 unqualified variant: a = the name S, b = the enum D whose variant it is.
 // - E0104 second allocator: `rel` = the first allocator item's first token.
 // - E0105 name declared twice: a = the name S, b = the scope kind (`SCOPE_*`), c = its id; `rel`
-//   = the first declaration's name.
+//   = the first declaration's name. `SCOPE_ITEM`: d = the name S of the fn the binding is in
+//   (NONE: outside a fn).
 // - E0106 private: a = the name S, b = the decl D whose visibility applies (its module and span
 //   are the message's).
 // - E0107 module path: a = the segment S, b = the case (`CASE_*`), c = the module M (dotted,
@@ -56,6 +57,7 @@ pub struct Rows {
     pub a: vec.Vec<u32>,
     pub b: vec.Vec<u32>,
     pub c: vec.Vec<u32>,
+    pub d: vec.Vec<u32>,
     pub rel: ragged.Ragged<u32>,
 }
 
@@ -69,6 +71,7 @@ impl Rows {
             a: vec.Vec::<u32>.new(),
             b: vec.Vec::<u32>.new(),
             c: vec.Vec::<u32>.new(),
+            d: vec.Vec::<u32>.new(),
             rel: ragged.Ragged::<u32>.new(),
         };
     }
@@ -79,6 +82,10 @@ impl Rows {
 
     // Adds a row whose related spans are those pushed by `related` since the last row.
     pub fn add(&mut self, code: u16, file: u32, off: u32, len: u32, a: u32, b: u32, c: u32) {
+        self.add_in(code, file, off, len, a, b, c, NONE);
+    }
+
+    pub fn add_in(&mut self, code: u16, file: u32, off: u32, len: u32, a: u32, b: u32, c: u32, d: u32) {
         self.code.push(code);
         self.file.push(file);
         self.off.push(off);
@@ -86,6 +93,7 @@ impl Rows {
         self.a.push(a);
         self.b.push(b);
         self.c.push(c);
+        self.d.push(d);
         self.rel.end_row();
     }
 

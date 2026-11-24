@@ -227,6 +227,9 @@ impl<H: Host> Interp<'_, H> {
                     self.lanes(body, regs, arg(1)?)?,
                     self.lanes(body, regs, arg(2)?)?,
                 );
+                if b.len() != a.len() || c.len() != a.len() {
+                    return Err(malformed("fma lanes"));
+                }
                 let mut out = Vec::with_capacity(a.len());
                 for k in 0..a.len() {
                     out.push(simd::float_fma(f, a[k], b[k], c[k]).ok_or_else(|| lane_err(lane))?);
@@ -392,6 +395,9 @@ impl<H: Host> Interp<'_, H> {
             Compress | Expand => {
                 let a = self.lanes(body, regs, arg(0)?)?;
                 let m = self.mask(body, regs, arg(1)?)?;
+                if m.len() != a.len() {
+                    return Err(malformed("compress / expand lanes"));
+                }
                 let mut out = vec![0u64; a.len()];
                 let mut k = 0;
                 for (j, &on) in m.iter().enumerate() {
@@ -427,7 +433,7 @@ impl<H: Host> Interp<'_, H> {
                 }
                 let mut out = Vec::with_capacity(n as usize);
                 for k in 0..n as usize {
-                    if mask.as_ref().is_some_and(|m| !m[k]) {
+                    if mask.as_ref().is_some_and(|m| m.get(k) != Some(&true)) {
                         out.push(0);
                         continue;
                     }
@@ -459,7 +465,7 @@ impl<H: Host> Interp<'_, H> {
                     self.track_vec(regs, arg(0)?, at(0), v.len() as u64 * w as u64, true)?;
                 }
                 for (k, &x) in v.iter().enumerate() {
-                    if mask.as_ref().is_some_and(|m| !m[k]) {
+                    if mask.as_ref().is_some_and(|m| m.get(k) != Some(&true)) {
                         continue;
                     }
                     if mask.is_some() {
@@ -484,7 +490,7 @@ impl<H: Host> Interp<'_, H> {
                     return Ok(VOut::Trap(PanicKind::Bounds));
                 }
                 let w = (lane.bits() / 8) as u64;
-                let at = |k: i128| base.wrapping_add(k as u64 * w);
+                let at = |k: i128| base.wrapping_add((k as u64).wrapping_mul(w));
                 if op == Gather {
                     let mut out = Vec::with_capacity(idx.len());
                     for &k in &idx {
@@ -520,6 +526,9 @@ impl<H: Host> Interp<'_, H> {
             }
             ToBits => {
                 let m = self.mask(body, regs, arg(0)?)?;
+                if m.len() > 64 {
+                    return Err(malformed("to_bits lanes"));
+                }
                 Val::S(m.iter().enumerate().fold(0u64, |acc, (k, &on)| acc | ((on as u64) << k)))
             }
             ToVec => {

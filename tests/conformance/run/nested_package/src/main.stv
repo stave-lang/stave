@@ -1,0 +1,16 @@
+// A directory with its own `stave.toml` below a package is another package, here a path
+// dependency: `stave test` of this package reads its own annotations and runs its own `test fn`s;
+// the dependency's directives and `test fn`s belong to `stave test prims`.
+import prims;
+import std.debug;
+import std.io;
+
+fn main() -> i32 {
+    let n = prims.double(21);
+    io.print(f"main: {n}\n");
+    return 0;
+}
+
+test fn outer_uses_inner() {
+    debug.assert(prims.double(2) == 4, "two doubled");
+}

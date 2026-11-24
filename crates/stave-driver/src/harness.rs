@@ -396,7 +396,7 @@ fn word(s: &str) -> String {
 /// Adds `__stave_test_inputs.<tag>`, a fn without parameters that calls `test` once per input of
 /// `inputs` (values of `d`'s parameters), in order, and returns. An array, tuple, or struct
 /// argument is loaded from a static holding its bytes; a slice argument is made from a static
-/// `[T; n]` of its elements (equal statics shared).
+/// `[T; n]` of its elements (equal statics shared). The module stays canonical.
 pub fn add_caller(
     m: &mut Module,
     test: FuncId,
@@ -410,7 +410,7 @@ pub fn add_caller(
         return Err(format!("`{}`: not a `test fn` with the domain's parameters", f.path));
     }
     let lay = Layouts::compute(&m.types);
-    let sa = m.intrinsic("static_addr");
+    let sa = m.intrinsic(stave_ir::intrinsics::STATIC_ADDR);
     let mut cx = Caller { m, lay, sa, tag, statics: HashMap::new() };
     let mut b = FuncBuilder::new(&[]);
     for input in inputs {
@@ -429,6 +429,11 @@ pub fn add_caller(
         None,
     );
     cx.m.define(f, body);
+    // The caller's instance follows every lowered one, so it is last and no function moves; its
+    // body and the intrinsic it may add are renumbered.
+    if !stave_ir::canon::is_identity(&crate::build::canonical(cx.m)) {
+        return Err("the test input caller is not the last function in instance order".to_string());
+    }
     Ok(f)
 }
 

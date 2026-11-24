@@ -620,22 +620,43 @@ struct Dups {
     len: vec.Vec<u32>,
     sym: vec.Vec<u32>,
     item: vec.Vec<u32>,
+    fnode: vec.Vec<u32>,
 }
 
 impl Dups {
-    fn add(&mut self, group: u32, sym: u32, ord: u32, off: u32, len: u32, item: u32) {
+    fn add(&mut self, group: u32, sym: u32, ord: u32, off: u32, len: u32, item: u32, fnode: u32) {
         self.key.push(search.pair(group, sym));
         self.ord.push(ord);
         self.off.push(off);
         self.len.push(len);
         self.sym.push(sym);
         self.item.push(item);
+        self.fnode.push(fnode);
     }
+}
+
+// The name S of the fn at row f, as stage0 names the scope of a binding in it: the identifier
+// after the first `fn` within eight tokens of the fn's first token, else the token after it
+// (NONE when that is no identifier, or f is NONE).
+fn fn_name(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, f: u32, file_end: usize) -> u32 {
+    if f == NONE { return NONE; }
+    let a = tree.tok.as_slice()[f as usize] as usize;
+    let mut name_tok = a + 1;
+    let mut j = a;
+    while j < a + 8 && j < file_end {
+        if kind_at(t, j) == T_KW_FN {
+            name_tok = j + 1;
+            break;
+        }
+        j = j + 1;
+    }
+    if name_tok >= file_end { return NONE; }
+    return nm.tok_str.as_slice()[name_tok];
 }
 
 // The bindings of the pattern rooted at row root (stage0 binds every name after the whole
 // pattern, so its own paths never see them), its path uses, and E0105 for names bound twice.
-fn pattern(u: &mut Uses, b: &mut Binds, dups: &mut Dups, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, root: usize, bind: bool, lo: u32, hi: u32, chain: &mut vec.Vec<u32>) {
+fn pattern(u: &mut Uses, b: &mut Binds, dups: &mut Dups, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, root: usize, bind: bool, lo: u32, hi: u32, fnode: u32, chain: &mut vec.Vec<u32>) {
     let first = root - tree.size.as_slice()[root] as usize;
     for g in first..root + 1 {
         let k = tree.kind.as_slice()[g];
@@ -665,7 +686,7 @@ fn pattern(u: &mut Uses, b: &mut Binds, dups: &mut Dups, it: Item, tree: &ast.As
         }
         if name_tok == NONE { continue; }
         let s = nm.tok_str.as_slice()[name_tok as usize];
-        dups.add(rel(it, root), s, rel(it, g), t.start.as_slice()[name_tok as usize], ident_len(nm, s), it.i);
+        dups.add(rel(it, root), s, rel(it, g), t.start.as_slice()[name_tok as usize], ident_len(nm, s), it.i, fnode);
         if bind { b.add(it.i, C_LOCAL, s, lo, hi, rel(it, g)); }
     }
 }
@@ -714,7 +735,7 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, tree
                     let s = nm.tok_str.as_slice()[nt];
                     let owner = cx.parent.as_slice()[g] as usize;
                     b.add(it.i, C_GENERIC, s, sub_lo(tree, it, g), rel(it, owner) - 1, rel(it, c));
-                    dups.add(rel(it, g), s, rel(it, c), t.start.as_slice()[nt], ident_len(nm, s), it.i);
+                    dups.add(rel(it, g), s, rel(it, c), t.start.as_slice()[nt], ident_len(nm, s), it.i, cx.fnl.as_slice()[g]);
                 }
             } else if k == node_kinds.KIND_TAIL_CLAUSE {
                 let ks = kids(tree, g);
@@ -729,13 +750,13 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, tree
                 let p = first_kid(tree, base, g);
                 if p != NONE {
                     let blk = cx.parent.as_slice()[g] as usize;
-                    pattern(u, b, dups, it, tree, t, nm, p as usize, true, rel(it, g) + 1, rel(it, blk) - 1, &mut chain);
+                    pattern(u, b, dups, it, tree, t, nm, p as usize, true, rel(it, g) + 1, rel(it, blk) - 1, cx.fnl.as_slice()[g], &mut chain);
                 }
             } else if k == node_kinds.KIND_FOR_STMT {
                 let p = first_kid(tree, base, g);
                 let blk = child(tree, base, g, node_kinds.KIND_BLOCK);
                 if p != NONE && for_has_block(tree, base, g) {
-                    pattern(u, b, dups, it, tree, t, nm, p as usize, true, sub_lo(tree, it, blk as usize), rel(it, blk as usize), &mut chain);
+                    pattern(u, b, dups, it, tree, t, nm, p as usize, true, sub_lo(tree, it, blk as usize), rel(it, blk as usize), cx.fnl.as_slice()[g], &mut chain);
                 }
             } else if k == node_kinds.KIND_STMT_ARM || k == node_kinds.KIND_EXPR_ARM {
                 let ap = first_kid(tree, base, g);
@@ -743,7 +764,7 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, tree
                     let alts = kids(tree, ap as usize);
                     for j in 0..alts.len() {
                         let r = base + alts[j] as usize;
-                        pattern(u, b, dups, it, tree, t, nm, r, j == 0, rel(it, ap as usize) + 1, rel(it, g) - 1, &mut chain);
+                        pattern(u, b, dups, it, tree, t, nm, r, j == 0, rel(it, ap as usize) + 1, rel(it, g) - 1, cx.fnl.as_slice()[g], &mut chain);
                     }
                 }
             }
@@ -771,7 +792,7 @@ fn param(b: &mut Binds, su: &mut SelfUses, dups: &mut Dups, it: Item, tree: &ast
     if kind_at(t, a) != T_IDENT || owner == NONE { return; }
     let s = nm.tok_str.as_slice()[a];
     b.add(it.i, C_LOCAL, s, rel(it, g) + 1, rel(it, owner as usize) - 1, rel(it, g));
-    dups.add(rel(it, owner as usize), s, rel(it, g), t.start.as_slice()[a], ident_len(nm, s), it.i);
+    dups.add(rel(it, owner as usize), s, rel(it, g), t.start.as_slice()[a], ident_len(nm, s), it.i, cx.fnl.as_slice()[g]);
 }
 
 // A `from` origin: a local only (or `self`); inside a parameter's clause its position is the
@@ -1102,7 +1123,7 @@ fn unresolved_heads(u: &Uses, ds: &decls.Decls, md: &modules.Modules, cut: &item
 }
 
 // E0105 for every later binding of a name within one group.
-fn dup_rows(d: &Dups, cut: &items.Items, rows: &mut resdiag.Rows) {
+fn dup_rows(d: &Dups, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, cut: &items.Items, rows: &mut resdiag.Rows) {
     let p0 = sort.sort_perm(d.ord.as_slice());
     let ks = perm.gather(d.key.as_slice(), p0.as_slice());
     let pk = perm.gather(p0.as_slice(), sort.sort_perm(ks.as_slice()).as_slice());
@@ -1116,7 +1137,9 @@ fn dup_rows(d: &Dups, cut: &items.Items, rows: &mut resdiag.Rows) {
             let x = p.as_slice()[j] as usize;
             let file = cut.file.as_slice()[d.item.as_slice()[x] as usize];
             rows.related(file, d.off.as_slice()[e], d.len.as_slice()[e]);
-            rows.add(resdiag.E0105, file, d.off.as_slice()[x], d.len.as_slice()[x], d.sym.as_slice()[x], resdiag.SCOPE_ITEM, d.item.as_slice()[x]);
+            let file_end = t.file_tok.as_slice()[file as usize + 1] as usize;
+            let fname = fn_name(tree, t, nm, d.fnode.as_slice()[x], file_end);
+            rows.add_in(resdiag.E0105, file, d.off.as_slice()[x], d.len.as_slice()[x], d.sym.as_slice()[x], resdiag.SCOPE_ITEM, d.item.as_slice()[x], fname);
             j = j + 1;
         }
         k = j;
@@ -1129,9 +1152,9 @@ pub fn build(md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, lx: &
     let mut u = Uses.new();
     let mut su = SelfUses.{ item: vec.Vec::<u32>.new(), pos: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), len: vec.Vec::<u32>.new() };
     let mut b = Binds.{ item: vec.Vec::<u32>.new(), class: vec.Vec::<u8>.new(), sym: vec.Vec::<u32>.new(), lo: vec.Vec::<u32>.new(), hi: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new() };
-    let mut dups = Dups.{ key: vec.Vec::<u64>.new(), ord: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), len: vec.Vec::<u32>.new(), sym: vec.Vec::<u32>.new(), item: vec.Vec::<u32>.new() };
+    let mut dups = Dups.{ key: vec.Vec::<u64>.new(), ord: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), len: vec.Vec::<u32>.new(), sym: vec.Vec::<u32>.new(), item: vec.Vec::<u32>.new(), fnode: vec.Vec::<u32>.new() };
     collect(&mut u, &mut su, &mut b, &mut dups, tree, t, nm, set, cut, &cx, rows);
-    dup_rows(&dups, cut, rows);
+    dup_rows(&dups, tree, t, nm, cut, rows);
     // lookups: a value head asks for a local and a generic, a type head for a generic, an origin
     // for a local, `self` for the self parameter
     let mut q_item = vec.Vec::<u32>.new();

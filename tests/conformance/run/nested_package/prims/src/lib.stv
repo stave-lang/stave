@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+import std.debug;
+
+pub fn double(x: u32) -> u32 {
+    return x + x;
+}
+
+test fn doubles() {
+    debug.assert(double(3) == 6, "three doubled");
+}
+
+test fn doubles_zero() {
+    debug.assert(double(0) == 0, "zero doubled");
+}

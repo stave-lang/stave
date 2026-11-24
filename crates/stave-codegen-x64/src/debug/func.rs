@@ -303,6 +303,14 @@ pub(crate) struct Cg<'a, 'm> {
     reserve: Option<(SymbolId, i32)>,
 }
 
+/// The `rbp` displacement of the stack argument at `off` above the return address.
+fn stack_arg(off: u32) -> Res<i32> {
+    i32::try_from(off)
+        .ok()
+        .and_then(|o| o.checked_add(16))
+        .ok_or_else(|| unsup("stack arguments beyond 2 GiB"))
+}
+
 /// The entry of a fn on the alternate stack ([`stave_ir::Func::alt_stack`]), before anything
 /// touches the stack: unless `rsp` is on the thread's alternate signal stack already, or the
 /// thread has none yet, `rsp` moves to its top with a copy of the return address, so the
@@ -336,7 +344,7 @@ pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<(FuncCode, StackUse)> {
         .insts
         .op
         .iter()
-        .any(|op| matches!(op, Op::Intrinsic(id) if cx.m.intrinsic_name(*id) == Some("cpuid")));
+        .any(|op| matches!(op, Op::Intrinsic(id) if cx.m.intrinsic_kind(*id) == Some(stave_ir::intrinsics::Kind::Cpuid)));
     if cx.release && !cpuid {
         match compile_with(cx, fid, true) {
             // An instruction that needs more temporaries than the cache keeps next to the owned
@@ -2671,9 +2679,9 @@ impl<'a, 'm> Cg<'a, 'm> {
                             self.a.mov_rm(Size::Q, RAX, Mem::base(RBP, -8))?;
                             entry_base = true;
                         }
-                        Mem::base(RAX, 16 + *off as i32)
+                        Mem::base(RAX, stack_arg(*off)?)
                     } else {
-                        Mem::base(RBP, 16 + *off as i32)
+                        Mem::base(RBP, stack_arg(*off)?)
                     };
                     let k = self.alloc_k()?;
                     self.kmask_load(k, src, n, w)?;
@@ -2691,10 +2699,10 @@ impl<'a, 'm> Cg<'a, 'm> {
                         entry_base = true;
                     }
                     let d = self.def_mem(p)?;
-                    self.copy_mem(d, MSrc::Mem(Mem::base(RAX, 16 + *off as i32)), size)?;
+                    self.copy_mem(d, MSrc::Mem(Mem::base(RAX, stack_arg(*off)?)), size)?;
                 }
                 Loc::Stack(off) => {
-                    self.home[pi] = 16 + *off as i32;
+                    self.home[pi] = stack_arg(*off)?;
                     self.has_home[pi] = true;
                     self.in_home[pi] = true;
                 }

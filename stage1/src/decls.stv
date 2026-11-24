@@ -744,7 +744,7 @@ fn is_scalar(b: &[u8]) -> bool {
 }
 
 fn builtin_name(b: &[u8]) -> u8 {
-    if text.eq_str(b, "size_of") || text.eq_str(b, "align_of") || text.eq_str(b, "fence_stream") || text.eq_str(b, "old") { return 1; }
+    if text.eq_str(b, "size_of") || text.eq_str(b, "align_of") || text.eq_str(b, "fence_stream") { return 1; }
     if text.eq_str(b, "soa_row_size") || text.eq_str(b, "soa_read") || text.eq_str(b, "soa_write") { return 2; }
     return 0;
 }

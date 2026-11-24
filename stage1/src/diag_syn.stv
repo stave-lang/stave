@@ -1,0 +1,436 @@
+// The diagnostics of the item cut and of the parser, as rows of `diag.Diags` (stage0's
+// `items.rs` and `parse.rs`; the refinement rules are contracts/parse-errors.md).
+//
+// - A file whose brackets do not pair has one E0016 and no items: the first closer that has no
+//   opener or closes an opener of another kind, else the innermost opener never closed. A
+//   balanced file deeper than `MAX_DEPTH` has one E0005 at the first opener over the limit.
+// - A dropped item has one diagnostic: the tokens before the first item and a late `import` are
+//   E0004 with the expected set of the `File` row; an `unsafe("")` is E0013 case `empty`; a
+//   failed parse is the first refinement of the rule list that matches the stored parser state
+//   (`ast.Fail`), else E0004 with the terminals of the failing row (generated `ll1_table`) in
+//   terminal order.
+//
+// Token positions here are file-relative (the file's token list, as stage0's) and signed, so a
+// neighbour before the first token is just outside the item.
+import ast;
+import diag;
+import generated.ll1_table;
+import generated.node_kinds;
+import generated.terminals;
+import items;
+import lex;
+import source;
+import text;
+import std.mem;
+import std.vec;
+
+const W: usize = terminals.NTERM;
+const NT_BIT: u32 = 32768;
+const SYM_MASK: u32 = 0xFFFF;
+const PROD_SHIFT: u32 = 16;
+const PROD_MASK: u32 = 0xFFF;
+// A kind no token has and a node-kind value no rule names.
+const NO_KIND: u32 = 65535;
+
+const T_BANG: u32 = terminals.T_BANG as u32;
+const T_BANG_EQ: u32 = terminals.T_BANG_EQ as u32;
+const T_L_PAREN: u32 = terminals.T_L_PAREN as u32;
+const T_COMMA: u32 = terminals.T_COMMA as u32;
+const T_MINUS_GT: u32 = terminals.T_MINUS_GT as u32;
+const T_DOT: u32 = terminals.T_DOT as u32;
+const T_DOT_L_BRACE: u32 = terminals.T_DOT_L_BRACE as u32;
+const T_COLON: u32 = terminals.T_COLON as u32;
+const T_COLON_COLON: u32 = terminals.T_COLON_COLON as u32;
+const T_SEMI: u32 = terminals.T_SEMI as u32;
+const T_LT: u32 = terminals.T_LT as u32;
+const T_LT_EQ: u32 = terminals.T_LT_EQ as u32;
+const T_EQ_EQ: u32 = terminals.T_EQ_EQ as u32;
+const T_GT: u32 = terminals.T_GT as u32;
+const T_GT_EQ: u32 = terminals.T_GT_EQ as u32;
+const T_IDENT: u32 = terminals.T_IDENT as u32;
+const T_KW_ELSE: u32 = terminals.T_KW_ELSE as u32;
+const T_KW_FN: u32 = terminals.T_KW_FN as u32;
+const T_KW_IF: u32 = terminals.T_KW_IF as u32;
+const T_KW_IMPL: u32 = terminals.T_KW_IMPL as u32;
+const T_KW_IMPORT: u32 = terminals.T_KW_IMPORT as u32;
+const T_KW_LET: u32 = terminals.T_KW_LET as u32;
+const T_KW_MUT: u32 = terminals.T_KW_MUT as u32;
+const T_KW_SELF: u32 = terminals.T_KW_SELF as u32;
+const T_KW_STRUCT: u32 = terminals.T_KW_STRUCT as u32;
+const T_KW_UNSAFE: u32 = terminals.T_KW_UNSAFE as u32;
+const T_KW_WHILE: u32 = terminals.T_KW_WHILE as u32;
+const T_L_BRACKET: u32 = terminals.T_L_BRACKET as u32;
+const T_L_BRACE: u32 = terminals.T_L_BRACE as u32;
+const T_R_PAREN: u32 = terminals.T_R_PAREN as u32;
+const T_R_BRACKET: u32 = terminals.T_R_BRACKET as u32;
+const T_R_BRACE: u32 = terminals.T_R_BRACE as u32;
+const T_STR_LIT: u32 = terminals.T_STR_LIT as u32;
+
+const K_ADT_DECL: u32 = node_kinds.KIND_ADT_DECL as u32;
+const K_AND_EXPR: u32 = node_kinds.KIND_AND_EXPR as u32;
+const K_DISPATCH_DECL: u32 = node_kinds.KIND_DISPATCH_DECL as u32;
+const K_EXPR_STMT: u32 = node_kinds.KIND_EXPR_STMT as u32;
+const K_EXTERN_FN: u32 = node_kinds.KIND_EXTERN_FN as u32;
+const K_EXTERN_ITEM: u32 = node_kinds.KIND_EXTERN_ITEM as u32;
+const K_FILE: u32 = node_kinds.KIND_FILE as u32;
+const K_FN_DECL: u32 = node_kinds.KIND_FN_DECL as u32;
+const K_KERNEL_DECL: u32 = node_kinds.KIND_KERNEL_DECL as u32;
+const K_PARAM: u32 = node_kinds.KIND_PARAM as u32;
+const K_PARAMS: u32 = node_kinds.KIND_PARAMS as u32;
+const K_PRIMARY: u32 = node_kinds.KIND_PRIMARY as u32;
+const K_RET_CLAUSE: u32 = node_kinds.KIND_RET_CLAUSE as u32;
+const K_STMT: u32 = node_kinds.KIND_STMT as u32;
+const K_TRAIT_FN: u32 = node_kinds.KIND_TRAIT_FN as u32;
+const K_TYPE: u32 = node_kinds.KIND_TYPE as u32;
+const K_TYPE_BASE: u32 = node_kinds.KIND_TYPE_BASE as u32;
+const K_UNSAFE: u32 = node_kinds.KIND_UNSAFE as u32;
+const K_X_PARAMS: u32 = node_kinds.KIND_X_PARAMS as u32;
+
+// The tokens of one file and the item being diagnosed, `lo..hi` of them.
+view struct Site {
+    lx: &lex.Lexer,
+    kinds: &[u8],
+    starts: &[u32],
+    src: &[u8],
+    lo: i64,
+    hi: i64,
+}
+
+fn site(lx: &lex.Lexer, kinds: &[u8], starts: &[u32], src: &[u8], lo: i64, hi: i64) -> Site from lx + kinds + starts + src {
+    return Site.{ lx: lx, kinds: kinds, starts: starts, src: src, lo: lo, hi: hi };
+}
+
+impl Site {
+    // The kind of token j when it is one of the item's, else `NO_KIND`.
+    fn kind(&self, j: i64) -> u32 {
+        if j < self.lo || j >= self.hi { return NO_KIND; }
+        return self.kinds[j as% usize] as u32;
+    }
+
+    // The end offset of token j.
+    fn end(&self, j: i64) -> u32 {
+        return self.lx.token_end(self.src, self.kinds, self.starts, j as% usize) as% u32;
+    }
+
+    // Whether token j is an identifier spelled `w`.
+    fn word(&self, j: i64, w: &str) -> bool {
+        if self.kind(j) != T_IDENT { return false; }
+        let s = self.starts[j as% usize] as usize;
+        return text.eq_str(&self.src[s..(self.end(j) as usize)], w);
+    }
+
+    // The span of token j, moved `shift` bytes in (a split token's rest): offset and size. A
+    // token past the list is the end of the file.
+    fn span(&self, j: i64, shift: u32) -> (u32, u32) {
+        if (j as% usize) >= self.kinds.len() { return (self.src.len() as% u32, 0); }
+        let off = self.starts[j as% usize] +| shift;
+        let end = self.end(j);
+        return (off, if end > off then end - off else 0);
+    }
+
+    // The first token of the dotted name `Ident ('.' Ident)*` that ends at token `last`.
+    fn chain_start(&self, last: i64) -> i64 {
+        let mut first = last;
+        while first >= self.lo + 2 && self.kind(first - 1) == T_DOT && self.kind(first - 2) == T_IDENT { first = first - 2; }
+        return first;
+    }
+}
+
+// What the parser state means: the code (`E0004` when no refinement matches), the token the
+// primary span is at, the shift into it, and a flag choosing the case or the keyword.
+struct Verdict {
+    code: u16,
+    at: i64,
+    shift: u32,
+    flag: bool,
+}
+
+fn verdict(code: u16, at: i64) -> Verdict {
+    return Verdict.{ code: code, at: at, shift: 0, flag: false };
+}
+
+fn flagged(code: u16, at: i64, flag: bool) -> Verdict {
+    return Verdict.{ code: code, at: at, shift: 0, flag: flag };
+}
+
+// The generated tables the refinements read.
+struct Tabs {
+    table: vec.Vec<i16>,
+    origin: vec.Vec<u16>,
+}
+
+fn tabs() -> Tabs {
+    let mut t = Tabs.{ table: vec.Vec::<i16>.with_capacity(ll1_table.NNT * W), origin: vec.Vec::<u16>.with_capacity(ll1_table.NNT) };
+    t.table.extend_from_slice(&ll1_table.TABLE);
+    t.origin.extend_from_slice(&ll1_table.NT_ORIGIN);
+    return t;
+}
+
+// The origin rule of nonterminal nt (`NO_KIND` past the table).
+fn origin_of(tb: &Tabs, nt: u32) -> u32 {
+    if nt as usize >= tb.origin.len() { return NO_KIND; }
+    return tb.origin.as_slice()[nt as usize] as u32;
+}
+
+fn is_cmp(t: u32) -> bool {
+    return t == T_EQ_EQ || t == T_BANG_EQ || t == T_LT || t == T_LT_EQ || t == T_GT || t == T_GT_EQ;
+}
+
+fn is_param_rule(k: u32) -> bool {
+    return k == K_PARAM || k == K_PARAMS || k == K_X_PARAMS || k == K_FN_DECL || k == K_TRAIT_FN || k == K_KERNEL_DECL || k == K_DISPATCH_DECL || k == K_EXTERN_ITEM || k == K_EXTERN_FN;
+}
+
+// Rule 3 of the list: `Name { ..` read as a struct literal or pattern; the `{`, or -1.
+fn brace_of(s: &Site, li: i64, la: u32) -> i64 {
+    let ident_before = s.kind(li - 1) == T_IDENT;
+    if la == T_L_BRACE && ident_before {
+        let n1 = s.kind(li + 1);
+        let n2 = s.kind(li + 2);
+        if n1 == T_R_BRACE || (n1 == T_IDENT && (n2 == T_COLON || n2 == T_COMMA || n2 == T_R_BRACE)) { return li; }
+    }
+    if la == T_COLON && ident_before && s.kind(li - 2) == T_L_BRACE && s.kind(li - 3) == T_IDENT { return li - 2; }
+    return -1;
+}
+
+// Whether `where` at li lies before the item's first `{` at bracket depth 0.
+fn in_header(s: &Site, li: i64) -> bool {
+    let mut depth: i32 = 0;
+    let mut j = s.lo;
+    while j < li {
+        let k = s.kind(j);
+        if k == T_L_BRACE && depth == 0 { return false; }
+        if k == T_L_PAREN || k == T_L_BRACKET || k == T_L_BRACE || k == T_DOT_L_BRACE {
+            depth = depth + 1;
+        } else if k == T_R_PAREN || k == T_R_BRACKET || k == T_R_BRACE {
+            depth = depth - 1;
+        }
+        j = j + 1;
+    }
+    return true;
+}
+
+// Rules 5 to 13: the Rust forms, only when the lookahead is a whole token. E0004 when none.
+fn rust_form(s: &Site, f: ast.Fail, li: i64, open_tok: i64, top_term: u32, top_origin: u32, term_origin: u32) -> Verdict {
+    let la = f.la_kind;
+    if la == T_KW_LET {
+        if s.kind(li - 1) == T_KW_IF { return flagged(19, li - 1, false); }
+        if s.kind(li - 1) == T_KW_WHILE { return flagged(19, li - 1, true); }
+    }
+    if la == T_KW_ELSE && top_term == T_SEMI && term_origin == K_STMT && s.kind(open_tok) == T_KW_LET { return verdict(20, li); }
+    if la == T_R_BRACE && top_origin == K_EXPR_STMT && f.open_tok != ast.NONE { return verdict(21, open_tok); }
+    if s.word(li, "where") && in_header(s, li) { return verdict(22, li); }
+    if s.kind(li - 1) == T_COLON_COLON && la != T_LT { return verdict(23, li - 1); }
+    if la == T_COLON_COLON && s.kind(li + 1) != T_LT { return verdict(23, li); }
+    if la == T_KW_MUT && (s.kind(li + 1) == T_IDENT || s.kind(li + 1) == T_KW_SELF) {
+        let closure = top_origin == K_PRIMARY && s.kind(li - 1) == T_L_PAREN && s.kind(li - 2) == T_KW_FN;
+        if closure || is_param_rule(top_origin) { return verdict(25, li); }
+    }
+    if (la == T_L_PAREN || la == T_SEMI) && s.kind(li - 1) == T_IDENT && s.kind(li - 2) == T_KW_STRUCT && top_origin == K_ADT_DECL {
+        return flagged(26, li, la == T_SEMI);
+    }
+    let in_type = top_origin == K_TYPE || top_origin == K_TYPE_BASE;
+    if la == T_BANG && (in_type || top_origin == K_RET_CLAUSE) { return flagged(27, li, s.kind(li - 1) == T_MINUS_GT); }
+    if la == T_KW_IMPL && in_type { return flagged(28, li, false); }
+    if la == T_IDENT && s.word(li - 1, "dyn") { return flagged(28, li - 1, true); }
+    return verdict(4, li);
+}
+
+// The code and span position of a failed parse (contracts/parse-errors.md): the rules in order,
+// the first that matches wins.
+fn classify(s: &Site, tb: &Tabs, f: ast.Fail, fbase: i64) -> Verdict {
+    let sym = f.top & SYM_MASK;
+    let is_term = sym & NT_BIT == 0;
+    let top_term = if is_term then sym else NO_KIND;
+    let top_origin = if is_term then NO_KIND else origin_of(tb, sym & ~NT_BIT);
+    let term_origin = if is_term then origin_of(tb, (f.top >> PROD_SHIFT) & PROD_MASK) else NO_KIND;
+    let li = f.tok as i64 - fbase;
+    let la = f.la_kind;
+    let open_tok = if f.open_tok == ast.NONE then -1i64 else (f.open_tok as i64 - fbase);
+    if is_term && (sym == T_L_PAREN || sym == T_STR_LIT) && f.open_kind == K_UNSAFE {
+        let mut at = li;
+        let mut k: i64 = 3;
+        while k >= 1 {
+            if s.kind(li - k) == T_KW_UNSAFE { at = li - k; }
+            k = k - 1;
+        }
+        return verdict(13, at);
+    }
+    if f.d2_lt != ast.NONE { return verdict(11, f.d2_lt as i64 - fbase); }
+    if f.shift == 0 {
+        let b = brace_of(s, li, la);
+        if b >= 0 { return verdict(14, b); }
+    }
+    if !is_term && is_cmp(la) && top_origin == K_AND_EXPR {
+        let mut v = verdict(12, li);
+        v.shift = f.shift;
+        return v;
+    }
+    if f.shift == 0 {
+        let v = rust_form(s, f, li, open_tok, top_term, top_origin, term_origin);
+        if v.code != 4 { return v; }
+    }
+    let mut v = verdict(4, li);
+    v.shift = f.shift;
+    return v;
+}
+
+// The terminals of nonterminal nt's table row in terminal order, `, ` between, but for `skip`.
+fn push_row(out: &mut vec.Vec<u8>, lx: &lex.Lexer, tb: &Tabs, nt: usize, skip: u32) {
+    let row = &tb.table.as_slice()[(nt * W)..((nt + 1) * W)];
+    let mut first = true;
+    for t in 0..W {
+        if row[t] < 0 || (t as% u32) == skip { continue; }
+        if !first { out.extend_from_slice(mem.str_bytes(", ")); }
+        out.extend_from_slice(lx.spelling(t));
+        first = false;
+    }
+}
+
+fn e0004(d: &mut diag.Diags, file: u32, found: &[u8], expected: &[u8], span: (u32, u32)) {
+    d.begin(4, "");
+    d.arg("found", found);
+    d.arg("expected", expected);
+    d.end(file, span.0, span.1);
+}
+
+// The diagnostic of a dropped item whose parse failed.
+fn parse_failure(d: &mut diag.Diags, lx: &lex.Lexer, tb: &Tabs, s: &Site, file: u32, f: ast.Fail, fbase: i64) {
+    let v = classify(s, tb, f, fbase);
+    let span = s.span(v.at, v.shift);
+    let code = v.code;
+    if code == 4 {
+        let sym = f.top & SYM_MASK;
+        let mut expected = vec.Vec::<u8>.new();
+        if sym & NT_BIT == 0 {
+            expected.extend_from_slice(lx.spelling(sym as usize));
+        } else {
+            push_row(&mut expected, lx, tb, (sym & ~NT_BIT) as usize, NO_KIND);
+        }
+        let li = v.at;
+        let found = if li < s.hi then lx.spelling(f.la_kind as usize) else lx.kind_name(s.kinds[li as% usize]);
+        e0004(d, file, found, expected.as_slice(), span);
+    } else if code == 13 {
+        d.begin(13, "");
+        d.end(file, span.0, span.1);
+    } else if code == 14 {
+        let last = v.at - 1;
+        d.begin(14, "");
+        d.arg("path", &s.src[(s.starts[s.chain_start(last) as% usize] as usize)..(s.end(last) as usize)]);
+        d.end(file, span.0, span.1);
+    } else if code == 19 || code == 28 {
+        let kw = if code == 19 then (if v.flag then "while" else "if") else (if v.flag then "dyn" else "impl");
+        d.begin(code, "");
+        d.arg("kw", mem.str_bytes(kw));
+        d.end(file, span.0, span.1);
+    } else if code == 26 {
+        d.begin(26, if v.flag then "unit" else "");
+        let a = s.starts[(v.at - 1) as% usize] as usize;
+        d.arg("name", &s.src[a..(s.end(v.at - 1) as usize)]);
+        d.end(file, span.0, span.1);
+    } else if code == 27 {
+        d.begin(27, if v.flag then "ret" else "");
+        d.end(file, span.0, span.1);
+    } else {
+        d.begin(code, "");
+        d.end(file, span.0, span.1);
+    }
+}
+
+// E0016 for the unbalanced file `f`, tokens `lo..hi` of the program.
+fn unbalanced(d: &mut diag.Diags, lx: &lex.Lexer, toks: &lex.Tokens, cut: &items.Items, f: u32, lo: usize, hi: usize) {
+    let kind = toks.kind.as_slice();
+    let start = toks.start.as_slice();
+    let mate = cut.mate.as_slice();
+    for i in lo..hi {
+        let k = kind[i] as u32;
+        if k != T_R_PAREN && k != T_R_BRACKET && k != T_R_BRACE { continue; }
+        if mate[i] == items.NONE {
+            d.begin(16, "unmatched");
+            d.arg("closer", lx.spelling(k as usize));
+            d.end(f, start[i], 1);
+            return;
+        }
+        let o = mate[i] as usize;
+        let ok = kind[o] as u32;
+        let want = if ok == T_L_PAREN then T_R_PAREN else if ok == T_L_BRACKET then T_R_BRACKET else T_R_BRACE;
+        if want != k {
+            d.begin(16, "mismatched");
+            d.arg("closer", lx.spelling(k as usize));
+            d.arg("opener", lx.spelling(ok as usize));
+            d.role("opener", f, start[o], if ok == T_DOT_L_BRACE then 2 else 1);
+            d.end(f, start[i], 1);
+            return;
+        }
+    }
+    let mut i = hi;
+    while i > lo {
+        i = i - 1;
+        let k = kind[i] as u32;
+        if (k == T_L_PAREN || k == T_L_BRACKET || k == T_L_BRACE || k == T_DOT_L_BRACE) && mate[i] == items.NONE {
+            d.begin(16, "unclosed");
+            d.arg("opener", lx.spelling(k as usize));
+            d.end(f, start[i], if k == T_DOT_L_BRACE then 2 else 1);
+            return;
+        }
+    }
+}
+
+// E0005 for the balanced file `f` deeper than the limit: its first opener over it.
+fn too_deep(d: &mut diag.Diags, toks: &lex.Tokens, cut: &items.Items, f: u32, lo: usize, hi: usize) {
+    let depth = cut.depth.as_slice();
+    for i in lo..hi {
+        if depth[i] > items.MAX_DEPTH {
+            d.begin(5, "");
+            d.end(f, toks.start.as_slice()[i], if toks.kind.as_slice()[i] as u32 == T_DOT_L_BRACE then 2 else 1);
+            return;
+        }
+    }
+}
+
+// The diagnostics of the item cut and of the parse of every file of `set`.
+pub fn syntactic(d: &mut diag.Diags, lx: &lex.Lexer, set: &source.SourceSet, toks: &lex.Tokens, cut: &items.Items, tree: &ast.Ast) {
+    let ft = toks.file_tok.as_slice();
+    for f in 0..set.files() {
+        let st = cut.file_state.as_slice()[f];
+        if st == items.FILE_UNBALANCED {
+            unbalanced(d, lx, toks, cut, f as% u32, ft[f] as usize, ft[f + 1] as usize);
+        } else if st == items.FILE_TOO_DEEP {
+            too_deep(d, toks, cut, f as% u32, ft[f] as usize, ft[f + 1] as usize);
+        }
+    }
+    let mut any = false;
+    for r in 0..tree.items() {
+        let s = tree.status.as_slice()[r];
+        if s == ast.DROP_PRE_ITEM || s == ast.DROP_LATE_IMPORT || s == ast.DROP_SYNTAX || s == ast.DROP_EMPTY_OBLIGATION { any = true; }
+    }
+    if !any { return; }
+    let tb = tabs();
+    let kinds = toks.kind.as_slice();
+    let starts = toks.start.as_slice();
+    for r in 0..tree.items() {
+        let status = tree.status.as_slice()[r];
+        if status != ast.DROP_PRE_ITEM && status != ast.DROP_LATE_IMPORT && status != ast.DROP_SYNTAX && status != ast.DROP_EMPTY_OBLIGATION { continue; }
+        let f = cut.file.as_slice()[r] as usize;
+        let base = ft[f] as usize;
+        let end = ft[f + 1] as usize;
+        let fbase = base as% i64;
+        let lo = cut.tok_lo.as_slice()[r] as i64 - fbase;
+        let hi = cut.tok_hi.as_slice()[r] as i64 - fbase;
+        let s = site(lx, &kinds[base..end], &starts[base..end], set.file(f), lo, hi);
+        let fl = tree.fail.get(r);
+        if status == ast.DROP_SYNTAX {
+            parse_failure(d, lx, &tb, &s, f as% u32, fl, fbase);
+        } else if status == ast.DROP_EMPTY_OBLIGATION {
+            let span = s.span(fl.tok as i64 - fbase, 0);
+            d.begin(13, "empty");
+            d.end(f as% u32, span.0, span.1);
+        } else {
+            let span = s.span(lo, 0);
+            let mut expected = vec.Vec::<u8>.new();
+            let late = status == ast.DROP_LATE_IMPORT;
+            push_row(&mut expected, lx, &tb, K_FILE as usize, if late then T_KW_IMPORT else NO_KIND);
+            let found = if late then mem.str_bytes("import") else lx.kind_name(s.kinds[lo as% usize]);
+            e0004(d, f as% u32, found, expected.as_slice(), span);
+        }
+    }
+}

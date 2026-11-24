@@ -266,9 +266,15 @@ pub(crate) fn path_text(strings: &Strings, segs: &[Sym]) -> String {
         if k > 0 {
             s.push('.');
         }
-        s.push_str(strings.get(x));
+        s.push_str(&segment_text(strings.get(x)));
     }
     s
+}
+
+/// A module path segment (a file, directory, or package name) as path text and hole value: a line
+/// feed, which such a name may hold, is written `\n`, so the text stays a valid one-line value.
+pub(crate) fn segment_text(seg: &str) -> std::borrow::Cow<'_, str> {
+    if seg.contains('\n') { seg.replace('\n', "\\n").into() } else { seg.into() }
 }
 
 #[cfg(test)]

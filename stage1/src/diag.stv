@@ -1,0 +1,314 @@
+// Diagnostics of a build: one row per diagnostic in flat columns, no borrows.
+//
+// A row holds the code number, the shape (a row of the registry's shape tables), the primary span
+// (`file` is `idx.NONE` for a location-less code), and two slices of shared columns: its hole
+// values (`arg_*`: the registry's hole row and the value bytes) and its role spans (`rel_*`: the
+// role's name is an `arg` entry without a hole). A stage adds a row with `begin`, `arg`, `role`,
+// `end`.
+//
+// `order` is stage0's canonical order (crates/stave-diag order.rs): location-less rows first, then
+// by (file key, offset, code, message); rows equal in those four are one diagnostic, the one
+// smallest by (span length, severity) is kept. The file key is the rank of (package name, display
+// path), given as a column. The order is a stable LSD radix sort, a pass per key column
+// (`prims.sort`), so no comparison sort is written; messages are rendered and ranked only when
+// two rows tie on (file key, offset, code).
+import diag_reg;
+import prims.col;
+import prims.perm;
+import prims.sort;
+import std.cell;
+import std.debug;
+import std.idx;
+import std.mem;
+import std.vec;
+
+pub struct Diags {
+    pub reg: diag_reg.Registry,
+    pub code: vec.Vec<u16>,
+    pub shape: vec.Vec<u32>,
+    pub file: vec.Vec<u32>,
+    pub start: vec.Vec<u32>,
+    pub size: vec.Vec<u32>,
+    pub arg_lo: vec.Vec<u32>,
+    pub arg_hi: vec.Vec<u32>,
+    pub rel_lo: vec.Vec<u32>,
+    pub rel_hi: vec.Vec<u32>,
+    pub arg_hole: vec.Vec<u32>,
+    pub arg_end: vec.Vec<u32>,
+    pub arg_bytes: vec.Vec<u8>,
+    pub rel_name: vec.Vec<u32>,
+    pub rel_file: vec.Vec<u32>,
+    pub rel_start: vec.Vec<u32>,
+    pub rel_size: vec.Vec<u32>,
+    // Set when a stage misused the builder (a code, case, or hole the registry lacks, a span that
+    // does not fit the code, a template hole it never gave, a newline in one-line text): the
+    // rows are then not rendered and the build is an internal error.
+    pub bad: cell.Cell<bool>,
+}
+
+// The `find_arg` result for a hole that was not given.
+const NO_ARG: usize = 4294967295;
+
+// Whitespace of a `source` hole in one-line text.
+fn is_collapsed_space(c: u8) -> bool {
+    return c == 32 || (c >= 9 && c <= 13);
+}
+
+// v with every whitespace run one space and the ends trimmed.
+fn push_collapsed(out: &mut vec.Vec<u8>, v: &[u8]) {
+    let mut i: usize = 0;
+    let mut first = true;
+    while i < v.len() {
+        while i < v.len() && is_collapsed_space(v[i]) { i = i + 1; }
+        let s = i;
+        while i < v.len() && !is_collapsed_space(v[i]) { i = i + 1; }
+        if s < i {
+            if !first { out.push(32); }
+            out.extend_from_slice(&v[s..i]);
+            first = false;
+        }
+    }
+}
+
+// The rows of p ordered again by keys (indexed by row), stable.
+fn refine(p: vec.Vec<u32>, keys: &[u32]) -> vec.Vec<u32> {
+    let k = perm.gather(keys, p.as_slice());
+    let q = sort.sort_perm(k.as_slice());
+    return perm.gather(p.as_slice(), q.as_slice());
+}
+
+// The rank of each string in byte order, a shorter prefix first; equal strings rank by position.
+// A stable radix pass per byte position, last position first (a byte is its value + 1, past the
+// end is 0).
+pub fn ranks(strs: &diag_reg.Strs) -> vec.Vec<u32> {
+    let n = strs.len();
+    let mut longest: usize = 0;
+    for i in 0..n {
+        if strs.get(i).len() > longest { longest = strs.get(i).len(); }
+    }
+    let mut p = col.iota(n);
+    let mut pos = longest;
+    while pos > 0 {
+        pos = pos - 1;
+        let mut key = vec.Vec::<u32>.with_capacity(n);
+        for i in 0..n {
+            let m = strs.get(i);
+            key.push(if pos < m.len() then ((m[pos] as u32) + 1) else 0);
+        }
+        p = refine(p, key.as_slice());
+    }
+    return perm.invert(p.as_slice());
+}
+
+impl Diags {
+    pub fn new() -> Diags {
+        return Diags.{
+            reg: diag_reg.Registry.load(),
+            code: vec.Vec::<u16>.new(),
+            shape: vec.Vec::<u32>.new(),
+            file: vec.Vec::<u32>.new(),
+            start: vec.Vec::<u32>.new(),
+            size: vec.Vec::<u32>.new(),
+            arg_lo: vec.Vec::<u32>.new(),
+            arg_hi: vec.Vec::<u32>.new(),
+            rel_lo: vec.Vec::<u32>.new(),
+            rel_hi: vec.Vec::<u32>.new(),
+            arg_hole: vec.Vec::<u32>.new(),
+            arg_end: vec.Vec::<u32>.new(),
+            arg_bytes: vec.Vec::<u8>.new(),
+            rel_name: vec.Vec::<u32>.new(),
+            rel_file: vec.Vec::<u32>.new(),
+            rel_start: vec.Vec::<u32>.new(),
+            rel_size: vec.Vec::<u32>.new(),
+            bad: cell.Cell::<bool>.new(false),
+        };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.code.len();
+    }
+
+    // Opens a diagnostic of code number `number` (`E0018` is 18) in shape `case` ("" is the
+    // base shape). It is closed by `end`; its `arg`s and `role`s come between.
+    pub fn begin(&mut self, number: u16, case: &str) {
+        let known = self.reg.has_code(number);
+        let row = if known then self.reg.row(number) else 0;
+        let known_case = known && self.reg.has_case(row, mem.str_bytes(case));
+        if !known_case { self.bad.set(true); }
+        let shape = if known_case then self.reg.shape(row, mem.str_bytes(case)) else (self.reg.shape_first.as_slice()[row] as usize);
+        self.code.push(self.reg.number.as_slice()[row]);
+        self.shape.push(shape as% u32);
+        self.file.push(idx.NONE);
+        self.start.push(0);
+        self.size.push(0);
+        self.arg_lo.push(self.arg_end.len() as% u32);
+        self.arg_hi.push(self.arg_end.len() as% u32);
+        self.rel_lo.push(self.rel_name.len() as% u32);
+        self.rel_hi.push(self.rel_name.len() as% u32);
+    }
+
+    fn push_value(&mut self, hole: u32, value: &[u8]) {
+        self.arg_hole.push(hole);
+        self.arg_bytes.extend_from_slice(value);
+        self.arg_end.push(self.arg_bytes.len() as% u32);
+    }
+
+    // The value of the declared hole `hole` of the open diagnostic.
+    pub fn arg(&mut self, hole: &str, value: &[u8]) {
+        let row = self.reg.row(self.code.as_slice()[self.code.len() - 1]);
+        if !self.reg.has_hole(row, mem.str_bytes(hole)) {
+            self.bad.set(true);
+            return;
+        }
+        let h = self.reg.hole(row, mem.str_bytes(hole));
+        self.push_value(h as% u32, value);
+    }
+
+    // A span supplied for the template role `name` of the open diagnostic.
+    pub fn role(&mut self, name: &str, file: u32, start: u32, size: u32) {
+        self.push_value(idx.NONE, mem.str_bytes(name));
+        self.rel_name.push((self.arg_end.len() - 1) as% u32);
+        self.rel_file.push(file);
+        self.rel_start.push(start);
+        self.rel_size.push(size);
+    }
+
+    // Closes the open diagnostic at its primary span; `file` is `idx.NONE` exactly when the code
+    // has no location.
+    pub fn end(&mut self, file: u32, start: u32, size: u32) {
+        let k = self.code.len() - 1;
+        let row = self.reg.row(self.code.as_slice()[k]);
+        if self.reg.located.as_slice()[row] != (file != idx.NONE) { self.bad.set(true); }
+        self.file.as_mut_slice()[k] = file;
+        self.start.as_mut_slice()[k] = start;
+        self.size.as_mut_slice()[k] = size;
+        self.arg_hi.as_mut_slice()[k] = self.arg_end.len() as% u32;
+        self.rel_hi.as_mut_slice()[k] = self.rel_name.len() as% u32;
+    }
+
+    pub fn arg_value(&self, k: usize) -> &[u8] from self {
+        let lo: usize = if k == 0 then 0 else (self.arg_end.as_slice()[k - 1] as usize);
+        return &self.arg_bytes.as_slice()[lo..(self.arg_end.as_slice()[k] as usize)];
+    }
+
+    // The argument entry of diagnostic i that fills the hole `name`.
+    fn find_arg(&self, i: usize, name: &[u8]) -> usize {
+        let lo = self.arg_lo.as_slice()[i] as usize;
+        let hi = self.arg_hi.as_slice()[i] as usize;
+        for k in lo..hi {
+            let h = self.arg_hole.as_slice()[k];
+            if h != idx.NONE && self.reg.hole_name.get(h as usize).eq(name) { return k; }
+        }
+        self.bad.set(true);
+        return NO_ARG;
+    }
+
+    // 0 error, 1 warning.
+    pub fn severity(&self, i: usize) -> u8 {
+        return self.reg.severity.as_slice()[self.reg.row(self.code.as_slice()[i])];
+    }
+
+    // The text of a registry template with diagnostic i's hole values: `{hole}` is its value,
+    // `{{` and `}}` are braces. A `source` hole in one-line text has its whitespace runs
+    // collapsed to one space; other values in one-line text have no newline.
+    pub fn expand(&self, i: usize, template: &[u8], one_line: bool, out: &mut vec.Vec<u8>) {
+        let n = template.len();
+        let mut p: usize = 0;
+        while p < n {
+            let c = template[p];
+            if c == 123 && p + 1 < n && template[p + 1] == 123 {
+                out.push(123);
+                p = p + 2;
+            } else if c == 125 && p + 1 < n && template[p + 1] == 125 {
+                out.push(125);
+                p = p + 2;
+            } else if c == 123 {
+                let mut e = p + 1;
+                while e < n && template[e] != 125 { e = e + 1; }
+                debug.assert(e < n, "a template has an unclosed hole");
+                let k = self.find_arg(i, &template[(p + 1)..e]);
+                if k != NO_ARG {
+                    let v = self.arg_value(k);
+                    let h = self.arg_hole.as_slice()[k] as usize;
+                    if one_line && self.reg.hole_kind.as_slice()[h] == diag_reg.KIND_SOURCE {
+                        push_collapsed(out, v);
+                    } else {
+                        if one_line && v.find_byte(10).is_some() { self.bad.set(true); }
+                        out.extend_from_slice(v);
+                    }
+                }
+                p = e + 1;
+            } else {
+                debug.assert(c != 125, "a template has a stray }");
+                out.push(c);
+                p = p + 1;
+            }
+        }
+    }
+
+    // The message of diagnostic i.
+    pub fn message(&self, i: usize, out: &mut vec.Vec<u8>) {
+        self.expand(i, self.reg.shape_message.get(self.shape.as_slice()[i] as usize), true, out);
+    }
+
+    // The rows in canonical order, duplicates dropped. `rank[f]` is file f's rank by (package
+    // name, display path).
+    pub fn order(&self, rank: &[u32]) -> vec.Vec<u32> {
+        let n = self.len();
+        let mut fk = vec.Vec::<u32>.with_capacity(n);
+        let mut off = vec.Vec::<u32>.with_capacity(n);
+        let mut code = vec.Vec::<u32>.with_capacity(n);
+        for i in 0..n {
+            let f = self.file.as_slice()[i];
+            fk.push(if f == idx.NONE then 0 else (rank[f as usize] + 1));
+            off.push(if f == idx.NONE then 0 else self.start.as_slice()[i]);
+            code.push(self.code.as_slice()[i] as u32);
+        }
+        let p = refine(refine(refine(col.iota(n), code.as_slice()), off.as_slice()), fk.as_slice());
+        let ps = p.as_slice();
+        for k in 1..n {
+            let a = ps[k - 1] as usize;
+            let b = ps[k] as usize;
+            if fk.as_slice()[a] == fk.as_slice()[b] && off.as_slice()[a] == off.as_slice()[b] && code.as_slice()[a] == code.as_slice()[b] {
+                return self.order_ties(fk.as_slice(), off.as_slice(), code.as_slice());
+            }
+        }
+        return p;
+    }
+
+    // `order` when two rows tie on (file key, offset, code): the full key, least significant
+    // column first.
+    fn order_ties(&self, fk: &[u32], off: &[u32], code: &[u32]) -> vec.Vec<u32> {
+        let n = self.len();
+        let mut msg = diag_reg.Strs.new();
+        let mut sev = vec.Vec::<u32>.with_capacity(n);
+        let mut buf = vec.Vec::<u8>.new();
+        for i in 0..n {
+            buf.clear();
+            self.message(i, &mut buf);
+            msg.push(buf.as_slice());
+            sev.push(self.severity(i) as u32);
+        }
+        let mut p = refine(refine(col.iota(n), sev.as_slice()), self.size.as_slice());
+        p = refine(p, ranks(&msg).as_slice());
+        p = refine(refine(refine(p, code), off), fk);
+        let mut out = vec.Vec::<u32>.with_capacity(n);
+        for k in 0..n {
+            let b = p.as_slice()[k] as usize;
+            if out.len() > 0 {
+                let a = *out.get_ref(out.len() - 1) as usize;
+                if fk[a] == fk[b] && off[a] == off[b] && code[a] == code[b] && msg.get(a).eq(msg.get(b)) { continue; }
+            }
+            out.push(b as% u32);
+        }
+        return out;
+    }
+
+    // Whether any of the listed rows is an error.
+    pub fn has_errors(&self, rows: &[u32]) -> bool {
+        for k in 0..rows.len() {
+            if self.severity(rows[k] as usize) == 0 { return true; }
+        }
+        return false;
+    }
+}

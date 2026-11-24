@@ -75,6 +75,20 @@ pub fn normalize(p: &str) -> string.String {
     return out;
 }
 
+// p as diagnostics print it: relative to root when below it (both normalized), else normalized.
+pub fn display(root: &str, p: &str) -> string.String {
+    let nr = normalize(root);
+    let np = normalize(p);
+    let r = nr.as_bytes();
+    let b = np.as_bytes();
+    let rl = r.len();
+    if rl > 0 && b.len() > rl && text.starts_with(b, r) {
+        if r[rl - 1] == SLASH { return text.string_of(&b[rl..b.len()]); }
+        if b[rl] == SLASH { return text.string_of(&b[rl + 1..b.len()]); }
+    }
+    return np;
+}
+
 // Everything before the last component ("" for a single relative component).
 pub fn parent(p: &str) -> string.String {
     let b = mem.str_bytes(p);

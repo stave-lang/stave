@@ -1261,7 +1261,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             }
             if self.env.has_params(t) {
                 // as written: a type parameter has no name of its own here
-                let tn = icx.node_text(args[0]).to_string();
+                let tn = icx.node_spelled(args[0]);
                 let f = if b == Builtin::SizeOf { "size_of" } else { "align_of" };
                 let d = mk("E0904", Some("generic"), &[("name", f), ("type", &tn)], icx.node_span(n), &[]);
                 return self.defer(d);

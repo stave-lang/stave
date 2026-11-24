@@ -37,7 +37,7 @@ pub struct Out {
 }
 
 pub fn kit() -> Kit {
-    let mut s = source.SourceSet.{ bytes: vec.Vec::<u8>.new(), file_off: vec.Vec::<u64>.new(), read_ok: vec.Vec::<bool>.new() };
+    let mut s = source.SourceSet.{ bytes: vec.Vec::<u8>.new(), file_off: vec.Vec::<u64>.new(), read_err: vec.Vec::<u8>.new() };
     s.file_off.push(0);
     return Kit.{ fl: files.FileList.empty(), set: s, dep_counts: vec.Vec::<u32>.new() };
 }
@@ -71,7 +71,7 @@ impl Kit {
         self.fl.file_pkg.push(pkg);
         self.set.bytes.extend_from_slice(mem.str_bytes(src));
         self.set.file_off.push(self.set.bytes.len() as u64);
-        self.set.read_ok.push(true);
+        self.set.read_err.push(source.READ_OK);
     }
 
     pub fn run(self) -> Out {

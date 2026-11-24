@@ -520,6 +520,12 @@ impl<'p> ItemCx<'p> {
     pub fn node_text(&self, n: u32) -> &'p str {
         self.span_text(self.node_span(n))
     }
+
+    /// The source text of node `n` as the value of a hole that is not of kind `source` (see
+    /// [`stave_diag::spelled`]).
+    pub fn node_spelled(&self, n: u32) -> String {
+        stave_diag::spelled(self.node_text(n))
+    }
 }
 
 #[cfg(test)]
