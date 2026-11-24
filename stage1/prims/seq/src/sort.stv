@@ -35,6 +35,7 @@ pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
         }
     }
     let vary = any ^ all;
+    if vary == 0 { return pa; }
     let mut kb = col.filled(n, 0u64);
     let mut pb = col.filled(n, 0u32);
     let mut cnt = col.filled(256, 0u32);

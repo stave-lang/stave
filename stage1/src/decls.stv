@@ -711,7 +711,63 @@ fn canonical_order(raw: &Raw, md: &modules.Modules) -> vec.Vec<u32> {
             dp[d] = (lev + 1) as% u8;
         }
     }
+    // the fields' widths: a NONE name, tie, or offset sorts last, as the value above the others
+    let mut top = [0u32; 4];
+    let mut mk0: u32 = 0;
+    {
+        let xa = sa.as_slice();
+        let xb = sb.as_slice();
+        let dp = depth.as_slice();
+        let k0v = k0.as_slice();
+        let t = &mut top;
+        for d in 0..n {
+            let e = 3 * d + dp[d] as usize - 1;
+            let v = [((xa[e] >> 8) & 4294967295) as% u32, (xa[e] & 255) as% u32, (xb[e] >> 32) as% u32, (xb[e] & 4294967295) as% u32];
+            for f in 0..4usize {
+                if v[f] != NONE && v[f] > t[f] { t[f] = v[f]; }
+            }
+            if k0v[d] > mk0 { mk0 = k0v[d]; }
+        }
+    }
+    let wo = bits_for(top[3] + 1);
+    let wt = bits_for(top[2] + 1);
+    let wk = bits_for(top[1] + 1);
+    let wn = bits_for(top[0] + 1);
+    let wl = 1 + wn + wk + wt + wo;
     let mut order = col.iota(n);
+    if wl + bits_for(mk0) <= 64 {
+        // one key per level, (present, name, kind, tie, offset); the path rank above level 0's
+        let mut keys = col.filled(n, 0u64);
+        let mut s: usize = 3;
+        while s > 0 {
+            s = s - 1;
+            {
+                let os = order.as_slice();
+                let ks = keys.as_mut_slice();
+                let xa = sa.as_slice();
+                let xb = sb.as_slice();
+                let dp = depth.as_slice();
+                let k0v = k0.as_slice();
+                for k in 0..n {
+                    let d = os[k] as usize;
+                    let mut key: u64 = 0;
+                    if s < dp[d] as usize {
+                        let a = xa[3 * d + s];
+                        let b = xb[3 * d + s];
+                        let name = enc(((a >> 8) & 4294967295) as% u32, top[0]);
+                        let tie = enc((b >> 32) as% u32, top[2]);
+                        let off = enc((b & 4294967295) as% u32, top[3]);
+                        key = (1u64 << (wl - 1)) | (name << (wk + wt + wo)) | ((a & 255) << (wt + wo)) | (tie << wo) | off;
+                    }
+                    if s == 0 && mk0 != 0 { key = key | ((k0v[d] as u64) << wl); }
+                    ks[k] = key;
+                }
+            }
+            let p = sort.sort_perm(keys.as_slice());
+            order = perm.gather(order.as_slice(), p.as_slice());
+        }
+        return order;
+    }
     let mut keys = col.filled(n, 0u64);
     let mut s: usize = 3;
     while s > 0 {
@@ -742,42 +798,54 @@ fn canonical_order(raw: &Raw, md: &modules.Modules) -> vec.Vec<u32> {
     return perm.gather(order.as_slice(), p.as_slice());
 }
 
-// Whether string S spells a built-in type: a scalar, `vec`, `mask`, `never`, a vector `TxN` of a
-// lane type, a mask `maskWxN` (N a power of two from 2 to 64, or `n`).
-fn prim_name(b: &[u8]) -> bool {
-    // every such name is at most 9 bytes and starts with one of `b c f i m n s u v`
-    if b.len() == 0 || b.len() > 9 { return false; }
-    let c = b[0];
-    if c != 98 && c != 99 && c != 102 && c != 105 && c != 109 && c != 110 && c != 115 && c != 117 && c != 118 { return false; }
-    if is_scalar(b) || text.eq_str(b, "vec") || text.eq_str(b, "mask") || text.eq_str(b, "never") { return true; }
-    let mut x = b.len();
-    while x > 0 && b[x - 1] != 120 { x = x - 1; }
-    if x == 0 { return false; }
-    let head = &b[0..x - 1];
-    let n = &b[x..b.len()];
-    let lanes = text.eq_str(n, "n") || text.eq_str(n, "2") || text.eq_str(n, "4") || text.eq_str(n, "8") || text.eq_str(n, "16") || text.eq_str(n, "32") || text.eq_str(n, "64");
-    if !lanes { return false; }
-    if text.starts_with(head, mem.str_bytes("mask")) {
-        let w = &head[4..head.len()];
-        return text.eq_str(w, "8") || text.eq_str(w, "16") || text.eq_str(w, "32") || text.eq_str(w, "64");
-    }
-    return is_scalar(head) && !text.eq_str(head, "isize") && !text.eq_str(head, "usize") && !text.eq_str(head, "bool") && !text.eq_str(head, "char") && !text.eq_str(head, "str");
+// v as a key field: NONE becomes top + 1, above every other value.
+fn enc(v: u32, top: u32) -> u64 {
+    return if v == NONE then (top as u64) + 1 else v as u64;
 }
 
-fn is_scalar(b: &[u8]) -> bool {
-    let names = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize", "f16", "bf16", "f32", "f64", "bool", "char", "str"];
+// The number of bits a value up to x needs.
+fn bits_for(x: u32) -> u64 {
+    let mut w: u64 = 0;
+    while w < 32 && ((x as u64) >> w) != 0 {
+        w = w + 1;
+    }
+    return w;
+}
+
+// The built-in type names: the scalars, `vec`, `mask`, `never`, a vector `TxN` of a lane type,
+// a mask `maskWxN` (N a power of two from 2 to 64, or `n`); and the built-in fns (1; 2: of
+// `std.soa` only). They are few, so each is looked up in the string table.
+fn mark_builtins(nm: &intern.Interned, is_prim: &mut [bool], builtin: &mut [u8]) {
+    let names = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize", "f16", "bf16", "f32", "f64", "bool", "char", "str", "vec", "mask", "never"];
+    let lane_types = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "bf16", "f32", "f64"];
+    let lanes = ["n", "2", "4", "8", "16", "32", "64"];
+    let widths = ["8", "16", "32", "64"];
     for k in 0..names.len() {
-        if text.eq_str(b, names[k]) { return true; }
+        mark(nm, is_prim, mem.str_bytes(names[k]));
     }
-    return false;
+    for n in 0..lanes.len() {
+        let l = lanes[n];
+        for k in 0..lane_types.len() {
+            let t = lane_types[k];
+            let v = f"{t}x{l}";
+            mark(nm, is_prim, v.as_bytes());
+        }
+        for k in 0..widths.len() {
+            let w = widths[k];
+            let m = f"mask{w}x{l}";
+            mark(nm, is_prim, m.as_bytes());
+        }
+    }
+    let fns = ["size_of", "align_of", "fence_stream", "soa_row_size", "soa_read", "soa_write"];
+    for k in 0..fns.len() {
+        let s = intern.find_str(&nm.tab, mem.str_bytes(fns[k]));
+        if s != NONE { builtin[s as usize] = if k < 3 then 1u8 else 2u8; }
+    }
 }
 
-fn builtin_name(b: &[u8]) -> u8 {
-    // every such name starts with `a`, `f`, or `s`
-    if b.len() == 0 || (b[0] != 97 && b[0] != 102 && b[0] != 115) { return 0; }
-    if text.eq_str(b, "size_of") || text.eq_str(b, "align_of") || text.eq_str(b, "fence_stream") { return 1; }
-    if text.eq_str(b, "soa_row_size") || text.eq_str(b, "soa_read") || text.eq_str(b, "soa_write") { return 2; }
-    return 0;
+fn mark(nm: &intern.Interned, flags: &mut [bool], b: &[u8]) {
+    let s = intern.find_str(&nm.tab, b);
+    if s != NONE { flags[s as usize] = true; }
 }
 
 fn sorted_by_key(keys: &[u64], vals: &[u32]) -> (vec.Vec<u64>, vec.Vec<u32>) {
@@ -969,8 +1037,8 @@ pub fn build(md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &s
         var_off: vec.Vec::<u32>.new(),
         var_enum: vec.Vec::<u32>.new(),
         poisoned: vec.Vec::<u32>.new(),
-        is_prim: vec.Vec::<bool>.with_capacity(nm.tab.len()),
-        builtin: vec.Vec::<u8>.with_capacity(nm.tab.len()),
+        is_prim: col.filled(nm.tab.len(), false),
+        builtin: col.filled(nm.tab.len(), 0u8),
     };
     {
         let rp = raw.parent.as_slice();
@@ -996,15 +1064,7 @@ pub fn build(md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &s
             ds.scope_decl.push(cs[sr[s] as usize]);
         }
     }
-    {
-        let so = nm.tab.str_off.as_slice();
-        let sb = nm.tab.str_bytes.as_slice();
-        for s in 0..nm.tab.len() {
-            let b = &sb[so[s] as usize..so[s + 1] as usize];
-            ds.is_prim.push(prim_name(b));
-            ds.builtin.push(builtin_name(b));
-        }
-    }
+    mark_builtins(nm, ds.is_prim.as_mut_slice(), ds.builtin.as_mut_slice());
     let pp = sort.sort_perm(c.poisoned.as_slice());
     let pz = perm.gather(c.poisoned.as_slice(), pp.as_slice());
     for k in 0..pz.len() {

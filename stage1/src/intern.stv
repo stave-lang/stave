@@ -21,6 +21,7 @@ import prims.col;
 import prims.perm;
 import prims.rle;
 import prims.scan;
+import prims.search;
 import prims.sort;
 import prims.xxhash;
 import source;
@@ -106,6 +107,18 @@ pub struct Interned {
     pub pkg_str: vec.Vec<u32>,
     pub file_seg: vec.Vec<u32>,
     pub seg_str: vec.Vec<u32>,
+}
+
+// The id of the string with bytes b, or `idx.NONE` when b is not interned: ids ascend by hash.
+pub fn find_str(tab: &Table, b: &[u8]) -> u32 {
+    let h = xxhash.hash32(b, 0);
+    let hs = tab.str_hash.as_slice();
+    let mut s = search.lower_bound(hs, h);
+    while s < hs.len() && hs[s] == h {
+        if tab.text(s).eq(b) { return s as% u32; }
+        s = s + 1;
+    }
+    return idx.NONE;
 }
 
 // Byte order: 0 when equal, else negative or positive. The equality test goes first: the usual
