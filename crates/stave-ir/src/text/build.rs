@@ -3,7 +3,7 @@
 //! resolution (blocks and values renumbered in text order, fns sorted by instance id), and every
 //! datum of the text placed in its [`Module`] field.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use super::line::{
@@ -557,7 +557,7 @@ pub(crate) fn structure(lines: Vec<Ln>) -> Result<Built, Vec<ReadError>> {
     }
 
     let mut module = Module::new();
-    let mut intrinsics: Vec<String> = Vec::new();
+    let intrinsics = intrinsic_table(&fns);
     let mut map = LineMap {
         header: header_line,
         types: types.iter().map(|t| t.0).collect(),
@@ -583,7 +583,7 @@ pub(crate) fn structure(lines: Vec<Ln>) -> Result<Built, Vec<ReadError>> {
         };
         let mut lines = FnLines { header: f.line, blocks: Vec::new(), terms: Vec::new(), insts: Vec::new() };
         let body = if f.head.body {
-            let mut b = BodyCx { e: &mut e, fids: &fids, intrinsics: &mut intrinsics, inst: &f.head.inst };
+            let mut b = BodyCx { e: &mut e, fids: &fids, intrinsics: &intrinsics, inst: &f.head.inst };
             b.body(f, &mut lines)
         } else {
             None
@@ -662,7 +662,7 @@ fn summary(claims: &[(u32, u32, ClaimKindL, Row)]) -> Summary {
 struct BodyCx<'a> {
     e: &'a mut Errs,
     fids: &'a HashMap<InstanceId, FuncId>,
-    intrinsics: &'a mut Vec<String>,
+    intrinsics: &'a [String],
     inst: &'a InstanceId,
 }
 
@@ -701,6 +701,7 @@ impl BodyCx<'_> {
             }
         }
         let mut body = Body { values, ..Body::default() };
+        let mut pool = Pool::default();
         let r = Resolve { vals: &vals, labels: &labels, fids: self.fids, inst: self.inst };
         for b in &f.blocks {
             let pstart = body.block_params.len() as u32;
@@ -711,11 +712,17 @@ impl BodyCx<'_> {
             for (line, inst) in &b.insts {
                 let op = match &inst.op {
                     OpL::Op(op) => *op,
-                    OpL::Intrinsic(name) => Op::Intrinsic(intern(self.intrinsics, name)),
+                    OpL::Intrinsic(name) => match intrinsic_id(self.intrinsics, name) {
+                        Some(id) => Op::Intrinsic(id),
+                        None => {
+                            self.e.at(*line, 1, format!("`intrinsic.{name}` is not in the intrinsic table"));
+                            Op::Intrinsic(crate::ir::IntrinsicId(u32::MAX))
+                        }
+                    },
                 };
                 let start = body.operands.len() as u32;
                 for a in &inst.args {
-                    let o = r.operand(self.e, *line, a, &mut body.consts);
+                    let o = r.operand(self.e, *line, a, &mut pool);
                     body.operands.push(o);
                 }
                 let args = Span { start, len: body.operands.len() as u32 - start };
@@ -728,7 +735,7 @@ impl BodyCx<'_> {
             }
             let insts = Span { start: istart, len: body.insts.len() as u32 - istart };
             let (tline, term) = match &b.term {
-                Some((no, t)) => (*no, r.term(self.e, *no, t, &mut body)),
+                Some((no, t)) => (*no, r.term(self.e, *no, t, &mut body, &mut pool)),
                 None => (b.line, Term::Unreachable),
             };
             body.blocks.push(BlockData {
@@ -739,6 +746,7 @@ impl BodyCx<'_> {
             lines.blocks.push(b.line);
             lines.terms.push(tline);
         }
+        body.consts = pool.consts;
         if self.e.0.len() != n0 {
             return None;
         }
@@ -757,13 +765,55 @@ fn reject_unreachable_blocks(e: &mut Errs, body: &Body, f: &FnG, inst: &Instance
     }
 }
 
-/// The id of intrinsic name `name`, numbered by first use in print order.
-fn intern(names: &mut Vec<String>, name: &str) -> crate::ir::IntrinsicId {
-    let i = names.iter().position(|n| n == name).unwrap_or_else(|| {
-        names.push(name.to_string());
-        names.len() - 1
-    });
-    crate::ir::IntrinsicId(i as u32)
+/// The module's intrinsic table: the names the bodies use, each once, sorted by bytes
+/// (contracts/checked-ir.md "Canonical module").
+fn intrinsic_table(fns: &[FnG]) -> Vec<String> {
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    for f in fns {
+        for b in &f.blocks {
+            for (_, inst) in &b.insts {
+                if let OpL::Intrinsic(name) = &inst.op {
+                    names.insert(name);
+                }
+            }
+        }
+    }
+    names.into_iter().map(str::to_string).collect()
+}
+
+/// The id of `name` in `table`, a name of a table [`intrinsic_table`] made.
+fn intrinsic_id(table: &[String], name: &str) -> Option<crate::ir::IntrinsicId> {
+    let i = table.binary_search_by(|n| n.as_bytes().cmp(name.as_bytes())).ok()?;
+    Some(crate::ir::IntrinsicId(i as u32))
+}
+
+/// The constant pool of one body: one entry per distinct constant, numbered by first use.
+#[derive(Default)]
+struct Pool {
+    consts: Vec<Const>,
+    ids: HashMap<(u8, i128), ConstId>,
+}
+
+impl Pool {
+    fn id(&mut self, c: Const) -> ConstId {
+        let key = const_key(&c);
+        *self.ids.entry(key).or_insert_with(|| {
+            self.consts.push(c);
+            ConstId(self.consts.len() as u32 - 1)
+        })
+    }
+}
+
+/// What makes two constants the same: the kind and the bits, never the value (`0.0` and `-0.0`
+/// differ, `f16` and `bf16` of equal bits differ).
+fn const_key(c: &Const) -> (u8, i128) {
+    match *c {
+        Const::Int(v) => (0, v),
+        Const::F16(b) => (1, i128::from(b)),
+        Const::BF16(b) => (2, i128::from(b)),
+        Const::F32(b) => (3, i128::from(b)),
+        Const::F64(b) => (4, i128::from(b)),
+    }
 }
 
 struct Resolve<'a> {
@@ -774,7 +824,7 @@ struct Resolve<'a> {
 }
 
 impl Resolve<'_> {
-    fn operand(&self, e: &mut Errs, line: u32, a: &Arg, consts: &mut Vec<Const>) -> Operand {
+    fn operand(&self, e: &mut Errs, line: u32, a: &Arg, pool: &mut Pool) -> Operand {
         match &a.v {
             ArgV::Val(v) => match self.vals.get(v) {
                 Some(&x) => Operand::Value(x),
@@ -783,10 +833,7 @@ impl Resolve<'_> {
                     Operand::Value(Value(u32::MAX))
                 }
             },
-            ArgV::Const(c) => {
-                consts.push(*c);
-                Operand::Const(ConstId(consts.len() as u32 - 1))
-            }
+            ArgV::Const(c) => Operand::Const(pool.id(*c)),
             ArgV::Str(s) => Operand::Str(StrId(*s)),
             ArgV::Func(inst) => match self.fids.get(inst) {
                 Some(&f) => Operand::Func(f),
@@ -799,7 +846,7 @@ impl Resolve<'_> {
         }
     }
 
-    fn target(&self, e: &mut Errs, line: u32, t: &Tgt, body: &mut Body) -> Target {
+    fn target(&self, e: &mut Errs, line: u32, t: &Tgt, body: &mut Body, pool: &mut Pool) -> Target {
         let block = match self.labels.get(&t.label) {
             Some(&k) => Block(k),
             None => {
@@ -809,33 +856,70 @@ impl Resolve<'_> {
         };
         let start = body.operands.len() as u32;
         for a in &t.args {
-            let o = self.operand(e, line, a, &mut body.consts);
+            let o = self.operand(e, line, a, pool);
             body.operands.push(o);
         }
         Target { block, args: Span { start, len: body.operands.len() as u32 - start } }
     }
 
-    fn term(&self, e: &mut Errs, line: u32, t: &TermL, body: &mut Body) -> Term {
+    fn term(&self, e: &mut Errs, line: u32, t: &TermL, body: &mut Body, pool: &mut Pool) -> Term {
         match t {
-            TermL::Br(t) => Term::Br(self.target(e, line, t, body)),
+            TermL::Br(t) => Term::Br(self.target(e, line, t, body, pool)),
             TermL::Cbr(c, a, b) => {
-                let cond = self.operand(e, line, c, &mut body.consts);
-                let then = self.target(e, line, a, body);
-                Term::Cbr { cond, then, els: self.target(e, line, b, body) }
+                let cond = self.operand(e, line, c, pool);
+                let then = self.target(e, line, a, body, pool);
+                Term::Cbr { cond, then, els: self.target(e, line, b, body, pool) }
             }
             TermL::Switch(s, cases, d) => {
-                let scrut = self.operand(e, line, s, &mut body.consts);
+                let scrut = self.operand(e, line, s, pool);
                 let mut new = Vec::with_capacity(cases.len());
                 for (v, t) in cases {
-                    new.push(SwitchCase { value: *v, target: self.target(e, line, t, body) });
+                    new.push(SwitchCase { value: *v, target: self.target(e, line, t, body, pool) });
                 }
-                let default = self.target(e, line, d, body);
+                let default = self.target(e, line, d, body, pool);
                 let span = Span { start: body.cases.len() as u32, len: new.len() as u32 };
                 body.cases.extend(new);
                 Term::Switch { scrut, cases: span, default }
             }
-            TermL::Ret(o) => Term::Ret(o.as_ref().map(|o| self.operand(e, line, o, &mut body.consts))),
+            TermL::Ret(o) => Term::Ret(o.as_ref().map(|o| self.operand(e, line, o, pool))),
             TermL::Unreachable => Term::Unreachable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_outside_the_table_has_no_id() {
+        let table: Vec<String> = ["copy_bytes", "cpuid", "syscall1"].map(String::from).to_vec();
+        assert_eq!(intrinsic_id(&table, "cpuid"), Some(crate::ir::IntrinsicId(1)));
+        for name in ["", "copy", "copy_bytes ", "syscall0", "zz", "Syscall1"] {
+            assert_eq!(intrinsic_id(&table, name), None, "{name:?}");
+        }
+        assert_eq!(intrinsic_id(&[], "cpuid"), None);
+    }
+
+    #[test]
+    fn constants_differ_by_kind_and_bits() {
+        let mut p = Pool::default();
+        let ids = [
+            Const::Int(0),
+            Const::F16(0),
+            Const::BF16(0),
+            Const::F32(0),
+            Const::F64(0),
+            Const::F32(0x8000_0000),
+            Const::Int(-1),
+            Const::F64(0x8000_0000_0000_0000),
+            Const::Int(i128::MIN),
+            Const::Int(i128::MAX),
+        ]
+        .map(|c| p.id(c));
+        assert_eq!(ids.map(|c| c.0), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(p.id(Const::F32(0)), ConstId(3));
+        assert_eq!(p.id(Const::Int(i128::MIN)), ConstId(8));
+        assert_eq!(p.consts.len(), 10);
     }
 }

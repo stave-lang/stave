@@ -579,9 +579,10 @@ fn @3 libc.printf(t9) -> t0 symbol \"printf\" variadic
 fn calls_fn_values_and_intrinsics() {
     let l = load(CALLS);
     let m = &l.module;
-    assert_eq!(m.intrinsics, vec!["syscall1".to_string(), "copy_bytes".to_string()]);
+    assert_eq!(m.intrinsics, vec!["copy_bytes".to_string(), "syscall1".to_string()]);
     let b = m.funcs[0].body.as_ref().unwrap();
-    assert!(matches!(b.insts.op[7], Op::Intrinsic(i) if i.0 == 1));
+    assert!(matches!(b.insts.op[6], Op::Intrinsic(i) if i.0 == 1));
+    assert!(matches!(b.insts.op[7], Op::Intrinsic(i) if i.0 == 0));
     assert_eq!(b.args(10)[1], Operand::Str(StrId(0)));
 }
 
@@ -667,6 +668,146 @@ fn terminators_and_constant_operands() {
             Const::Int(-5),
         ]
     );
+}
+
+/// One pool entry per distinct constant (kind and bits), numbered by first use: block params'
+/// targets, instructions, then the terminator's condition and targets.
+const POOL: &str = "stave.ir 4 \"x86_64-linux-v2\" debug checked
+type t0 int s 32
+type t1 bool
+type t2 float 16
+type t3 float b16
+type t4 float 32
+type t5 float 64
+type t6 int u 8
+fn @0 app.p(t1) -> t0 {
+b0(%0: t1):
+  br b1(0, 0, 0x00000000, 0x80000000, 0x7fc00000, 0x7fc00001, 0x3c00, bf16 0x3c00)
+b1(%1: t0, %2: t6, %3: t4, %4: t4, %5: t4, %6: t4, %7: t2, %8: t3):
+  %9 = add.wrap t0 %1 -1
+  %10 = add.wrap t0 %9 0
+  %11 = add.wrap t0 %10 -1
+  %12 = add.wrap t0 %11 1
+  cbr %0 b2(0, 1) b2(1, 0)
+b2(%13: t0, %14: t0):
+  %15 = add.wrap t0 %13 %14
+  ret 0
+}
+fn @1 app.q(t1) -> t0 {
+b0(%0: t1):
+  %1 = add.wrap t0 7 7
+  ret 7
+}
+";
+
+#[test]
+fn constants_are_one_entry_per_distinct_constant() {
+    let l = load(POOL);
+    let b = l.module.funcs[0].body.as_ref().unwrap();
+    assert_eq!(
+        b.consts,
+        vec![
+            Const::Int(0),
+            Const::F32(0),
+            Const::F32(0x80000000),
+            Const::F32(0x7fc00000),
+            Const::F32(0x7fc00001),
+            Const::F16(0x3c00),
+            Const::BF16(0x3c00),
+            Const::Int(-1),
+            Const::Int(1),
+        ]
+    );
+    let ids: Vec<u32> =
+        b.operands.iter().filter_map(|o| if let Operand::Const(c) = o { Some(c.0) } else { None }).collect();
+    assert_eq!(ids, vec![0, 0, 1, 2, 3, 4, 5, 6, 7, 0, 7, 8, 0, 8, 8, 0]);
+    let ret = |b: &stave_ir::Body| {
+        b.blocks
+            .iter()
+            .filter_map(|d| if let Term::Ret(Some(o)) = d.term { Some(o) } else { None })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ret(b), vec![Operand::Const(stave_ir::ir::ConstId(0))]);
+    // The pool is per body.
+    let q = l.module.funcs[1].body.as_ref().unwrap();
+    assert_eq!(q.consts, vec![Const::Int(7)]);
+}
+
+/// A guard and an access with the same constant index are one fact; with different constants
+/// the access has no guard.
+fn const_index_module(guard: &str, access: &str) -> String {
+    with_head(&format!(
+        "type t0 int s 32
+type t1 slice t0
+type t2 ref t1
+type t3 ref t0
+type t4 int u size
+fn @0 a(t2) -> t0 {{
+b0(%0: t2):
+  %1 = slice.len t4 %0
+  check.bounds () {guard} %1
+  %2 = addr.elem t3 %0 {access}
+  %3 = load t0 %2
+  ret %3
+}}
+"
+    ))
+}
+
+#[test]
+fn the_audit_sees_one_constant_where_the_guard_and_the_access_share_it() {
+    let l = load(&const_index_module("0", "0"));
+    assert_eq!(l.module.funcs[0].body.as_ref().unwrap().consts, vec![Const::Int(0)]);
+    let es = rejects(&const_index_module("0", "1"), "verify: ");
+    assert_eq!(es[0].kind, ErrorKind::Audit);
+}
+
+/// Intrinsic names: the names the bodies use, each once, sorted by bytes, whatever the order of
+/// first use or of the fns.
+const INTRINSICS: &str = "stave.ir 4 \"x86_64-linux-v2\" debug checked
+type t0 int s 32
+type t1 int u size
+type t2 int s size
+type t3 int u 8
+type t4 ptr mut t3
+type t5 ptr const t3
+fn @1 app.b(t4, t5) -> t2 {
+b0(%0: t4, %1: t5):
+  %2 = intrinsic.syscall1 t2 60 0
+  intrinsic.copy_bytes () %0 %1 4
+  ret %2
+}
+fn @0 app.a(t4, t5) {
+b0(%0: t4, %1: t5):
+  %2 = intrinsic.syscall0 t2 39
+  %3 = intrinsic.syscall1 t2 60 0
+  ret
+}
+";
+
+#[test]
+fn the_intrinsic_table_is_sorted_by_bytes_and_every_name_is_used() {
+    let l = load(INTRINSICS);
+    let m = &l.module;
+    let want: Vec<String> = ["copy_bytes", "syscall0", "syscall1"].map(String::from).to_vec();
+    assert_eq!(m.intrinsics, want);
+    let mut used = vec![false; m.intrinsics.len()];
+    for f in &m.funcs {
+        let b = f.body.as_ref().unwrap();
+        for op in &b.insts.op {
+            if let Op::Intrinsic(i) = op {
+                used[i.index()] = true;
+                assert!(m.intrinsic_name(*i).is_some());
+            }
+        }
+    }
+    assert!(used.iter().all(|&u| u), "{used:?}");
+    // @0 is app.a: syscall0 = 1, syscall1 = 2; app.b: syscall1 = 2, copy_bytes = 0.
+    let a = m.funcs[0].body.as_ref().unwrap();
+    assert_eq!(a.insts.op[0], Op::Intrinsic(stave_ir::IntrinsicId(1)));
+    assert_eq!(a.insts.op[1], Op::Intrinsic(stave_ir::IntrinsicId(2)));
+    let b = m.funcs[1].body.as_ref().unwrap();
+    assert_eq!(b.insts.op[1], Op::Intrinsic(stave_ir::IntrinsicId(0)));
 }
 
 /// Vector and mask ops, with the guard of a chunk load and store.
