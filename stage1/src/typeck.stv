@@ -49,6 +49,7 @@ import sigs;
 import source;
 import tc_builtins;
 import tc_chain;
+import tc_pat;
 import tc_rows;
 import types;
 import prims.col;
@@ -97,6 +98,9 @@ const K_UNARY: u8 = node_kinds.KIND_UNARY;
 const K_GENERIC_PARAM: u8 = node_kinds.KIND_GENERIC_PARAM;
 const K_ARGS: u8 = node_kinds.KIND_ARGS;
 const K_FOR_STMT: u8 = node_kinds.KIND_FOR_STMT;
+const K_STMT_ARM: u8 = node_kinds.KIND_STMT_ARM;
+const K_EXPR_ARM: u8 = node_kinds.KIND_EXPR_ARM;
+const K_ARM_PATTERN: u8 = node_kinds.KIND_ARM_PATTERN;
 const K_STRUCT_LIT: u8 = node_kinds.KIND_STRUCT_LIT;
 const T_IDENT: u8 = terminals.T_IDENT as% u8;
 const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
@@ -113,6 +117,7 @@ const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
 const T_KW_SELF_TYPE: u8 = terminals.T_KW_SELF_TYPE as% u8;
 const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
 const T_KW_LET: u8 = terminals.T_KW_LET as% u8;
+const T_KW_MATCH: u8 = terminals.T_KW_MATCH as% u8;
 const T_KW_IF: u8 = terminals.T_KW_IF as% u8;
 const T_KW_WHILE: u8 = terminals.T_KW_WHILE as% u8;
 const T_KW_LOOP: u8 = terminals.T_KW_LOOP as% u8;
@@ -338,6 +343,8 @@ impl tc_rows.Typeck {
             self.set_hint(c, if is_lit(l) then NONE else l);
             return true;
         }
+        if pk == K_MATCH { return self.enter_match(tree, r, k, c); }
+        if pk == K_STMT_ARM || pk == K_EXPR_ARM { return self.enter_arm(sg, ds, nm, t, tree, r, k, c); }
         if pk == K_IF_EXPR {
             if k == 0 {
                 self.set_hint_bool(c);
@@ -438,6 +445,7 @@ impl tc_rows.Typeck {
         if a == T_KW_IF || a == T_KW_LOOP || a == T_KW_UNSAFE || a == T_KW_SCOPE || a == T_KW_STRICT || a == T_KW_EMULATE || a == T_L_BRACE {
             return ck == K_BLOCK || ck == K_IF_STMT;
         }
+        if a == T_KW_MATCH { return self.enter_match(tree, r, k, c); }
         if ck == K_EXPR_STMT { return true; }
         if ck == K_TYPE || ck == K_PATTERN || ck == node_kinds.KIND_TAIL_BIND { return false; }
         self.set_hint(c, UNK);
@@ -500,6 +508,10 @@ impl tc_rows.Typeck {
     fn finish(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) {
         let k = kind(tree, r);
         if k == K_FN_DECL || k == K_BLOCK || k == K_FOR_STMT { return; }
+        if k == K_STMT_ARM || k == K_EXPR_ARM {
+            self.finish_arm(sg, tree, r);
+            return;
+        }
         if k == K_IF_STMT {
             let ks = tree.kids.row(r);
             self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
@@ -511,7 +523,7 @@ impl tc_rows.Typeck {
             return;
         }
         if k == K_STMT {
-            self.finish_stmt(sg, t, tree, r);
+            self.finish_stmt(sg, ds, nm, t, tree, r);
             return;
         }
         if k == K_EXPR_STMT {
@@ -540,7 +552,7 @@ impl tc_rows.Typeck {
         self.nty.as_mut_slice()[r] = v;
     }
 
-    fn finish_stmt(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) {
+    fn finish_stmt(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, r: usize) {
         let a = tk(t, first_tok(tree, r));
         let ks = tree.kids.row(r);
         if a == T_KW_LET {
@@ -554,7 +566,7 @@ impl tc_rows.Typeck {
             } else if init != NONE {
                 ty = self.force_at(init as usize);
             }
-            self.bind_pattern(t, tree, pat, ty);
+            self.bind_pattern(sg, ds, nm, t, tree, pat, ty);
             return;
         }
         if a == T_KW_WHILE {
@@ -576,6 +588,7 @@ impl tc_rows.Typeck {
             self.rets.truncate(self.rets.len() - 1);
             return;
         }
+        if a == T_KW_MATCH { return; }
         if a == T_KW_IF || a == T_KW_LOOP || a == T_KW_UNSAFE || a == T_KW_SCOPE || a == T_KW_STRICT || a == T_KW_EMULATE || a == T_L_BRACE || a == T_KW_BREAK || a == T_KW_CONTINUE { return; }
         if ks.len() == 1 && kind(tree, self.base + ks[0] as usize) == K_EXPR_STMT { return; }
         self.poison_kids(tree, r);
@@ -614,7 +627,10 @@ impl tc_rows.Typeck {
             return self.chain_value(r);
         }
         if k == K_IF_EXPR { return self.if_value(sg, tree, r); }
-        if k == K_MATCH { return self.unknown(tree, r); }
+        if k == K_MATCH {
+            let v = self.arm.as_slice()[r];
+            return if v == NONE then self.t_never else v;
+        }
         return self.unknown(tree, r);
     }
 
@@ -880,8 +896,74 @@ impl tc_rows.Typeck {
         let ks = tree.kids.row(r);
         let h = self.hint.as_slice()[r];
         self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
-        let at = self.resolve_at(self.base + ks[1] as usize);
-        let bt = self.resolve_at(self.base + ks[2] as usize);
+        let a = self.nty.as_slice()[self.base + ks[1] as usize];
+        let b = self.nty.as_slice()[self.base + ks[2] as usize];
+        return self.arms_join(sg, a, b, h);
+    }
+
+    // Before child c (the k-th) of a `match` (value or statement) row r: the scrutinee without a
+    // context, then the arms; the scrutinee's type (kept in `acc`) is decided before the first.
+    fn enter_match(&mut self, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
+        if k == 0 {
+            self.set_hint(c, NONE);
+            return true;
+        }
+        if k == 1 {
+            let s = self.force_at(self.base + tree.kids.row(r)[0] as usize);
+            self.acc.as_mut_slice()[r] = s;
+        }
+        return true;
+    }
+
+    // Before child c (the k-th) of an arm row r: its patterns bind against the scrutinee's type,
+    // a guard is `bool`, a value arm's context is the arms' type so far when the `match` has none.
+    fn enter_arm(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
+        let m = sg.cx.parent.as_slice()[r] as usize;
+        let ck = kind(tree, c);
+        if ck == K_ARM_PATTERN {
+            let st = self.acc.as_slice()[m];
+            let ps = tree.kids.row(c);
+            for j in 0..ps.len() {
+                self.bind_pattern(sg, ds, nm, t, tree, self.base + ps[j] as usize, st);
+            }
+            return false;
+        }
+        let ks = tree.kids.row(r);
+        if k == 1 && ks.len() >= 3 {
+            self.set_hint_bool(c);
+            return true;
+        }
+        if ck == K_BLOCK { return true; }
+        let hm = self.hint.as_slice()[m];
+        let so_far = self.arm.as_slice()[m];
+        let rr = if so_far == NONE then NONE else self.resolve(so_far);
+        let typed = rr != NONE && rr != UNK && !is_lit(rr) && rr != self.t_never;
+        let h = if rr == UNK then UNK else if typed && hm == UNK then UNK else if typed && hm == NONE then rr else hm;
+        self.set_hint(c, h);
+        return true;
+    }
+
+    // An arm finished: its guard is `bool`; a value arm's value joins the arms' type so far.
+    fn finish_arm(&mut self, sg: &mut sigs.Sigs, tree: &ast.Ast, r: usize) {
+        let ks = tree.kids.row(r);
+        if ks.len() >= 3 { self.coerce_bool(&sg.cx.tab, self.base + ks[1] as usize); }
+        if kind(tree, r) != K_EXPR_ARM { return; }
+        let m = sg.cx.parent.as_slice()[r] as usize;
+        let v = self.nty.as_slice()[self.base + ks[ks.len() - 1] as usize];
+        let so_far = self.arm.as_slice()[m];
+        if so_far == NONE {
+            self.arm.as_mut_slice()[m] = v;
+            return;
+        }
+        let h = self.hint.as_slice()[m];
+        let j = self.arms_join(sg, so_far, v, h);
+        self.arm.as_mut_slice()[m] = j;
+    }
+
+    // stage0's `arms_unify`: the type of two arms' values a and b under context type h.
+    fn arms_join(&mut self, sg: &mut sigs.Sigs, a: u32, b: u32, h: u32) -> u32 {
+        let at = self.resolve(a);
+        let bt = self.resolve(b);
         if at == UNK || bt == UNK {
             self.poison(at);
             self.poison(bt);
@@ -985,7 +1067,7 @@ impl tc_rows.Typeck {
             let bind = if b == NONE then e else b;
             if b != NONE && b != UNK && e != UNK && e != b { self.bad = true; }
             let pat = self.base + tree.kids.row(r)[0] as usize;
-            self.bind_pattern(t, tree, pat, bind);
+            self.bind_pattern(sg, ds, nm, t, tree, pat, bind);
             return true;
         }
         self.set_hint(c, UNK);
@@ -1205,6 +1287,10 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &in
         soa_mod: md.soa_mod,
         args: vec.Vec::<u32>.new(),
         headless: tc_chain.headless_names(ds),
+        pat_row: vec.Vec::<u32>.new(),
+        pat_ty: vec.Vec::<u32>.new(),
+        pat_mode: vec.Vec::<u8>.new(),
+        arm: col.filled(n, NONE),
         bt: tc_builtins.table(&nm.tab),
         t_bool: t_bool,
         t_char: t_char,
