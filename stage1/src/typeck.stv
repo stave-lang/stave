@@ -25,9 +25,9 @@
 // `NONE` (printed `-`): a node that denotes no value (the head of a path naming a module, type,
 // or fn), or that the checker never visits (types, patterns, nodes outside any body).
 //
-// The checker is five modules, each owning one concern:
-// - `typeck` (this one): the walk, statements, primaries, operators, casts, `for` loops; the entry
-//   point `build`.
+// The checker is nine modules, each owning one concern:
+// - `typeck` (this one): the walk, statements, primaries, operators, casts, `for` loops, array
+//   literals; the entry point `build` and its rounds.
 // - `tc_rows`: the state (`Typeck`: the node rows and the body's literal groups) and what every
 //   other module calls on it: literal groups, `coerce`, `unify`, `force`, hints, `err`.
 // - `tc_chain`: postfix chains (path steps, fields, tuple elements, indexing, calls, method
@@ -35,6 +35,10 @@
 //   `arg_hint`.
 // - `tc_builtins`: the built-in methods and type-relative built-ins, as a table (`Builtins`).
 // - `tc_pat`: pattern bindings (`bind_pattern`).
+// - `tc_traits`: the trait questions a body asks of the one solver, in rounds.
+// - `tc_method`: method lookup on a receiver value.
+// - `tc_ops`: user operators through their operator traits.
+// - `tc_closure`: closure literals.
 import ast;
 import consteval;
 import decls;
