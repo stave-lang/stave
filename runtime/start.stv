@@ -130,6 +130,20 @@ pub fn arg(i: usize) -> usize {
     return unsafe("argv[i] with i < argc lies in the initial stack, which stays mapped") *((v + i * 8) as *const usize);
 }
 
+// Address of the NUL-terminated environment entry i (`NAME=value`); 0 past the last one.
+pub fn env_at(i: usize) -> usize {
+    let st = state.get();
+    let mut p = unsafe("st is runtime.state.STATE, filled by entry before main") (*st).envp;
+    if p == 0 { return 0; }
+    let mut k: usize = 0;
+    loop {
+        let e = unsafe("envp is a NULL-terminated array on the initial stack, which stays mapped, and p is at or before its NULL") *(p as *const usize);
+        if e == 0 || k == i { return e; }
+        k = k + 1;
+        p = p + 8;
+    }
+}
+
 // AT_HWCAP and AT_HWCAP2 (AArch64 feature detection, contracts/intrinsics.md).
 pub fn hwcap() -> (u64, u64) {
     let st = state.get();

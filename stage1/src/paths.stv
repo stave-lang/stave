@@ -1,0 +1,118 @@
+// `/`-separated paths as UTF-8 strings, with the lexical rules of Rust's `Path` that stage0's
+// package loader uses: join, normalization (drop `.`, `..` pops the previous component), the
+// parent, the last component, and the extension.
+import text;
+import std.mem;
+import std.string;
+import std.vec;
+
+const SLASH: u8 = 47;
+const DOT: u8 = 46;
+
+fn is_dot(c: &[u8]) -> bool {
+    return c.len() == 1 && c[0] == DOT;
+}
+
+fn is_dotdot(c: &[u8]) -> bool {
+    return c.len() == 2 && c[0] == DOT && c[1] == DOT;
+}
+
+// The components of p as (start, end) offsets: empty ones and `.` dropped, except a leading `.`
+// of a relative path (Rust keeps it as `CurDir`).
+fn components(p: &[u8]) -> vec.Vec<(usize, usize)> {
+    let mut out = vec.Vec::<(usize, usize)>.new();
+    let n = p.len();
+    let mut i: usize = 0;
+    while i < n {
+        while i < n && p[i] == SLASH { i = i + 1; }
+        let s = i;
+        while i < n && p[i] != SLASH { i = i + 1; }
+        if s < i {
+            let lead = s == 0;
+            if !is_dot(&p[s..i]) || lead { out.push((s, i)); }
+        }
+    }
+    return out;
+}
+
+// a joined with b (b itself when absolute or a is empty).
+pub fn join(a: &str, b: &str) -> string.String {
+    let ab = mem.str_bytes(a);
+    let bb = mem.str_bytes(b);
+    if ab.len() == 0 || (bb.len() > 0 && bb[0] == SLASH) { return string.String.from_str(b); }
+    let mut s = string.String.from_str(a);
+    if ab[ab.len() - 1] != SLASH { s.push_str("/"); }
+    s.push_str(b);
+    return s;
+}
+
+// Lexical normalization: `.` dropped, `..` removes the previous component (or stays when there
+// is none).
+pub fn normalize(p: &str) -> string.String {
+    let b = mem.str_bytes(p);
+    let abs = b.len() > 0 && b[0] == SLASH;
+    let cs = components(b);
+    let mut keep = vec.Vec::<(usize, usize)>.new();
+    for k in 0..cs.len() {
+        let (s, e) = *cs.get_ref(k);
+        let c = &b[s..e];
+        if is_dot(c) { continue; }
+        if is_dotdot(c) {
+            if keep.len() > 0 {
+                let _ = keep.pop();
+                continue;
+            }
+        }
+        keep.push((s, e));
+    }
+    let mut out = string.String.new();
+    if abs { out.push_str("/"); }
+    for k in 0..keep.len() {
+        let (s, e) = *keep.get_ref(k);
+        if k > 0 { out.push_str("/"); }
+        text.push_bytes(&mut out, &b[s..e]);
+    }
+    return out;
+}
+
+// Everything before the last component ("" for a single relative component).
+pub fn parent(p: &str) -> string.String {
+    let b = mem.str_bytes(p);
+    let cs = components(b);
+    if cs.len() == 0 { return string.String.new(); }
+    if cs.len() == 1 {
+        return if b.len() > 0 && b[0] == SLASH then string.String.from_str("/") else string.String.new();
+    }
+    let (s, e) = *cs.get_ref(cs.len() - 2);
+    return text.string_of(&b[0..e]);
+}
+
+// The last component, unless it is `.` or `..` or there is none.
+pub fn file_name(p: &str) -> Option<string.String> {
+    let b = mem.str_bytes(p);
+    let cs = components(b);
+    if cs.len() == 0 { return Option.None; }
+    let (s, e) = *cs.get_ref(cs.len() - 1);
+    let c = &b[s..e];
+    if is_dot(c) || is_dotdot(c) { return Option.None; }
+    return Option.Some(text.string_of(c));
+}
+
+// Whether the last component has the extension ext (the text after its last `.`, which is not
+// its first byte).
+pub fn has_extension(p: &str, ext: &str) -> bool {
+    let name = match file_name(p) {
+        Option.Some(n) => n,
+        Option.None => string.String.new(),
+    };
+    let b = name.as_bytes();
+    let x = mem.str_bytes(ext);
+    if b.len() < x.len() + 2 { return false; }
+    let dot = b.len() - x.len() - 1;
+    if b[dot] != DOT || !text.ends_with(b, x) { return false; }
+    // the extension follows the last dot only
+    for k in dot + 1..b.len() {
+        if b[k] == DOT { return false; }
+    }
+    return true;
+}
