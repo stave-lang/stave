@@ -211,7 +211,92 @@ pub fn abi_signature(k: Known) -> Option<(&'static [ITy], ITy)> {
         Known::TryAlloc => (&[Usize, Usize], MutPtrU8),
         Known::Free => (&[MutPtrU8, Usize, Usize], Unit),
         Known::TryRealloc => (&[MutPtrU8, Usize, Usize, Usize], MutPtrU8),
-        _ => return None,
+        // Called by IR calls only.
+        Known::Option
+        | Known::Result
+        | Known::Copy
+        | Known::Send
+        | Known::Sync
+        | Known::Flat
+        | Known::Frozen
+        | Known::Drop
+        | Known::Display
+        | Known::Write
+        | Known::OpAdd
+        | Known::OpWrapAdd
+        | Known::OpSatAdd
+        | Known::OpSub
+        | Known::OpWrapSub
+        | Known::OpSatSub
+        | Known::OpMul
+        | Known::OpWrapMul
+        | Known::OpSatMul
+        | Known::OpDiv
+        | Known::OpRem
+        | Known::OpShl
+        | Known::OpWrapShl
+        | Known::OpShr
+        | Known::OpBitAnd
+        | Known::OpBitOr
+        | Known::OpBitXor
+        | Known::OpNeg
+        | Known::OpNot
+        | Known::String
+        | Known::StringNew
+        | Known::StringPushStr
+        | Known::StringAsStr
+        | Known::UnsafeCell
+        | Known::UnsafeCellNew
+        | Known::Soa
+        | Known::AtomicU32New
+        | Known::AtomicU64New
+        | Known::AtomicUsizeNew
+        | Known::AtomicBoolNew
+        | Known::Mutex
+        | Known::MutexNew
+        | Known::MutexLock
+        | Known::MutexGuard
+        | Known::Once
+        | Known::OnceNew
+        | Known::OnceGetOrInit
+        | Known::LockPair
+        | Known::MemForget
+        | Known::ThreadJoin
+        | Known::ParFor
+        | Known::ParForMut
+        | Known::TrapMsg
+        | Known::TrapErr
+        | Known::Abort
+        | Known::PanicBegin
+        | Known::RequiresFailed
+        | Known::EnsuresFailed
+        | Known::SetUserSite
+        | Known::TestInput
+        | Known::TestSkip
+        | Known::ErrtracePush
+        | Known::ErrtraceRestart
+        | Known::ErrtraceSave
+        | Known::ErrtraceRestore
+        | Known::ThreadStart
+        | Known::RtThreadJoin
+        | Known::ScopeSpawn
+        | Known::ScopeJoin
+        | Known::RunQueued
+        | Known::CpuFeatures
+        | Known::CpuWord
+        | Known::CpuTrace
+        | Known::Alloc
+        | Known::Realloc
+        | Known::AtomicLock
+        | Known::AtomicTryLock
+        | Known::AtomicUnlock
+        | Known::Futex
+        | Known::OsRead
+        | Known::OsWrite
+        | Known::OsPread64
+        | Known::OsPwrite64
+        | Known::OsOpenat
+        | Known::OsFlock => return None,
     })
 }
 

@@ -522,6 +522,25 @@ fn known_signatures() {
     has(&bad, "`runtime.thread.entry` must have the signature");
 }
 
+/// Every known item with an ABI signature is checked against it; the others are not.
+#[test]
+fn every_abi_signature_is_enforced() {
+    use stave_ir::Known;
+    let mut checked = 0;
+    for &k in Known::ALL {
+        let mut m = Module::new();
+        let u8t = m.types.u8();
+        // Five `u8` parameters match no row.
+        define_known(&mut m, &[0], k, &[u8t; 5], None, |b, _| b.unreachable());
+        m.funcs[0].alt_stack = false;
+        let e = errs(&m);
+        let wrong = e.iter().any(|s| s.contains("must have the signature"));
+        assert_eq!(wrong, stave_ir::known::abi_signature(k).is_some(), "{k}: {e:#?}");
+        checked += usize::from(wrong);
+    }
+    assert_eq!(checked, 9);
+}
+
 /// Each operand and switch case belongs to one span at most.
 #[test]
 fn shared_spans() {
