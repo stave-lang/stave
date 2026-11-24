@@ -186,7 +186,8 @@ pub struct Consts {
 
 // The layout requests of `size_of` / `align_of` calls, by the call's node row: the state
 // (`CV_OK`, `CV_FAIL`, or pending `CV_LAYOUT`), size and alignment once decided, and the item and
-// scope the type argument is lowered in.
+// scope the type argument is lowered in, as of the round that last met the request (`met`: this
+// round did; the scope's types are this round's).
 pub struct Lay {
     pub row: vec.Vec<u32>,
     pub st: vec.Vec<u8>,
@@ -194,11 +195,12 @@ pub struct Lay {
     pub aln: vec.Vec<u64>,
     pub it: vec.Vec<u32>,
     pub sc: vec.Vec<Scope>,
+    pub met: vec.Vec<bool>,
 }
 
 impl Lay {
     pub fn new() -> Lay {
-        return Lay.{ row: vec.Vec::<u32>.new(), st: vec.Vec::<u8>.new(), size: vec.Vec::<u64>.new(), aln: vec.Vec::<u64>.new(), it: vec.Vec::<u32>.new(), sc: vec.Vec::<Scope>.new() };
+        return Lay.{ row: vec.Vec::<u32>.new(), st: vec.Vec::<u8>.new(), size: vec.Vec::<u64>.new(), aln: vec.Vec::<u64>.new(), it: vec.Vec::<u32>.new(), sc: vec.Vec::<Scope>.new(), met: vec.Vec::<bool>.new() };
     }
 
     pub fn len(&self) -> usize {
@@ -220,6 +222,7 @@ impl Lay {
         self.aln.push(0);
         self.it.push(it);
         self.sc.push(sc);
+        self.met.push(true);
     }
 
     pub fn pending(&self) -> usize {
@@ -228,6 +231,13 @@ impl Lay {
             if self.st.as_slice()[k] == CV_LAYOUT { n = n + 1; }
         }
         return n;
+    }
+
+    // Starts a round: no request met yet.
+    pub fn new_round(&mut self) {
+        for k in 0..self.met.len() {
+            self.met.as_mut_slice()[k] = false;
+        }
     }
 
     // Decides every pending request as failed (what waits on itself).
@@ -835,6 +845,11 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                                 continue;
                             }
                             let st = cx.lay.st.as_slice()[r as usize];
+                            if st == CV_LAYOUT {
+                                cx.lay.it.as_mut_slice()[r as usize] = it;
+                                cx.lay.sc.as_mut_slice()[r as usize] = cx.sc;
+                                cx.lay.met.as_mut_slice()[r as usize] = true;
+                            }
                             if st != CV_OK {
                                 ev.fail(st);
                                 continue;

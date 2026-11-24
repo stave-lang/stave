@@ -1579,6 +1579,7 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
 pub fn build(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, res: &resolve.Names) -> Sigs {
     let mut lay = consteval.Lay.new();
     loop {
+        lay.new_round();
         let mut sg = build_round(fl, md, ds, nm, set, t, cut, tree, res, lay);
         if sg.cx.lay.pending() == 0 { return sg; }
         let decided = settle(&mut sg, ds, nm, set, t, cut, tree);
@@ -1596,7 +1597,7 @@ fn settle(sg: &mut Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.So
     let mut lw = Lw.new();
     let mut decided: u32 = 0;
     for r in 0..sg.cx.lay.len() {
-        if sg.cx.lay.st.as_slice()[r] != consteval.CV_LAYOUT { continue; }
+        if sg.cx.lay.st.as_slice()[r] != consteval.CV_LAYOUT || !sg.cx.lay.met.as_slice()[r] { continue; }
         let it = sg.cx.lay.it.as_slice()[r];
         let sc = sg.cx.lay.sc.as_slice()[r];
         let base = tree.item_node.as_slice()[it as usize] as usize;
