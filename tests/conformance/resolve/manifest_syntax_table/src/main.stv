@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// E1002 case `syntax` for an array of tables, which the manifest reader does not support.
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,139 @@
+//~ STDOUT for_lending_exits.stdout
+// A `for` over a lending iterator (`next` returns items that borrow the iterator, `from self`)
+// whose items have drop glue: each item is dropped after the body's locals, at the body's end
+// and on every exit (`break`, `continue`, `return`, `?`), and before the iterator: an owned
+// iterator is dropped with its loop, after its last item; one reached through `&mut` is the
+// caller's, free again after the loop. The `Option` that `next` returns holds no drop of its
+// own, so nothing reads the iterator after it ends.
+import std.io;
+
+struct D { id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        io.print(f" {self.id}");
+    }
+}
+
+// reads the borrowed counter in its drop
+view struct G { r: &u32 }
+
+impl Drop for G {
+    fn drop(&mut self) {
+        let n = *self.r;
+        io.print(f" G{n}");
+    }
+}
+
+// `n` items, each a view of the counter `v`; its field `d` is dropped with it
+struct Lend { v: u32, n: u32, d: D }
+
+impl Lend {
+    fn next(&mut self) -> Option<G> from self {
+        if self.n == 0 {
+            return Option.None;
+        }
+        self.n -= 1;
+        self.v += 1;
+        return Option.Some(G.{ r: &self.v });
+    }
+}
+
+fn mk(id: u32) -> D {
+    return D.{ id: id };
+}
+
+fn lend(id: u32) -> Lend {
+    return Lend.{ v: 0, n: 3, d: mk(id) };
+}
+
+fn check(v: u32, k: u32) -> Result<u32, u32> {
+    if v == k {
+        return Result.Err(7);
+    }
+    return Result.Ok(v);
+}
+
+fn normal() {
+    for g in lend(9) {
+        let e = mk(1);
+    }
+    io.print(" |");
+}
+
+fn brk(k: u32) {
+    for g in lend(9) {
+        let e = mk(1);
+        if *g.r == k {
+            break;
+        }
+    }
+    io.print(" |");
+}
+
+fn cont() {
+    for g in lend(9) {
+        let e = mk(1);
+        if *g.r == 2 {
+            continue;
+        }
+        io.print(" c");
+    }
+    io.print(" |");
+}
+
+fn ret(k: u32) -> Result<u32, u32> {
+    for g in lend(9) {
+        let e = mk(1);
+        if *g.r == k {
+            return Result.Ok(1);
+        }
+        let _ = check(*g.r, k + 1)?;
+    }
+    io.print(" |");
+    return Result.Ok(0);
+}
+
+fn through_mut() {
+    let mut l = lend(8);
+    for g in &mut l {
+        let e = mk(1);
+        if *g.r == 2 {
+            break;
+        }
+    }
+    l.v = 7;
+    for g in &mut l {
+        io.print(" b");
+    }
+    io.print(" |");
+}
+
+fn nl() {
+    io.print("\n");
+}
+
+fn main() -> i32 {
+    io.print("normal:");
+    normal();
+    nl();
+    io.print("break:");
+    brk(2);
+    nl();
+    io.print("continue:");
+    cont();
+    nl();
+    io.print("return:");
+    let _ = ret(2);
+    nl();
+    io.print("?:");
+    let _ = ret(0);
+    nl();
+    io.print("none:");
+    let _ = ret(7);
+    nl();
+    io.print("through &mut:");
+    through_mut();
+    nl();
+    return 0;
+}

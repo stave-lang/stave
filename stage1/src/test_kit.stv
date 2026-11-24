@@ -1,0 +1,181 @@
+// A build in memory for the tests of `modules`, `decls`, and `resolve`: packages and files are
+// added in rank order (packages by name, files by package name then path), then every stage
+// runs on them as `main` runs them on a discovered build.
+import decls;
+import files;
+import intern;
+import items;
+import lex;
+import modules;
+import parse;
+import resdiag;
+import resolve;
+import source;
+import ast;
+import text;
+import std.mem;
+import std.string;
+import std.vec;
+
+pub struct Kit {
+    pub fl: files.FileList,
+    pub set: source.SourceSet,
+    dep_counts: vec.Vec<u32>,
+}
+
+pub struct Out {
+    pub set: source.SourceSet,
+    pub lx: lex.Lexer,
+    pub toks: lex.Tokens,
+    pub cut: items.Items,
+    pub tree: ast.Ast,
+    pub nm: intern.Interned,
+    pub md: modules.Modules,
+    pub ds: decls.Decls,
+    pub res: resolve.Names,
+    pub rows: resdiag.Rows,
+}
+
+pub fn kit() -> Kit {
+    let mut s = source.SourceSet.{ bytes: vec.Vec::<u8>.new(), file_off: vec.Vec::<u64>.new(), read_err: vec.Vec::<u8>.new() };
+    s.file_off.push(0);
+    return Kit.{ fl: files.FileList.empty(), set: s, dep_counts: vec.Vec::<u32>.new() };
+}
+
+impl Kit {
+    // Adds the next package by rank; returns its rank.
+    pub fn package(&mut self, name: &str, builtin: bool, root: bool, lib: bool) -> u32 {
+        self.fl.pkg_name.push(string.String.from_str(name));
+        self.fl.pkg_builtin.push(builtin);
+        self.fl.pkg_root.push(root);
+        self.fl.pkg_lib.push(lib);
+        self.dep_counts.push(0);
+        return (self.fl.pkg_name.len() - 1) as% u32;
+    }
+
+    // Package `pkg` binds `name` to package `to` (bindings of one package by name, packages in
+    // rank order).
+    pub fn dep(&mut self, pkg: u32, name: &str, to: u32) {
+        self.fl.dep_name.push(string.String.from_str(name));
+        self.fl.dep_pkg.push(to);
+        let c = self.dep_counts.as_slice()[pkg as usize] + 1;
+        self.dep_counts.as_mut_slice()[pkg as usize] = c;
+    }
+
+    // Adds the next file by rank: its package and module path in the package (`a/b`).
+    pub fn file(&mut self, pkg: u32, module: &str, src: &str) {
+        self.fl.package.push(string.String.from_str(self.fl.pkg_name.get_ref(pkg as usize).as_str()));
+        self.fl.rel_path.push(string.String.from_str(module));
+        self.fl.abs_path.push(string.String.from_str(module));
+        self.fl.module.push(string.String.from_str(module));
+        self.fl.file_pkg.push(pkg);
+        self.set.bytes.extend_from_slice(mem.str_bytes(src));
+        self.set.file_off.push(self.set.bytes.len() as u64);
+        self.set.read_err.push(source.READ_OK);
+    }
+
+    pub fn run(self) -> Out {
+        let mut k = self;
+        k.fl.dep_off.clear();
+        k.fl.dep_off.push(0);
+        let mut acc: u32 = 0;
+        for p in 0..k.dep_counts.len() {
+            acc = acc + k.dep_counts.as_slice()[p];
+            k.fl.dep_off.push(acc);
+        }
+        let lx = lex.Lexer.new();
+        let mut toks = lex.Tokens.new();
+        for f in 0..k.set.files() {
+            lx.lex_file(k.set.file(f), &mut toks);
+        }
+        let cut = items.build(&lx, &k.set, &toks);
+        let tree = parse.build(&k.set, &toks, &cut);
+        let nm = intern.build(&k.set, &toks, &k.fl);
+        let mut rows = resdiag.Rows.new();
+        let md = modules.build(&k.fl, &nm, &lx, &k.set, &toks, &cut, &tree, &mut rows);
+        let ds = decls.build(&md, &nm, &lx, &k.set, &toks, &cut, &tree, &mut rows);
+        let res = resolve.build(&md, &ds, &nm, &lx, &k.set, &toks, &cut, &tree, &mut rows);
+        let Kit.{ fl: _, set, dep_counts: _ } = k;
+        return Out.{ set: set, lx: lx, toks: toks, cut: cut, tree: tree, nm: nm, md: md, ds: ds, res: res, rows: rows };
+    }
+}
+
+impl Out {
+    // The id of string s (NONE if not interned).
+    pub fn sym(&self, s: &str) -> u32 {
+        return modules.lookup(&self.nm.tab, mem.str_bytes(s));
+    }
+
+    // The module whose path text is s, or NONE.
+    pub fn module(&self, s: &str) -> u32 {
+        for m in 0..self.md.modules() {
+            if text.eq_str(self.md.text(m), s) { return m as% u32; }
+        }
+        return modules.NONE;
+    }
+
+    // The decl of module m's scope named s (NONE).
+    pub fn item(&self, m: u32, s: &str) -> u32 {
+        let (d, _) = self.ds.entry(m, self.sym(s));
+        return d;
+    }
+
+    // The byte offset of the k-th occurrence (0 first) of `pat` in file f.
+    pub fn at(&self, f: usize, pat: &str, k: usize) -> u32 {
+        let src = self.set.file(f);
+        let p = mem.str_bytes(pat);
+        let mut seen: usize = 0;
+        if p.len() > src.len() { return modules.NONE; }
+        for i in 0..src.len() - p.len() + 1 {
+            if src[i..i + p.len()].eq(p) {
+                if seen == k { return i as% u32; }
+                seen = seen + 1;
+            }
+        }
+        return modules.NONE;
+    }
+
+    // The names row whose identifier is at byte offset off of item i: (tag, target), or (255, NONE).
+    pub fn name_at(&self, i: u32, off: u32) -> (u8, u32) {
+        for k in 0..self.res.len() {
+            if self.res.item.as_slice()[k] == i && self.res.off.as_slice()[k] == off { return (self.res.tag.as_slice()[k], self.res.target.as_slice()[k]); }
+        }
+        return (255, modules.NONE);
+    }
+
+    // The item of file f holding byte offset off.
+    pub fn item_at(&self, f: usize, off: u32) -> u32 {
+        for i in 0..self.cut.len() {
+            if self.cut.file.as_slice()[i] as usize == f && self.cut.off_start.as_slice()[i] <= off && off < self.cut.off_end.as_slice()[i] { return i as% u32; }
+        }
+        return modules.NONE;
+    }
+
+    // The resolution of the identifier at the k-th occurrence of `pat` in file f.
+    pub fn res_of(&self, f: usize, pat: &str, k: usize) -> (u8, u32) {
+        let off = self.at(f, pat, k);
+        return self.name_at(self.item_at(f, off), off);
+    }
+
+    // The node kind of item-relative node n of item i.
+    pub fn node_kind(&self, i: u32, n: u32) -> u8 {
+        return self.tree.kind.as_slice()[self.tree.item_node.as_slice()[i as usize] as usize + n as usize];
+    }
+
+    // The byte offset of the first token of item-relative node n of item i.
+    pub fn node_off(&self, i: u32, n: u32) -> u32 {
+        let g = self.tree.tok.as_slice()[self.tree.item_node.as_slice()[i as usize] as usize + n as usize];
+        return self.toks.start.as_slice()[g as usize];
+    }
+}
+
+// One root package `main` (files in rank order) with a built-in `std` holding `std.core`.
+pub fn single(src: &str) -> Out {
+    let mut k = kit();
+    let m = k.package("main", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(m, "std", s);
+    k.file(m, "main", src);
+    k.file(s, "core", "pub enum Option<T> { Some(T), None }\npub trait Copy {}\n");
+    return k.run();
+}

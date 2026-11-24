@@ -1,0 +1,383 @@
+// The diagnostics of signature building as rows of `diag.Diags`: each `sigs` row with its holes
+// rebuilt as stage0 writes them. A name is the token as written; a type is its Stave spelling
+// (`display`): an ADT by its declared name, a generic param by its name in the signature's
+// generics (`T<i>` past them), at most 64 levels deep and about 4096 bytes long, `..` past that.
+import ast;
+import consteval;
+import decls;
+import diag;
+import intern;
+import items;
+import lex;
+import sigs;
+import source;
+import text;
+import types;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+const DISPLAY_MAX: usize = 4096;
+const DEPTH_MAX: u32 = 64;
+
+// Display stack entries: a type to spell at a depth, a literal piece, a const argument (`val`
+// the type, `depth` the word offset in its extra row), an ` align N`, a fn type's clauses.
+const P_TYPE: u8 = 0;
+const P_TEXT: u8 = 1;
+const P_CONST: u8 = 2;
+const P_ALIGN: u8 = 3;
+const P_CLAUSES: u8 = 4;
+
+// The literal pieces a type's spelling is made of.
+const PIECES: &str = "& &mut *const *mut [ ] ; ( ) , , ) -> fn( < > .. never Self _ Range< RangeInclusive<";
+
+struct Disp {
+    kind: vec.Vec<u8>,
+    val: vec.Vec<u32>,
+    depth: vec.Vec<u32>,
+}
+
+impl Disp {
+    fn ty(&mut self, t: u32, depth: u32) {
+        self.push(P_TYPE, t, depth);
+    }
+
+    fn piece(&mut self, k: u32) {
+        self.push(P_TEXT, k, 0);
+    }
+
+    fn push(&mut self, k: u8, v: u32, d: u32) {
+        self.kind.push(k);
+        self.val.push(v);
+        self.depth.push(d);
+    }
+}
+
+// Piece indexes into `PIECES`.
+const AMP: u32 = 0;
+const AMP_MUT: u32 = 1;
+const PTR_CONST: u32 = 2;
+const PTR_MUT: u32 = 3;
+const LBRACKET: u32 = 4;
+const RBRACKET: u32 = 5;
+const SEMI: u32 = 6;
+const LPAREN: u32 = 7;
+const RPAREN: u32 = 8;
+const COMMA_SP: u32 = 9;
+const COMMA_1: u32 = 10;
+const ARROW: u32 = 12;
+const FN_OPEN: u32 = 13;
+const LT: u32 = 14;
+const GT: u32 = 15;
+const DOTS: u32 = 16;
+const NEVER: u32 = 17;
+const SELF_T: u32 = 18;
+const UNDER: u32 = 19;
+const RANGE: u32 = 20;
+const RANGE_INCL: u32 = 21;
+
+fn push_piece(out: &mut vec.Vec<u8>, k: u32) {
+    if k == SEMI {
+        out.extend_from_slice(mem.str_bytes("; "));
+        return;
+    }
+    if k == COMMA_SP {
+        out.extend_from_slice(mem.str_bytes(", "));
+        return;
+    }
+    if k == COMMA_1 {
+        out.push(44);
+        return;
+    }
+    if k == ARROW {
+        out.extend_from_slice(mem.str_bytes(" -> "));
+        return;
+    }
+    if k == AMP_MUT || k == PTR_CONST || k == PTR_MUT {
+        let (a, b) = sigs.word(PIECES, k as usize);
+        out.extend_from_slice(&mem.str_bytes(PIECES)[a..b]);
+        out.push(32);
+        return;
+    }
+    let (a, b) = sigs.word(PIECES, k as usize);
+    out.extend_from_slice(&mem.str_bytes(PIECES)[a..b]);
+}
+
+// The name of flat generic param i in scope words (par_lo, par_hi, own_lo, own_hi).
+fn param_name(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, nm: &intern.Interned, sc: &[u32], i: u32) {
+    let np = sc[1] - sc[0];
+    let r = if i < np then sc[0] + i else if i - np < sc[3] - sc[2] then sc[2] + i - np else NONE;
+    if r == NONE {
+        out.push(84);
+        text.push_u32(out, i);
+        return;
+    }
+    let s = sg.cx.gens.name.as_slice()[r as usize];
+    if s == NONE {
+        out.push(95);
+        return;
+    }
+    out.extend_from_slice(nm.tab.text(s as usize));
+}
+
+fn scalar_name(out: &mut vec.Vec<u8>, tab: &types.Table, t: u32) {
+    let tag = tab.tag_of(t);
+    let a = tab.a_of(t);
+    let b = tab.b_of(t);
+    if tag == types.TK_INT {
+        out.push(if a == 1 then 105u8 else 117u8);
+        out.extend_from_slice(mem.str_bytes(if b == types.W_8 then "8" else if b == types.W_16 then "16" else if b == types.W_32 then "32" else if b == types.W_64 then "64" else "size"));
+    } else if tag == types.TK_FLOAT {
+        out.extend_from_slice(mem.str_bytes(if a == 0 then "f16" else if a == 1 then "f32" else if a == 2 then "f64" else "bf16"));
+    } else if tag == types.TK_BOOL {
+        out.extend_from_slice(mem.str_bytes("bool"));
+    } else if tag == types.TK_CHAR {
+        out.extend_from_slice(mem.str_bytes("char"));
+    } else if tag == types.TK_STR {
+        out.extend_from_slice(mem.str_bytes("str"));
+    } else {
+        out.push(63);
+    }
+}
+
+fn push_lanes(out: &mut vec.Vec<u8>, l: u32) {
+    if l == types.LANES_N {
+        out.push(110);
+    } else {
+        text.push_u32(out, l);
+    }
+}
+
+// A const argument (3 words) as `display` writes it: the value, the param's name, or `_`.
+fn push_const(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, nm: &intern.Interned, sc: &[u32], k: u32, x: u32, y: u32) {
+    if k == types.GA_VALUE {
+        text.push_u64(out, ((x as u64) << 32) | (y as u64));
+    } else if k == types.GA_PARAM {
+        param_name(out, sg, nm, sc, x);
+    } else {
+        out.push(95);
+    }
+}
+
+// ` needs(f, ..)` and ` without(e, ..)` of fn type t, as its type writes them.
+fn fn_clauses(out: &mut vec.Vec<u8>, tab: &types.Table, t: u32) {
+    let xs = tab.x(t);
+    let np = tab.a_of(t) as usize;
+    let feats = sigs.feature_maximal(((xs[np + 1] as u64) << 32) | (xs[np + 2] as u64));
+    if feats != 0 {
+        out.extend_from_slice(mem.str_bytes(" needs("));
+        let mut first = true;
+        for f in 0..24usize {
+            if (feats >> f as u64) & 1 == 0 { continue; }
+            if !first { out.extend_from_slice(mem.str_bytes(", ")); }
+            sigs.push_feature(out, f);
+            first = false;
+        }
+        out.push(41);
+    }
+    let mut deny = xs[np + 3];
+    if deny & 64 != 0 { deny = deny & 127; }
+    if deny != 0 {
+        out.extend_from_slice(mem.str_bytes(" without("));
+        let mut first = true;
+        for e in 0..8usize {
+            if (deny >> e as% u32) & 1 == 0 { continue; }
+            if !first { out.extend_from_slice(mem.str_bytes(", ")); }
+            sigs.push_effect(out, e);
+            first = false;
+        }
+        out.push(41);
+    }
+}
+
+// The Stave spelling of type t (stage0's `types::display`).
+pub fn display(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, sc: &[u32], t: u32) {
+    let tab = &sg.cx.tab;
+    let mut st = Disp.{ kind: vec.Vec::<u8>.new(), val: vec.Vec::<u32>.new(), depth: vec.Vec::<u32>.new() };
+    st.ty(t, 0);
+    while st.kind.len() > 0 {
+        let k = st.kind.len() - 1;
+        let pk = st.kind.as_slice()[k];
+        let v = st.val.as_slice()[k];
+        let depth = st.depth.as_slice()[k];
+        st.kind.truncate(k);
+        st.val.truncate(k);
+        st.depth.truncate(k);
+        if pk == P_TEXT {
+            push_piece(out, v);
+            continue;
+        }
+        if pk == P_CONST {
+            let xs = tab.x(v);
+            let at = depth as usize;
+            push_const(out, sg, nm, sc, xs[at], xs[at + 1], xs[at + 2]);
+            continue;
+        }
+        if pk == P_ALIGN {
+            out.extend_from_slice(mem.str_bytes(" align "));
+            text.push_u32(out, v);
+            continue;
+        }
+        if pk == P_CLAUSES {
+            fn_clauses(out, tab, v);
+            continue;
+        }
+        if depth > DEPTH_MAX || out.len() > DISPLAY_MAX {
+            push_piece(out, DOTS);
+            continue;
+        }
+        if v == types.ERR || v == NONE {
+            out.push(95);
+            continue;
+        }
+        let tag = tab.tag_of(v);
+        let a = tab.a_of(v);
+        let b = tab.b_of(v);
+        let xs = tab.x(v);
+        let d1 = depth + 1;
+        if tag <= types.TK_STR {
+            scalar_name(out, tab, v);
+        } else if tag == types.TK_REF || tag == types.TK_PTR {
+            push_piece(out, if tag == types.TK_REF then (if a == 1 then AMP_MUT else AMP) else (if a == 1 then PTR_MUT else PTR_CONST));
+            st.ty(b, d1);
+        } else if tag == types.TK_ARRAY {
+            push_piece(out, LBRACKET);
+            st.piece(RBRACKET);
+            st.push(P_CONST, v, 0);
+            st.piece(SEMI);
+            st.ty(a, d1);
+        } else if tag == types.TK_SLICE {
+            push_piece(out, LBRACKET);
+            st.piece(RBRACKET);
+            if b != 0 { st.push(P_ALIGN, b, 0); }
+            st.ty(a, d1);
+        } else if tag == types.TK_TUPLE {
+            push_piece(out, LPAREN);
+            st.piece(RPAREN);
+            if xs.len() == 1 { st.piece(COMMA_1); }
+            let n = xs.len();
+            for j in 0..n {
+                st.ty(xs[n - 1 - j], d1);
+                if n - 1 - j > 0 { st.piece(COMMA_SP); }
+            }
+        } else if tag == types.TK_ADT {
+            let s = ds.name.as_slice()[a as usize];
+            if s != NONE { out.extend_from_slice(nm.tab.text(s as usize)); } else { out.push(95); }
+            let n = xs.len() / 3;
+            if n > 0 {
+                push_piece(out, LT);
+                st.piece(GT);
+                for j in 0..n {
+                    let q = n - 1 - j;
+                    if xs[3 * q] == types.GA_TYPE {
+                        st.ty(xs[3 * q + 1], d1);
+                    } else {
+                        st.push(P_CONST, v, (3 * q) as% u32);
+                    }
+                    if q > 0 { st.piece(COMMA_SP); }
+                }
+            }
+        } else if tag == types.TK_FN {
+            push_piece(out, FN_OPEN);
+            let np = a as usize;
+            let ret = xs[np];
+            let feats = ((xs[np + 1] as u64) << 32) | (xs[np + 2] as u64);
+            let deny = xs[np + 3];
+            // the clauses last, then the return type, then the params in reverse
+            if deny != 0 || feats != 0 { st.push(P_CLAUSES, v, 0); }
+            if !(tab.tag_of(ret) == types.TK_TUPLE && tab.x(ret).len() == 0) {
+                st.ty(ret, d1);
+                st.piece(ARROW);
+            }
+            st.piece(RPAREN);
+            for j in 0..np {
+                st.ty(xs[np - 1 - j], d1);
+                if np - 1 - j > 0 { st.piece(COMMA_SP); }
+            }
+        } else if tag == types.TK_VECTOR {
+            scalar_name(out, tab, a);
+            out.push(120);
+            push_lanes(out, b);
+        } else if tag == types.TK_MASK {
+            out.extend_from_slice(mem.str_bytes("mask"));
+            text.push_u32(out, a);
+            out.push(120);
+            push_lanes(out, b);
+        } else if tag == types.TK_PARAM || tag == types.TK_CONSTPARAM {
+            param_name(out, sg, nm, sc, a);
+        } else if tag == types.TK_NEVER {
+            push_piece(out, NEVER);
+        } else if tag == types.TK_RANGE {
+            push_piece(out, if b == 1 then RANGE_INCL else RANGE);
+            st.piece(GT);
+            st.ty(a, d1);
+        } else if tag == types.TK_SELF {
+            push_piece(out, SELF_T);
+        }
+    }
+}
+
+// The end offset of global token x in its file f.
+fn tok_end(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, f: usize, x: u32) -> u32 {
+    let lo = t.file_tok.as_slice()[f] as usize;
+    let hi = t.file_tok.as_slice()[f + 1] as usize;
+    return lx.token_end(set.file(f), &t.kind.as_slice()[lo..hi], &t.start.as_slice()[lo..hi], x as usize - lo) as% u32;
+}
+
+// The text of global token x as written.
+fn tok_text(out: &mut vec.Vec<u8>, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, f: usize, x: u32) {
+    let s = t.start.as_slice()[x as usize] as usize;
+    let e = tok_end(lx, set, t, f, x) as usize;
+    out.extend_from_slice(&set.file(f)[s..e]);
+}
+
+// Each `sigs` row as a diagnostic.
+pub fn sigs_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items) {
+    let r = &sg.rows;
+    let mut buf = vec.Vec::<u8>.new();
+    for k in 0..r.len() {
+        let code = r.code.as_slice()[k];
+        let it = r.item.as_slice()[k];
+        let f = cut.file.as_slice()[it as usize] as usize;
+        let lo = r.lo.as_slice()[k];
+        let hi = r.hi.as_slice()[k];
+        let a = r.a.as_slice()[k];
+        let sc = &r.gscope.as_slice()[4 * k..4 * k + 4];
+        if code == sigs.D_E0709 {
+            d.begin(709, if r.b.as_slice()[k] == 1 then "test" else "");
+            let w = if a == sigs.W_MAIN then "`main`" else if a == sigs.W_TRAIT_METHOD then "a trait method" else if a == sigs.W_EXPORT then "an `extern` export" else if a == sigs.W_TEST then "a `test fn`" else if a == sigs.W_ALLOCATOR then "an allocator fn" else "a runtime entry fn";
+            d.arg("what", mem.str_bytes(w));
+        } else if code == sigs.D_E0708 || code == sigs.D_E1404 {
+            d.begin(code, "");
+            buf.clear();
+            tok_text(&mut buf, lx, set, t, f, lo);
+            d.arg("name", buf.as_slice());
+        } else if code == sigs.D_E0514 || code == sigs.D_E0515 || code == sigs.D_E0520 || code == sigs.D_E0521 {
+            d.begin(code, "");
+            buf.clear();
+            tok_text(&mut buf, lx, set, t, f, a);
+            d.arg("param", buf.as_slice());
+            if code == sigs.D_E0520 || code == sigs.D_E0521 {
+                buf.clear();
+                display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
+                d.arg("type", buf.as_slice());
+            }
+        } else if code == sigs.D_E0410 {
+            d.begin(410, "");
+            buf.clear();
+            if a == NONE { buf.push(95); } else { tok_text(&mut buf, lx, set, t, f, a); }
+            d.arg("field", buf.as_slice());
+            buf.clear();
+            display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
+            d.arg("type", buf.as_slice());
+            let adt = r.b.as_slice()[k];
+            d.arg("adt", nm.tab.text(ds.name.as_slice()[adt as usize] as usize));
+        } else {
+            debug.assert(false, "a sigs row with no diagnostic");
+        }
+        let s = t.start.as_slice()[lo as usize];
+        let e = tok_end(lx, set, t, f, hi);
+        d.end(f as% u32, s, e - s);
+    }
+}

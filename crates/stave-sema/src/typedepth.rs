@@ -53,6 +53,32 @@ struct Walk<'a, 'g> {
     /// [`Walk::parts`] left out a field whose type after substitution would be taller than the
     /// type table holds ([`crate::types::MAX_TYPE_HEIGHT`]): the holder is too deep.
     tall_part: bool,
+    /// Types whose depth met a type in progress, or such a type: each reaches, through parts, a
+    /// type that holds itself by value.
+    cyclic: FxHashSet<TypeId>,
+    /// The depth being computed met a type in progress or a cyclic type.
+    met_cycle: bool,
+}
+
+/// One type of [`Walk::depth`] whose parts are being measured.
+struct Measure {
+    t: TypeId,
+    /// Depth so far: the term height, the parts measured, past the limit for a tall part.
+    d: u32,
+    /// A part measured so far is too deep.
+    part_too_deep: bool,
+    /// [`Walk::met_cycle`] when the measure began (restored and joined at its end).
+    outer_met: bool,
+    parts: Vec<TypeId>,
+    /// The next part to measure.
+    next: usize,
+}
+
+impl Measure {
+    fn add_part(&mut self, pd: u32) {
+        self.part_too_deep |= pd > MAX_TYPE_DEPTH;
+        self.d = self.d.max(pd.saturating_add(1));
+    }
 }
 
 impl<'a, 'g> Walk<'a, 'g> {
@@ -67,6 +93,8 @@ impl<'a, 'g> Walk<'a, 'g> {
             queue: Vec::new(),
             causes: FxHashSet::default(),
             tall_part: false,
+            cyclic: FxHashSet::default(),
+            met_cycle: false,
         }
     }
 
@@ -132,35 +160,71 @@ impl<'a, 'g> Walk<'a, 'g> {
     /// Depth of `t` (module docs). Components that are not parts are queued to be measured by
     /// themselves. A chain of parts ends: a type holding itself by value is cut (it has no
     /// layout, diagnosed elsewhere), and an endless family of distinct parts grows its type
-    /// arguments, so its term height passes the limit.
+    /// arguments, so its term height passes the limit. The chain is walked with an explicit
+    /// stack of [`Measure`] frames: a chain of parts as long as a program can write takes no
+    /// stack in proportion to it.
     fn depth(&mut self, t: TypeId) -> u32 {
+        let mut frames = match self.enter(t) {
+            Ok(d) => return d,
+            Err(f) => vec![f],
+        };
+        loop {
+            let Some(top) = frames.last_mut() else { return 0 };
+            if let Some(&p) = top.parts.get(top.next) {
+                top.next += 1;
+                match self.enter(p) {
+                    Ok(pd) => top.add_part(pd),
+                    Err(f) => frames.push(f),
+                }
+                continue;
+            }
+            let Some(f) = frames.pop() else { return 0 };
+            let d = self.leave(f);
+            match frames.last_mut() {
+                Some(top) => top.add_part(d),
+                None => return d,
+            }
+        }
+    }
+
+    /// Starts measuring `t`: its depth if known without its parts, else the frame that
+    /// measures them.
+    fn enter(&mut self, t: TypeId) -> Result<u32, Measure> {
         if let Some(&d) = self.depth.get(&t) {
-            return d;
+            self.met_cycle |= self.cyclic.contains(&t);
+            return Ok(d);
         }
         let (k, _) = self.term(t);
         if k > MAX_TYPE_DEPTH {
             self.depth.insert(t, k);
             let c = self.term_cause(t);
             self.causes.insert(c);
-            return k;
+            return Ok(k);
         }
         if !self.active.insert(t) {
-            return k;
+            self.met_cycle = true;
+            return Ok(k);
         }
+        let outer_met = std::mem::take(&mut self.met_cycle);
         let mut d = k;
-        let mut part_too_deep = false;
         self.tall_part = false;
         let parts = self.parts(t);
         if std::mem::take(&mut self.tall_part) {
             d = MAX_TYPE_DEPTH + 1;
         }
-        for p in parts {
-            let pd = self.depth(p);
-            part_too_deep |= pd > MAX_TYPE_DEPTH;
-            d = d.max(pd.saturating_add(1));
-        }
+        Err(Measure { t, d, part_too_deep: false, outer_met, parts, next: 0 })
+    }
+
+    /// Ends the measure of `f.t` once every part is measured: records its depth, and whether it
+    /// is too deep by itself or reaches a type holding itself by value.
+    fn leave(&mut self, f: Measure) -> u32 {
+        let Measure { t, d, part_too_deep, outer_met, .. } = f;
         self.active.remove(&t);
         self.depth.insert(t, d);
+        if self.met_cycle {
+            self.cyclic.insert(t);
+        }
+        self.met_cycle |= outer_met;
         if d > MAX_TYPE_DEPTH {
             if !part_too_deep {
                 self.causes.insert(t);
@@ -204,6 +268,21 @@ impl<'a, 'g> Walk<'a, 'g> {
     fn has_params(&mut self, t: TypeId) -> bool {
         self.term(t).1
     }
+}
+
+/// The depth of each of `ts` (module docs), `None` for a type that reaches, through parts, a
+/// type holding itself by value (it has no depth and no layout). Whatever the order of `ts`,
+/// the walk of such a type meets either a type in progress or one already found cyclic, and the
+/// walk of any other type meets neither, so the answer is per type.
+pub(crate) fn depths(sigs: &Sigs, table: &TypeTable, ts: &[TypeId]) -> Vec<Option<u32>> {
+    let mut w = Walk::new(Overlay::new(table), sigs);
+    ts.iter()
+        .map(|&t| {
+            let d = w.depth(t);
+            w.met_cycle = false;
+            (!w.cyclic.contains(&t)).then_some(d)
+        })
+        .collect()
 }
 
 /// E0005 case `type` diagnostics (module docs). `bodies` sorted by decl.

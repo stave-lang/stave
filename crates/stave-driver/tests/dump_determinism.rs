@@ -1,6 +1,6 @@
-//! Dump determinism: a 10k-line gen-corpus package, built with the
-//! shipped std and runtime, dumped with `tokens,items,ast,strings,names,types,diags,ir` (`ir`:
-//! the checked IR of a debug lowering, `Options::lower`) under 1, 2, and 12 worker
+//! Dump determinism: a 10k-line gen-corpus package, built with the shipped std and runtime,
+//! dumped with `tokens,items,ast,strings,names,sigs,kinds,types,diags,ir` (`ir`: the checked IR
+//! of a debug lowering, `Options::lower`) under 1, 2, and 12 worker
 //! threads and under the shuffle knob (`STAVE_SEMA_SHUFFLE=<seed>`, here
 //! `Options::shuffle_seed`: it permutes stave-sema's internal interning and decl creation order)
 //! gives byte-identical dumps; 100 repeated runs are identical. The corpus uses the default mix,
@@ -13,12 +13,14 @@ use stave_driver::dump::{DumpStage, render_to_vec};
 use stave_driver::pipeline::{self, Goal, Options};
 use stave_driver::shipped::Library;
 
-const STAGES: [DumpStage; 8] = [
+const STAGES: [DumpStage; 10] = [
     DumpStage::Tokens,
     DumpStage::Items,
     DumpStage::Ast,
     DumpStage::Strings,
     DumpStage::Names,
+    DumpStage::Sigs,
+    DumpStage::Kinds,
     DumpStage::Types,
     DumpStage::Diags,
     DumpStage::Ir,
@@ -60,12 +62,12 @@ fn dumps_identical_across_threads_shuffles_and_runs() {
     let p1 = pipeline::thread_pool(Some(1)).unwrap();
     let base = dumps(&p1, &root, None);
     assert!(base[0].len() > 100_000, "tokens dump unexpectedly small");
-    for (k, min) in [(3, 1_000), (4, 10_000), (5, 10_000)] {
+    for (k, min) in [(3, 1_000), (4, 10_000), (5, 10_000), (6, 10_000), (7, 10_000)] {
         assert!(base[k].len() > min, "{} dump unexpectedly small", STAGES[k].name());
     }
-    assert!(base[6].is_empty(), "the corpus is valid: {}", String::from_utf8_lossy(&base[6]));
-    assert!(base[7].len() > 100_000, "ir dump unexpectedly small");
-    let ir = String::from_utf8_lossy(&base[7]);
+    assert!(base[8].is_empty(), "the corpus is valid: {}", String::from_utf8_lossy(&base[8]));
+    assert!(base[9].len() > 100_000, "ir dump unexpectedly small");
+    let ir = String::from_utf8_lossy(&base[9]);
     assert!(ir.contains("fn.make"), "the m2 corpus lowers closures with environments");
     let differs = |got: &[Vec<u8>], what: &str| {
         for (k, s) in STAGES.iter().enumerate() {

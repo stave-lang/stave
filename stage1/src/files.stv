@@ -10,16 +10,28 @@
 //   than a built-in never gets a dependency named `std` or `runtime`, and a dependency
 //   directory without `stave.toml` is skipped. Every package found adds its files, whatever
 //   imports name: the file set does not depend on name resolution.
+// - Package facts for name resolution, by package rank: built in or not, the root package or
+//   not, the root module file (`lib` for a `kind = "lib"` package or one with `src/lib.stv` and no
+//   `src/main.stv`, else `main`; none for a built-in package), and the dependency bindings
+//   (manifest name, package), sorted by name. A dependency named like a built-in package, one
+//   whose directory has no `stave.toml`, and a non-built-in package's dependency on a built-in
+//   one bind nothing; every non-built-in package binds `std` to the built-in `std`, and `std`
+//   binds `runtime`.
 // - A package's directory key is its lexically normalized path. stage0 uses the canonical
 //   (absolute, symlinks resolved) path: the two orders agree when the root and the library
 //   directory are given as absolute paths without symlinks.
 import manifest;
+import manifest_check;
 import paths;
+import prims.col;
+import prims.scan;
 import text;
 import std.io;
 import std.mem;
 import std.string;
 import std.vec;
+
+const NONE: u32 = 4294967295;
 
 // Deepest directory level walked below a package's source directory.
 const MAX_DIR_DEPTH: usize = 64;
@@ -35,6 +47,56 @@ pub struct FileList {
     pub package: vec.Vec<string.String>,
     pub rel_path: vec.Vec<string.String>,
     pub abs_path: vec.Vec<string.String>,
+    // the module path of each file, `/`-separated (`a/b` is `a.b`)
+    pub module: vec.Vec<string.String>,
+    // the name of every package of the build, files or not, in package rank order
+    pub pkg_name: vec.Vec<string.String>,
+    // per file: its package rank
+    pub file_pkg: vec.Vec<u32>,
+    // per package rank: built in, the root package, the root module is `lib` (else `main`)
+    pub pkg_builtin: vec.Vec<bool>,
+    pub pkg_root: vec.Vec<bool>,
+    pub pkg_lib: vec.Vec<bool>,
+    // package p binds `dep_name[k]` to package `dep_pkg[k]` for k in dep_off[p]..dep_off[p + 1]
+    pub dep_off: vec.Vec<u32>,
+    pub dep_name: vec.Vec<string.String>,
+    pub dep_pkg: vec.Vec<u32>,
+    // the manifests read, in discovery order: the name of the package each belongs to, its path,
+    // and its text (`man_bytes[man_off[m]..man_off[m + 1]]`, empty when unreadable)
+    pub man_pkg: vec.Vec<string.String>,
+    pub man_abs: vec.Vec<string.String>,
+    pub man_bytes: vec.Vec<u8>,
+    pub man_off: vec.Vec<u64>,
+    // the E1002 and E1203 rows of the manifests
+    pub issues: manifest_check.Issues,
+}
+
+impl FileList {
+    pub fn empty() -> FileList {
+        let mut off = vec.Vec::<u32>.new();
+        off.push(0);
+        let mut moff = vec.Vec::<u64>.new();
+        moff.push(0);
+        return FileList.{
+            package: vec.Vec::<string.String>.new(),
+            rel_path: vec.Vec::<string.String>.new(),
+            abs_path: vec.Vec::<string.String>.new(),
+            module: vec.Vec::<string.String>.new(),
+            pkg_name: vec.Vec::<string.String>.new(),
+            file_pkg: vec.Vec::<u32>.new(),
+            pkg_builtin: vec.Vec::<bool>.new(),
+            pkg_root: vec.Vec::<bool>.new(),
+            pkg_lib: vec.Vec::<bool>.new(),
+            dep_off: off,
+            dep_name: vec.Vec::<string.String>.new(),
+            dep_pkg: vec.Vec::<u32>.new(),
+            man_pkg: vec.Vec::<string.String>.new(),
+            man_abs: vec.Vec::<string.String>.new(),
+            man_bytes: vec.Vec::<u8>.new(),
+            man_off: moff,
+            issues: manifest_check.Issues.new(),
+        };
+    }
 }
 
 struct Loader {
@@ -42,11 +104,28 @@ struct Loader {
     dir: vec.Vec<string.String>,
     canonical: vec.Vec<string.String>,
     builtin: vec.Vec<bool>,
+    root: vec.Vec<bool>,
+    lib: vec.Vec<bool>,
+    // dependency bindings by loader index: package e_from binds e_name to e_to
+    e_from: vec.Vec<u32>,
+    e_name: vec.Vec<string.String>,
+    e_to: vec.Vec<u32>,
     // the effective dependency specs of each package, taken once when it is visited
     specs: vec.Vec<vec.Vec<manifest.Dep>>,
     f_pkg: vec.Vec<u32>,
     f_rel: vec.Vec<string.String>,
     f_abs: vec.Vec<string.String>,
+    f_mod: vec.Vec<string.String>,
+    // the manifests: the package each belongs to (loader index), its path, its text; per package
+    // its manifest (NONE when it has none) and the spans of its `name` and `kind` values
+    m_pkg: vec.Vec<u32>,
+    m_abs: vec.Vec<string.String>,
+    m_bytes: vec.Vec<u8>,
+    m_off: vec.Vec<u64>,
+    man_of: vec.Vec<u32>,
+    name_lo: vec.Vec<u32>,
+    name_hi: vec.Vec<u32>,
+    iss: manifest_check.Issues,
 }
 
 pub fn is_file(p: &str) -> bool {
@@ -151,34 +230,86 @@ fn builtin_files(dir: &str) -> vec.Vec<string.String> {
     return out;
 }
 
+// The module path of the file `rel` (relative to its source directory): without `.stv`.
+fn module_of(rel: &str) -> string.String {
+    let b = mem.str_bytes(rel);
+    let ext = mem.str_bytes(".stv");
+    return text.string_of(if text.ends_with(b, ext) then &b[0..b.len() - ext.len()] else b);
+}
+
 impl Loader {
     fn new() -> Loader {
+        let mut moff = vec.Vec::<u64>.new();
+        moff.push(0);
         return Loader.{
             name: vec.Vec::<string.String>.new(),
             dir: vec.Vec::<string.String>.new(),
             canonical: vec.Vec::<string.String>.new(),
             builtin: vec.Vec::<bool>.new(),
+            root: vec.Vec::<bool>.new(),
+            lib: vec.Vec::<bool>.new(),
+            e_from: vec.Vec::<u32>.new(),
+            e_name: vec.Vec::<string.String>.new(),
+            e_to: vec.Vec::<u32>.new(),
             specs: vec.Vec::<vec.Vec<manifest.Dep>>.new(),
             f_pkg: vec.Vec::<u32>.new(),
             f_rel: vec.Vec::<string.String>.new(),
             f_abs: vec.Vec::<string.String>.new(),
+            f_mod: vec.Vec::<string.String>.new(),
+            m_pkg: vec.Vec::<u32>.new(),
+            m_abs: vec.Vec::<string.String>.new(),
+            m_bytes: vec.Vec::<u8>.new(),
+            m_off: moff,
+            man_of: vec.Vec::<u32>.new(),
+            name_lo: vec.Vec::<u32>.new(),
+            name_hi: vec.Vec::<u32>.new(),
+            iss: manifest_check.Issues.new(),
         };
     }
 
-    fn find_canonical(&self, c: &str) -> bool {
+    // The loader index of the package whose directory key is c, or NONE.
+    fn find_canonical(&self, c: &str) -> u32 {
         for k in 0..self.canonical.len() {
-            if text.eq(self.canonical.get_ref(k).as_bytes(), mem.str_bytes(c)) { return true; }
+            if text.eq(self.canonical.get_ref(k).as_bytes(), mem.str_bytes(c)) { return k as% u32; }
         }
-        return false;
+        return NONE;
+    }
+
+    fn bind(&mut self, src: u32, name: &str, to: u32) {
+        self.e_from.push(src);
+        self.e_name.push(string.String.from_str(name));
+        self.e_to.push(to);
     }
 
     // Adds the package in dir: its manifest (required unless built in), its dependency specs,
     // and its module files. Returns its index.
-    fn add_package(&mut self, dir: &str, builtin: bool, t: &Target) -> u32 {
+    fn add_package(&mut self, dir: &str, builtin: bool, root: bool, t: &Target) -> u32 {
         let id = self.name.len() as% u32;
         let mpath = paths.join(dir, "stave.toml");
         let has_manifest = !builtin || is_file(mpath.as_str());
-        let mut m = if has_manifest then read_manifest(mpath.as_str()) else manifest.parse(mem.str_bytes(""));
+        let mut m = manifest.parse(mem.str_bytes(""));
+        let mut mi = NONE;
+        let mut unreadable = false;
+        if has_manifest {
+            mi = self.m_pkg.len() as% u32;
+            self.m_pkg.push(id);
+            self.m_abs.push(dup(&mpath));
+            match io.read_file(mpath.as_str()) {
+                Result.Ok(b) => {
+                    self.m_bytes.extend_from_slice(b.as_slice());
+                    self.m_off.push(self.m_bytes.len() as u64);
+                    m = manifest_check.read(b.as_slice(), mi, &mut self.iss);
+                }
+                Result.Err(_) => {
+                    self.m_off.push(self.m_bytes.len() as u64);
+                    self.iss.add(mi, 1002, manifest_check.C_UNREADABLE, 0, 0, mem.str_bytes(""), mem.str_bytes(""));
+                    unreadable = true;
+                }
+            }
+        }
+        self.man_of.push(mi);
+        self.name_lo.push(m.name_lo);
+        self.name_hi.push(m.name_hi);
         self.specs.push(manifest.effective_deps(&m, t.name.as_str(), t.alias.as_str()));
         let name = match mem.replace(&mut m.name, Option.None) {
             Option.Some(n) => n,
@@ -191,18 +322,39 @@ impl Loader {
         self.dir.push(string.String.from_str(dir));
         self.canonical.push(paths.normalize(dir));
         self.builtin.push(builtin);
+        self.root.push(root);
+        let kind = match &m.kind {
+            Option.Some(k) => if text.eq_str(k.as_bytes(), "lib") then 1u8 else if text.eq_str(k.as_bytes(), "bin") then 2u8 else 0u8,
+            Option.None => 0u8,
+        };
         if builtin {
+            self.lib.push(false);
             let fs = builtin_files(dir);
             for k in 0..fs.len() {
                 let rel = fs.get_ref(k);
                 self.f_pkg.push(id);
                 self.f_abs.push(paths.join(dir, rel.as_str()));
                 self.f_rel.push(dup(rel));
+                self.f_mod.push(module_of(rel.as_str()));
             }
             return id;
         }
         let src = paths.join(dir, "src");
         let fs = stave_files(src.as_str());
+        let mut has_lib = false;
+        let mut has_main = false;
+        for k in 0..fs.len() {
+            let b = fs.get_ref(k).as_bytes();
+            if text.eq_str(b, "lib.stv") { has_lib = true; }
+            if text.eq_str(b, "main.stv") { has_main = true; }
+        }
+        let is_lib = kind == 1 || (kind == 0 && has_lib && !has_main);
+        self.lib.push(is_lib);
+        if mi != NONE && !unreadable && !(if is_lib then has_lib else has_main) {
+            let (lo, hi) = if m.kind_lo == manifest.NO_SPAN then (0u32, 0u32) else (m.kind_lo, m.kind_hi);
+            let root = if is_lib then "src/lib.stv" else "src/main.stv";
+            self.iss.add(mi, 1002, manifest_check.C_MISSING_ROOT, lo, hi, mem.str_bytes(""), mem.str_bytes(root));
+        }
         for k in 0..fs.len() {
             let rel = fs.get_ref(k);
             let mut r = string.String.from_str("src/");
@@ -210,16 +362,10 @@ impl Loader {
             self.f_pkg.push(id);
             self.f_abs.push(paths.join(src.as_str(), rel.as_str()));
             self.f_rel.push(r);
+            self.f_mod.push(module_of(rel.as_str()));
         }
         return id;
     }
-}
-
-fn read_manifest(path: &str) -> manifest.Manifest {
-    return match io.read_file(path) {
-        Result.Ok(b) => manifest.parse(b.as_slice()),
-        Result.Err(_) => manifest.parse(mem.str_bytes("")),
-    };
 }
 
 fn is_builtin_name(n: &str) -> bool {
@@ -236,7 +382,12 @@ pub fn discover(root: &str, std_dir: &str, runtime_dir: &str, t: &Target) -> Fil
         l.dir.push(paths.parent(root));
         l.canonical.push(paths.normalize(root));
         l.builtin.push(false);
+        l.root.push(true);
+        l.lib.push(false);
         l.specs.push(vec.Vec::<manifest.Dep>.new());
+        l.man_of.push(NONE);
+        l.name_lo.push(manifest.NO_SPAN);
+        l.name_hi.push(manifest.NO_SPAN);
         l.f_pkg.push(0);
         let fname = match paths.file_name(root) {
             Option.Some(n) => n,
@@ -244,15 +395,17 @@ pub fn discover(root: &str, std_dir: &str, runtime_dir: &str, t: &Target) -> Fil
         };
         l.f_rel.push(fname);
         l.f_abs.push(string.String.from_str(root));
+        l.f_mod.push(string.String.from_str("main"));
     } else {
-        queue.push(l.add_package(root, false, t));
+        queue.push(l.add_package(root, false, true, t));
     }
-    let s = l.add_package(std_dir, true, t);
+    let s = l.add_package(std_dir, true, false, t);
     *l.name.get_mut(s as usize) = string.String.from_str("std");
     queue.push(s);
-    let r = l.add_package(runtime_dir, true, t);
+    let r = l.add_package(runtime_dir, true, false, t);
     *l.name.get_mut(r as usize) = string.String.from_str("runtime");
     queue.push(r);
+    l.bind(s, "runtime", r);
     loop {
         if queue.len() == 0 { break; }
         let p = match queue.pop() {
@@ -263,7 +416,11 @@ pub fn discover(root: &str, std_dir: &str, runtime_dir: &str, t: &Target) -> Fil
         let builtin = *l.builtin.get_ref(p);
         for k in 0..deps.len() {
             let d = deps.get_ref(k);
-            if !builtin && is_builtin_name(d.name.as_str()) { continue; }
+            let mi = *l.man_of.get_ref(p);
+            if !builtin && is_builtin_name(d.name.as_str()) {
+                if mi != NONE { l.iss.add(mi, 1002, manifest_check.C_BUILTIN_NAME, d.key_lo, d.key_hi, d.name.as_bytes(), mem.str_bytes("")); }
+                continue;
+            }
             if d.path.is_none() { continue; }
             let path = match &d.path {
                 Option.Some(x) => dup(x),
@@ -272,12 +429,43 @@ pub fn discover(root: &str, std_dir: &str, runtime_dir: &str, t: &Target) -> Fil
             let joined = paths.join(l.dir.get_ref(p).as_str(), path.as_str());
             let dir = paths.normalize(joined.as_str());
             let m = paths.join(dir.as_str(), "stave.toml");
-            if !is_file(m.as_str()) { continue; }
+            if !is_file(m.as_str()) {
+                if mi != NONE { l.iss.add(mi, 1002, manifest_check.C_MISSING_DEP, d.path_lo, d.path_hi, d.name.as_bytes(), mem.str_bytes("")); }
+                continue;
+            }
             let canon = paths.normalize(dir.as_str());
-            if !l.find_canonical(canon.as_str()) { queue.push(l.add_package(dir.as_str(), builtin, t)); }
+            let mut id = l.find_canonical(canon.as_str());
+            if id == NONE {
+                id = l.add_package(dir.as_str(), builtin, false, t);
+                queue.push(id);
+            }
+            if !builtin && *l.builtin.get_ref(id as usize) {
+                if mi != NONE { l.iss.add(mi, 1002, manifest_check.C_BUILTIN_DEP, d.path_lo, d.path_hi, d.name.as_bytes(), mem.str_bytes("")); }
+                continue;
+            }
+            l.bind(p as% u32, d.name.as_str(), id);
         }
     }
-    return ordered(&l);
+    // a package that is not built in may not take a built-in package's name either
+    for p in 0..l.name.len() {
+        let mi = *l.man_of.get_ref(p);
+        if *l.builtin.get_ref(p) || mi == NONE || *l.name_lo.get_ref(p) == manifest.NO_SPAN { continue; }
+        if is_builtin_name(l.name.get_ref(p).as_str()) {
+            l.iss.add(mi, 1002, manifest_check.C_BUILTIN_NAME, *l.name_lo.get_ref(p), *l.name_hi.get_ref(p), l.name.get_ref(p).as_bytes(), mem.str_bytes(""));
+        }
+    }
+    for p in 0..l.name.len() {
+        if !*l.builtin.get_ref(p) { l.bind(p as% u32, "std", s); }
+    }
+    let mut out = ordered(&l);
+    for m in 0..l.m_pkg.len() {
+        out.man_pkg.push(dup(l.name.get_ref(*l.m_pkg.get_ref(m) as usize)));
+        out.man_abs.push(dup(l.m_abs.get_ref(m)));
+        out.man_off.push(*l.m_off.get_ref(m + 1));
+    }
+    out.man_bytes = mem.replace(&mut l.m_bytes, vec.Vec::<u8>.new());
+    out.issues = mem.replace(&mut l.iss, manifest_check.Issues.new());
+    return out;
 }
 
 // The files in F order: packages ranked by (name, directory), files by (package name, path,
@@ -305,13 +493,46 @@ fn ordered(l: &Loader) -> FileList {
         if r != 0 { return r < 0; }
         return rank.as_slice()[px] < rank.as_slice()[py];
     });
-    let mut out = FileList.{ package: vec.Vec::<string.String>.new(), rel_path: vec.Vec::<string.String>.new(), abs_path: vec.Vec::<string.String>.new() };
+    let mut out = FileList.empty();
+    for k in 0..porder.len() {
+        let p = porder.as_slice()[k] as usize;
+        out.pkg_name.push(dup(l.name.get_ref(p)));
+        out.pkg_builtin.push(*l.builtin.get_ref(p));
+        out.pkg_root.push(*l.root.get_ref(p));
+        out.pkg_lib.push(*l.lib.get_ref(p));
+    }
+    // bindings by (package rank, name, loader index); the first of a name stays
+    let eorder = text.sorted(l.e_from.len(), fn(a: u32, b: u32) -> bool {
+        let (x, y) = (a as usize, b as usize);
+        let rx = rank.as_slice()[l.e_from.as_slice()[x] as usize];
+        let ry = rank.as_slice()[l.e_from.as_slice()[y] as usize];
+        if rx != ry { return rx < ry; }
+        let c = text.cmp(l.e_name.get_ref(x).as_bytes(), l.e_name.get_ref(y).as_bytes());
+        if c != 0 { return c < 0; }
+        return l.e_to.as_slice()[x] < l.e_to.as_slice()[y];
+    });
+    let mut counts = col.filled(porder.len(), 0u32);
+    for k in 0..eorder.len() {
+        let e = eorder.as_slice()[k] as usize;
+        let src = rank.as_slice()[l.e_from.as_slice()[e] as usize];
+        if k > 0 {
+            let pe = eorder.as_slice()[k - 1] as usize;
+            if rank.as_slice()[l.e_from.as_slice()[pe] as usize] == src && text.eq(l.e_name.get_ref(pe).as_bytes(), l.e_name.get_ref(e).as_bytes()) { continue; }
+        }
+        out.dep_name.push(dup(l.e_name.get_ref(e)));
+        out.dep_pkg.push(rank.as_slice()[l.e_to.as_slice()[e] as usize]);
+        let nv = counts.as_slice()[src as usize] + 1;
+        counts.as_mut_slice()[src as usize] = nv;
+    }
+    out.dep_off = scan.offsets(counts.as_slice());
     for k in 0..forder.len() {
         let f = forder.as_slice()[k] as usize;
         let p = l.f_pkg.as_slice()[f] as usize;
         out.package.push(dup(l.name.get_ref(p)));
+        out.file_pkg.push(rank.as_slice()[p]);
         out.rel_path.push(dup(l.f_rel.get_ref(f)));
         out.abs_path.push(dup(l.f_abs.get_ref(f)));
+        out.module.push(dup(l.f_mod.get_ref(f)));
     }
     return out;
 }

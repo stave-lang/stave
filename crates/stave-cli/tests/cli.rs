@@ -76,6 +76,16 @@ fn golden_lib() -> String {
     repo().join("tests/conformance/dumps/_lib").display().to_string()
 }
 
+/// The stand-in library of a dump case: `kinds_` cases use `_lib_kinds` (the marker traits,
+/// `std.cell`, and `std.sync`), the others `_lib`.
+fn golden_lib_of(case: &str) -> String {
+    if case.starts_with("kinds_") {
+        repo().join("tests/conformance/dumps/_lib_kinds").display().to_string()
+    } else {
+        golden_lib()
+    }
+}
+
 fn stave_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
     let mut c = Command::new(env!("CARGO_BIN_EXE_stave"));
     c.args(args).env_remove("STAVE_THREADS").env_remove("STAVE_STD_DIR").env_remove("STAVE_SEMA_SHUFFLE");
@@ -219,15 +229,33 @@ fn single_file_argument() {
 /// Lines of `tests/conformance/dumps/_lib` (std/core.stv, std/io.stv, std/string.stv, runtime/empty.stv).
 const STD_LINES: u64 = 40;
 
-const GOLDEN_DUMPS: &str = "--dump=tokens,items,ast,strings,names,types,diags,stats";
-const GOLDEN_FILES: [&str; 7] =
-    ["tokens.txt", "items.txt", "ast.txt", "strings.txt", "names.txt", "types.txt", "diags.txt"];
+const GOLDEN_DUMPS: &str = "--dump=tokens,items,ast,strings,names,sigs,kinds,types,diags,stats";
+const GOLDEN_FILES: [&str; 9] = [
+    "tokens.txt",
+    "items.txt",
+    "ast.txt",
+    "strings.txt",
+    "names.txt",
+    "sigs.txt",
+    "kinds.txt",
+    "types.txt",
+    "diags.txt",
+];
 
 #[test]
 fn dumps_match_goldens_under_stave_threads_and_shuffle() {
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli_dumps");
-    let lib = golden_lib();
-    for case in ["valid_small", "dropped_item", "unbalanced", "multi_file"] {
+    for case in [
+        "valid_small",
+        "dropped_item",
+        "unbalanced",
+        "multi_file",
+        "sigs_decls",
+        "sigs_errors",
+        "kinds_layout",
+        "kinds_errors",
+    ] {
+        let lib = golden_lib_of(case);
         for (threads, shuffle) in [("1", ""), ("2", ""), ("12", ""), ("12", "7"), ("3", "3735928559")] {
             let dir = tmp.join(format!("{case}_{threads}_{shuffle}"));
             let _ = std::fs::remove_dir_all(&dir);

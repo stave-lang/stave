@@ -1,0 +1,77 @@
+// diag_names: the messages the name stages' rows render to (hole text: names, module paths, scopes).
+import diag;
+import diag_names;
+import test_kit;
+import std.debug;
+import std.mem;
+import std.vec;
+
+// Every message of the rows of `o`, one per line.
+fn messages(o: &test_kit.Out) -> vec.Vec<u8> {
+    let mut d = diag.Diags.new();
+    diag_names.names(&mut d, &o.rows, &o.md, &o.ds, &o.nm, &o.set);
+    debug.assert(!d.bad.get(), "every row builds from its template");
+    let mut out = vec.Vec::<u8>.new();
+    for i in 0..d.len() {
+        d.message(i, &mut out);
+        out.push(10);
+    }
+    return out;
+}
+
+fn has(hay: &[u8], needle: &str) -> bool {
+    let n = mem.str_bytes(needle);
+    if n.len() > hay.len() { return false; }
+    for i in 0..hay.len() - n.len() + 1 {
+        if hay[i..i + n.len()].eq(n) { return true; }
+    }
+    return false;
+}
+
+test fn not_found_and_variant() {
+    let m = messages(&test_kit.single("enum E { V }\nfn main() { let a = zz; let b = V; }\n"));
+    debug.assert(has(m.as_slice(), "cannot find `zz` in this scope\n"), "E0101 names the identifier");
+    debug.assert(has(m.as_slice(), "enum variant `V` must be qualified as `E.V`\n"), "E0103 names the enum");
+}
+
+test fn scopes_of_duplicates() {
+    let m = messages(&test_kit.single("fn a() {}\nfn a() {}\nenum E { A, A, V { f: u32, f: u32 } }\nstruct S { x: u32, x: u32 }\nstruct T {}\nimpl T { fn m() {} }\nimpl T { fn m() {} }\nimpl u32 { fn p() {} fn p() {} }\nfn g<U, U>(x: u32, x: u32) { let y = 0u32; let (z, z) = (1u32, 2u32); }\nimpl T { fn h(w: u32, w: u32) {} }\nfn main() {}\n"));
+    debug.assert(has(m.as_slice(), "duplicate declaration of `a` in `main`\n"), "a module");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `A` in `main.E`\n"), "variants");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `f` in `main.E.V`\n"), "the fields of a variant");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `x` in `main.S`\n"), "fields");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `m` in `main.T`\n"), "methods of one head");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `p` in `u32`\n"), "methods of a built-in head");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `U` in `main.g`\n"), "generics of a fn");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `x` in `main.g`\n"), "parameters");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `z` in `main.g`\n"), "a pattern");
+    debug.assert(has(m.as_slice(), "duplicate declaration of `w` in `main.T.h`\n"), "parameters of a method");
+}
+
+test fn cycles_and_allocators() {
+    let mut k = test_kit.kit();
+    let app = k.package("app", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(app, "std", s);
+    k.file(app, "a", "import b;\npub fn fa() {}\n");
+    k.file(app, "b", "import a;\nallocator a;\nfn fb() {}\n");
+    k.file(app, "main", "import a;\nimport std.core;\nallocator a;\nfn main() { a.fa(); b.fb(); }\n");
+    k.file(s, "core", "pub enum Option<T> { Some(T), None }\n");
+    let m = messages(&k.run());
+    debug.assert(has(m.as_slice(), "import cycle through module `a`\n"), "E0102 names the smallest module");
+    debug.assert(has(m.as_slice(), "more than one `allocator` declaration in this binary\n"), "E0104");
+}
+
+test fn private_and_extern() {
+    let mut k = test_kit.kit();
+    let app = k.package("app", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(app, "std", s);
+    k.file(app, "m", "pub fn f() {}\nfn g() {}\n");
+    k.file(app, "main", "import m;\nextern \"C\" { fn puts(s: *const u8) -> i32; }\nextern \"Rust\" fn r() {}\nfn main() { m.g(); }\n");
+    k.file(s, "core", "pub enum Option<T> { Some(T), None }\n");
+    let m = messages(&k.run());
+    debug.assert(has(m.as_slice(), "`g` is private to module `m`\n"), "E0106 names the module");
+    debug.assert(has(m.as_slice(), "`extern \"C\"` import block needs `unsafe(\"..\")`\n"), "E0811 obligation");
+    debug.assert(has(m.as_slice(), "unknown ABI `\"Rust\"`\n"), "E0811 with the ABI as written");
+}

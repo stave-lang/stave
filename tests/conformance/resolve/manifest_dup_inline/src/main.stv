@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// E1002 case `duplicate-key` for a key given twice in an inline table.
+fn main() -> i32 {
+    return 0;
+}

@@ -1,15 +1,17 @@
-//! Dump goldens: `tests/conformance/dumps/<case>/input` is a package; the
-//! expected `tokens.txt items.txt ast.txt strings.txt names.txt types.txt diags.txt` sit next to
-//! it (formats: contracts/stage-gates.md). `stats.txt` must be written
-//! and is never compared. Dumps cover the whole program, so the cases build against the pinned
-//! stand-in library `tests/conformance/dumps/_lib` (`std/`, an empty `runtime/`; the CLI test
-//! uses it through `STAVE_STD_DIR`): the goldens do not move with the shipped std/.
+//! Dump goldens: `tests/conformance/dumps/<case>/input` is a package; the expected `tokens.txt
+//! items.txt ast.txt strings.txt names.txt sigs.txt kinds.txt types.txt diags.txt` sit next to it
+//! (formats: contracts/stage-gates.md). `stats.txt` must be written and is never compared. Dumps
+//! cover the whole program, so the cases build against the pinned stand-in library
+//! `tests/conformance/dumps/_lib` (`std/`, an empty `runtime/`; the CLI test uses it through
+//! `STAVE_STD_DIR`), the `kinds_` cases against `_lib_kinds` (`_lib` plus the marker traits,
+//! `std.cell`, and `std.sync`): the goldens do not move with the shipped std/.
 //!
 //! Checked-IR goldens (contracts/checked-ir.md): every `ir_<construct>/` case is a
 //! package `input` plus the expected `ir.txt` of a debug lowering (`stave check --dump=ir`) and, when
 //! present, `ir.release.txt` of a `--release` lowering (instance root sets; the `ir_bounds_*`
 //! cases: the bounds checks left in each mode, which must be the same ones). A case whose input
-//! has an error diagnostic has no `ir.txt`, and none may be written for it.
+//! has an error diagnostic has no `ir.txt`, and none may be written for it. Every `ir_` case also
+//! has the `sigs.txt` and `kinds.txt` of a check.
 //!
 //! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!).
 //!
@@ -22,19 +24,31 @@ use std::path::{Path, PathBuf};
 #[path = "../../../tests/support/checked_ir.rs"]
 mod checked_ir;
 
-use stave_driver::dump::{DumpStage, write_dumps};
+use stave_driver::dump::{DumpStage, render_to_vec, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
 
-const CASES: [&str; 4] = ["valid_small", "dropped_item", "unbalanced", "multi_file"];
+const CASES: [&str; 9] = [
+    "valid_small",
+    "dropped_item",
+    "unbalanced",
+    "multi_file",
+    "intern_collision",
+    "sigs_decls",
+    "sigs_errors",
+    "kinds_layout",
+    "kinds_errors",
+];
 /// The `ir_` cases that also have a golden of the release lowering.
 const RELEASE_CASES: [&str; 3] = ["ir_bounds_kept", "ir_bounds_removed", "ir_roots"];
-const COMPARED: [DumpStage; 7] = [
+const COMPARED: [DumpStage; 9] = [
     DumpStage::Tokens,
     DumpStage::Items,
     DumpStage::Ast,
     DumpStage::Strings,
     DumpStage::Names,
+    DumpStage::Sigs,
+    DumpStage::Kinds,
     DumpStage::Types,
     DumpStage::Diags,
 ];
@@ -47,13 +61,15 @@ fn dumps_dir(case: &str) -> PathBuf {
     repo().join("tests/conformance/dumps").join(case)
 }
 
-fn golden_std() -> Library {
-    Library::in_dir(&repo().join("tests/conformance/dumps/_lib"))
+/// The pinned library of `case`: `_lib_kinds` for the `kinds_` cases, else `_lib`.
+fn golden_std(case: &str) -> Library {
+    let lib = if case.starts_with("kinds_") { "_lib_kinds" } else { "_lib" };
+    Library::in_dir(&repo().join("tests/conformance/dumps").join(lib))
 }
 
 fn output(case: &str, threads: usize) -> Output {
     let opts = Options::new(Goal::Check).threads(Some(threads));
-    pipeline::run(&dumps_dir(case).join("input"), &golden_std(), &opts).unwrap()
+    pipeline::run(&dumps_dir(case).join("input"), &golden_std(case), &opts).unwrap()
 }
 
 /// Writes every dump of `case` into a directory of its own per (`test`, case, threads): tests
@@ -169,7 +185,17 @@ fn golden_properties() {
                 assert!(read(&dir.join("diags.txt")).contains("\"code\":\"E0016\""));
             }
             "dropped_item" => assert_eq!(items.lines().filter(|l| l.ends_with(" dropped")).count(), 1),
-            "valid_small" => assert!(read(&dir.join("diags.txt")).is_empty()),
+            "valid_small" | "intern_collision" | "sigs_decls" | "kinds_layout" => {
+                assert!(read(&dir.join("diags.txt")).is_empty())
+            }
+            "sigs_errors" => {
+                let d = read(&dir.join("diags.txt"));
+                assert!(d.contains("\"code\":\"E0101\"") && d.contains("\"code\":\"E0203\""), "{d}");
+            }
+            "kinds_errors" => {
+                let d = read(&dir.join("diags.txt"));
+                assert!(d.contains("\"code\":\"E0903\"") && d.contains("\"code\":\"E0421\""), "{d}");
+            }
             "multi_file" => {
                 // F = rank of (package, path): multi_file's src/main.stv, src/util.stv,
                 // src/util/math.stv, then runtime's empty.stv (no tokens), std's core.stv, io.stv,
@@ -259,6 +285,309 @@ fn semantic_dump_properties() {
     }
 }
 
+/// A dump's type table (`t<T> key` lines) with every key expanded: each `t<T>` component is
+/// replaced by its own expanded key in parentheses, so two tables can be compared modulo their T
+/// numbering. The error type (no line) expands to `error`.
+fn deep_keys(text: &str) -> Vec<(u32, String)> {
+    let table: std::collections::BTreeMap<u32, &str> = text
+        .lines()
+        .filter_map(|l| {
+            let (t, key) = l.split_once(' ')?;
+            Some((t.strip_prefix('t')?.parse().ok()?, key))
+        })
+        .collect();
+    fn expand(
+        t: u32,
+        table: &std::collections::BTreeMap<u32, &str>,
+        memo: &mut std::collections::BTreeMap<u32, String>,
+    ) -> String {
+        if let Some(s) = memo.get(&t) {
+            return s.clone();
+        }
+        let Some(key) = table.get(&t) else { return "error".to_string() };
+        let parts: Vec<String> = key
+            .split(' ')
+            .map(|w| match w.strip_prefix('t').and_then(|n| n.parse::<u32>().ok()) {
+                Some(c) => format!("({})", expand(c, table, memo)),
+                None => w.to_string(),
+            })
+            .collect();
+        let s = parts.join(" ");
+        memo.insert(t, s.clone());
+        s
+    }
+    let mut memo = std::collections::BTreeMap::new();
+    table.keys().map(|&t| (t, expand(t, &table, &mut memo))).collect()
+}
+
+/// The numbers of the `<prefix><n>` words of a line.
+fn refs(line: &str, prefix: char) -> Vec<u32> {
+    line.split([' ', '[', ']', ','])
+        .filter_map(|w| w.strip_prefix(prefix).and_then(|n| n.parse().ok()))
+        .collect()
+}
+
+const DECL_KINDS: [&str; 14] = [
+    "module",
+    "fn",
+    "struct",
+    "enum",
+    "trait",
+    "const",
+    "static",
+    "alias",
+    "impl",
+    "field",
+    "variant",
+    "method",
+    "trait-method",
+    "error",
+];
+
+/// `sigs` field rules, and its table against the `types` table of the same build: the `sigs`
+/// table is dense from t0, its keys are distinct, and the keys both tables hold are in the same
+/// order in both (a renumbering of a subset of one canonical order). Same bytes at 1 and 8
+/// threads.
+#[test]
+fn sigs_table_is_a_renumbered_subset_of_types() {
+    let mut cases: Vec<String> = CASES.iter().map(|c| c.to_string()).collect();
+    cases.extend(ir_cases());
+    for case in &cases {
+        let out = output(case, 1);
+        let sigs = String::from_utf8(render_to_vec(DumpStage::Sigs, &out).unwrap()).unwrap();
+        let types = String::from_utf8(render_to_vec(DumpStage::Types, &out).unwrap()).unwrap();
+        let out8 = output(case, 8);
+        assert_eq!(sigs.as_bytes(), render_to_vec(DumpStage::Sigs, &out8).unwrap(), "{case}: 1 vs 8 threads");
+        check_lines(&format!("{case}/sigs.txt"), &sigs);
+        let n_types = sigs.lines().take_while(|l| l.starts_with('t')).count() as u32;
+        let decls: Vec<&str> = sigs.lines().skip(n_types as usize).collect();
+        for (k, l) in sigs.lines().take(n_types as usize).enumerate() {
+            assert!(l.starts_with(&format!("t{k} ")), "{case}: table not dense from t0: {l}");
+        }
+        assert!(!decls.is_empty(), "{case}: no decl lines");
+        for (k, l) in decls.iter().enumerate() {
+            let f: Vec<&str> = l.split(' ').collect();
+            assert!(f.len() >= 9, "{case}: {l}");
+            assert_eq!(f[0], format!("d{k}"), "{case}: decl lines not by D from d0: {l}");
+            assert!(DECL_KINDS.contains(&f[1]), "{case}: kind: {l}");
+            let sig = match f[1] {
+                "fn" | "method" | "trait-method" => Some(" params["),
+                "struct" | "enum" | "trait" => Some(" gen["),
+                "impl" => Some(" trait "),
+                "const" | "static" | "field" => Some(" ty "),
+                "alias" => Some(" target "),
+                "module" => Some(" path["),
+                _ => None,
+            };
+            if let Some(s) = sig {
+                assert!(l.contains(s), "{case}: no `{}` field: {l}", s.trim());
+            }
+            if f[1] == "error" {
+                assert_eq!(f.len(), 9, "{case}: an error decl has no signature: {l}");
+            }
+            for t in refs(l, 't') {
+                assert!(t <= n_types, "{case}: t{t} not in the table: {l}");
+            }
+            for d in refs(l, 'd') {
+                assert!((d as usize) < decls.len(), "{case}: d{d} is no decl: {l}");
+            }
+        }
+        for l in sigs.lines().take(n_types as usize) {
+            for t in refs(l.split_once(' ').unwrap().1, 't') {
+                assert!(t <= n_types, "{case}: t{t} not in the table: {l}");
+            }
+        }
+        // A `fntype` key does not print the deny clause, so two fn types that differ only there
+        // share a text; they are adjacent in the order, and the first of each text stands for it.
+        let mut local = deep_keys(&sigs);
+        let mut seen = std::collections::BTreeSet::new();
+        for (t, k) in &local {
+            assert!(seen.insert(k.clone()) || k.contains("fntype"), "{case}: t{t} repeats the key {k}");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        local.retain(|(_, k)| seen.insert(k.clone()));
+        let mut global: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for (t, k) in deep_keys(&types) {
+            global.entry(k).or_insert(t);
+        }
+        let common: Vec<(u32, u32)> =
+            local.iter().filter_map(|(t, k)| global.get(k).map(|&g| (*t, g))).collect();
+        assert!(
+            common.windows(2).all(|w| w[0].1 < w[1].1),
+            "{case}: sigs and types disagree on the order: {common:?}"
+        );
+        if !out.has_errors() {
+            assert!(!common.is_empty(), "{case}: no type in both tables");
+        }
+    }
+}
+
+/// The kind flags of `kinds`, in order.
+const KIND_FLAGS: [&str; 10] =
+    ["copy", "view", "send", "sync", "sized", "flat", "frozen", "drop-impl", "drop", "lock"];
+
+/// `kinds` field rules against `sigs` of the same build, and its layouts against the back end's:
+/// one `t<T>` line per `sigs` table type, by T, then `impl` lines (one per impl decl), then
+/// `apply` lines by (T, trait); every `t<T>` / `d<D>` named exists; same bytes at 1 and 8
+/// threads. On every case without errors that lowers (each `ir_` case and `kinds_layout` must),
+/// each type both the `sigs` table and the IR type table hold (same expanded key) has the size,
+/// alignment, and field offsets stave-ir's layout gives it, and no layout where stave-ir has
+/// none.
+#[test]
+fn kinds_lines_and_ir_layouts() {
+    let mut cases: Vec<String> = CASES.iter().map(|c| c.to_string()).collect();
+    cases.extend(ir_cases());
+    let mut compared = 0;
+    let mut compared_records = 0;
+    for case in &cases {
+        let out = output(case, 1);
+        let kinds = String::from_utf8(render_to_vec(DumpStage::Kinds, &out).unwrap()).unwrap();
+        let sigs = String::from_utf8(render_to_vec(DumpStage::Sigs, &out).unwrap()).unwrap();
+        let out8 = output(case, 8);
+        assert_eq!(
+            kinds.as_bytes(),
+            render_to_vec(DumpStage::Kinds, &out8).unwrap(),
+            "{case}: 1 vs 8 threads"
+        );
+        check_lines(&format!("{case}/kinds.txt"), &kinds);
+        let n_types = sigs.lines().take_while(|l| l.starts_with('t')).count();
+        let decls: Vec<&str> = sigs.lines().skip(n_types).collect();
+        let impl_decls: std::collections::BTreeSet<String> = decls
+            .iter()
+            .filter(|l| l.split(' ').nth(1) == Some("impl"))
+            .map(|l| l.split(' ').next().unwrap().to_string())
+            .collect();
+        let tlines: Vec<&str> = kinds.lines().take_while(|l| l.starts_with('t')).collect();
+        assert_eq!(tlines.len(), n_types, "{case}: one kinds line per sigs table type");
+        let mut sizes: Vec<String> = Vec::new();
+        for (k, l) in tlines.iter().enumerate() {
+            let f: Vec<&str> = l.split(' ').collect();
+            assert_eq!(f[0], format!("t{k}"), "{case}: not by T from t0: {l}");
+            if f[1] != "-" {
+                let flags: Vec<usize> =
+                    f[1].split(',').map(|x| KIND_FLAGS.iter().position(|k| *k == x).expect(l)).collect();
+                assert!(flags.windows(2).all(|w| w[0] < w[1]), "{case}: flag order: {l}");
+            }
+            assert_eq!(f[2], "depth", "{l}");
+            assert!(f[3] == "-" || f[3] == "over" || f[3].parse::<u32>().is_ok_and(|d| d >= 1), "{l}");
+            assert_eq!(f[4], "size", "{l}");
+            let rest = f[5..].join(" ");
+            assert!(
+                ["param", "unsized", "overflow", "none"].contains(&rest.as_str()) || f[6] == "align",
+                "{case}: size form: {l}"
+            );
+            sizes.push(rest);
+        }
+        let mut impls_seen = std::collections::BTreeSet::new();
+        let mut last_apply: Option<(u32, u32)> = None;
+        for l in kinds.lines().skip(n_types) {
+            let f: Vec<&str> = l.split(' ').collect();
+            match f[0] {
+                "impl" => {
+                    assert!(last_apply.is_none(), "{case}: impl line after apply lines: {l}");
+                    assert_eq!((f[2], f[4], f[6]), ("trait", "head", "gen"), "{l}");
+                    assert!(impl_decls.contains(f[1]), "{case}: {} is no impl decl: {l}", f[1]);
+                    assert!(impls_seen.insert(f[1].to_string()), "{case}: impl listed twice: {l}");
+                }
+                "apply" => {
+                    let key = (refs(f[1], 't')[0], refs(f[2], 'd')[0]);
+                    assert!(last_apply.is_none_or(|p| p < key), "{case}: apply lines not by (T, trait): {l}");
+                    last_apply = Some(key);
+                    for d in refs(f[3..].join(" ").as_str(), 'd') {
+                        assert!(impl_decls.contains(&format!("d{d}")), "{case}: d{d} is no impl: {l}");
+                    }
+                }
+                _ => panic!("{case}: bad kinds line {l}"),
+            }
+            for t in refs(l, 't') {
+                assert!((t as usize) < n_types, "{case}: t{t} not in the sigs table: {l}");
+            }
+            for d in refs(l, 'd') {
+                assert!((d as usize) < decls.len(), "{case}: d{d} is no decl: {l}");
+            }
+        }
+        assert_eq!(impls_seen, impl_decls, "{case}: every impl decl has one impl line");
+
+        if out.has_errors() {
+            continue;
+        }
+        let ir_out = lowered(case, false, 1);
+        let Some(m) = ir_out.module.as_ref() else {
+            let f = ir_out.failure.as_ref().map(|f| f.to_string());
+            assert!(!case.starts_with("ir_") && case != "kinds_layout", "{case}: no module ({f:?})");
+            continue;
+        };
+        let layouts = stave_ir::layout::Layouts::compute(&m.types);
+        let ir_table: String = (0..m.types.len())
+            .map(|i| format!("t{i} {}\n", m.types.key_text(stave_ir::TypeId(i as u32))))
+            .collect();
+        let mut ir_of: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for (t, k) in deep_keys(&ir_table) {
+            ir_of.entry(k).or_insert(t);
+        }
+        for (t, k) in deep_keys(&sigs) {
+            let Some(&i) = ir_of.get(&k) else { continue };
+            let got = &sizes[t as usize];
+            let want = match layouts.get_layout(stave_ir::TypeId(i)) {
+                Err(_) => {
+                    assert!(
+                        !got.contains(" align "),
+                        "{case}: t{t} ({k}): stave-ir has no layout, kinds: {got}"
+                    );
+                    continue;
+                }
+                Ok(l) => {
+                    let list = |v: &[(u64, stave_ir::TypeId)]| {
+                        v.iter().map(|(o, _)| o.to_string()).collect::<Vec<_>>().join(" ")
+                    };
+                    let record = k.starts_with("adt ") || k.starts_with("tuple");
+                    let shape = match &l.shape {
+                        stave_ir::layout::Shape::Fields(fs) if record => format!(" fields[{}]", list(fs)),
+                        stave_ir::layout::Shape::Enum(vs) if record => format!(
+                            " tag 4 variants[{}]",
+                            vs.iter().map(|v| format!("[{}]", list(v))).collect::<Vec<_>>().join(" ")
+                        ),
+                        _ => String::new(),
+                    };
+                    if record {
+                        compared_records += 1;
+                    }
+                    format!("{} align {}{shape}", l.size, l.align)
+                }
+            };
+            assert_eq!(got, &want, "{case}: t{t} ({k}): kinds vs stave-ir layout");
+            compared += 1;
+        }
+    }
+    assert!(compared > 150 && compared_records > 20, "{compared} types, {compared_records} records compared");
+}
+
+/// `sigs.txt` and `kinds.txt` of every `ir_` case (a check, the pinned library).
+#[test]
+fn sigs_and_kinds_goldens_of_ir_cases() {
+    let bless = std::env::var_os("STAVE_BLESS").is_some();
+    let mut failures = Vec::new();
+    for case in ir_cases() {
+        let out = output(&case, 2);
+        for stage in [DumpStage::Sigs, DumpStage::Kinds] {
+            let got = String::from_utf8(render_to_vec(stage, &out).unwrap()).unwrap();
+            let file = stage.file_name();
+            let want_path = dumps_dir(&case).join(&file);
+            if bless {
+                std::fs::write(&want_path, &got).unwrap();
+                continue;
+            }
+            match std::fs::read_to_string(&want_path) {
+                Ok(want) if want == got => {}
+                Ok(want) => failures
+                    .push(format!("{case}/{file}: differs from the golden\n--- want\n{want}--- got\n{got}")),
+                Err(e) => failures.push(format!("{}: {e}", want_path.display())),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn ir_dump_of_a_check_is_refused() {
     let out = output("valid_small", 1);
@@ -283,14 +612,19 @@ fn ir_cases() -> Vec<String> {
     v
 }
 
-/// Writes `ir.txt` (plus `diags.txt`) of `case` lowered in debug or release mode.
-fn run_ir_case(case: &str, release: bool, threads: usize) -> (PathBuf, Output) {
+/// `case` lowered in debug or release mode.
+fn lowered(case: &str, release: bool, threads: usize) -> Output {
     let mut opts = Options::new(Goal::Check).threads(Some(threads));
     opts.lower = true;
     opts.release = release;
     // Fixed target: the dispatch arms dropped for another arch must not depend on the host.
     opts.target = Some(stave_target::Triple::parse("x86_64-linux").unwrap());
-    let out = pipeline::run(&dumps_dir(case).join("input"), &golden_std(), &opts).unwrap();
+    pipeline::run(&dumps_dir(case).join("input"), &golden_std(case), &opts).unwrap()
+}
+
+/// Writes `ir.txt` (plus `diags.txt`) of `case` lowered in debug or release mode.
+fn run_ir_case(case: &str, release: bool, threads: usize) -> (PathBuf, Output) {
+    let out = lowered(case, release, threads);
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("dump_goldens")
         .join(format!("ir_{case}_{}_{threads}", if release { "release" } else { "debug" }));
@@ -433,5 +767,217 @@ fn part_stores_write_in_place() {
                 .map(|(p, n)| (p.to_string(), n))
                 .collect();
         assert_eq!(counts, want, "release {release}");
+    }
+}
+
+/// Stack of the thread [`deep_types_on_a_small_stack`] renders the dumps on: half the default of
+/// the threads `stave build --dump` writes them from.
+const SMALL_STACK: usize = 1 << 20;
+
+/// A chain of distinct types this long in each generated family; [`NEAR`]: a type term just
+/// under the type height limit (1000).
+const CHAIN: usize = 5000;
+const NEAR: usize = 990;
+
+/// Shared by every generated program (`_lib_kinds`): the leaves of the chains, and `W` with an
+/// impl that recurses through its type argument.
+const DEEP_BASE: &str = "struct W<T> { pub a: T }
+trait Area {}
+impl Area for u8 {}
+impl<T: Area> Area for W<T> {}
+fn base(a: u8, b: &u8, c: *const u8, d: (u8, u8), e: [u8; 1], f: W<u8>) {}
+fn main() -> i32 {
+    return 0;
+}
+";
+
+/// Every compared dump stage of `out`, rendered on a thread of [`SMALL_STACK`] bytes.
+fn dumps_on_small_stack(out: &Output) -> Vec<(DumpStage, String)> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(SMALL_STACK)
+            .spawn_scoped(s, || {
+                COMPARED
+                    .iter()
+                    .map(|&st| (st, String::from_utf8(render_to_vec(st, out).unwrap()).unwrap()))
+                    .collect()
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    })
+}
+
+/// `src` after [`DEEP_BASE`], checked against `_lib_kinds`, its dumps rendered on a small stack.
+fn deep_program(name: &str, src: &str) -> (Output, Vec<(DumpStage, String)>) {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("dump_deep");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.stv"));
+    std::fs::write(&path, format!("{DEEP_BASE}{src}")).unwrap();
+    let opts = Options::new(Goal::Check).threads(Some(2));
+    let out = pipeline::run(&path, &golden_std("kinds_"), &opts).unwrap();
+    let dumps = dumps_on_small_stack(&out);
+    (out, dumps)
+}
+
+fn stage(dumps: &[(DumpStage, String)], st: DumpStage) -> &str {
+    &dumps.iter().find(|(s, _)| *s == st).unwrap().1
+}
+
+/// The `kinds` lines with every `t<T>` and `d<D>` number dropped, counted: the lines of two
+/// programs that differ by added decls compare.
+fn kinds_shapes(kinds: &str) -> std::collections::BTreeMap<String, i64> {
+    let mut m = std::collections::BTreeMap::new();
+    for l in kinds.lines() {
+        let mut s = String::with_capacity(l.len());
+        let mut cut = false;
+        let mut prev = ' ';
+        for c in l.chars() {
+            if cut && c.is_ascii_digit() {
+                continue;
+            }
+            cut = (c == 't' || c == 'd') && (prev == ' ' || prev == '[');
+            s.push(c);
+            prev = c;
+        }
+        *m.entry(s).or_insert(0) += 1;
+    }
+    m
+}
+
+/// A chain of [`CHAIN`] structs `{p}0 ..`, each holding the next through `wrap` (`{}` stands
+/// for it), the last `u8`.
+fn chain(p: &str, view: bool, wrap: &str) -> String {
+    let v = if view { "view " } else { "" };
+    (0..CHAIN)
+        .map(|k| {
+            let next = if k + 1 < CHAIN { format!("{p}{}", k + 1) } else { "u8".into() };
+            format!("{v}struct {p}{k} {{ pub a: {} }}\n", wrap.replace("{}", &next))
+        })
+        .collect()
+}
+
+/// The dumps of types nested well past the depth limit (by value, through tuple and array
+/// elements), of chains as long through references and raw pointers, of a term of type
+/// arguments just under the height limit with an impl that recurses through it, and of terms
+/// past the height limit, rendered on a 1 MiB stack: every `kinds` line is the contract's answer
+/// (the flags by the structural rules; `depth over` and `size none` past the limit). The two
+/// conformance programs that walk such types with the shipped std likewise.
+#[test]
+fn deep_types_on_a_small_stack() {
+    let (base_out, base) = deep_program("base", "");
+    assert!(!base_out.has_errors(), "{:?}", base_out.diagnostics);
+    let base_kinds = kinds_shapes(stage(&base, DumpStage::Kinds));
+    let flat = "send,sync,sized,flat,frozen";
+    let sized = |d: usize, s: &str| {
+        if d > 1000 { "depth over size none".to_string() } else { format!("depth {d} size {s}") }
+    };
+    // (name, source, the kinds lines it adds to the base program's): the table holds a struct
+    // that a field names, so not the first of a chain
+    let mut families: Vec<(&str, String, Vec<String>)> = Vec::new();
+    let want =
+        (1..CHAIN).map(|k| format!("t {flat} {}", sized(CHAIN + 1 - k, "1 align 1 fields[0]"))).collect();
+    families.push(("by_value", chain("V", false, "{}"), want));
+    let mut want = Vec::new();
+    for _ in 1..CHAIN {
+        want.push("t view,send,sync,sized,frozen depth 3 size 8 align 8 fields[0]".to_string());
+        want.push("t copy,view,send,sync,sized,frozen depth 2 size 8 align 8".to_string());
+    }
+    families.push(("by_ref", chain("R", true, "&{}"), want));
+    let mut want = Vec::new();
+    for _ in 1..CHAIN {
+        want.push("t sized,frozen depth 3 size 8 align 8 fields[0]".to_string());
+        want.push("t copy,sized,frozen depth 2 size 8 align 8".to_string());
+    }
+    families.push(("by_ptr", chain("P", false, "*const {}"), want));
+    let mut want = Vec::new();
+    for k in 1..CHAIN {
+        let d = 3 + 2 * (CHAIN - 1 - k);
+        let s = CHAIN - k + 1;
+        want.push(format!("t {flat} {}", sized(d, &format!("{s} align 1 fields[0]"))));
+        want.push(format!("t {flat} {}", sized(d + 1, &format!("{} align 1 fields[0 1]", s + 1))));
+    }
+    families.push(("by_tuple", chain("T", false, "(u8, {})"), want));
+    let mut want = Vec::new();
+    for k in 1..CHAIN {
+        let d = 3 + 2 * (CHAIN - 1 - k);
+        want.push(format!("t {flat} {}", sized(d, "1 align 1 fields[0]")));
+        want.push(format!("t {flat} {}", sized(d + 1, "1 align 1")));
+    }
+    families.push(("by_array", chain("A", false, "[{}; 1]"), want));
+    // terms just under the height limit: W<..W<u8>..> (with an impl through the argument),
+    // &..&u8, [..[u8; 1]..; 1], (u8, (u8, .. u8)); their one-level forms are the base's
+    let mut want = Vec::new();
+    for k in 2..=NEAR {
+        want.push(format!("t {flat} depth {} size 1 align 1 fields[0]", k + 1));
+        want.push("apply t d [d]".to_string());
+        want.push(format!("t copy,view,send,sync,sized,frozen depth {} size 8 align 8", k + 1));
+        want.push(format!("t copy,{flat} depth {} size 1 align 1", k + 1));
+        want.push(format!("t copy,{flat} depth {} size {} align 1 fields[0 1]", k + 1, k + 1));
+    }
+    let src = format!(
+        "struct HW {{ pub a: {}u8{} }}\nview struct HR {{ pub a: {}u8 }}\nstruct HA {{ pub a: {}u8{} }}\n\
+         struct HT {{ pub a: {}u8{} }}\n",
+        "W<".repeat(NEAR),
+        ">".repeat(NEAR),
+        "&".repeat(NEAR),
+        "[".repeat(NEAR),
+        "; 1]".repeat(NEAR),
+        "(u8, ".repeat(NEAR),
+        ")".repeat(NEAR),
+    );
+    families.push(("near_limit_terms", src, want));
+
+    for (name, src, want) in families {
+        let (out, dumps) = deep_program(name, &src);
+        let mut got = kinds_shapes(stage(&dumps, DumpStage::Kinds));
+        for (l, n) in &base_kinds {
+            *got.entry(l.clone()).or_insert(0) -= n;
+        }
+        for l in want {
+            *got.entry(l).or_insert(0) -= 1;
+        }
+        got.retain(|_, n| *n != 0);
+        assert!(
+            got.is_empty(),
+            "{name}: kinds lines added to the base program's, less the expected: {got:?}"
+        );
+        let e0005 = out.diagnostics.iter().filter(|d| d.code() == "E0005").count();
+        assert_eq!(out.has_errors(), e0005 > 0, "{name}: {:?}", out.diagnostics.first());
+        assert!(stage(&dumps, DumpStage::Sigs).lines().count() > NEAR, "{name}: sigs");
+    }
+
+    // Terms past the height limit are refused (E0005): the table holds none of them.
+    let tall = format!(
+        "view struct X {{ pub a: {}u8, pub b: {}u8{}, pub c: {}u8{}, pub d: {}u8{} }}\n",
+        "&".repeat(CHAIN),
+        "W<".repeat(CHAIN),
+        ">".repeat(CHAIN),
+        "(u8, ".repeat(CHAIN),
+        ")".repeat(CHAIN),
+        "[".repeat(CHAIN),
+        "; 1]".repeat(CHAIN),
+    );
+    let (out, dumps) = deep_program("tall_terms", &tall);
+    assert!(out.diagnostics.iter().any(|d| d.code() == "E0005"), "tall_terms: {:?}", out.diagnostics.first());
+    let types = |m: &std::collections::BTreeMap<String, i64>| -> i64 {
+        m.iter().filter(|(l, _)| l.starts_with("t ")).map(|(_, n)| n).sum()
+    };
+    let added = types(&kinds_shapes(stage(&dumps, DumpStage::Kinds))) - types(&base_kinds);
+    assert_eq!(added, 0, "tall_terms: no type added");
+
+    // The conformance programs that walk such types, with the shipped std: `&P<u32>` of a
+    // polymorphic recursion past the height limit (its pointee is in no signature), and
+    // `S0 ..= S1101` of a chain of structs `S0 .. S2100` past the depth limit.
+    for (f, n_over) in [("neg_polyrec_walks", 0), ("match_search_limit", 1102)] {
+        let path = repo().join("tests/conformance/types").join(format!("{f}.stv"));
+        let opts = Options::new(Goal::Check).threads(Some(2));
+        let out = pipeline::run(&path, &Library::in_dir(&repo()), &opts).unwrap();
+        let dumps = dumps_on_small_stack(&out);
+        let kinds = stage(&dumps, DumpStage::Kinds);
+        let over: Vec<&str> = kinds.lines().filter(|l| l.contains(" depth over ")).collect();
+        assert_eq!(over.len(), n_over, "{f}: types past the depth limit");
+        let want = format!(" {flat} depth over size none");
+        assert!(over.iter().all(|l| l.ends_with(&want)), "{f}: {:?}", over.first());
     }
 }

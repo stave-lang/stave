@@ -1,0 +1,1570 @@
+// Name resolution: every identifier use of the items not dropped bound to a decl, a local, a
+// generic param, a built-in, or nothing, as stage0's resolver binds it; the `names` dump rows.
+//
+// stage0 walks each item with a task stack that pushes and pops locals. The same answers come
+// from ranges over node ids, with no walk: nodes are numbered in postorder, so a node's subtree
+// is the id range `N - size .. N` and a later sibling's subtree lies above it.
+// - Context per node, one item at a time, top-down (a parent's id is above its children's):
+//   whether stage0's walk visits it, the enclosing fn, closure, contract clause, impl or trait.
+// - A binding is a row (item, class, name, lo, hi, node): visible to the uses at positions
+//   lo..=hi. A `let` binds after its statement up to the end of its block, a parameter after
+//   itself up to the end of its fn or closure, a `for` pattern in its block, a match arm's first
+//   alternative after the pattern up to the end of the arm, a `tail` name in its clause, a
+//   generic param in its whole owner, `self` from the parameter list to the end of the fn.
+//   These ranges nest or are disjoint for one name, as the walk's stack is.
+// - A use's position is its key node (a `from` clause of a parameter: its parameter list, which
+//   stage0 resolves after every parameter is bound). The binding of a use is the innermost range
+//   holding it: binding and use rows are sorted by (item, name, class, position), then one
+//   scan per (item, name, class) keeps a stack of open ranges (pop what ended, the top holds the
+//   position). The same answers come from a segmented bracket match.
+// - Dotted chains go left to right from the head's resolution: a module step looks up the
+//   module's items, a type step a variant, an inherent method, or the one trait-impl method of
+//   that name; the first step after a value or a type whose members need types stops the chain.
+// - Rows: (item, key node, byte offset, decl or local, target), sorted by (item, node, offset).
+import ast;
+import decls;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import items;
+import lex;
+import modules;
+import prims.col;
+import prims.hindex;
+import prims.perm;
+import prims.search;
+import prims.sort;
+import resdiag;
+import source;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+
+pub const TAG_DECL: u8 = 0;
+pub const TAG_LOCAL: u8 = 1;
+
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_DOT: u8 = terminals.T_DOT as% u8;
+const T_COLON: u8 = terminals.T_COLON as% u8;
+const T_COLON_COLON: u8 = terminals.T_COLON_COLON as% u8;
+const T_LT: u8 = terminals.T_LT as% u8;
+const T_GT: u8 = terminals.T_GT as% u8;
+const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
+const T_GT_EQ: u8 = terminals.T_GT_EQ as% u8;
+const T_GT_GT_EQ: u8 = terminals.T_GT_GT_EQ as% u8;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
+const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
+const T_R_BRACKET: u8 = terminals.T_R_BRACKET as% u8;
+const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
+const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
+const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
+const T_EOF: u8 = terminals.T_EOF as% u8;
+const T_FMT: u8 = terminals.T_FMT_LIT as% u8;
+const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
+const T_KW_SELF_TYPE: u8 = terminals.T_KW_SELF_TYPE as% u8;
+const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
+const T_KW_LET: u8 = terminals.T_KW_LET as% u8;
+const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
+const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
+const T_KW_COPY: u8 = terminals.T_KW_COPY as% u8;
+
+const B_DQUOTE: u8 = 34;
+const B_DOT: u8 = 46;
+const B_BACKSLASH: u8 = 92;
+const B_LBRACE: u8 = 123;
+const B_RBRACE: u8 = 125;
+
+// Binding classes: locals, generic params, the `self` parameter.
+const C_LOCAL: u8 = 0;
+const C_GENERIC: u8 = 1;
+const C_SELF: u8 = 2;
+
+// Visit states: not visited, visited, a parameter of a visited parameter list.
+const S_NO: u8 = 0;
+const S_YES: u8 = 1;
+const S_PARAM: u8 = 2;
+
+// Name spaces of a chain head: value (locals, generics, globals), type (generics, globals),
+// global only (patterns, dispatch arms), local only (`from` origins).
+const NS_VALUE: u8 = 0;
+const NS_TYPE: u8 = 1;
+const NS_GLOBAL: u8 = 2;
+const NS_ORIGIN: u8 = 3;
+
+// What a name resolves to while a chain is followed.
+const R_NONE: u8 = 0;
+const R_DECL: u8 = 1;
+const R_LOCAL: u8 = 2;
+const R_GENERIC: u8 = 3;
+const R_CONST_GENERIC: u8 = 4;
+const R_PRIM: u8 = 5;
+const R_BUILTIN: u8 = 6;
+const R_SELF_TYPE: u8 = 7;
+const R_RESULT: u8 = 8;
+
+// The rows of the `names` dump, sorted by (item, node, offset).
+pub struct Names {
+    pub item: vec.Vec<u32>,
+    pub node: vec.Vec<u32>,
+    pub off: vec.Vec<u32>,
+    pub tag: vec.Vec<u8>,
+    pub target: vec.Vec<u32>,
+}
+
+impl Names {
+    pub fn len(&self) -> usize {
+        return self.item.len();
+    }
+}
+
+// The node context of one item at a time, in columns sized for the largest item and reused
+// (rows held are global; a row g of the item is at g - base).
+struct Ctx {
+    parent: vec.Vec<u32>,
+    state: vec.Vec<u8>,
+    // nearest fn, closure `Primary`, `Requires` / `Ensures`, `ImplDecl` / `TraitDecl` (rows, the
+    // node itself included)
+    fnl: vec.Vec<u32>,
+    clo: vec.Vec<u32>,
+    cla: vec.Vec<u32>,
+    con: vec.Vec<u32>,
+    // `F_*` and `G_*` bits
+    flag: vec.Vec<u8>,
+    // per kind, the last row whose children held it: a child is the first of its kind iff that
+    // row is not its parent yet
+    seen: vec.Vec<u32>,
+}
+
+impl Ctx {
+    fn new(n: usize) -> Ctx {
+        return Ctx.{ parent: col.filled(n, NONE), state: col.filled(n, S_NO), fnl: col.filled(n, NONE), clo: col.filled(n, NONE), cla: col.filled(n, NONE), con: col.filled(n, NONE), flag: col.filled(n, 0u8), seen: col.filled(256, NONE) };
+    }
+
+    fn slices(&self, base: usize) -> CtxV from self {
+        return CtxV.{ base: base, parent_c: self.parent.as_slice(), state_c: self.state.as_slice(), fnl_c: self.fnl.as_slice(), clo_c: self.clo.as_slice(), cla_c: self.cla.as_slice(), con_c: self.con.as_slice(), flag_c: self.flag.as_slice() };
+    }
+}
+
+// The context of the item whose rows start at `base`, by row.
+view struct CtxV {
+    base: usize,
+    parent_c: &[u32],
+    state_c: &[u8],
+    fnl_c: &[u32],
+    clo_c: &[u32],
+    cla_c: &[u32],
+    con_c: &[u32],
+    flag_c: &[u8],
+}
+
+impl CtxV {
+    fn parent(&self, g: usize) -> u32 {
+        return self.parent_c[g - self.base];
+    }
+
+    fn state(&self, g: usize) -> u8 {
+        return self.state_c[g - self.base];
+    }
+
+    fn fnl(&self, g: usize) -> u32 {
+        return self.fnl_c[g - self.base];
+    }
+
+    fn clo(&self, g: usize) -> u32 {
+        return self.clo_c[g - self.base];
+    }
+
+    fn cla(&self, g: usize) -> u32 {
+        return self.cla_c[g - self.base];
+    }
+
+    fn con(&self, g: usize) -> u32 {
+        return self.con_c[g - self.base];
+    }
+
+    fn flag(&self, g: usize) -> u8 {
+        return self.flag_c[g - self.base];
+    }
+}
+
+// Node bits: the first child of its parent, the first child of its kind among its siblings; it
+// has a `SelfParam` child, a `Block` child, a `Block` child after its first child.
+const F_FIRST: u8 = 1;
+const F_FIRST_OF_KIND: u8 = 2;
+const G_SELF: u8 = 4;
+const G_BLOCK: u8 = 8;
+const G_LATE_BLOCK: u8 = 16;
+
+// The columns the passes read, borrowed once: a column read through its `Vec` is a call, which
+// costs more than the work per node.
+view struct Cols {
+    kind: &[u8],
+    tok: &[u32],
+    size: &[u32],
+    koff: &[u32],
+    kids: &[u32],
+    inode: &[u32],
+    tkind: &[u8],
+    tstart: &[u32],
+    tstr: &[u32],
+    str_off: &[u32],
+    ifile: &[u32],
+    fmod: &[u32],
+}
+
+impl Cols {
+    // The kind of global token g (`Eof` past the end).
+    fn tk(&self, g: usize) -> u8 {
+        return if g < self.tkind.len() then self.tkind[g] else T_EOF;
+    }
+
+    // The first child of row g (item base `base`) as a row, or NONE.
+    fn first_kid(&self, base: usize, g: usize) -> u32 {
+        let j = self.koff[g] as usize;
+        return if j < self.koff[g + 1] as usize then (base + self.kids[j] as usize) as% u32 else NONE;
+    }
+
+    // The first child of row g of kind k, as a row, or NONE.
+    fn child(&self, base: usize, g: usize, k: u8) -> u32 {
+        for j in self.koff[g] as usize..self.koff[g + 1] as usize {
+            let c = base + self.kids[j] as usize;
+            if self.kind[c] == k { return c as% u32; }
+        }
+        return NONE;
+    }
+
+    // The byte length of string s (0 for NONE).
+    fn str_len(&self, s: u32) -> u32 {
+        return if s == NONE then 0u32 else self.str_off[s as usize + 1] - self.str_off[s as usize];
+    }
+}
+
+fn cols(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, cut: &items.Items, md: &modules.Modules) -> Cols from tree + t + nm + cut + md {
+    return Cols.{
+        kind: tree.kind.as_slice(),
+        tok: tree.tok.as_slice(),
+        size: tree.size.as_slice(),
+        koff: tree.kids.offsets(),
+        kids: tree.kids.data(),
+        inode: tree.item_node.as_slice(),
+        tkind: t.kind.as_slice(),
+        tstart: t.start.as_slice(),
+        tstr: nm.tok_str.as_slice(),
+        str_off: nm.tab.str_off.as_slice(),
+        ifile: cut.file.as_slice(),
+        fmod: md.file_mod.as_slice(),
+    };
+}
+
+// Binding rows (positions and nodes item-relative).
+struct Binds {
+    item: vec.Vec<u32>,
+    class: vec.Vec<u8>,
+    sym: vec.Vec<u32>,
+    lo: vec.Vec<u32>,
+    hi: vec.Vec<u32>,
+    node: vec.Vec<u32>,
+}
+
+impl Binds {
+    fn add(&mut self, item: u32, class: u8, sym: u32, lo: u32, hi: u32, node: u32) {
+        self.item.push(item);
+        self.class.push(class);
+        self.sym.push(sym);
+        self.lo.push(lo);
+        self.hi.push(hi);
+        self.node.push(node);
+    }
+}
+
+// `Uses.flags` bits: a bare head may name a variant (E0103); the head is `Self`; the head's
+// contextual names are those of an `ensures` clause; the token after the head is `(` (`old(..)`);
+// a `Self` head inside an `ImplDecl`.
+const U_VARIANT_OK: u8 = 1;
+const U_SELF_HEAD: u8 = 2;
+const U_ENSURES: u8 = 4;
+const U_CALL: u8 = 8;
+const U_IN_IMPL: u8 = 16;
+
+fn uflags(variant_ok: bool, self_head: bool, ens: bool, call: bool) -> u8 {
+    return variant_ok.select(U_VARIANT_OK, 0u8) | self_head.select(U_SELF_HEAD, 0u8) | ens.select(U_ENSURES, 0u8) | call.select(U_CALL, 0u8);
+}
+
+// Uses: one row per chain, its segments in `seg_*` rows `seg_lo[u]..seg_lo[u + 1]`.
+struct Uses {
+    item: vec.Vec<u32>,
+    node: vec.Vec<u32>,
+    pos: vec.Vec<u32>,
+    ns: vec.Vec<u8>,
+    flags: vec.Vec<u8>,
+    // the clause row the head's contextual names come from (NONE: outside clauses); in an
+    // `ensures` clause the row `result` names
+    clause: vec.Vec<u32>,
+    seg_lo: vec.Vec<u32>,
+    seg_sym: vec.Vec<u32>,
+    seg_off: vec.Vec<u32>,
+    seg_len: vec.Vec<u32>,
+    // the answers of the local and generic lookups (binding rows, NONE)
+    local: vec.Vec<u32>,
+    generic: vec.Vec<u32>,
+}
+
+impl Uses {
+    fn new() -> Uses {
+        let mut lo = vec.Vec::<u32>.new();
+        lo.push(0);
+        return Uses.{
+            item: vec.Vec::<u32>.new(),
+            node: vec.Vec::<u32>.new(),
+            pos: vec.Vec::<u32>.new(),
+            ns: vec.Vec::<u8>.new(),
+            flags: vec.Vec::<u8>.new(),
+            clause: vec.Vec::<u32>.new(),
+            seg_lo: lo,
+            seg_sym: vec.Vec::<u32>.new(),
+            seg_off: vec.Vec::<u32>.new(),
+            seg_len: vec.Vec::<u32>.new(),
+            local: vec.Vec::<u32>.new(),
+            generic: vec.Vec::<u32>.new(),
+        };
+    }
+
+    fn seg(&mut self, sym: u32, off: u32, len: u32) {
+        self.seg_sym.push(sym);
+        self.seg_off.push(off);
+        self.seg_len.push(len);
+    }
+
+    // Closes the use whose segments were pushed since the last one.
+    fn end(&mut self, item: u32, node: u32, pos: u32, ns: u8, flags: u8, clause: u32) {
+        self.item.push(item);
+        self.node.push(node);
+        self.pos.push(pos);
+        self.ns.push(ns);
+        self.flags.push(flags);
+        self.clause.push(clause);
+        self.seg_lo.push(self.seg_sym.len() as% u32);
+    }
+
+    fn slices(&self) -> UseV from self {
+        return UseV.{ item: self.item.as_slice(), node: self.node.as_slice(), ns: self.ns.as_slice(), flags: self.flags.as_slice(), clause: self.clause.as_slice(), seg_lo: self.seg_lo.as_slice(), seg_sym: self.seg_sym.as_slice(), seg_off: self.seg_off.as_slice(), seg_len: self.seg_len.as_slice(), local: self.local.as_slice(), generic: self.generic.as_slice() };
+    }
+}
+
+// The columns of `Uses` that chains read.
+view struct UseV {
+    item: &[u32],
+    node: &[u32],
+    ns: &[u8],
+    flags: &[u8],
+    clause: &[u32],
+    seg_lo: &[u32],
+    seg_sym: &[u32],
+    seg_off: &[u32],
+    seg_len: &[u32],
+    local: &[u32],
+    generic: &[u32],
+}
+
+// Lookups of `self`: (item, position, the span of the keyword) for E0101 when no `self` holds it.
+struct SelfUses {
+    item: vec.Vec<u32>,
+    pos: vec.Vec<u32>,
+    off: vec.Vec<u32>,
+    len: vec.Vec<u32>,
+}
+
+impl SelfUses {
+    fn add(&mut self, item: u32, pos: u32, off: u32) {
+        self.item.push(item);
+        self.pos.push(pos);
+        self.off.push(off);
+        self.len.push(4);
+    }
+}
+
+fn kind_at(t: &lex.Tokens, g: usize) -> u8 {
+    return if g < t.kind.len() then t.kind.as_slice()[g] else T_EOF;
+}
+
+// Kinds whose children stage0's walk never visits.
+fn leaf_kind(k: u8) -> bool {
+    return k == node_kinds.KIND_NEEDS || k == node_kinds.KIND_FEATURE || k == node_kinds.KIND_LITERAL || k == node_kinds.KIND_ASSIGN_OP || k == node_kinds.KIND_CMP_OP || k == node_kinds.KIND_UNSAFE || k == node_kinds.KIND_SELF_PARAM || k == node_kinds.KIND_IMPORT || k == node_kinds.KIND_ALLOCATOR_DECL || k == node_kinds.KIND_WITHOUT || k == node_kinds.KIND_EFFECT || k == node_kinds.KIND_PATTERN || k == node_kinds.KIND_FIELD_PAT || k == node_kinds.KIND_NAME || k == node_kinds.KIND_ORIGIN;
+}
+
+// How a parent's kind decides its children's visit state (`K_*`, by kind).
+const K_ALL: u8 = 0;
+const K_NONE: u8 = 1;
+const K_LIST: u8 = 2;
+const K_PARAM: u8 = 3;
+const K_STMT: u8 = 4;
+const K_FOR: u8 = 5;
+const K_ARM: u8 = 6;
+
+fn kind_rules() -> [u8; 256] {
+    let mut r = [K_ALL; 256];
+    for k in 0usize..256 {
+        if leaf_kind(k as% u8) { r[k] = K_NONE; }
+    }
+    r[node_kinds.KIND_PARAMS as usize] = K_LIST;
+    r[node_kinds.KIND_X_PARAMS as usize] = K_LIST;
+    r[node_kinds.KIND_PARAM as usize] = K_PARAM;
+    r[node_kinds.KIND_STMT as usize] = K_STMT;
+    r[node_kinds.KIND_FOR_STMT as usize] = K_FOR;
+    r[node_kinds.KIND_STMT_ARM as usize] = K_ARM;
+    r[node_kinds.KIND_EXPR_ARM as usize] = K_ARM;
+    return r;
+}
+
+// The visit state of child ch of row p (global rows; the item's rows start at base), whose state
+// is ps and rule rule (`parent`, `clo` filled for p and above, `flag` for every row of the item).
+fn child_state(c: &Cols, parent: &[u32], clo: &[u32], flag: &[u8], base: usize, p: usize, ps: u8, rule: u8, ch: usize) -> u8 {
+    let ck = c.kind[ch];
+    let fch = flag[ch - base];
+    let first_of_kind = fch & F_FIRST_OF_KIND != 0;
+    if ps == S_PARAM {
+        // the list visits every parameter's `from` clause after binding them all (not in a closure)
+        let pp = parent[p - base] as usize;
+        let pk2 = c.kind[pp];
+        let from_ok = (pk2 == node_kinds.KIND_PARAMS || pk2 == node_kinds.KIND_X_PARAMS) && clo[pp - base] == NONE;
+        if from_ok && ck == node_kinds.KIND_PARAM_FROM && first_of_kind { return S_YES; }
+        if flag[p - base] & G_SELF != 0 { return S_NO; }
+        return if ck == node_kinds.KIND_TYPE && first_of_kind then S_YES else S_NO;
+    }
+    if ps != S_YES || rule == K_NONE { return S_NO; }
+    if rule == K_ALL { return S_YES; }
+    if rule == K_LIST { return if ck == node_kinds.KIND_PARAM then S_PARAM else S_YES; }
+    if rule == K_PARAM {
+        // a parameter visited on its own: its type only
+        if ck == node_kinds.KIND_PARAM { return S_PARAM; }
+        if flag[p - base] & G_SELF != 0 { return S_NO; }
+        return if ck == node_kinds.KIND_TYPE && first_of_kind then S_YES else S_NO;
+    }
+    let first = fch & F_FIRST != 0;
+    if rule == K_STMT {
+        if c.tk(c.tok[p] as usize) != T_KW_LET { return S_YES; }
+        return if first then S_NO else S_YES;
+    }
+    if rule == K_FOR {
+        // without a `Block` after the first child stage0 visits nothing
+        if flag[p - base] & G_LATE_BLOCK == 0 { return S_NO; }
+        return if first then S_NO else S_YES;
+    }
+    return if first then S_NO else S_YES;
+}
+
+// The context of the item at rows base..end, into the first end - base rows of cx's columns.
+fn context(c: &Cols, rules: &[u8], base: usize, end: usize, cx: &mut Ctx) {
+    let len = end - base;
+    let kind = c.kind;
+    let par = cx.parent.as_mut_slice();
+    let sts = cx.state.as_mut_slice();
+    let fnl_s = cx.fnl.as_mut_slice();
+    let clo_s = cx.clo.as_mut_slice();
+    let cla_s = cx.cla.as_mut_slice();
+    let con_s = cx.con.as_mut_slice();
+    let fl = cx.flag.as_mut_slice();
+    let seen = cx.seen.as_mut_slice();
+    par[0..len].fill(NONE);
+    fl[0..len].fill(0);
+    for g in base..end {
+        let r = g - base;
+        let lo = c.koff[g] as usize;
+        let gg = g as% u32;
+        for j in lo..c.koff[g + 1] as usize {
+            let cr = c.kids[j] as usize;
+            par[cr] = gg;
+            let ck = kind[base + cr];
+            let mut f = fl[cr];
+            if j == lo { f = f | F_FIRST; }
+            if seen[ck as usize] != gg {
+                seen[ck as usize] = gg;
+                f = f | F_FIRST_OF_KIND;
+            }
+            fl[cr] = f;
+            if ck == node_kinds.KIND_SELF_PARAM { fl[r] = fl[r] | G_SELF; }
+            if ck == node_kinds.KIND_BLOCK {
+                fl[r] = fl[r] | G_BLOCK;
+                if j != lo { fl[r] = fl[r] | G_LATE_BLOCK; }
+            }
+        }
+    }
+    // parents before children: descending rows
+    let mut r = len;
+    while r > 0 {
+        r = r - 1;
+        let g = base + r;
+        let p = par[r];
+        let mut st = S_YES;
+        let mut fnl = NONE;
+        let mut clo = NONE;
+        let mut cla = NONE;
+        let mut con = NONE;
+        if p != NONE {
+            let pu = p as usize;
+            let pr = pu - base;
+            let ps = sts[pr];
+            let rule = rules[kind[pu] as usize];
+            // the usual cases without the call: a parent not visited, a leaf, a plain parent
+            if ps == S_NO || (ps == S_YES && rule == K_NONE) {
+                st = S_NO;
+            } else if ps != S_YES || rule != K_ALL {
+                st = child_state(c, par, clo_s, fl, base, pu, ps, rule, g);
+            }
+            fnl = fnl_s[pr];
+            clo = clo_s[pr];
+            cla = cla_s[pr];
+            con = con_s[pr];
+        }
+        let k = kind[g];
+        if k == node_kinds.KIND_FN_DECL || k == node_kinds.KIND_KERNEL_DECL || k == node_kinds.KIND_DISPATCH_DECL || k == node_kinds.KIND_EXTERN_FN || k == node_kinds.KIND_TRAIT_FN || (k == node_kinds.KIND_EXTERN_ITEM && fl[r] & G_BLOCK != 0) {
+            fnl = g as% u32;
+        } else if k == node_kinds.KIND_PRIMARY && c.tk(c.tok[g] as usize) == T_KW_FN {
+            clo = g as% u32;
+        } else if k == node_kinds.KIND_REQUIRES || k == node_kinds.KIND_ENSURES {
+            cla = g as% u32;
+        } else if k == node_kinds.KIND_IMPL_DECL || k == node_kinds.KIND_TRAIT_DECL {
+            con = g as% u32;
+        }
+        sts[r] = st;
+        fnl_s[r] = fnl;
+        clo_s[r] = clo;
+        cla_s[r] = cla;
+        con_s[r] = con;
+    }
+}
+
+// The end of the generic argument list opening at global token lt (a `<`): (next token,
+// whether the list ended inside a split token such as `>>`).
+fn angle_end(c: &Cols, lt: usize) -> (usize, bool) {
+    let mut angle: i64 = 0;
+    let mut bracket: i64 = 0;
+    let mut i = lt;
+    let tks = c.tkind;
+    let n = tks.len();
+    while i < n {
+        let k = tks[i];
+        if k == T_EOF { return (i, false); }
+        if k == T_L_PAREN || k == T_L_BRACKET || k == T_L_BRACE || k == T_DOT_L_BRACE {
+            bracket = bracket + 1;
+        } else if k == T_R_PAREN || k == T_R_BRACKET || k == T_R_BRACE {
+            bracket = bracket - 1;
+            if bracket < 0 { return (i, false); }
+        } else if bracket == 0 {
+            let mut delta: i64 = 0;
+            let mut whole: i64 = 0;
+            if k == T_LT {
+                delta = 1;
+            } else if k == T_GT {
+                delta = -1;
+                whole = 1;
+            } else if k == T_GT_GT {
+                delta = -2;
+                whole = 2;
+            } else if k == T_GT_EQ {
+                delta = -1;
+                whole = 2;
+            } else if k == T_GT_GT_EQ {
+                delta = -2;
+                whole = 3;
+            }
+            if delta < 0 {
+                let before = angle;
+                angle = angle + delta;
+                if angle <= 0 { return (i + 1, before < whole); }
+            } else {
+                angle = angle + delta;
+            }
+        }
+        i = i + 1;
+    }
+    return (i, false);
+}
+
+// Pushes the segment of identifier token g.
+fn tok_seg(u: &mut Uses, c: &Cols, g: usize) {
+    let s = c.tstr[g];
+    u.seg(s, c.tstart[g], c.str_len(s));
+}
+
+// The uses, bindings, and `self` lookups of one ok item.
+struct Item {
+    i: u32,
+    base: usize,
+    end: usize,
+}
+
+impl Copy for Item {}
+
+fn rel(it: Item, g: usize) -> u32 {
+    return (g - it.base) as% u32;
+}
+
+// The lower end of the subtree of row g (item-relative).
+fn sub_lo(c: &Cols, it: Item, g: usize) -> u32 {
+    return rel(it, g) - c.size[g];
+}
+
+// Records the chain head use of `Primary` row g.
+fn primary(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, g: usize, rows: &mut resdiag.Rows, file: u32) {
+    let a = c.tok[g] as usize;
+    let k = c.tk(a);
+    let n = rel(it, g);
+    let cla = x.cla(g);
+    let ens = cla != NONE && c.kind[cla as usize] == node_kinds.KIND_ENSURES;
+    // the row `result` names in an `ensures` clause: the fn's first one, else the clause
+    let mut rc = cla;
+    if ens {
+        let f = x.fnl(g);
+        let fe = if f == NONE then NONE else c.child(it.base, f as usize, node_kinds.KIND_ENSURES);
+        if fe != NONE { rc = fe; }
+    }
+    if k == T_KW_SELF {
+        su.add(it.i, n, c.tstart[a]);
+        return;
+    }
+    if k == T_FMT {
+        fmt(u, su, it, c, t, nm, set, a, n, rc, ens);
+        return;
+    }
+    let self_head = k == T_KW_SELF_TYPE;
+    if k != T_IDENT && !self_head { return; }
+    let call = c.tk(a + 1) == T_L_PAREN;
+    let mut pos = a + 1;
+    if k == T_IDENT && c.tk(a + 1) == T_COLON_COLON {
+        let (e, partial) = angle_end(c, a + 2);
+        if partial {
+            tok_seg(u, c, a);
+            u.end(it.i, n, n, NS_VALUE, uflags(true, false, ens, call), rc);
+            return;
+        }
+        pos = e;
+    }
+    let mut in_impl = false;
+    if self_head {
+        let con = x.con(g);
+        if con == NONE {
+            rows.add(resdiag.E0101, file, c.tstart[a], 4, NONE, 2, NONE);
+            return;
+        }
+        in_impl = c.kind[con as usize] == node_kinds.KIND_IMPL_DECL;
+        u.seg(NONE, c.tstart[a], 4);
+    } else {
+        tok_seg(u, c, a);
+    }
+    while c.tk(pos) == T_DOT && c.tk(pos + 1) == T_IDENT {
+        tok_seg(u, c, pos + 1);
+        pos = pos + 2;
+        if c.tk(pos) == T_COLON_COLON {
+            let (e, partial) = angle_end(c, pos + 1);
+            if partial { break; }
+            pos = e;
+        }
+    }
+    u.end(it.i, n, n, NS_VALUE, uflags(!self_head, self_head, ens, call) | in_impl.select(U_IN_IMPL, 0u8), rc);
+}
+
+// The f-string holes of `FmtLit` token a (a `\` skips the next byte, the first unescaped `"`
+// ends it, a hole is `{` names `.`-separated `}`), each a chain keyed by the `Primary`; the
+// segment ids are the interned hole segments of the token in order (`self` is none).
+fn fmt(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, a: usize, n: u32, cla: u32, ens: bool) {
+    let f = modules.file_of(t, a as% u32) as usize;
+    let src = set.file(f);
+    let start = c.tstart[a] as usize;
+    let hole_str = nm.hole_str.as_slice();
+    let mut h = search.lower_bound(nm.hole_tok.as_slice(), a as% u32);
+    let call = c.tk(a + 1) == T_L_PAREN;
+    let len = src.len();
+    let mut j = start + 2;
+    let mut segs = vec.Vec::<u32>.new();
+    while j < len {
+        let b = src[j];
+        if b == B_DQUOTE { break; }
+        if b == B_BACKSLASH {
+            j = j + 2;
+            continue;
+        }
+        if b != B_LBRACE {
+            j = j + 1;
+            continue;
+        }
+        let mut k = j + 1;
+        let mut ok = false;
+        segs.clear();
+        loop {
+            let s = k;
+            while k < len && is_idcont(src[k]) { k = k + 1; }
+            if k == s { break; }
+            segs.push(s as% u32);
+            segs.push(k as% u32);
+            if k < len && src[k] == B_DOT {
+                k = k + 1;
+            } else if k < len && src[k] == B_RBRACE {
+                ok = true;
+                k = k + 1;
+                break;
+            } else {
+                break;
+            }
+        }
+        if ok {
+            let mut p: usize = 0;
+            let mut head_self = false;
+            while p < segs.len() {
+                let s = segs.as_slice()[p] as usize;
+                let e = segs.as_slice()[p + 1] as usize;
+                let is_self = src[s..e].eq(mem.str_bytes("self"));
+                if p == 0 && is_self { head_self = true; }
+                let mut sym = NONE;
+                if !is_self {
+                    sym = hole_str[h];
+                    h = h + 1;
+                }
+                u.seg(sym, s as% u32, (e - s) as% u32);
+                p = p + 2;
+            }
+            if head_self {
+                // `self` in a hole: no chain; the segments pushed are dropped
+                let lo = u.seg_lo.as_slice()[u.seg_lo.len() - 1] as usize;
+                su.add(it.i, n, u.seg_off.as_slice()[lo]);
+                u.seg_sym.truncate(lo);
+                u.seg_off.truncate(lo);
+                u.seg_len.truncate(lo);
+            } else {
+                u.end(it.i, n, n, NS_VALUE, uflags(true, false, ens, call), cla);
+            }
+        }
+        j = if k > j + 1 then k else j + 1;
+    }
+}
+
+fn is_idcont(b: u8) -> bool {
+    return (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+}
+
+// An identifier chain at row g keyed there.
+fn path_use(u: &mut Uses, it: Item, c: &Cols, g: usize, ns: u8, chain: &mut vec.Vec<u32>) {
+    let a = c.tok[g] as usize;
+    if c.tk(a) != T_IDENT { return; }
+    modules.ident_chain(c.tkind, a, chain);
+    let ch = chain.as_slice();
+    for k in 0..ch.len() {
+        tok_seg(u, c, ch[k] as usize);
+    }
+    let n = rel(it, g);
+    u.end(it.i, n, n, ns, 0, NONE);
+}
+
+// E0105 for the later of two bindings named alike in one group (a pattern, a parameter list, a
+// generic list): rows (group, name, order) are sorted, each run's first is the first binding.
+struct Dups {
+    key: vec.Vec<u64>,
+    ord: vec.Vec<u32>,
+    off: vec.Vec<u32>,
+    len: vec.Vec<u32>,
+    sym: vec.Vec<u32>,
+    item: vec.Vec<u32>,
+    fnode: vec.Vec<u32>,
+}
+
+impl Dups {
+    fn add(&mut self, group: u32, sym: u32, ord: u32, off: u32, len: u32, item: u32, fnode: u32) {
+        self.key.push(search.pair(group, sym));
+        self.ord.push(ord);
+        self.off.push(off);
+        self.len.push(len);
+        self.sym.push(sym);
+        self.item.push(item);
+        self.fnode.push(fnode);
+    }
+}
+
+// The name S of the fn at row f, as stage0 names the scope of a binding in it: the identifier
+// after the first `fn` within eight tokens of the fn's first token, else the token after it
+// (NONE when that is no identifier, or f is NONE).
+fn fn_name(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, f: u32, file_end: usize) -> u32 {
+    if f == NONE { return NONE; }
+    let a = tree.tok.as_slice()[f as usize] as usize;
+    let mut name_tok = a + 1;
+    let mut j = a;
+    while j < a + 8 && j < file_end {
+        if kind_at(t, j) == T_KW_FN {
+            name_tok = j + 1;
+            break;
+        }
+        j = j + 1;
+    }
+    if name_tok >= file_end { return NONE; }
+    return nm.tok_str.as_slice()[name_tok];
+}
+
+// The bindings of the pattern rooted at row root (stage0 binds every name after the whole
+// pattern, so its own paths never see them), its path uses, and E0105 for names bound twice.
+fn pattern(u: &mut Uses, b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, root: usize, bind: bool, lo: u32, hi: u32, fnode: u32, chain: &mut vec.Vec<u32>) {
+    let first = root - c.size[root] as usize;
+    for g in first..root + 1 {
+        let k = c.kind[g];
+        let a = c.tok[g] as usize;
+        let mut name_tok = NONE;
+        if k == node_kinds.KIND_PATTERN {
+            let ak = c.tk(a);
+            if ak == T_KW_MUT {
+                if c.tk(a + 1) == T_IDENT { name_tok = (a + 1) as% u32; }
+            } else if ak == T_IDENT {
+                modules.ident_chain(c.tkind, a, chain);
+                let ch = chain.as_slice();
+                let e = ch[ch.len() - 1] as usize + 1;
+                let suffix = c.tk(e) == T_L_PAREN || c.tk(e) == T_DOT_L_BRACE;
+                if ch.len() == 1 && !suffix {
+                    name_tok = a as% u32;
+                } else {
+                    for q in 0..ch.len() {
+                        tok_seg(u, c, ch[q] as usize);
+                    }
+                    let n = rel(it, g);
+                    u.end(it.i, n, n, NS_GLOBAL, uflags(ch.len() == 1, false, false, false), NONE);
+                }
+            }
+        } else if k == node_kinds.KIND_FIELD_PAT {
+            if c.tk(a) == T_IDENT && c.tk(a + 1) != T_COLON { name_tok = a as% u32; }
+        }
+        if name_tok == NONE { continue; }
+        let s = c.tstr[name_tok as usize];
+        dups.add(rel(it, root), s, rel(it, g), c.tstart[name_tok as usize], c.str_len(s), it.i, fnode);
+        if bind { b.add(it.i, C_LOCAL, s, lo, hi, rel(it, g)); }
+    }
+}
+
+// The kinds `collect` reads a use or a binding at.
+fn work_kinds() -> vec.Vec<bool> {
+    let mut w = col.filled(256, false);
+    let ks = [node_kinds.KIND_PRIMARY, node_kinds.KIND_TYPE_BASE, node_kinds.KIND_BOUND_ITEM, node_kinds.KIND_NAME, node_kinds.KIND_ORIGIN, node_kinds.KIND_GENERICS, node_kinds.KIND_TAIL_CLAUSE, node_kinds.KIND_STMT, node_kinds.KIND_FOR_STMT, node_kinds.KIND_STMT_ARM, node_kinds.KIND_EXPR_ARM];
+    let ws = w.as_mut_slice();
+    for j in 0..ks.len() {
+        ws[ks[j] as usize] = true;
+    }
+    return w;
+}
+
+// Uses, bindings, and E0105 groups of every ok item.
+fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &Cols, cx: &mut Ctx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, rows: &mut resdiag.Rows) {
+    let mut chain = vec.Vec::<u32>.new();
+    let work_c = work_kinds();
+    let work = work_c.as_slice();
+    let rules = kind_rules();
+    for i in 0..c.ifile.len() {
+        if !tree.ok(i) { continue; }
+        let base = c.inode[i] as usize;
+        let end = c.inode[i + 1] as usize;
+        if end == base { continue; }
+        if c.kind[end - 1] != node_kinds.KIND_ITEM { continue; }
+        let it = Item.{ i: i as% u32, base: base, end: end };
+        let file = c.ifile[i];
+        context(c, &rules, base, end, cx);
+        let xv = cx.slices(base);
+        let x = &xv;
+        for g in base..end {
+            let st = x.state(g);
+            if st == S_PARAM {
+                param(b, dups, it, c, x, g);
+                continue;
+            }
+            if st != S_YES { continue; }
+            let k = c.kind[g];
+            if !work[k as usize] { continue; }
+            if k == node_kinds.KIND_PRIMARY {
+                primary(u, su, it, c, x, t, nm, set, g, rows, file);
+            } else if k == node_kinds.KIND_TYPE_BASE {
+                let a = c.tok[g] as usize;
+                if c.tk(a) == T_KW_SELF_TYPE {
+                    if x.con(g) == NONE { rows.add(resdiag.E0101, file, c.tstart[a], 4, NONE, 2, NONE); }
+                } else {
+                    path_use(u, it, c, g, NS_TYPE, &mut chain);
+                }
+            } else if k == node_kinds.KIND_BOUND_ITEM {
+                path_use(u, it, c, g, NS_TYPE, &mut chain);
+            } else if k == node_kinds.KIND_NAME {
+                path_use(u, it, c, g, NS_GLOBAL, &mut chain);
+            } else if k == node_kinds.KIND_ORIGIN {
+                origin(u, su, it, c, x, g);
+            } else if k == node_kinds.KIND_GENERICS {
+                for j in c.koff[g] as usize..c.koff[g + 1] as usize {
+                    let ch = base + c.kids[j] as usize;
+                    if c.kind[ch] != node_kinds.KIND_GENERIC_PARAM { continue; }
+                    let a = c.tok[ch] as usize;
+                    let nt = if c.tk(a) == T_KW_CONST then a + 1 else a;
+                    let s = c.tstr[nt];
+                    let owner = x.parent(g) as usize;
+                    b.add(it.i, C_GENERIC, s, sub_lo(c, it, g), rel(it, owner) - 1, rel(it, ch));
+                    dups.add(rel(it, g), s, rel(it, ch), c.tstart[nt], c.str_len(s), it.i, x.fnl(g));
+                }
+            } else if k == node_kinds.KIND_TAIL_CLAUSE {
+                for j in c.koff[g] as usize..c.koff[g + 1] as usize {
+                    let ch = base + c.kids[j] as usize;
+                    if c.kind[ch] != node_kinds.KIND_TAIL_BIND { continue; }
+                    let a = c.tok[ch] as usize;
+                    if c.tk(a) != T_IDENT { continue; }
+                    b.add(it.i, C_LOCAL, c.tstr[a], sub_lo(c, it, g), rel(it, g), rel(it, ch));
+                }
+            } else if k == node_kinds.KIND_STMT && c.tk(c.tok[g] as usize) == T_KW_LET {
+                let p = c.first_kid(base, g);
+                if p != NONE {
+                    let blk = x.parent(g) as usize;
+                    pattern(u, b, dups, it, c, p as usize, true, rel(it, g) + 1, rel(it, blk) - 1, x.fnl(g), &mut chain);
+                }
+            } else if k == node_kinds.KIND_FOR_STMT {
+                let p = c.first_kid(base, g);
+                if p != NONE && x.flag(g) & G_LATE_BLOCK != 0 {
+                    let blk = c.child(base, g, node_kinds.KIND_BLOCK) as usize;
+                    pattern(u, b, dups, it, c, p as usize, true, sub_lo(c, it, blk), rel(it, blk), x.fnl(g), &mut chain);
+                }
+            } else if k == node_kinds.KIND_STMT_ARM || k == node_kinds.KIND_EXPR_ARM {
+                let ap = c.first_kid(base, g);
+                if ap != NONE {
+                    let apu = ap as usize;
+                    let lo = c.koff[apu] as usize;
+                    for j in lo..c.koff[apu + 1] as usize {
+                        let r = base + c.kids[j] as usize;
+                        pattern(u, b, dups, it, c, r, j == lo, rel(it, apu) + 1, rel(it, g) - 1, x.fnl(g), &mut chain);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The nearest fn or closure holding row g (rows: a closure lies below its fn).
+fn owner_of(x: &CtxV, g: usize) -> u32 {
+    let f = x.fnl(g);
+    let c = x.clo(g);
+    return if c < f then c else f;
+}
+
+// A parameter of a visited parameter list: its binding (or the `self` one) and its E0105 group.
+fn param(b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, x: &CtxV, g: usize) {
+    let list = x.parent(g) as usize;
+    let owner = owner_of(x, g);
+    if x.flag(g) & G_SELF != 0 {
+        let f = x.fnl(g);
+        if f != NONE { b.add(it.i, C_SELF, 0, sub_lo(c, it, list), rel(it, f as usize) - 1, rel(it, g)); }
+        return;
+    }
+    let a = c.tok[g] as usize;
+    if c.tk(a) != T_IDENT || owner == NONE { return; }
+    let s = c.tstr[a];
+    b.add(it.i, C_LOCAL, s, rel(it, g) + 1, rel(it, owner as usize) - 1, rel(it, g));
+    dups.add(rel(it, owner as usize), s, rel(it, g), c.tstart[a], c.str_len(s), it.i, x.fnl(g));
+}
+
+// A `from` origin: a local only (or `self`); inside a parameter's clause its position is the
+// parameter list's.
+fn origin(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, g: usize) {
+    let a = c.tok[g] as usize;
+    let tk = if c.tk(a) == T_KW_COPY then a + 1 else a;
+    let mut pos = rel(it, g);
+    let mut p = x.parent(g);
+    while p != NONE && c.kind[p as usize] == node_kinds.KIND_FROM {
+        p = x.parent(p as usize);
+    }
+    if p != NONE && c.kind[p as usize] == node_kinds.KIND_PARAM_FROM {
+        let q = x.parent(p as usize);
+        pos = rel(it, x.parent(q as usize) as usize);
+    }
+    if c.tk(tk) == T_KW_SELF {
+        su.add(it.i, pos, c.tstart[tk]);
+        return;
+    }
+    if c.tk(tk) != T_IDENT { return; }
+    tok_seg(u, c, tk);
+    u.end(it.i, rel(it, g), pos, NS_ORIGIN, 0, NONE);
+}
+
+// The innermost binding of each lookup: lookups (item, class, sym, pos) against the binding
+// ranges; `ans[q]` = the binding row or NONE.
+fn sweep(b: &Binds, q_item: &[u32], q_class: &[u8], q_sym: &[u32], q_pos: &[u32]) -> vec.Vec<u32> {
+    let bi = b.item.as_slice();
+    let bc = b.class.as_slice();
+    let bs = b.sym.as_slice();
+    let blo = b.lo.as_slice();
+    let bhi = b.hi.as_slice();
+    let bn = b.node.as_slice();
+    let nb = bi.len();
+    let nq = q_item.len();
+    // a lookup of a name no binding of its item has stays out of the sort: a hash index over the
+    // distinct (item, name) keys of the bindings decides it
+    let mut bkeys = col.filled(nb, 0u64);
+    {
+        let bk = bkeys.as_mut_slice();
+        for e in 0..nb {
+            bk[e] = search.pair(bi[e], bs[e]);
+        }
+    }
+    let bp = sort.sort_perm(bkeys.as_slice());
+    let mut uniq = vec.Vec::<u64>.new();
+    {
+        let bk = bkeys.as_slice();
+        let ps = bp.as_slice();
+        for k in 0..ps.len() {
+            let x = bk[ps[k] as usize];
+            if k == 0 || bk[ps[k - 1] as usize] != x { uniq.push(x); }
+        }
+    }
+    let hx = hindex.HashIndex.build(uniq.as_slice());
+    // names some binding has: the others skip the probe
+    let mut max_sym: u32 = 0;
+    for e in 0..nb {
+        if bs[e] != NONE && bs[e] > max_sym { max_sym = bs[e]; }
+    }
+    let mut bound_c = col.filled(max_sym as usize + 1, false);
+    {
+        let bd = bound_c.as_mut_slice();
+        for e in 0..nb {
+            if bs[e] != NONE { bd[bs[e] as usize] = true; }
+        }
+    }
+    let bound = bound_c.as_slice();
+    let mut qmap = vec.Vec::<u32>.new();
+    for e in 0..nq {
+        let s = q_sym[e];
+        if s != NONE && (s as usize >= bound.len() || !bound[s as usize]) { continue; }
+        if hx.probe(search.pair(q_item[e], s)) != NONE { qmap.push(e as% u32); }
+    }
+    let qm = qmap.as_slice();
+    let n = nb + qm.len();
+    // events: bindings open at lo, lookups at pos; at one position opens go first, by node (a
+    // lookup's place among lookups is its input order, which the stable sort keeps). Order:
+    // (item, name, class, position, lookup, node); positions and nodes are item-relative.
+    let mut mi: u32 = 0;
+    let mut ms: u32 = 0;
+    let mut mp: u32 = 0;
+    let mut mn: u32 = 0;
+    for e in 0..nb {
+        mi = if bi[e] > mi then bi[e] else mi;
+        ms = if bs[e] > ms then bs[e] else ms;
+        mp = if blo[e] > mp then blo[e] else mp;
+        mn = if bn[e] > mn then bn[e] else mn;
+    }
+    for x in 0..qm.len() {
+        let e = qm[x] as usize;
+        mi = if q_item[e] > mi then q_item[e] else mi;
+        ms = if q_sym[e] > ms then q_sym[e] else ms;
+        mp = if q_pos[e] > mp then q_pos[e] else mp;
+    }
+    let wn = bits_for(mn) as u64;
+    let wp = bits_for(mp) as u64;
+    let wl = wn + 1;
+    let wg = wl + wp;
+    let ws = bits_for(ms) as u64;
+    // the group (item, name, class) of event e is `grp[e]`, its position `at[e]`
+    let mut grp = col.filled(n, 0u64);
+    let mut at = col.filled(n, 0u32);
+    let mut order = col.filled(0, 0u32);
+    if wg + 2 + ws + (bits_for(mi) as u64) <= 64 {
+        // one key: item | name | class (2) | position | lookup (1) | node
+        let mut key = col.filled(n, 0u64);
+        {
+            let ks = key.as_mut_slice();
+            let gs = grp.as_mut_slice();
+            let ats = at.as_mut_slice();
+            for e in 0..nb {
+                let g = ((((bi[e] as u64) << ws) | (bs[e] as u64)) << 2) | (bc[e] as u64);
+                gs[e] = g;
+                ats[e] = blo[e];
+                ks[e] = (g << wg) | ((blo[e] as u64) << wl) | (bn[e] as u64);
+            }
+            for x in 0..qm.len() {
+                let e = qm[x] as usize;
+                let g = ((((q_item[e] as u64) << ws) | (q_sym[e] as u64)) << 2) | (q_class[e] as u64);
+                gs[nb + x] = g;
+                ats[nb + x] = q_pos[e];
+                ks[nb + x] = (g << wg) | ((q_pos[e] as u64) << wl) | (1u64 << wn);
+            }
+        }
+        order = sort.sort_perm(key.as_slice());
+    } else {
+        // two keys: (class (2) | position (30) | lookup (1) | node (30)), then (item, name)
+        let mut k2 = col.filled(n, 0u64);
+        let mut k1 = col.filled(n, 0u64);
+        {
+            let a2 = k2.as_mut_slice();
+            let a1 = k1.as_mut_slice();
+            let gs = grp.as_mut_slice();
+            let ats = at.as_mut_slice();
+            for e in 0..nb {
+                a2[e] = ((bc[e] as u64) << 61) | ((blo[e] as u64) << 31) | (bn[e] as u64);
+                a1[e] = search.pair(bi[e], bs[e]);
+                ats[e] = blo[e];
+            }
+            for x in 0..qm.len() {
+                let e = qm[x] as usize;
+                a2[nb + x] = ((q_class[e] as u64) << 61) | ((q_pos[e] as u64) << 31) | (1u64 << 30);
+                a1[nb + x] = search.pair(q_item[e], q_sym[e]);
+                ats[nb + x] = q_pos[e];
+            }
+            // a group number: (item, name) runs cut again by class
+            let p = sort.sort_perm(a1);
+            let ps = p.as_slice();
+            let mut r: u64 = 0;
+            for k in 0..n {
+                let e = ps[k] as usize;
+                if k > 0 {
+                    let pe = ps[k - 1] as usize;
+                    if a1[pe] != a1[e] { r = r + 4; }
+                }
+                gs[e] = r | (a2[e] >> 61);
+            }
+        }
+        order = sort.sort_perm(k2.as_slice());
+        let g1 = perm.gather(k1.as_slice(), order.as_slice());
+        order = perm.gather(order.as_slice(), sort.sort_perm(g1.as_slice()).as_slice());
+    }
+    let mut ans = col.filled(nq, NONE);
+    // the open ranges, innermost on top
+    let mut stack = col.filled(nb, 0u32);
+    {
+        let os = order.as_slice();
+        let gs = grp.as_slice();
+        let ats = at.as_slice();
+        let an = ans.as_mut_slice();
+        let st = stack.as_mut_slice();
+        let mut top: usize = 0;
+        for k in 0..n {
+            let e = os[k] as usize;
+            if k > 0 && gs[os[k - 1] as usize] != gs[e] { top = 0; }
+            let pos = ats[e];
+            while top > 0 && bhi[st[top - 1] as usize] < pos {
+                top = top - 1;
+            }
+            if e < nb {
+                if blo[e] <= bhi[e] {
+                    st[top] = e as% u32;
+                    top = top + 1;
+                }
+            } else if top > 0 {
+                an[qm[e - nb] as usize] = st[top - 1];
+            }
+        }
+    }
+    return ans;
+}
+
+// The number of bits a value up to x needs.
+fn bits_for(x: u32) -> u32 {
+    let mut w: u32 = 0;
+    while w < 32 && (x >> w) != 0 {
+        w = w + 1;
+    }
+    return w;
+}
+
+// What a resolution leads to when the chain goes on.
+const ST_STOP: u8 = 0;
+const ST_VALUE: u8 = 1;
+const ST_TYPE_REL: u8 = 2;
+const ST_MODULE: u8 = 3;
+const ST_TYPE: u8 = 4;
+
+fn classify(ds: &decls.Decls, r: u8, id: u32, self_adt: u32) -> (u8, u32) {
+    if r == R_DECL {
+        let k = ds.kind.as_slice()[id as usize];
+        if k == decls.DK_MODULE { return (ST_MODULE, ds.module.as_slice()[id as usize]); }
+        if k == decls.DK_STRUCT || k == decls.DK_ENUM || k == decls.DK_TRAIT { return (ST_TYPE, id); }
+        if k == decls.DK_TYPE_ALIAS { return (ST_TYPE_REL, NONE); }
+        if k == decls.DK_ERROR || k == decls.DK_IMPL { return (ST_STOP, NONE); }
+        return (ST_VALUE, NONE);
+    }
+    if r == R_PRIM || r == R_GENERIC { return (ST_TYPE_REL, NONE); }
+    if r == R_SELF_TYPE { return if self_adt != NONE then (ST_TYPE, self_adt) else (ST_TYPE_REL, NONE); }
+    if r == R_NONE { return (ST_STOP, NONE); }
+    return (ST_VALUE, NONE);
+}
+
+// E0106 unless decl d may be named from module m (a trait-impl method has its trait's
+// visibility; variants and trait methods are always visible).
+fn check_vis(ds: &decls.Decls, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, m: u32, d: u32, file: u32, off: u32, len: u32, rows: &mut resdiag.Rows) {
+    let mut owner = d;
+    if ds.kind.as_slice()[d as usize] == decls.DK_METHOD && ds.flags.as_slice()[d as usize] & decls.F_TRAIT_IMPL != 0 {
+        owner = ds.impl_trait.as_slice()[ds.parent.as_slice()[d as usize] as usize];
+        if owner == NONE { return; }
+    }
+    let ok = ds.kind.as_slice()[owner as usize];
+    if ok == decls.DK_VARIANT || ok == decls.DK_TRAIT_METHOD { return; }
+    if ds.module.as_slice()[owner as usize] != m && ds.flags.as_slice()[owner as usize] & decls.F_PUB == 0 {
+        let (df, doff, dl) = decls.span(ds, md, lx, set, t, owner);
+        rows.related(df, doff, dl);
+        rows.add(resdiag.E0106, file, off, len, ds.name.as_slice()[d as usize], owner, NONE);
+    }
+}
+
+// The first enum visible from module m, in (module, offset) order, with a variant named s. A
+// global lookup from m gives an enum only of m's own scope or of the prelude, so only the enums
+// of m and of `std.core` are candidates, the smaller module first.
+fn enum_with_variant(ds: &decls.Decls, md: &modules.Modules, m: u32, s: u32) -> u32 {
+    let c = md.core_mod;
+    let first = if c != NONE && c < m then c else m;
+    let second = if first == m then c else m;
+    let e = visible_enum_of(ds, md, m, s, first);
+    if e != NONE || second == NONE || second == first { return e; }
+    return visible_enum_of(ds, md, m, s, second);
+}
+
+fn visible_enum_of(ds: &decls.Decls, md: &modules.Modules, m: u32, s: u32, owner: u32) -> u32 {
+    let key = search.pair(s, owner);
+    let mut k = search.lower_bound(ds.var_key.as_slice(), key);
+    while k < ds.var_key.len() && ds.var_key.as_slice()[k] == key {
+        let e = ds.var_enum.as_slice()[k];
+        let (tag, id) = ds.global(md, m, ds.name.as_slice()[e as usize]);
+        if tag == decls.G_DECL && id == e { return e; }
+        k = k + 1;
+    }
+    return NONE;
+}
+
+// The lines of the `names` dump being built.
+struct Lines {
+    item: vec.Vec<u32>,
+    node: vec.Vec<u32>,
+    off: vec.Vec<u32>,
+    tag: vec.Vec<u8>,
+    target: vec.Vec<u32>,
+}
+
+impl Lines {
+    fn add(&mut self, item: u32, node: u32, off: u32, tag: u8, target: u32) {
+        self.item.push(item);
+        self.node.push(node);
+        self.off.push(off);
+        self.tag.push(tag);
+        self.target.push(target);
+    }
+}
+
+// Follows chain k from its head; adds a line per segment that resolves to a decl or local.
+fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, c: &Cols, k: usize, out: &mut Lines, pend: &mut vec.Vec<u32>, rows: &mut resdiag.Rows) {
+    let item = v.item[k];
+    let node = v.node[k];
+    let ns = v.ns[k];
+    let fl = v.flags[k];
+    let lo = v.seg_lo[k] as usize;
+    let hi = v.seg_lo[k + 1] as usize;
+    if hi == lo { return; }
+    let file = c.ifile[item as usize];
+    let m = c.fmod[file as usize];
+    let base = c.inode[item as usize] as usize;
+    let hs = v.seg_sym[lo];
+    let hoff = v.seg_off[lo];
+    let hlen = v.seg_len[lo];
+    let mut r = R_NONE;
+    let mut id = NONE;
+    let mut self_adt = NONE;
+    if fl & U_SELF_HEAD != 0 {
+        r = R_SELF_TYPE;
+        if fl & U_IN_IMPL != 0 {
+            let d = ds.item_decl.as_slice()[item as usize];
+            if d != NONE && ds.kind.as_slice()[d as usize] == decls.DK_IMPL { self_adt = ds.impl_head.as_slice()[d as usize]; }
+        }
+    } else if ns == NS_ORIGIN {
+        let l = v.local[k];
+        if l != NONE {
+            r = R_LOCAL;
+            id = bnode[l as usize];
+        }
+    } else {
+        let cla = v.clause[k];
+        if ns == NS_VALUE && cla != NONE {
+            let txt = if hs == NONE then mem.str_bytes("") else nm.tab.text(hs as usize);
+            if txt.eq(mem.str_bytes("old")) && hi - lo == 1 && fl & U_CALL != 0 {
+                r = R_BUILTIN;
+            } else if txt.eq(mem.str_bytes("result")) && fl & U_ENSURES != 0 {
+                r = R_RESULT;
+                id = cla - base as% u32;
+            }
+        }
+        if r == R_NONE && ns == NS_VALUE && v.local[k] != NONE {
+            r = R_LOCAL;
+            id = bnode[v.local[k] as usize];
+        }
+        if r == R_NONE && ns != NS_GLOBAL && v.generic[k] != NONE {
+            id = bnode[v.generic[k] as usize];
+            let ga = c.tok[base + id as usize] as usize;
+            r = if c.tk(ga) == T_KW_CONST then R_CONST_GENERIC else R_GENERIC;
+        }
+        if r == R_NONE {
+            let (tag, gid) = ds.global(md, m, hs);
+            if tag == decls.G_DECL {
+                r = R_DECL;
+                id = gid;
+            } else if tag == decls.G_PRIM {
+                r = R_PRIM;
+            } else if tag == decls.G_BUILTIN {
+                r = R_BUILTIN;
+            }
+        }
+    }
+    if r == R_NONE {
+        if ns == NS_ORIGIN {
+            rows.add(resdiag.E0101, file, hoff, hlen, hs, 0, NONE);
+            return;
+        }
+        // E0103 or E0101: settled once per (module, name) after every chain
+        if fl & U_VARIANT_OK != 0 {
+            pend.push(k as% u32);
+            return;
+        }
+        rows.add(resdiag.E0101, file, hoff, hlen, hs, 0, NONE);
+        return;
+    }
+    if r == R_DECL { out.add(item, node, hoff, TAG_DECL, id); }
+    if r == R_LOCAL || r == R_GENERIC || r == R_CONST_GENERIC || r == R_RESULT { out.add(item, node, hoff, TAG_LOCAL, id); }
+    let (mut st, mut sid) = classify(ds, r, id, self_adt);
+    for q in lo + 1..hi {
+        let s = v.seg_sym[q];
+        let soff = v.seg_off[q];
+        let slen = v.seg_len[q];
+        if st == ST_STOP { break; }
+        if st == ST_VALUE || st == ST_TYPE_REL {
+            if ns == NS_TYPE { rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE); }
+            break;
+        }
+        if st == ST_MODULE {
+            let d = ds.module_item(sid, s);
+            if d == NONE {
+                rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE);
+                break;
+            }
+            check_vis(ds, md, lx, set, t, m, d, file, soff, slen, rows);
+            out.add(item, node, soff, TAG_DECL, d);
+            let (a, b) = classify(ds, R_DECL, d, NONE);
+            st = a;
+            sid = b;
+            continue;
+        }
+        // a struct, enum, or trait
+        if ns == NS_TYPE {
+            rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE);
+            break;
+        }
+        let mem = ds.step_member(sid, s);
+        if mem != NONE {
+            out.add(item, node, soff, TAG_DECL, mem);
+            st = ST_VALUE;
+            continue;
+        }
+        if ds.kind.as_slice()[sid as usize] == decls.DK_TRAIT {
+            rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE);
+            break;
+        }
+        let (meth, ambiguous) = ds.method(sid, s);
+        if meth != NONE {
+            check_vis(ds, md, lx, set, t, m, meth, file, soff, slen, rows);
+            out.add(item, node, soff, TAG_DECL, meth);
+            st = ST_VALUE;
+            continue;
+        }
+        if !ambiguous && !ds.is_poisoned(ds.name.as_slice()[sid as usize]) { rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE); }
+        break;
+    }
+}
+
+// E0103 for an unresolved head a visible enum has a variant of, else E0101; the enum is looked
+// up once per (module, name).
+fn unresolved_heads(u: &Uses, ds: &decls.Decls, md: &modules.Modules, cut: &items.Items, pend: &[u32], rows: &mut resdiag.Rows) {
+    let mut keys = vec.Vec::<u64>.with_capacity(pend.len());
+    for q in 0..pend.len() {
+        let k = pend[q] as usize;
+        let file = cut.file.as_slice()[u.item.as_slice()[k] as usize];
+        let s = u.seg_sym.as_slice()[u.seg_lo.as_slice()[k] as usize];
+        keys.push(search.pair(md.file_mod.as_slice()[file as usize], s));
+    }
+    let p = sort.sort_perm(keys.as_slice());
+    let mut e = NONE;
+    for r in 0..p.len() {
+        let q = p.as_slice()[r] as usize;
+        let key = keys.as_slice()[q];
+        if r == 0 || keys.as_slice()[p.as_slice()[r - 1] as usize] != key { e = enum_with_variant(ds, md, (key >> 32) as% u32, (key & 4294967295) as% u32); }
+        let k = pend[q] as usize;
+        let lo = u.seg_lo.as_slice()[k] as usize;
+        let file = cut.file.as_slice()[u.item.as_slice()[k] as usize];
+        let s = u.seg_sym.as_slice()[lo];
+        if e != NONE {
+            rows.add(resdiag.E0103, file, u.seg_off.as_slice()[lo], u.seg_len.as_slice()[lo], s, e, NONE);
+        } else {
+            rows.add(resdiag.E0101, file, u.seg_off.as_slice()[lo], u.seg_len.as_slice()[lo], s, 0, NONE);
+        }
+    }
+}
+
+// E0105 for every later binding of a name within one group.
+fn dup_rows(d: &Dups, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, cut: &items.Items, rows: &mut resdiag.Rows) {
+    let p0 = sort.sort_perm(d.ord.as_slice());
+    let ks = perm.gather(d.key.as_slice(), p0.as_slice());
+    let pk = perm.gather(p0.as_slice(), sort.sort_perm(ks.as_slice()).as_slice());
+    let ik = perm.gather(d.item.as_slice(), pk.as_slice());
+    let p = perm.gather(pk.as_slice(), sort.sort_perm(ik.as_slice()).as_slice());
+    let mut k: usize = 0;
+    while k < p.len() {
+        let e = p.as_slice()[k] as usize;
+        let mut j = k + 1;
+        while j < p.len() && d.key.as_slice()[p.as_slice()[j] as usize] == d.key.as_slice()[e] && d.item.as_slice()[p.as_slice()[j] as usize] == d.item.as_slice()[e] {
+            let x = p.as_slice()[j] as usize;
+            let file = cut.file.as_slice()[d.item.as_slice()[x] as usize];
+            rows.related(file, d.off.as_slice()[e], d.len.as_slice()[e]);
+            let file_end = t.file_tok.as_slice()[file as usize + 1] as usize;
+            let fname = fn_name(tree, t, nm, d.fnode.as_slice()[x], file_end);
+            rows.add_in(resdiag.E0105, file, d.off.as_slice()[x], d.len.as_slice()[x], d.sym.as_slice()[x], resdiag.SCOPE_ITEM, d.item.as_slice()[x], fname);
+            j = j + 1;
+        }
+        k = j;
+    }
+}
+
+// Resolves every name use of the build.
+pub fn build(md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, rows: &mut resdiag.Rows) -> Names {
+    let c = cols(tree, t, nm, cut, md);
+    let mut longest: usize = 0;
+    for i in 0..cut.len() {
+        let len = (c.inode[i + 1] - c.inode[i]) as usize;
+        if len > longest { longest = len; }
+    }
+    let mut cx = Ctx.new(longest);
+    let mut u = Uses.new();
+    let mut su = SelfUses.{ item: vec.Vec::<u32>.new(), pos: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), len: vec.Vec::<u32>.new() };
+    let mut b = Binds.{ item: vec.Vec::<u32>.new(), class: vec.Vec::<u8>.new(), sym: vec.Vec::<u32>.new(), lo: vec.Vec::<u32>.new(), hi: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new() };
+    let mut dups = Dups.{ key: vec.Vec::<u64>.new(), ord: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), len: vec.Vec::<u32>.new(), sym: vec.Vec::<u32>.new(), item: vec.Vec::<u32>.new(), fnode: vec.Vec::<u32>.new() };
+    collect(&mut u, &mut su, &mut b, &mut dups, &c, &mut cx, tree, t, nm, set, rows);
+    dup_rows(&dups, tree, t, nm, cut, rows);
+    // lookups: a value head asks for a local and a generic, a type head for a generic, an origin
+    // for a local, `self` for the self parameter
+    let nu = u.item.len();
+    let nself = su.item.len();
+    let mut nq = nself;
+    {
+        let fl = u.flags.as_slice();
+        let ns = u.ns.as_slice();
+        let sl = u.seg_lo.as_slice();
+        for k in 0..nu {
+            if fl[k] & U_SELF_HEAD != 0 || sl[k + 1] == sl[k] { continue; }
+            if ns[k] == NS_VALUE { nq = nq + 2; } else if ns[k] == NS_ORIGIN || ns[k] == NS_TYPE { nq = nq + 1; }
+        }
+    }
+    let mut q_item = col.filled(nq, 0u32);
+    let mut q_class = col.filled(nq, 0u8);
+    let mut q_sym = col.filled(nq, 0u32);
+    let mut q_pos = col.filled(nq, 0u32);
+    let mut q_use = col.filled(nq - nself, 0u32);
+    {
+        let fl = u.flags.as_slice();
+        let ns = u.ns.as_slice();
+        let sl = u.seg_lo.as_slice();
+        let ss = u.seg_sym.as_slice();
+        let ui = u.item.as_slice();
+        let up = u.pos.as_slice();
+        let qi = q_item.as_mut_slice();
+        let qc = q_class.as_mut_slice();
+        let qs = q_sym.as_mut_slice();
+        let qp = q_pos.as_mut_slice();
+        let qu = q_use.as_mut_slice();
+        let mut q: usize = 0;
+        for k in 0..nu {
+            let lo = sl[k] as usize;
+            if fl[k] & U_SELF_HEAD != 0 || sl[k + 1] as usize == lo { continue; }
+            let n = ns[k];
+            let s = ss[lo];
+            if n == NS_VALUE || n == NS_ORIGIN {
+                qi[q] = ui[k];
+                qc[q] = C_LOCAL;
+                qs[q] = s;
+                qp[q] = up[k];
+                qu[q] = (k as% u32) << 1;
+                q = q + 1;
+            }
+            if n == NS_VALUE || n == NS_TYPE {
+                qi[q] = ui[k];
+                qc[q] = C_GENERIC;
+                qs[q] = s;
+                qp[q] = up[k];
+                qu[q] = ((k as% u32) << 1) | 1;
+                q = q + 1;
+            }
+        }
+        let si = su.item.as_slice();
+        let sp = su.pos.as_slice();
+        for k in 0..nself {
+            qi[q] = si[k];
+            qc[q] = C_SELF;
+            qs[q] = 0;
+            qp[q] = sp[k];
+            q = q + 1;
+        }
+    }
+    let nuse_q = nq - nself;
+    let ans = sweep(&b, q_item.as_slice(), q_class.as_slice(), q_sym.as_slice(), q_pos.as_slice());
+    u.local = col.filled(nu, NONE);
+    u.generic = col.filled(nu, NONE);
+    {
+        let an = ans.as_slice();
+        let qu = q_use.as_slice();
+        let ul = u.local.as_mut_slice();
+        let ug = u.generic.as_mut_slice();
+        for q in 0..nuse_q {
+            let k = (qu[q] >> 1) as usize;
+            if qu[q] & 1 == 0 { ul[k] = an[q]; } else { ug[k] = an[q]; }
+        }
+    }
+    for k in 0..nself {
+        if ans.as_slice()[nuse_q + k] == NONE {
+            let file = c.ifile[su.item.as_slice()[k] as usize];
+            rows.add(resdiag.E0101, file, su.off.as_slice()[k], su.len.as_slice()[k], NONE, 1, NONE);
+        }
+    }
+    let mut out = Lines.{ item: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), tag: vec.Vec::<u8>.new(), target: vec.Vec::<u32>.new() };
+    let mut pend = vec.Vec::<u32>.new();
+    {
+        let v = u.slices();
+        let bnode = b.node.as_slice();
+        for k in 0..nu {
+            follow(&v, bnode, ds, md, nm, lx, set, t, &c, k, &mut out, &mut pend, rows);
+        }
+    }
+    unresolved_heads(&u, ds, md, cut, pend.as_slice(), rows);
+    // import and allocator paths: a line per segment that names a module
+    for k in 0..md.imp_item.len() {
+        let i = md.imp_item.as_slice()[k];
+        let root = c.inode[i as usize + 1] - c.inode[i as usize] - 1;
+        for s in md.seg_off.as_slice()[k]..md.seg_off.as_slice()[k + 1] {
+            let m = md.seg_mod.as_slice()[s as usize];
+            if m == NONE { continue; }
+            out.add(i, root, c.tstart[md.seg_tok.as_slice()[s as usize] as usize], TAG_DECL, ds.mod_decl.as_slice()[m as usize]);
+        }
+    }
+    for k in 0..md.alloc_item.len() {
+        let i = md.alloc_item.as_slice()[k];
+        for s in md.alloc_seg_off.as_slice()[k]..md.alloc_seg_off.as_slice()[k + 1] {
+            let m = md.alloc_seg_mod.as_slice()[s as usize];
+            if m == NONE { continue; }
+            out.add(i, md.alloc_node.as_slice()[k], c.tstart[md.alloc_seg_tok.as_slice()[s as usize] as usize], TAG_DECL, ds.mod_decl.as_slice()[m as usize]);
+        }
+    }
+    let p0 = sort.sort_perm(out.off.as_slice());
+    let mut keys = col.filled(p0.len(), 0u64);
+    {
+        let ps = p0.as_slice();
+        let oi = out.item.as_slice();
+        let on = out.node.as_slice();
+        let ks = keys.as_mut_slice();
+        for k in 0..ps.len() {
+            let e = ps[k] as usize;
+            ks[k] = search.pair(oi[e], on[e]);
+        }
+    }
+    let p = perm.gather(p0.as_slice(), sort.sort_perm(keys.as_slice()).as_slice());
+    return Names.{
+        item: perm.gather(out.item.as_slice(), p.as_slice()),
+        node: perm.gather(out.node.as_slice(), p.as_slice()),
+        off: perm.gather(out.off.as_slice(), p.as_slice()),
+        tag: perm.gather(out.tag.as_slice(), p.as_slice()),
+        target: perm.gather(out.target.as_slice(), p.as_slice()),
+    };
+}

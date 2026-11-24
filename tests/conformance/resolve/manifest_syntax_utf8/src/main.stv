@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// E1002 case `syntax` at a non-ASCII byte: the key text is the rest of the line.
+fn main() -> i32 {
+    return 0;
+}

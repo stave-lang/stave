@@ -1,0 +1,449 @@
+// String interning: the ids of the `strings` dump, from the texts of every name of the build.
+//
+// - The interned set is the text of every `Ident` token, every segment of every f-string hole
+//   that is not `self`, every package name, and every segment of every module path. No other
+//   literal is interned.
+// - A string's id is the rank of (xxHash32 of its bytes with seed 0, its bytes) among the
+//   distinct strings. `rank` computes it without a hash table: hash every candidate text, sort
+//   the candidates by hash (stable radix), cut the sorted column into runs of equal hash, tell
+//   the strings of a run apart by comparing bytes, and number the runs' strings with a prefix
+//   sum. A run holds one string unless two different strings collide, which stays correct: the
+//   run is then split by a binary search over its distinct strings in byte order. Nothing
+//   depends on the order the candidates are visited in.
+// - Columns are program-wide: `str_off` / `str_hash` / `str_bytes` describe the distinct strings
+//   by id (string S is `str_bytes[str_off[S]..str_off[S + 1]]`), `cand_str` maps each candidate
+//   to its id, and `Interned` maps tokens, f-string holes, packages, and module path segments
+//   to ids.
+import files;
+import generated.terminals;
+import lex;
+import prims.col;
+import prims.perm;
+import prims.rle;
+import prims.scan;
+import prims.search;
+import prims.sort;
+import prims.xxhash;
+import source;
+import text;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_FMT: u8 = terminals.T_FMT_LIT as% u8;
+
+const B_DQUOTE: u8 = 34;
+const B_SLASH: u8 = 47;
+const B_0: u8 = 48;
+const B_9: u8 = 57;
+const B_UPPER_A: u8 = 65;
+const B_UPPER_Z: u8 = 90;
+const B_BACKSLASH: u8 = 92;
+const B_UNDERSCORE: u8 = 95;
+const B_LOWER_A: u8 = 97;
+const B_LOWER_Z: u8 = 122;
+const B_LBRACE: u8 = 123;
+const B_DOT: u8 = 46;
+const B_RBRACE: u8 = 125;
+
+// Candidate texts, back to back: text k is `bytes[off[k]..off[k + 1]]`.
+pub struct Cands {
+    pub bytes: vec.Vec<u8>,
+    pub off: vec.Vec<u32>,
+}
+
+impl Cands {
+    pub fn new() -> Cands {
+        let mut off = vec.Vec::<u32>.new();
+        off.push(0);
+        return Cands.{ bytes: vec.Vec::<u8>.new(), off: off };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.off.len() - 1;
+    }
+
+    pub fn push(&mut self, b: &[u8]) {
+        self.bytes.extend_from_slice(b);
+        let end = col.ids(self.bytes.len());
+        self.off.push(end);
+    }
+
+    pub fn text(&self, k: usize) -> &[u8] from self {
+        let o = self.off.as_slice();
+        return &self.bytes.as_slice()[o[k] as usize..o[k + 1] as usize];
+    }
+}
+
+// The distinct strings by id, and the id of every candidate.
+pub struct Table {
+    pub str_off: vec.Vec<u32>,
+    pub str_hash: vec.Vec<u32>,
+    pub str_bytes: vec.Vec<u8>,
+    pub cand_str: vec.Vec<u32>,
+}
+
+impl Table {
+    pub fn len(&self) -> usize {
+        return self.str_hash.len();
+    }
+
+    pub fn text(&self, s: usize) -> &[u8] from self {
+        let o = self.str_off.as_slice();
+        return &self.str_bytes.as_slice()[o[s] as usize..o[s + 1] as usize];
+    }
+}
+
+// The names of a build: `tok_str` is per global token (the id of an `Ident`, else `idx.NONE`);
+// `hole_str[h]` is the id of the f-string hole segment h, which lies in token `hole_tok[h]`
+// (in token order, then source order); `pkg_str` is per package name of the file list; file F's
+// module path is `seg_str[file_seg[F]..file_seg[F + 1]]`.
+pub struct Interned {
+    pub tab: Table,
+    pub tok_str: vec.Vec<u32>,
+    pub hole_tok: vec.Vec<u32>,
+    pub hole_str: vec.Vec<u32>,
+    pub pkg_str: vec.Vec<u32>,
+    pub file_seg: vec.Vec<u32>,
+    pub seg_str: vec.Vec<u32>,
+}
+
+// The id of the string with bytes b, or `idx.NONE` when b is not interned: ids ascend by hash.
+pub fn find_str(tab: &Table, b: &[u8]) -> u32 {
+    let h = xxhash.hash32(b, 0);
+    let hs = tab.str_hash.as_slice();
+    let mut s = search.lower_bound(hs, h);
+    while s < hs.len() && hs[s] == h {
+        if tab.text(s).eq(b) { return s as% u32; }
+        s = s + 1;
+    }
+    return idx.NONE;
+}
+
+// Byte order: 0 when equal, else negative or positive. The equality test goes first: the usual
+// comparison is of equal strings, which the vector `eq` settles faster than a byte loop.
+fn order3(a: &[u8], b: &[u8]) -> i32 {
+    if a.eq(b) { return 0; }
+    return text.cmp(a, b);
+}
+
+// Where t is or belongs in `reps`, the candidates of distinct strings in byte order: the
+// position of the first one not less than t, and whether it is equal to t.
+fn find(bytes: &[u8], co: &[u32], reps: &[u32], t: &[u8]) -> (usize, bool) {
+    let mut lo: usize = 0;
+    let mut hi: usize = reps.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let r = reps[mid] as usize;
+        let o = order3(&bytes[co[r] as usize..co[r + 1] as usize], t);
+        if o == 0 { return (mid, true); }
+        if o < 0 { lo = mid + 1; } else { hi = mid; }
+    }
+    return (lo, false);
+}
+
+// The candidates at the sorted positions lo..hi share one hash. Gives each the ordinal of its
+// string among the run's distinct strings in byte order (`local[lo..hi]`), and returns how many
+// distinct strings there are. `reps` is scratch; candidate k is `bytes[co[k]..co[k + 1]]`.
+fn split_run(bytes: &[u8], co: &[u32], order: &[u32], lo: usize, hi: usize, local: &mut [u32], reps: &mut vec.Vec<u32>) -> u32 {
+    // the usual run: every candidate equals the first, one string, ordinal 0 (`local` is 0 on entry)
+    let h0 = order[lo] as usize;
+    let head = &bytes[co[h0] as usize..co[h0 + 1] as usize];
+    let mut j = lo + 1;
+    while j < hi {
+        let k = order[j] as usize;
+        if !bytes[co[k] as usize..co[k + 1] as usize].eq(head) { break; }
+        j = j + 1;
+    }
+    if j == hi { return 1; }
+    reps.clear();
+    for k in lo..hi {
+        let cand = order[k];
+        let cu = cand as usize;
+        let (at, same) = find(bytes, co, reps.as_slice(), &bytes[co[cu] as usize..co[cu + 1] as usize]);
+        if same { continue; }
+        reps.push(cand);
+        let s = reps.as_mut_slice();
+        let mut j = s.len() - 1;
+        while j > at {
+            s[j] = s[j - 1];
+            j = j - 1;
+        }
+        s[at] = cand;
+    }
+    for k in lo..hi {
+        let cu = order[k] as usize;
+        let (at, _) = find(bytes, co, reps.as_slice(), &bytes[co[cu] as usize..co[cu + 1] as usize]);
+        local[k] = at as% u32;
+    }
+    return reps.len() as% u32;
+}
+
+// The table of the distinct texts of `c`, by rank of (hash, bytes), and the id of each text.
+pub fn rank(c: &Cands) -> Table {
+    let n = c.len();
+    let _ = col.ids(n);
+    let bytes = c.bytes.as_slice();
+    let co = c.off.as_slice();
+    let mut h = col.filled(n, 0u32);
+    {
+        let hs = h.as_mut_slice();
+        for k in 0..n {
+            hs[k] = xxhash.hash32(&bytes[co[k] as usize..co[k + 1] as usize], 0);
+        }
+    }
+    let order = sort.sort_perm(h.as_slice());
+    let hs = perm.gather(h.as_slice(), order.as_slice());
+    let runs = rle.encode(hs.as_slice());
+    let nr = runs.len();
+    let rs = runs.start.as_slice();
+    let ord = order.as_slice();
+
+    // the ordinal of each sorted position's string within its run, and the strings per run
+    let mut local = col.filled(n, 0u32);
+    let mut ndist = col.filled(nr, 1u32);
+    let mut reps = vec.Vec::<u32>.new();
+    {
+        let ls = local.as_mut_slice();
+        let nd = ndist.as_mut_slice();
+        for r in 0..nr {
+            let lo = rs[r] as usize;
+            let hi = rs[r + 1] as usize;
+            if hi - lo > 1 { nd[r] = split_run(bytes, co, ord, lo, hi, ls, &mut reps); }
+        }
+    }
+
+    // id = (strings of the earlier runs) + ordinal
+    let first = scan.offsets(ndist.as_slice());
+    let fs = first.as_slice();
+    let total = fs[nr] as usize;
+    let mut ids = col.filled(n, 0u32);
+    {
+        let ls = local.as_slice();
+        let is = ids.as_mut_slice();
+        for r in 0..nr {
+            for k in rs[r] as usize..rs[r + 1] as usize {
+                is[k] = fs[r] + ls[k];
+            }
+        }
+    }
+    let mut cand_str = col.filled(n, idx.NONE);
+    perm.scatter(cand_str.as_mut_slice(), ord, ids.as_slice());
+    let mut rep = col.filled(total, 0u32);
+    perm.scatter(rep.as_mut_slice(), ids.as_slice(), ord);
+
+    let mut str_hash = col.filled(total, 0u32);
+    {
+        let sh = str_hash.as_mut_slice();
+        let nd = ndist.as_slice();
+        let rv = runs.value.as_slice();
+        for r in 0..nr {
+            for s in fs[r] as usize..fs[r] as usize + nd[r] as usize {
+                sh[s] = rv[r];
+            }
+        }
+    }
+    let rp = rep.as_slice();
+    let mut lens = col.filled(total, 0u32);
+    {
+        let ln = lens.as_mut_slice();
+        for s in 0..total {
+            let k = rp[s] as usize;
+            ln[s] = co[k + 1] - co[k];
+        }
+    }
+    let str_off = scan.offsets(lens.as_slice());
+    let mut str_bytes = vec.Vec::<u8>.with_capacity(str_off.as_slice()[total] as usize);
+    for s in 0..total {
+        let k = rp[s] as usize;
+        str_bytes.extend_from_slice(&bytes[co[k] as usize..co[k + 1] as usize]);
+    }
+    return Table.{ str_off: str_off, str_hash: str_hash, str_bytes: str_bytes, cand_str: cand_str };
+}
+
+fn is_idcont(b: u8) -> bool {
+    return (b >= B_LOWER_A && b <= B_LOWER_Z) || (b >= B_UPPER_A && b <= B_UPPER_Z) || (b >= B_0 && b <= B_9) || b == B_UNDERSCORE;
+}
+
+// The candidates of the token and name columns: token candidates first (`tok` is the global
+// token: a hole segment's is a `FmtLit`), then the package names, then the module path segments.
+struct Gather {
+    cands: Cands,
+    tok: vec.Vec<u32>,
+    pend: vec.Vec<u32>,
+}
+
+impl Gather {
+    fn add(&mut self, b: &[u8], tok: u32) {
+        self.cands.push(b);
+        self.tok.push(tok);
+    }
+}
+
+// The hole segments of the f-string token of `src` that starts at `start`: a hole is `{`, then
+// names and numbers (`[A-Za-z0-9_]+`) separated by `.`, then `}`; a `\` skips the next byte; the
+// first unescaped `"` ends the literal. A segment equal to `self` is no name.
+fn fmt_holes(src: &[u8], start: usize, tok: u32, g: &mut Gather) {
+    let n = src.len();
+    let mut j = start + 2;
+    while j < n {
+        let b = src[j];
+        if b == B_DQUOTE { break; }
+        if b == B_BACKSLASH {
+            j = j + 2;
+            continue;
+        }
+        if b != B_LBRACE {
+            j = j + 1;
+            continue;
+        }
+        let mut k = j + 1;
+        let mut ok = false;
+        g.pend.clear();
+        loop {
+            let s = k;
+            while k < n && is_idcont(src[k]) { k = k + 1; }
+            if k == s { break; }
+            g.pend.push(s as% u32);
+            g.pend.push(k as% u32);
+            if k < n && src[k] == B_DOT {
+                k = k + 1;
+            } else if k < n && src[k] == B_RBRACE {
+                ok = true;
+                k = k + 1;
+                break;
+            } else {
+                break;
+            }
+        }
+        if ok {
+            let mut p: usize = 0;
+            while p < g.pend.len() {
+                let s = g.pend.as_slice()[p] as usize;
+                let e = g.pend.as_slice()[p + 1] as usize;
+                if !src[s..e].eq(mem.str_bytes("self")) { g.add(&src[s..e], tok); }
+                p = p + 2;
+            }
+        }
+        j = if k > j + 1 then k else j + 1;
+    }
+}
+
+// Interns the names of the build: identifiers and f-string hole segments of every file's tokens,
+// the package names, and the module path of every file (`fl.module` split at `/`).
+pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Interned {
+    let kind = t.kind.as_slice();
+    let start = t.start.as_slice();
+    let ft = t.file_tok.as_slice();
+    // identifier bytes by value: a table read, not a call per byte
+    let mut idc_c = col.filled(256, false);
+    {
+        let idc = idc_c.as_mut_slice();
+        for b in 0usize..256 {
+            idc[b] = is_idcont(b as% u8);
+        }
+    }
+    let idc = idc_c.as_slice();
+    // the identifier count and bytes, and the f-string hole segments; then the identifier
+    // candidates are written in place, each identifier read again (cheaper than a length column
+    // per token). The holes follow them: a candidate's id does not depend on its position.
+    let mut holes = Gather.{ cands: Cands.new(), tok: vec.Vec::<u32>.new(), pend: vec.Vec::<u32>.new() };
+    let mut nid: usize = 0;
+    let mut nbytes: usize = 0;
+    for f in 0..t.files() {
+        let src = set.file(f);
+        for i in ft[f] as usize..ft[f + 1] as usize {
+            if kind[i] == T_IDENT {
+                let s = start[i] as usize;
+                let mut e = s;
+                while e < src.len() && idc[src[e] as usize] { e = e + 1; }
+                nid = nid + 1;
+                nbytes = nbytes + (e - s);
+            } else if kind[i] == T_FMT {
+                fmt_holes(src, start[i] as usize, i as% u32, &mut holes);
+            }
+        }
+    }
+    let _ = col.ids(nbytes);
+    let mut bytes = col.filled(nbytes, 0u8);
+    let mut off = col.filled(nid + 1, 0u32);
+    let mut tok = col.filled(nid, 0u32);
+    {
+        let bs = bytes.as_mut_slice();
+        let os = off.as_mut_slice();
+        let ts = tok.as_mut_slice();
+        let mut k: usize = 0;
+        let mut o: usize = 0;
+        for f in 0..t.files() {
+            let src = set.file(f);
+            for i in ft[f] as usize..ft[f + 1] as usize {
+                if kind[i] != T_IDENT { continue; }
+                let mut e = start[i] as usize;
+                while e < src.len() && idc[src[e] as usize] {
+                    bs[o] = src[e];
+                    o = o + 1;
+                    e = e + 1;
+                }
+                ts[k] = i as% u32;
+                k = k + 1;
+                os[k] = o as% u32;
+            }
+        }
+    }
+    let mut g = Gather.{ cands: Cands.{ bytes: bytes, off: off }, tok: tok, pend: vec.Vec::<u32>.new() };
+    for k in 0..holes.cands.len() {
+        g.add(holes.cands.text(k), holes.tok.as_slice()[k]);
+    }
+    let ntok = g.cands.len();
+    for p in 0..fl.pkg_name.len() {
+        g.add(fl.pkg_name.get_ref(p).as_bytes(), idx.NONE);
+    }
+    let mut file_seg = vec.Vec::<u32>.new();
+    file_seg.push(0);
+    let mut nseg: u32 = 0;
+    for f in 0..fl.module.len() {
+        let m = fl.module.get_ref(f).as_bytes();
+        let mut lo: usize = 0;
+        for k in 0..m.len() + 1 {
+            if k == m.len() || m[k] == B_SLASH {
+                g.add(&m[lo..k], idx.NONE);
+                nseg = nseg + 1;
+                lo = k + 1;
+            }
+        }
+        file_seg.push(nseg);
+    }
+    let tab = rank(&g.cands);
+    let cs = tab.cand_str.as_slice();
+    let gt = g.tok.as_slice();
+    let mut tok_str = col.filled(t.kind.len(), idx.NONE);
+    let mut nhole: usize = 0;
+    {
+        let ts = tok_str.as_mut_slice();
+        for k in 0..ntok {
+            let x = gt[k] as usize;
+            if kind[x] == T_FMT { nhole = nhole + 1; } else { ts[x] = cs[k]; }
+        }
+    }
+    let mut hole_tok = col.filled(nhole, 0u32);
+    let mut hole_str = col.filled(nhole, 0u32);
+    {
+        let ht = hole_tok.as_mut_slice();
+        let hs = hole_str.as_mut_slice();
+        let mut h: usize = 0;
+        for k in 0..ntok {
+            if kind[gt[k] as usize] == T_FMT {
+                ht[h] = gt[k];
+                hs[h] = cs[k];
+                h = h + 1;
+            }
+        }
+    }
+    let npkg = fl.pkg_name.len();
+    let mut pkg_str = vec.Vec::<u32>.with_capacity(npkg);
+    pkg_str.extend_from_slice(&cs[ntok..ntok + npkg]);
+    let mut seg_str = vec.Vec::<u32>.with_capacity(nseg as usize);
+    seg_str.extend_from_slice(&cs[ntok + npkg..cs.len()]);
+    return Interned.{ tab: tab, tok_str: tok_str, hole_tok: hole_tok, hole_str: hole_str, pkg_str: pkg_str, file_seg: file_seg, seg_str: seg_str };
+}

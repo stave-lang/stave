@@ -1967,7 +1967,13 @@ impl<'a> FnCx<'a> {
     /// the slot ends.
     fn exit_temps(&mut self, from: (usize, usize), to: usize, end: bool) {
         let t1 = self.f.stmts.get(to).copied().unwrap_or(self.f.temps.len());
-        let ts: Vec<usize> = self.f.temps.get(from.0..t1.max(from.0)).unwrap_or(&[]).to_vec();
+        // the marks of open statements nest: one that does not names temporaries this exit
+        // cannot know, and an exit that dropped none of them would be code no check has seen
+        let Some(ts) = self.f.temps.get(from.0..t1) else {
+            self.fail_at(None, "an exit's temporaries outside the marks of its statements");
+            return;
+        };
+        let ts = ts.to_vec();
         for &l in ts.iter().rev() {
             self.drop_owner(l);
         }
@@ -2004,7 +2010,11 @@ impl<'a> FnCx<'a> {
 
     /// The end of the rvalue slots `stmt_slots[at..to]`, last taken first.
     fn end_slots(&mut self, at: usize, to: usize) {
-        let ss: Vec<(Operand, Ty)> = self.f.stmt_slots.get(at..to.max(at)).unwrap_or(&[]).to_vec();
+        let Some(ss) = self.f.stmt_slots.get(at..to) else {
+            self.fail_at(None, "rvalue slots outside the marks of their statements");
+            return;
+        };
+        let ss = ss.to_vec();
         for &(s, st) in ss.iter().rev() {
             self.event(stave_ir::EventKind::End, s, st);
         }

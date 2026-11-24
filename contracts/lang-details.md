@@ -340,7 +340,9 @@ when that owner ends.
   local held by what is dropped after it on the way out (a temporary of the statement, or a
   local declared before the block), read by its drop, is E0501 on every way out, as at the
   block's end; the fix is to declare the borrowed local first (E0501 cases `exit-temp`,
-  `exit-local`). The exception is the fn's or closure's own body block, which is inside no
+  `exit-local`), or, for one a `match` arm, `for`, or tail pattern binds (it is bound where its
+  block begins), to copy or move it into a local declared first and borrow that
+  (`exit-temp-binding`, `exit-local-binding`). The exception is the fn's or closure's own body block, which is inside no
   statement: on `return` and `?` its locals and the params are dropped in order but not ended
   (the frame ends them), so `let mut k = mkg(); let x: u32 = 5; k.r = &x; return;` is accepted
   (`k`'s drop reads `x`, whose slot is still there), and so is `.. return 1;` ending a non-unit
