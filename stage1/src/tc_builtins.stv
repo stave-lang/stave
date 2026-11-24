@@ -120,16 +120,31 @@ pub fn is_builtin(x: u32) -> bool {
     return x >= B_BASE && x < B_END;
 }
 
+// The built-in fns, in this order (stage0's `prim.Builtin`); which of them a name is, the
+// resolver decides (`decls.builtin_fn`).
+const FNS: &str = "size_of align_of fence_stream soa_row_size soa_read soa_write";
+const F_SIZE_OF: usize = 0;
+const F_ALIGN_OF: usize = 1;
+const F_FENCE: usize = 2;
+const F_ROW_SIZE: usize = 3;
+const F_READ: usize = 4;
+const F_WRITE: usize = 5;
+
 // The names the table looks up, as interned strings (NONE: not in this program).
 pub struct Builtins {
     ids: vec.Vec<u32>,
+    fns: vec.Vec<u32>,
     // `std.core.Option` (NONE: none in this program)
     opt: u32,
 }
 
 // The table of a program whose strings are tab and whose `Option` is decl opt (NONE: none).
 pub fn table(tab: &intern.Table, opt: u32) -> Builtins {
-    let w = mem.str_bytes(NAMES);
+    return Builtins.{ ids: lookups(tab, mem.str_bytes(NAMES)), fns: lookups(tab, mem.str_bytes(FNS)), opt: opt };
+}
+
+// The interned ids of the space-separated names w.
+fn lookups(tab: &intern.Table, w: &[u8]) -> vec.Vec<u32> {
     let mut ids = vec.Vec::<u32>.new();
     let mut at: usize = 0;
     for i in 0..w.len() + 1 {
@@ -138,7 +153,62 @@ pub fn table(tab: &intern.Table, opt: u32) -> Builtins {
             at = i + 1;
         }
     }
-    return Builtins.{ ids: ids, opt: opt };
+    return ids;
+}
+
+impl Builtins {
+    // The call of built-in fn s with the type written in its turbofish (NONE: none written) as a
+    // fn type (its parameters and result), as stage0's `call` on `St::Builtin`; ERR for a call
+    // stage0 rejects (a turbofish missing or given to `fence_stream`), UNK for `size_of` /
+    // `align_of` of a type that holds no generic param and is not a scalar, a reference, or a
+    // pointer (stage0 asks its layout, E0911 when there is none).
+    pub fn fn_type(&self, tab: &mut types.Table, s: u32, ty: u32) -> u32 {
+        let mut k: usize = 0;
+        while k < self.fns.len() && self.fns.as_slice()[k] != s {
+            k = k + 1;
+        }
+        if s == NONE || k == self.fns.len() { return UNK; }
+        if (k == F_FENCE) != (ty == NONE) { return types.ERR; }
+        if (k == F_SIZE_OF || k == F_ALIGN_OF) && !has_params(tab, ty) {
+            let tag = tab.tag_of(ty);
+            let laid = tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_REF || tag == types.TK_PTR;
+            if !laid { return UNK; }
+        }
+        let us = tab.usize_t();
+        let u8t = tab.int(false, types.W_8);
+        let ret = if k == F_FENCE || k == F_WRITE then tab.unit() else if k == F_READ then ty else us;
+        let p = tab.mk_ptr(k == F_WRITE, u8t);
+        tab.begin();
+        if k == F_READ || k == F_WRITE {
+            tab.push(p);
+            tab.push(us);
+            tab.push(us);
+        }
+        if k == F_WRITE { tab.push(ty); }
+        tab.push(ret);
+        tab.push(0);
+        tab.push(0);
+        tab.push(0);
+        let np: u32 = if k == F_READ then 3 else if k == F_WRITE then 4 else 0;
+        return tab.intern(types.TK_FN, np, 0);
+    }
+}
+
+// Whether type t holds a generic param or `Self` (stage0's `has_params`; a const param shows
+// as a component only where the table keeps it as one).
+fn has_params(tab: &types.Table, t: u32) -> bool {
+    let mut st = vec.Vec::<u32>.new();
+    let mut ks = vec.Vec::<u32>.new();
+    st.push(t);
+    while st.len() > 0 {
+        let x = st.as_slice()[st.len() - 1];
+        st.truncate(st.len() - 1);
+        let tag = tab.tag_of(x);
+        if tag == types.TK_PARAM || tag == types.TK_CONSTPARAM || tag == types.TK_SELF { return true; }
+        tab.kids(x, &mut ks);
+        st.extend_from_slice(ks.as_slice());
+    }
+    return false;
 }
 
 // Whether t is a lane type of a vector: a fixed-width int or a float.

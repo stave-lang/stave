@@ -1154,6 +1154,23 @@ pub fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.T
     return true;
 }
 
+// The generic arguments at `GenericArgs` row ga, each for a type param (a callee with no decl:
+// a built-in fn), into out as `lower_gargs` writes them.
+pub fn lower_type_args(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let n = tree.kids.row(ga as usize).len();
+    let f0 = lw.op.len();
+    let g0 = lw.gas.len();
+    for j in 0..n {
+        let a = base + tree.kids.row(ga as usize)[n - 1 - j] as usize;
+        lw.frame(OP_GARG, a, NONE, 0);
+    }
+    run(cx, lw, tree, t, nm, set, cut, ds, it, f0, sc);
+    out.extend_from_slice(&lw.gas.as_slice()[g0..lw.gas.len()]);
+    lw.gas.truncate(g0);
+}
+
 // The trait a `BoundItem` or `TypeBase` path row names, with its arguments: a row of `bounds`,
 // or NONE (not a trait, or a wrong argument count).
 fn trait_ref_at(sg: &mut Sigs, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, sc: consteval.Scope) -> u32 {

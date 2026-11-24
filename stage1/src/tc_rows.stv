@@ -12,8 +12,8 @@
 // coercion site), `coercible`, `unify` (stage0's `unify_operands`); `set_hint`; `known` (a type
 // from the signatures); `err` (a type error: the body prints `?`); `poison_kids`, `unknown` (a
 // form not checked yet); `expr_kid`; `tok_text`, `is_lit`; the calls of the built-ins of
-// `tc_builtins` (`bi_call`, `bi_hint`, `bi_targs`) and whether an impl with no struct or enum
-// head may have a method for a built-in type (`headless_on`, `headless_impls`).
+// `tc_builtins` (`bi_call`, `bi_hint`, `bi_targs`); the methods of impls with no struct or enum
+// head (`headless_impls`, looked up by `tc_method.headless_method`).
 import ast;
 import consteval;
 import decls;
@@ -25,7 +25,6 @@ import source;
 import tc_builtins;
 import tc_traits;
 import types;
-import prims.search;
 import prims.sort;
 import std.vec;
 
@@ -76,9 +75,9 @@ pub struct Typeck {
     pub args: vec.Vec<u32>,
     // the names of the methods of impls with no struct or enum head, sorted
     pub headless: vec.Vec<u32>,
-    // the same methods' names, sorted, and the impl of each (`headless_impls`)
+    // the same methods: their names, sorted, and their decls (`headless_impls`)
     pub hl_name: vec.Vec<u32>,
-    pub hl_imp: vec.Vec<u32>,
+    pub hl_m: vec.Vec<u32>,
     // the pattern walk of `tc_pat`: pattern rows, the type each matches, the binding mode
     pub pat_row: vec.Vec<u32>,
     pub pat_ty: vec.Vec<u32>,
@@ -348,21 +347,6 @@ const T_COMMA: u8 = terminals.T_COMMA as% u8;
 const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
 
 impl Typeck {
-    // Whether an impl with no struct or enum head has a method named s that may apply to c (a
-    // built-in type, no reference, no generic param): one whose self type is a generic param,
-    // or of c's kind. Stage0 takes such a method before a built-in of that name.
-    pub fn headless_on(&self, sg: &sigs.Sigs, c: u32, s: u32) -> bool {
-        let tab = &sg.cx.tab;
-        let names = self.hl_name.as_slice();
-        let mut k = search.lower_bound(names, s);
-        while k < names.len() && names[k] == s {
-            let st = sg.cx.ty.as_slice()[self.hl_imp.as_slice()[k] as usize];
-            if st == NONE || st == ERR || tab.tag_of(st) == types.TK_PARAM || tab.tag_of(st) == tab.tag_of(c) { return true; }
-            k = k + 1;
-        }
-        return false;
-    }
-
     // A call of built-in callee on c (the receiver, or the type of a type-relative call) with the
     // arguments of `Args` row args (NONE: none), each checked by its kind; its value.
     pub fn bi_call(&mut self, tab: &mut types.Table, tree: &ast.Ast, callee: u32, c: u32, args: u32) -> u32 {
@@ -456,7 +440,8 @@ impl Typeck {
     }
 }
 
-// The methods of impls with no struct or enum head: their names, sorted, and the impl of each.
+// The methods of impls with no struct or enum head: their names, sorted (methods of one name in
+// declaration order), and the method decl of each.
 pub fn headless_impls(ds: &decls.Decls) -> (vec.Vec<u32>, vec.Vec<u32>) {
     let mut xs = vec.Vec::<u32>.new();
     let mut ps = vec.Vec::<u32>.new();
@@ -465,7 +450,7 @@ pub fn headless_impls(ds: &decls.Decls) -> (vec.Vec<u32>, vec.Vec<u32>) {
         let p = ds.parent.as_slice()[m];
         if p == NONE || ds.kind.as_slice()[p as usize] != decls.DK_IMPL || ds.impl_head.as_slice()[p as usize] != NONE { continue; }
         xs.push(ds.name.as_slice()[m]);
-        ps.push(p);
+        ps.push(m as% u32);
     }
     let perm = sort.sort_perm(xs.as_slice());
     let mut names = vec.Vec::<u32>.with_capacity(xs.len());

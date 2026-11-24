@@ -104,6 +104,60 @@ impl tc_rows.Typeck {
         return self.impl_method(sg, ds, found, c);
     }
 
+    // Method s at level c (a type with no struct or enum head: a built-in type, a reference, a
+    // slice, a tuple) from the impls with no struct or enum head, as stage0's `lookup_at` takes
+    // them: the first inherent impl that has the method and applies, else the one trait impl
+    // that has it and applies. (method, `Self`, bindings row, true) when found; NONE three times
+    // and whether the lookup is open (an answer not given yet, two trait impls, an impl whose
+    // self type did not lower, a method `impl_method` does not take), false when no impl has it.
+    pub fn headless_method(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, c: u32, s: u32) -> (u32, u32, u32, bool) {
+        let lo = search.lower_bound(self.hl_name.as_slice(), s);
+        let mut hi = lo;
+        while hi < self.hl_name.len() && self.hl_name.as_slice()[hi] == s {
+            hi = hi + 1;
+        }
+        if lo == hi { return (NONE, NONE, NONE, false); }
+        let e = self.tq.env_of(sg, self.sc);
+        let mut wait = false;
+        let mut found = NONE;
+        let mut fargs = vec.Vec::<u32>.new();
+        let mut two = false;
+        // inherent impls first, then trait impls; an impl's first method of the name is the one
+        for pass in 0..2usize {
+            let mut prev = NONE;
+            for k in lo..hi {
+                let m = self.hl_m.as_slice()[k];
+                let imp = ds.parent.as_slice()[m as usize];
+                if (ds.impl_trait_ty.as_slice()[imp as usize] == NONE) != (pass == 0) || imp == prev { continue; }
+                prev = imp;
+                let st = sg.cx.ty.as_slice()[imp as usize];
+                if st == NONE || st == ERR { return (NONE, NONE, NONE, true); }
+                let a = self.tq.applies(sg, e, imp, c);
+                if a == tc_traits.A_WAIT { wait = true; }
+                if a != tc_traits.A_YES { continue; }
+                if pass == 0 && !wait {
+                    let (x, y, z) = self.impl_method(sg, ds, m, c);
+                    return (x, y, z, true);
+                }
+                if found != NONE { two = true; }
+                found = m;
+                fargs.clear();
+                fargs.extend_from_slice(self.tq.qargs.as_slice());
+            }
+            if wait {
+                let (x, y, z) = self.waited(true);
+                return (x, y, z, true);
+            }
+            if pass == 0 { found = NONE; }
+        }
+        if two { return (NONE, NONE, NONE, true); }
+        if found == NONE { return (NONE, NONE, NONE, false); }
+        self.tq.qargs.clear();
+        self.tq.qargs.extend_from_slice(fargs.as_slice());
+        let (x, y, z) = self.impl_method(sg, ds, found, c);
+        return (x, y, z, true);
+    }
+
     // A lookup that is not decided: when it waits for an answer in the last round, the body is
     // not modeled.
     fn waited(&mut self, wait: bool) -> (u32, u32, u32) {
