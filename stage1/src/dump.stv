@@ -2,7 +2,11 @@
 //
 // `tokens`: one line `F O KIND` per token, by (F, O); KIND is the terminal's name or spelling,
 // `ERROR` for an error token. `EOF` has no line.
+// `diags`: one JSON line per diagnostic, in canonical order.
+import diag;
+import diag_out;
 import lex;
+import source;
 import text;
 import std.vec;
 
@@ -25,4 +29,8 @@ pub fn tokens(lx: &lex.Lexer, t: &lex.Tokens) -> vec.Vec<u8> {
         }
     }
     return buf;
+}
+
+pub fn diags(d: &diag.Diags, rows: &[u32], ft: &diag_out.FileTable, set: &source.SourceSet) -> vec.Vec<u8> {
+    return diag_out.render(d, rows, ft, set, true);
 }

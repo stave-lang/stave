@@ -2,12 +2,17 @@
 // data is flat columns of ids and offsets, and each stage is a pass over whole arrays, the shape
 // it keeps on the GPU.
 //
-// Command line (a subset of stage0's): `stage1 build|check [PATH] --dump=tokens --dump-dir DIR
-// [--target T] [-o OUT]`. PATH (default `.`) is a `.stv` file or a package directory; the build
-// covers it, its path dependencies, and the shipped `std` and `runtime` from the library
-// directory (`$STAVE_STD_DIR`, else next to the binary as for stage0). It writes `DIR/tokens.txt`
-// (contracts/stage-gates.md), byte for byte stage0's. `-o` is accepted and unused: no code is
-// generated yet. Exit codes: 0 done, 2 usage.
+// Command line (a subset of stage0's): `stage1 build|check [PATH] [--dump=tokens,diags
+// --dump-dir DIR] [--diagnostics human|json] [--target T] [-o OUT]`. PATH (default `.`) is a
+// `.stv` file or a package directory; the build covers it, its path dependencies, and the shipped
+// `std` and `runtime` from the library directory (`$STAVE_STD_DIR`, else next to the binary as for
+// stage0). It writes `DIR/tokens.txt` and `DIR/diags.txt` (contracts/stage-gates.md), byte for
+// byte stage0's for the stages stage1 has, and prints its diagnostics to stderr in stage0's text
+// (or JSON lines). `-o` is accepted and unused: no code is generated yet. Exit codes: 0 done,
+// 1 diagnostics, 2 usage.
+import diag;
+import diag_lex;
+import diag_out;
 import dump;
 import files;
 import lex;
@@ -21,6 +26,7 @@ import std.string;
 import std.vec;
 
 const EXIT_OK: i32 = 0;
+const EXIT_USER: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
 fn usage(msg: &str) -> i32 {
@@ -33,6 +39,9 @@ struct Cli {
     dump: string.String,
     dump_dir: string.String,
     target: string.String,
+    json: bool,
+    dump_tokens: bool,
+    dump_diags: bool,
 }
 
 fn arg(i: usize) -> string.String {
@@ -72,7 +81,7 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
         }
         let (flag, inline) = split_flag(&a);
         let fb = flag.as_bytes();
-        let known = text.eq_str(fb, "--dump") || text.eq_str(fb, "--dump-dir") || text.eq_str(fb, "--target") || text.eq_str(fb, "-o");
+        let known = text.eq_str(fb, "--dump") || text.eq_str(fb, "--dump-dir") || text.eq_str(fb, "--target") || text.eq_str(fb, "-o") || text.eq_str(fb, "--diagnostics");
         if !known { return Result.Err(f"unknown or unsupported flag `{flag}`"); }
         let mut value = string.String.new();
         match inline {
@@ -90,15 +99,28 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
             cli.dump_dir = value;
         } else if text.eq_str(fb, "--target") {
             cli.target = value;
+        } else if text.eq_str(fb, "--diagnostics") {
+            if text.eq_str(value.as_bytes(), "json") {
+                cli.json = true;
+            } else if !text.eq_str(value.as_bytes(), "human") {
+                return Result.Err(f"--diagnostics takes human or json, not `{value}`");
+            }
         }
     }
-    if cli.dump.len() == 0 || cli.dump_dir.len() == 0 { return Result.Err(string.String.from_str("stage1 needs --dump=tokens and --dump-dir DIR")); }
+    if cli.dump.len() > 0 && cli.dump_dir.len() == 0 { return Result.Err(string.String.from_str("--dump needs --dump-dir DIR")); }
+    if cli.dump.len() == 0 && cli.dump_dir.len() > 0 { return Result.Err(string.String.from_str("--dump-dir needs --dump=STAGE,...")); }
     let d = cli.dump.as_bytes();
     let mut lo: usize = 0;
     for k in 0..d.len() + 1 {
         if k == d.len() || d[k] == 44 {
             let st = text.string_of(&d[lo..k]);
-            if !text.eq_str(st.as_bytes(), "tokens") { return Result.Err(f"dump `{st}` is not implemented in stage1"); }
+            if text.eq_str(st.as_bytes(), "tokens") {
+                cli.dump_tokens = true;
+            } else if text.eq_str(st.as_bytes(), "diags") {
+                cli.dump_diags = true;
+            } else if d.len() > 0 {
+                return Result.Err(f"dump `{st}` is not implemented in stage1");
+            }
             lo = k + 1;
         }
     }
@@ -172,8 +194,15 @@ fn check_root(root: &str) -> Result<(), string.String> {
     }
 }
 
+// The directory diagnostic paths are relative to: the root package's, or the parent of a root
+// `.stv` file.
+fn root_dir(root: &str) -> string.String {
+    if paths.has_extension(root, "stv") && files.is_file(root) { return paths.parent(root); }
+    return string.String.from_str(root);
+}
+
 fn main() -> i32 {
-    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux") };
+    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), json: false, dump_tokens: false, dump_diags: false };
     match parse_args(&mut cli) {
         Result.Ok(_) => {}
         Result.Err(m) => { return usage(m.as_str()); }
@@ -204,18 +233,38 @@ fn main() -> i32 {
     for f in 0..set.files() {
         lx.lex_file(set.file(f), &mut toks);
     }
-    let out = dump.tokens(&lx, &toks);
-    match io.create_dir_all(cli.dump_dir.as_str()) {
-        Result.Ok(_) => {}
-        Result.Err(e) => {
-            let d = cli.dump_dir.as_str();
-            return usage(f"cannot create {d}: {e}");
+    let mut d = diag.Diags.new();
+    diag_lex.unreadable(&mut d, &set);
+    diag_lex.lexical(&mut d, &toks, &set);
+    let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
+    let rows = d.order(ft.rank.as_slice());
+    let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);
+    let _ = io.write_all(2, shown.as_slice());
+    if cli.dump_dir.len() > 0 {
+        match io.create_dir_all(cli.dump_dir.as_str()) {
+            Result.Ok(_) => {}
+            Result.Err(e) => {
+                let dir = cli.dump_dir.as_str();
+                return usage(f"cannot create {dir}: {e}");
+            }
+        }
+        if cli.dump_tokens {
+            let out = dump.tokens(&lx, &toks);
+            let path = paths.join(cli.dump_dir.as_str(), "tokens.txt");
+            match io.write_file(path.as_str(), out.as_slice()) {
+                Result.Ok(_) => {}
+                Result.Err(e) => { return usage(f"cannot write {path}: {e}"); }
+            }
+        }
+        if cli.dump_diags {
+            let out = dump.diags(&d, rows.as_slice(), &ft, &set);
+            let path = paths.join(cli.dump_dir.as_str(), "diags.txt");
+            match io.write_file(path.as_str(), out.as_slice()) {
+                Result.Ok(_) => {}
+                Result.Err(e) => { return usage(f"cannot write {path}: {e}"); }
+            }
         }
     }
-    let path = paths.join(cli.dump_dir.as_str(), "tokens.txt");
-    match io.write_file(path.as_str(), out.as_slice()) {
-        Result.Ok(_) => {}
-        Result.Err(e) => { return usage(f"cannot write {path}: {e}"); }
-    }
+    if d.has_errors(rows.as_slice()) { return EXIT_USER; }
     return EXIT_OK;
 }
