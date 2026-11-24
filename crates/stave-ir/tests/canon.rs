@@ -122,7 +122,7 @@ fn canonical_form_is_what_the_printer_shows() {
     let remap = canonicalize(&mut c);
     verify_module(&m).unwrap_or_else(|e| panic!("{e:?}"));
     verify_module(&c).unwrap_or_else(|e| panic!("{e:?}"));
-    assert_eq!(print_checked(&c), print_checked(&m));
+    assert_eq!(print_checked(&c).unwrap(), print_checked(&m).unwrap());
     let before = ret_val(run(&m, main, vec![]));
     assert_eq!(ret_val(run(&c, remap[main.index()], vec![])), before);
     assert_eq!(before, Val::S(17));

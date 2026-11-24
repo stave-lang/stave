@@ -5,6 +5,11 @@ pub mod forge;
 use stave_ir::interp::{self, Config, Outcome, Val};
 use stave_ir::{BufferHost, FuncBuilder, FuncId, InstanceId, Module, SyscallAbi, TypeId};
 
+/// [`Module::record_decl`].
+pub fn record_decl(m: &mut Module, id: stave_ir::DeclId, kind: stave_ir::types::AdtKind, path: &str) {
+    m.record_decl(id, kind, path);
+}
+
 pub fn inst(n: &[u32]) -> InstanceId {
     InstanceId(n.to_vec())
 }

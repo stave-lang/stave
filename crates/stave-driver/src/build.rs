@@ -7,11 +7,11 @@
 //!   [`Failure::Unsupported`]; any other lowering or verifier error is a compiler bug
 //!   ([`Failure::Internal`]).
 //! - [`lower`] then decides which bounds and contract checks the program keeps, the same way in
-//!   every build mode: per function, the bounds audit (an element access without a check or proof
-//!   is a compiler bug) and the proofs of removable checks ([`stave_ir::bounds::analyze_func`]); the
-//!   witness checker on every proof ([`stave_ir::witness::check`]; a refused witness is a
-//!   compiler bug); then the removal of the accepted checks; then the canonical numbering
-//!   ([`canonical`]). The module it returns is the checked IR: what the `ir` dump prints, the
+//!   every build mode, on the canonical module ([`canonical`]; level `lowered`): per function, the
+//!   bounds audit (an element access without a check or proof is a compiler bug) and the proofs
+//!   of removable checks ([`stave_ir::bounds::analyze_func`]); the witness checker on every
+//!   proof ([`stave_ir::witness::check`]; a refused witness is a compiler bug); then the removal
+//!   of the accepted checks; then the canonical numbering again. The module it returns is the checked IR: what the `ir` dump prints, the
 //!   interpreter runs, and both code generators get.
 //! - [`codegen_link`]: release builds first run the IR passes of stave-opt and renumber their
 //!   result canonically, then the IR verifier
@@ -127,6 +127,9 @@ pub struct Lowered {
     pub removed: Vec<Proved>,
     /// Per function: the call-graph nodes it stands for ([`stave_sema::lower_mapped`]).
     pub nodes_of_func: Vec<Vec<u32>>,
+    /// The canonical module before the removal of proven checks (level `lowered`), when asked
+    /// for.
+    pub lowered: Option<Module>,
 }
 
 /// Lowers (mono + lower), verifies, and removes the bounds checks that have a checked witness.
@@ -139,13 +142,33 @@ pub fn lower(
     borrows: bool,
     drops: Option<&stave_sema::drops::Schedules>,
 ) -> Result<Lowered, Failure> {
+    lower_keeping(prog, tc, mode, borrows, drops, false)
+}
+
+/// [`lower`], keeping with `keep_lowered` the canonical module as it stands after the verifier
+/// and before the removal of proven checks ([`Lowered::lowered`]).
+pub fn lower_keeping(
+    prog: &Program,
+    tc: &Typeck,
+    mode: Mode,
+    borrows: bool,
+    drops: Option<&stave_sema::drops::Schedules>,
+    keep_lowered: bool,
+) -> Result<Lowered, Failure> {
     let (lowered, tm) = stave_sema::lower_mapped(prog, tc, mode, borrows, drops);
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");
     let (mut m, mut nodes_of_func) = lowered.map_err(|es| lower_failure(&es))?;
+    m.main = main_path(prog).and_then(|p| m.find_func(&p));
     verified(&m, Stage::Lower)?;
     prof::mark("verify");
+    // The removal reads the canonical module, level `lowered`: the proofs read a constant by its
+    // pool entry, so they must see the pool the text carries (one entry per distinct constant),
+    // or loading the `lowered` text would remove other checks than the build does.
+    let remap = canonical(&mut m);
+    stave_ir::canon::permute_by_func(&mut nodes_of_func, &remap);
+    let lowered = keep_lowered.then(|| m.clone());
     let r = remove_proven_checks(&mut m, true)?;
     extend_nodes(&mut nodes_of_func, &r.removal);
     let mut removed: Vec<Proved> = r.proved.into_iter().filter(|p| !p.witness.removed.is_empty()).collect();
@@ -160,7 +183,7 @@ pub fn lower(
         verified(&m, Stage::Lower)?;
     }
     prof::mark("canonical");
-    Ok(Lowered { module: m, removed, nodes_of_func })
+    Ok(Lowered { module: m, removed, nodes_of_func, lowered })
 }
 
 /// [`stave_ir::canon::canonicalize`] with the bodies rewritten in parallel. Every module that is
@@ -325,19 +348,51 @@ pub fn image_options(machine: Machine, release: bool) -> stave_obj::Options {
 }
 
 /// Generates code for every function of `m` and links the static executable whose `main` is
-/// `main` (`__stave_main`; contracts/intrinsics.md). With `stack`, the stack table holds the
-/// computed bound; without, it is empty (every stack gets the `[run] stack` default). `m` is
-/// canonical ([`canonical`]), as [`lower`] returns it: the code generators read functions,
-/// blocks and values in id order, so only the canonical numbering makes the image a function of
-/// the module's content. A module whose functions are out of instance order is refused.
+/// [`Module::main`] (`__stave_main`; contracts/intrinsics.md; none: [`Failure::NoMain`]). With
+/// `stack`, the stack table holds the computed bound; without, it is empty (every stack gets the
+/// `[run] stack` default). `m` is canonical ([`canonical`]), as [`lower`] returns it: the code
+/// generators read functions, blocks and values in id order, so only the canonical numbering
+/// makes the image a function of the module's content. A module whose functions are out of instance order is refused.
 pub fn codegen_link(
     m: &Module,
-    main: FuncId,
     triple: Triple,
     release: bool,
     threads: Option<usize>,
-    stack: Option<&stack::Input<'_>>,
+    stack: Option<&stack::Input>,
 ) -> Result<Built, Failure> {
+    generate(m, triple, if release { Passes::Run } else { Passes::Debug }, threads, stack)
+}
+
+/// [`codegen_link`] of a release build whose module is already the output of the release passes
+/// (level `opt`, verified and audited): the passes do not run again.
+pub fn codegen_link_optimized(
+    m: &Module,
+    triple: Triple,
+    threads: Option<usize>,
+    stack: Option<&stack::Input>,
+) -> Result<Built, Failure> {
+    generate(m, triple, Passes::Done, threads, stack)
+}
+
+/// The build mode of [`generate`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Passes {
+    /// A debug build: no release passes, the debug layout.
+    Debug,
+    /// A release build of a checked module: the release passes first.
+    Run,
+    /// A release build of their output.
+    Done,
+}
+
+fn generate(
+    m: &Module,
+    triple: Triple,
+    passes: Passes,
+    threads: Option<usize>,
+    stack: Option<&stack::Input>,
+) -> Result<Built, Failure> {
+    let release = passes != Passes::Debug;
     // A backend without vector code generation: a vector value or op stops the build here.
     if !generates_vector_code(triple)
         && let Some(f) = stave_ir::simd::first_vector_func(m)
@@ -348,32 +403,15 @@ pub fn codegen_link(
             message: format!("vector code generation (in `{path}`)"),
         });
     }
+    let main = m.main.ok_or(Failure::NoMain)?;
     let funcs = m.funcs.iter().filter(|f| f.body.is_some()).count() as u64;
     if !m.funcs.windows(2).all(|w| w[0].instance <= w[1].instance) {
         let message = "the module is not canonical: functions out of instance order".to_string();
         return Err(Failure::Internal { stage: Stage::Codegen, message });
     }
     let owned;
-    let m = if release {
-        let mut c = m.clone();
-        stave_opt::slices::declare_elem_pointers(&mut c.types);
-        let types = &c.types;
-        c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(|b| stave_opt::optimize(types, b));
-        prof::mark("opt");
-        // The passes keep every function, so only the bodies are renumbered.
-        let remap = canonical(&mut c);
-        if !stave_ir::canon::is_identity(&remap) {
-            let message = "the release passes moved a function".to_string();
-            return Err(Failure::Internal { stage: Stage::Opt, message });
-        }
-        prof::mark("opt-canonical");
-        // The optimizer's output is checked like the lowering's: it must be valid IR in which
-        // every element access still has its check or a proof.
-        verified(&c, Stage::Opt)?;
-        prof::mark("opt-verify");
-        audited(&c, Stage::Opt)?;
-        prof::mark("opt-audit");
-        owned = c;
+    let m = if passes == Passes::Run {
+        owned = release_passes(m)?;
         &owned
     } else {
         m
@@ -383,6 +421,31 @@ pub fn codegen_link(
         Arch::Aarch64 => a64(m, main, release, funcs, stack),
         Arch::Gpu => Err(Failure::Target(triple)),
     }
+}
+
+/// The release passes on the canonical module `m`: element pointer types, the optimizer on
+/// every body, then the canonical numbering again (the passes keep every function), the IR
+/// verifier and the bounds audit on the result. The module the release backends compile and
+/// the `opt` dump prints.
+pub fn release_passes(m: &Module) -> Result<Module, Failure> {
+    let mut c = m.clone();
+    stave_opt::slices::declare_elem_pointers(&mut c.types);
+    let types = &c.types;
+    c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(|b| stave_opt::optimize(types, b));
+    prof::mark("opt");
+    let remap = canonical(&mut c);
+    if !stave_ir::canon::is_identity(&remap) {
+        let message = "the release passes moved a function".to_string();
+        return Err(Failure::Internal { stage: Stage::Opt, message });
+    }
+    prof::mark("opt-canonical");
+    // The optimizer's output is checked like the lowering's: it must be valid IR in which every
+    // element access still has its check or a proof.
+    verified(&c, Stage::Opt)?;
+    prof::mark("opt-verify");
+    audited(&c, Stage::Opt)?;
+    prof::mark("opt-audit");
+    Ok(c)
 }
 
 /// Whether the backend of `triple` generates code for vector values and ops.
@@ -400,7 +463,7 @@ fn x64(
     release: bool,
     threads: Option<usize>,
     funcs: u64,
-    stack: Option<&stack::Input<'_>>,
+    stack: Option<&stack::Input>,
 ) -> Result<Built, Failure> {
     use stave_codegen_x64::Error as E;
     let classify = |stage: Stage, e: E| match e {
@@ -444,7 +507,7 @@ fn a64(
     main: FuncId,
     release: bool,
     funcs: u64,
-    stack: Option<&stack::Input<'_>>,
+    stack: Option<&stack::Input>,
 ) -> Result<Built, Failure> {
     use stave_codegen_a64::debug::{Codegen, Error, ErrorKind, FuncScratch, prepare};
     let classify = |stage: Stage, e: Error| match e.kind {

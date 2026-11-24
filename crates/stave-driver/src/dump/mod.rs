@@ -8,11 +8,12 @@
 //! packages (`F` = rank of (package, path), `I` numbered file after file, `S`/`D`/`T` the
 //! canonical stave-sema ids).
 //!
-//! Implemented: `tokens items ast strings names sigs types borrow ir diags stats` (`sigs` is
-//! [`stave_sema::dump_sigs`], the printer of the decl table and signature types; `types` is
-//! [`stave_sema::dump_types`], the one printer of the expression-node set and TypeKey text; `ir` is
-//! [`stave_ir::print_checked`] of the lowered module (module `ir`), and no `ir.txt` exists when the
-//! build has error diagnostics). `borrow` is stave-borrow's per-access lines (module `borrow`).
+//! Implemented: `tokens items ast strings names sigs types borrow lir ir opt diags stats` (`sigs`
+//! is [`stave_sema::dump_sigs`], the printer of the decl table and signature types; `types` is
+//! [`stave_sema::dump_types`], the one printer of the expression-node set and TypeKey text; `lir`,
+//! `ir`, and `opt` are [`stave_ir::print_module`] of the module at level `lowered`, `checked`,
+//! and `opt` (module `ir`), and none of those files exists when the build has error
+//! diagnostics). `borrow` is stave-borrow's per-access lines (module `borrow`).
 
 mod ast;
 mod borrow;
@@ -32,6 +33,8 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use stave_ir::text::Level;
+
 use crate::pipeline::Output;
 
 /// A dump stage, in contract order.
@@ -45,13 +48,15 @@ pub enum DumpStage {
     Sigs,
     Types,
     Borrow,
+    Lir,
     Ir,
+    Opt,
     Diags,
     Stats,
 }
 
 impl DumpStage {
-    pub const ALL: [DumpStage; 11] = [
+    pub const ALL: [DumpStage; 13] = [
         DumpStage::Tokens,
         DumpStage::Items,
         DumpStage::Ast,
@@ -60,7 +65,9 @@ impl DumpStage {
         DumpStage::Sigs,
         DumpStage::Types,
         DumpStage::Borrow,
+        DumpStage::Lir,
         DumpStage::Ir,
+        DumpStage::Opt,
         DumpStage::Diags,
         DumpStage::Stats,
     ];
@@ -75,7 +82,9 @@ impl DumpStage {
             DumpStage::Sigs => "sigs",
             DumpStage::Types => "types",
             DumpStage::Borrow => "borrow",
+            DumpStage::Lir => "lir",
             DumpStage::Ir => "ir",
+            DumpStage::Opt => "opt",
             DumpStage::Diags => "diags",
             DumpStage::Stats => "stats",
         }
@@ -98,6 +107,8 @@ pub enum DumpError {
     NotRun(DumpStage),
     /// A diagnostic span outside its file (a compiler bug).
     Locate(stave_diag::LocateError),
+    /// The release passes failed on the module of the `opt` dump (a compiler bug).
+    Internal(String),
 }
 
 impl fmt::Display for DumpError {
@@ -106,6 +117,7 @@ impl fmt::Display for DumpError {
             DumpError::Io(p, e) => write!(f, "cannot write {}: {e}", p.display()),
             DumpError::NotRun(s) => write!(f, "dump `{}`: the run stopped before its stage", s.name()),
             DumpError::Locate(e) => write!(f, "internal: {e}"),
+            DumpError::Internal(e) => write!(f, "internal: {e}"),
         }
     }
 }
@@ -132,8 +144,10 @@ pub fn render(stage: DumpStage, out: &Output, w: &mut dyn Write) -> Result<(), D
         DumpStage::Diags => diags::write(out, w),
         DumpStage::Stats => stats::write(out, w).map_err(io),
         DumpStage::Borrow => borrow::write(out, w),
-        // Callers skip `ir` when there are error diagnostics ([`write_dumps`]).
-        DumpStage::Ir => ir::write(out, w),
+        // Callers skip the IR dumps when there are error diagnostics ([`write_dumps`]).
+        DumpStage::Lir => ir::write(Level::Lowered, out, w),
+        DumpStage::Ir => ir::write(Level::Checked, out, w),
+        DumpStage::Opt => ir::write(Level::Opt, out, w),
     }
 }
 
@@ -144,13 +158,20 @@ pub fn render_to_vec(stage: DumpStage, out: &Output) -> Result<Vec<u8>, DumpErro
     Ok(v)
 }
 
-/// Writes `DIR/STAGE.txt` for every stage (the directory is created). `ir.txt` is not written
-/// (an old one is removed) when the build has error diagnostics (stage-gates.md).
+/// The emit form of the IR text of `out` (level `checked`: the gate form plus the stack section,
+/// checked-ir.md "Levels and forms"), for `stave ir emit`.
+pub fn emit_text(out: &Output) -> Result<String, DumpError> {
+    ir::text(Level::Checked, out, true)
+}
+
+/// Writes `DIR/STAGE.txt` for every stage (the directory is created). `lir.txt`, `ir.txt`, and
+/// `opt.txt` are not written (an old one is removed) when the build has error diagnostics
+/// (stage-gates.md).
 pub fn write_dumps(out: &Output, stages: &[DumpStage], dir: &Path) -> Result<(), DumpError> {
     std::fs::create_dir_all(dir).map_err(|e| DumpError::Io(dir.to_path_buf(), e))?;
     for &s in stages {
         let path = dir.join(s.file_name());
-        if s == DumpStage::Ir && out.has_errors() {
+        if matches!(s, DumpStage::Lir | DumpStage::Ir | DumpStage::Opt) && out.has_errors() {
             match std::fs::remove_file(&path) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(DumpError::Io(path, e)),
                 _ => continue,
@@ -233,7 +254,10 @@ mod tests {
         let all: Vec<&str> = DumpStage::ALL.iter().map(|s| s.name()).collect();
         assert_eq!(
             all,
-            ["tokens", "items", "ast", "strings", "names", "sigs", "types", "borrow", "ir", "diags", "stats"]
+            [
+                "tokens", "items", "ast", "strings", "names", "sigs", "types", "borrow", "lir", "ir", "opt",
+                "diags", "stats"
+            ]
         );
     }
 }

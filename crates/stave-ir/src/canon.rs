@@ -10,7 +10,7 @@ use crate::ir::{
     Block, BlockData, Body, BorrowMark, Const, ConstId, EventMark, Func, FuncId, Insts, IntrinsicId, Module,
     Op, Operand, Site, Span, SwitchCase, Target, Term, Value, ValueData, ValueDef,
 };
-use crate::types::TypeId;
+use crate::types::{DeclId, TypeId, TypeKey, TypeTable};
 
 /// Rewrites `m` into canonical form and returns where each function went (`old -> new`).
 ///
@@ -20,9 +20,9 @@ use crate::types::TypeId;
 ///    `41.k` follows `41`, the unchecked entry `41.u` follows the closures of `41`), bodiless
 ///    functions included. Equal instance ids, which a lowered module does not have, keep their
 ///    stored order. Every `Operand::Func` is rewritten.
-/// 2. **Per-function tables** of the module (`stated`, `clauses`) move with their function. A
-///    table that is not empty is first extended to one row per function with the row that a
-///    missing one means (`None`, the default clauses).
+/// 2. **Per-function tables** of the module (`stated`, `clauses`) and `main` move with their
+///    function. A table that is not empty is first extended to one row per function with the
+///    row that a missing one means (`None`, the default clauses).
 /// 3. **Intrinsic names** are the names the bodies use, sorted by bytes, without duplicates.
 /// 4. **Blocks** of a body: those reachable from `b0`, in stored order, numbered densely from 0.
 ///    Unreachable blocks and their instructions are dropped.
@@ -40,19 +40,30 @@ use crate::types::TypeId;
 ///    value, not which operands lowering happened to build from one constant.
 /// 7. **Borrow side table** (`borrows`, `events`): stored order, values renumbered, marks of
 ///    dropped values dropped.
+/// 8. **Types** (checked-ir.md "Ids"): the *P* set, the closure over key components of the
+///    types the functions with a body use after rule 4 (signatures and type arguments, values,
+///    instruction results, type operands), ranked in canonical type-key order
+///    ([`crate::types::TypeTable::canonical_cmp`]); then the *S* set, the other types that the
+///    shapes of kept ADT types, the statics, and the bodiless functions' signatures reach over
+///    key components and shapes, ranked the same way. No other type is kept (the verifier names
+///    the scalar type of a constant operand by key, so it needs no type no value has), and every
+///    type id of the module is rewritten. `decls` keeps the decls a kept `adt`
+///    key or `cell` names. A type table that is not well formed is left as it is.
 ///
-/// Types, strings, sites and statics are canonical as lowered (ranked by contracted keys) and
-/// are not changed. Callers that hold other per-function tables move them with the result
-/// ([`permute_by_func`]). The pass is idempotent.
+/// Strings, sites and statics are canonical as lowered (ranked by contracted keys) and are not
+/// changed. Callers that hold other per-function tables move them with the result
+/// ([`permute_by_func`]); nothing outside the module holds a type id across this pass. The pass
+/// is idempotent.
 pub fn canonicalize(m: &mut Module) -> Vec<FuncId> {
     canonicalize_by(m, |funcs, one| funcs.iter_mut().for_each(one))
 }
 
-/// [`canonicalize`] with the bodies rewritten by `each`: it must call the given function once on
-/// every element of the slice, in any order or in parallel (functions are independent).
+/// [`canonicalize`] with the functions rewritten by `each`: each call must call the given
+/// function once on every element of the slice, in any order or in parallel (functions are
+/// independent).
 pub fn canonicalize_by<E>(m: &mut Module, each: E) -> Vec<FuncId>
 where
-    E: FnOnce(&mut [Func], &(dyn Fn(&mut Func) + Sync)),
+    E: Fn(&mut [Func], &(dyn Fn(&mut Func) + Sync)),
 {
     let n = m.funcs.len();
     let mut order: Vec<usize> = (0..n).collect();
@@ -94,6 +105,7 @@ where
         permute_by_func(&mut m.clauses, &remap);
     }
     m.intrinsics = names;
+    m.main = m.main.map(|f| remap.get(f.index()).copied().unwrap_or(FuncId(u32::MAX)));
 
     let maps = Maps { funcs: &remap, intrinsics: &intrinsics };
     each(&mut m.funcs, &|f: &mut Func| {
@@ -101,7 +113,89 @@ where
             f.body = Some(canonical_body(b, &maps));
         }
     });
+    canonical_types(m, &each);
     remap
+}
+
+/// Rule 8 of [`canonicalize`], on a module whose bodies are already canonical (only reachable
+/// blocks count).
+fn canonical_types<E>(m: &mut Module, each: &E)
+where
+    E: Fn(&mut [Func], &(dyn Fn(&mut Func) + Sync)),
+{
+    if m.types.check_well_formed().is_err() {
+        return;
+    }
+    let n = m.types.len();
+    let mut seeds: Vec<TypeId> = Vec::new();
+    for f in &m.funcs {
+        let Some(b) = &f.body else { continue };
+        seeds.extend(f.signature_types());
+        seeds.extend(b.values.iter().map(|v| v.ty));
+        seeds.extend(b.insts.ty.iter().flatten());
+        seeds.extend(b.operands.iter().filter_map(|o| match o {
+            Operand::Type(t) => Some(*t),
+            _ => None,
+        }));
+    }
+    let mut in_p = vec![false; n];
+    close_types(&m.types, &mut seeds, &mut in_p, false);
+    let mut in_all = vec![false; n];
+    seeds.extend((0..n as u32).map(TypeId).filter(|t| in_p[t.index()]));
+    seeds.extend(m.statics.iter().map(|s| s.ty));
+    for f in m.funcs.iter().filter(|f| f.body.is_none()) {
+        seeds.extend(f.signature_types());
+    }
+    close_types(&m.types, &mut seeds, &mut in_all, true);
+
+    let types = &m.types;
+    let cmp = |a: &TypeId, b: &TypeId| types.canonical_cmp(*a, *b).unwrap_or(std::cmp::Ordering::Equal);
+    let mut order: Vec<TypeId> = (0..n as u32).map(TypeId).filter(|t| in_p[t.index()]).collect();
+    order.sort_by(cmp);
+    let mut s: Vec<TypeId> =
+        (0..n as u32).map(TypeId).filter(|t| in_all[t.index()] && !in_p[t.index()]).collect();
+    s.sort_by(cmp);
+    order.extend(s);
+    if order.len() != n || order.iter().enumerate().any(|(k, t)| t.index() != k) {
+        let remap = m.types.keep_in_order(&order);
+        let map = |t: TypeId| remap.get(t.index()).copied().unwrap_or(TypeId(u32::MAX));
+        each(&mut m.funcs, &|f: &mut Func| f.map_types(map));
+        for st in &mut m.statics {
+            st.ty = map(st.ty);
+        }
+    }
+    let mut named: Vec<DeclId> = m.cell.into_iter().collect();
+    for k in m.types.keys() {
+        if let TypeKey::Adt { def, .. } = k {
+            named.push(*def);
+        }
+    }
+    named.sort_unstable();
+    m.decls.retain(|d| named.binary_search(&d.id).is_ok());
+}
+
+/// Marks in `set` every type `seeds` reach over key components, and with `shapes` over the
+/// fields of ADT shapes too (empties `seeds`). Ids out of range are ignored.
+fn close_types(types: &TypeTable, seeds: &mut Vec<TypeId>, set: &mut [bool], shapes: bool) {
+    while let Some(t) = seeds.pop() {
+        match set.get_mut(t.index()) {
+            Some(seen) if !*seen => *seen = true,
+            _ => continue,
+        }
+        if let Some(k) = types.key(t) {
+            k.for_each_component(|c| seeds.push(c));
+        }
+        if shapes && let Some(sh) = types.shape(t) {
+            seeds.extend(sh.variants.iter().flatten().copied());
+        }
+    }
+}
+
+/// Whether `m` is its own canonical form ([`canonicalize`] changes nothing).
+pub fn is_canonical(m: &Module) -> bool {
+    let mut c = m.clone();
+    canonicalize(&mut c);
+    c == *m
 }
 
 /// Moves the rows of a per-function table with their functions: row `i` goes to `remap[i]`.

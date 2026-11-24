@@ -82,6 +82,7 @@ pub fn verify_types(m: &Module) -> Result<Vec<VerifyError>, Vec<VerifyError>> {
             }
         }
     }
+    errs.extend(module_faults(m).into_iter().map(module_err));
     errs.extend(verify_static_refs(m).into_iter().map(module_err));
     if types_ok {
         errs.extend(verify_lanes(&m.types).into_iter().map(module_err));
@@ -90,6 +91,57 @@ pub fn verify_types(m: &Module) -> Result<Vec<VerifyError>, Vec<VerifyError>> {
         errs.extend(verify_static_layout(m, &layouts).into_iter().map(module_err));
     }
     if types_ok { Ok(errs) } else { Err(errs) }
+}
+
+/// The keys the text can spell and the decls they name: no generic parameter (the module is
+/// monomorphized), every `adt` key's decl and `cell` in `decls`, `decls` ascending by id with
+/// none that no key or `cell` names, and an ADT shape of its decl's kind; `main` names a fn. The
+/// printer refuses a module with any of these too: its text would not load.
+pub(crate) fn module_faults(m: &Module) -> Vec<String> {
+    let mut errs = Vec::new();
+    if let Some(f) = m.main.filter(|f| f.index() >= m.funcs.len()) {
+        errs.push(format!("main: fn #{} out of range", f.0));
+    }
+    if !m.decls.windows(2).all(|w| w[0].id < w[1].id) {
+        errs.push("decls: not ascending by id, or an id twice".to_string());
+    }
+    let decl = |d: crate::types::DeclId| m.decls.binary_search_by_key(&d, |x| x.id).ok().map(|k| &m.decls[k]);
+    let mut named = vec![false; m.decls.len()];
+    let mut name = |d: crate::types::DeclId| {
+        if let Ok(k) = m.decls.binary_search_by_key(&d, |x| x.id) {
+            named[k] = true;
+        }
+    };
+    for (i, k) in m.types.keys().iter().enumerate() {
+        match k {
+            TypeKey::Param(_) | TypeKey::ConstParam(_) => {
+                errs.push(format!("t{i}: a generic parameter in a monomorphized module"));
+            }
+            TypeKey::Adt { def, .. } => {
+                name(*def);
+                match (decl(*def), m.types.shape(TypeId(i as u32))) {
+                    (None, _) => errs.push(format!("t{i}: adt d{} has no decl", def.0)),
+                    (Some(d), Some(s)) if s.kind != d.kind => {
+                        errs.push(format!("t{i}: a {:?} shape of {:?} decl d{}", s.kind, d.kind, def.0));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(c) = m.cell {
+        name(c);
+        if decl(c).is_none() {
+            errs.push(format!("cell: d{} has no decl", c.0));
+        }
+    }
+    for (k, d) in m.decls.iter().enumerate() {
+        if !named[k] {
+            errs.push(format!("decl d{}: no type or `cell` names it", d.id.0));
+        }
+    }
+    errs
 }
 
 /// A vector type has a lane type ([`crate::simd::lane_ty`]) and a lane count of
@@ -602,6 +654,25 @@ impl<'a> FnVerifier<'a> {
         }
     }
 
+    /// Checks that `o` can stand where the op rules name a scalar type by its key (`bool` for a
+    /// condition, `int u size` for a length or index). The table need not hold the type: a
+    /// module whose only operand there is a constant has no value of it, and a canonical type
+    /// table holds only the types something reaches.
+    pub(crate) fn check_scalar_operand(&self, b: &Body, o: Operand, want: &TypeKey) -> Result<(), String> {
+        if let Some(t) = self.m.types.find(want) {
+            return self.check_operand(b, o, t);
+        }
+        let fits = match (o, want) {
+            (Operand::Const(c), TypeKey::Bool) => matches!(b.konst(c), Some(Const::Int(0 | 1))),
+            (Operand::Const(c), TypeKey::Int { signed, bits }) => {
+                let width = if *bits == IntBits::Size { 64 } else { bits.width() };
+                matches!(b.konst(c), Some(Const::Int(x)) if IntTy::new(width, *signed).fits(x))
+            }
+            _ => false,
+        };
+        if fits { Ok(()) } else { Err(format!("operand cannot have type {}", crate::types::key_text(want))) }
+    }
+
     /// Checks that `o` can stand where a value of type `want` is expected.
     fn check_operand(&self, b: &Body, o: Operand, want: TypeId) -> Result<(), String> {
         let key = self.key(want).ok_or("expected type out of range")?;
@@ -728,8 +799,7 @@ impl<'a> FnVerifier<'a> {
         }
         match bd.term {
             Term::Cbr { cond, .. } => {
-                let bt = self.m.types.find(&TypeKey::Bool).ok_or("cbr condition: no bool type")?;
-                self.check_operand(b, cond, bt).map_err(|e| format!("cbr condition: {e}"))
+                self.check_scalar_operand(b, cond, &TypeKey::Bool).map_err(|e| format!("cbr condition: {e}"))
             }
             Term::Switch { scrut, cases, .. } => {
                 let t = self.operand_ty(b, scrut).ok_or("switch scrutinee must be a value")?;
@@ -875,8 +945,12 @@ impl<'a> FnVerifier<'a> {
             Op::Select => {
                 arity(3)?;
                 let t = res()?;
-                let bt = types.find(&TypeKey::Bool).ok_or("no bool type")?;
-                self.check_args(b, args, &[bt, t, t])
+                self.check_scalar_operand(b, args[0], &TypeKey::Bool)
+                    .map_err(|e| format!("argument 0: {e}"))?;
+                for k in 1..3 {
+                    self.check_operand(b, args[k], t).map_err(|e| format!("argument {k}: {e}"))?;
+                }
+                Ok(())
             }
             Op::Cast(kind) => {
                 arity(1)?;
@@ -1078,21 +1152,19 @@ impl<'a> FnVerifier<'a> {
                 arity(2)?;
                 let t = res()?;
                 let inner = pointee(types, t).ok_or("slice.make result must be a pointer")?;
-                let et = match self.key(inner) {
-                    Some(TypeKey::Slice { elem, .. }) => *elem,
-                    Some(TypeKey::Str) => {
-                        types.find(&TypeKey::Int { signed: false, bits: IntBits::B8 }).ok_or("no u8 type")?
+                let pt = self.operand_ty(b, args[0]).ok_or("slice.make pointer must be a value")?;
+                let elem_ok = match (self.key(inner), pointee(types, pt)) {
+                    (Some(TypeKey::Slice { elem, .. }), Some(p)) => p == *elem,
+                    (Some(TypeKey::Str), Some(p)) => {
+                        self.key(p) == Some(&TypeKey::Int { signed: false, bits: IntBits::B8 })
                     }
+                    (Some(TypeKey::Slice { .. } | TypeKey::Str), None) => false,
                     _ => return Err("slice.make result must point to a slice or str".into()),
                 };
-                let pt = self.operand_ty(b, args[0]).ok_or("slice.make pointer must be a value")?;
-                if pointee(types, pt) != Some(et) || self.cls(pt) != Cls::Ptr {
+                if !elem_ok || self.cls(pt) != Cls::Ptr {
                     return Err("slice.make pointer must point to the element type".into());
                 }
-                let us = types
-                    .find(&TypeKey::Int { signed: false, bits: IntBits::Size })
-                    .ok_or("no usize type")?;
-                self.check_operand(b, args[1], us)
+                self.check_scalar_operand(b, args[1], &TypeKey::Int { signed: false, bits: IntBits::Size })
             }
             Op::SliceLen | Op::SlicePtr => {
                 arity(1)?;

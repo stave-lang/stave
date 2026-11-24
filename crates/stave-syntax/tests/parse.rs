@@ -24,7 +24,15 @@ fn lang_md_blocks_parse() {
 
 #[test]
 fn stage1_generated_files_parse() {
-    for f in ["ll1_table.stv", "terminals.stv", "node_kinds.stv", "diag_templates.stv"] {
+    for f in [
+        "ll1_table.stv",
+        "terminals.stv",
+        "node_kinds.stv",
+        "ir_text_ll1_table.stv",
+        "ir_text_terminals.stv",
+        "ir_text_node_kinds.stv",
+        "diag_templates.stv",
+    ] {
         let p = repo().join("stage1/src/generated").join(f);
         let Ok(src) = std::fs::read(&p) else { continue };
         let pf = parse_file(&src, F);

@@ -1,8 +1,9 @@
-//! Emits `crates/stave-syntax/src/generated/{mod,ll1_table,terminals,node_kinds}.rs`.
-//! The files are excluded from rustfmt (`#[rustfmt::skip] pub mod generated;` in stave-syntax).
+//! Emits `{mod,ll1_table,terminals,node_kinds}.rs` (file stems prefixed by the profile) into the
+//! profile's Rust directory. The files are excluded from rustfmt (`#[rustfmt::skip] pub mod
+//! generated;` in the owning crate).
 
 use crate::naming::Names;
-use crate::{Output, RUST_DIR, Sym, Tables};
+use crate::{Output, Profile, Sym, Tables};
 use std::fmt::Write;
 
 /// Packs `items` into lines of at most `width` columns, each line indented by `indent` and every
@@ -50,25 +51,29 @@ fn nums<T: ToString>(xs: &[T]) -> impl Iterator<Item = String> + '_ {
 
 const W: usize = 100;
 
-fn mod_rs(header: &str) -> String {
+fn mod_rs(header: &str, prof: &Profile) -> String {
+    let p = prof.file_prefix;
     format!(
         "// {header}\n\
          //! LL(1) parse tables generated from the grammar by tools/ll1gen.\n\
          \n\
-         pub mod ll1_table;\n\
-         pub mod node_kinds;\n\
-         pub mod terminals;\n"
+         pub mod {p}ll1_table;\n\
+         pub mod {p}node_kinds;\n\
+         pub mod {p}terminals;\n"
     )
 }
 
-fn terminals_rs(t: &Tables, names: &Names, header: &str) -> String {
+fn terminals_rs(t: &Tables, names: &Names, header: &str, prof: &Profile) -> String {
     let n = t.nterm();
+    let p = prof.file_prefix;
+    let [ex1, ex2] = prof.class_examples;
     let mut o = format!("// {header}\n");
-    o += "//! Terminals in sorted spelling order (byte order), which is the E0004 expected-set order.\n";
-    o += "//! `Term as u16` is the terminal id of `ll1_table`.\n\n";
+    let _ = writeln!(o, "//! Terminals in sorted spelling order (byte order){}.", prof.order_note);
+    let _ = writeln!(o, "//! `Term as u16` is the terminal id of `{p}ll1_table`.\n");
     o += "/// Number of terminals.\n";
     let _ = writeln!(o, "pub const NTERM: usize = {n};\n");
-    o += "/// A terminal of the grammar.\n#[repr(u8)]\n";
+    let repr = if n > 256 { "u16" } else { "u8" };
+    let _ = writeln!(o, "/// A terminal of the grammar.\n#[repr({repr})]");
     o += "#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]\npub enum Term {\n";
     for (i, (s, v)) in t.terms.iter().zip(&names.term).enumerate() {
         let _ = writeln!(o, "    /// `{s}`\n    {v} = {i},");
@@ -79,15 +84,30 @@ fn terminals_rs(t: &Tables, names: &Names, header: &str) -> String {
     o += "    /// The terminal id.\n    pub const fn id(self) -> u16 {\n        self as u16\n    }\n\n";
     o += "    /// The terminal with id `id`.\n    pub const fn from_id(id: u16) -> Option<Term> {\n";
     o += "        if (id as usize) < NTERM { Some(Self::ALL[id as usize]) } else { None }\n    }\n\n";
-    o += "    /// Spelling for diagnostics: the token text, or the class name (`Ident`, `EOF`).\n";
+    let _ =
+        writeln!(o, "    /// Spelling for diagnostics: the token text, or the class name (`{ex1}`, `EOF`).");
     o += "    pub const fn text(self) -> &'static str {\n        TERM_TEXT[self as usize]\n    }\n\n";
-    o += "    /// A lexical class (`Ident`, `IntLit`, ..., `EOF`) rather than a fixed spelling.\n";
+    let _ =
+        writeln!(o, "    /// A lexical class (`{ex1}`, `{ex2}`, ..., `EOF`) rather than a fixed spelling.");
     o += "    pub const fn is_class(self) -> bool {\n        TERM_IS_CLASS[self as usize]\n    }\n}\n\n";
     o += "/// Spelling per terminal id.\npub const TERM_TEXT: [&str; NTERM] = [\n";
     o += &pack(t.terms.iter().map(|s| format!("{s:?}")), "    ", W);
     o += "];\n\n/// Lexical class flag per terminal id.\npub const TERM_IS_CLASS: [bool; NTERM] = [\n";
     o += &pack(nums(&t.term_is_class), "    ", W);
-    o += "];\n\n";
+    o += "];\n";
+    if t.any_word.is_some() {
+        o += "\n/// A token of the terminal has the Word shape `[A-Za-z_][A-Za-z0-9_.]*`: a keyword spelled in\n";
+        o += "/// that shape, a word class, or the pseudo-class `AnyWord`. The terminal `AnyWord` matches every\n";
+        o += "/// such token; the table holds its actions in every Word-shaped column of the row where it\n";
+        o += "/// has one.\n";
+        o += "pub const TERM_IS_WORD: [bool; NTERM] = [\n";
+        o += &pack(nums(&t.term_is_word), "    ", W);
+        o += "];\n";
+    }
+    if t.split.is_empty() {
+        return o;
+    }
+    o.push('\n');
     let (first, rest) = split_arrays(t);
     o += "// Split actions (grammar header): D3 `>>` `>=` `>>=` start with the `>` that closes type\n";
     o += "// arguments; the token `&&` in unary position is two `&`. A nonterminal with no action on a\n";
@@ -129,10 +149,14 @@ pub fn split_pairs(t: &Tables, part: usize) -> String {
         .join(", ")
 }
 
-fn node_kinds_rs(t: &Tables, names: &Names, header: &str) -> String {
+fn node_kinds_rs(t: &Tables, names: &Names, header: &str, prof: &Profile) -> String {
+    let p = prof.file_prefix;
     let mut o = format!("// {header}\n");
     o += "//! AST node kinds: one per named grammar rule. Helper nonterminals from\n";
-    o += "//! `? * +` and groups make no node. A kind's id equals its nonterminal id in `ll1_table`.\n\n";
+    let _ = writeln!(
+        o,
+        "//! `? * +` and groups make no node. A kind's id equals its nonterminal id in `{p}ll1_table`.\n"
+    );
     o += "/// Number of node kinds (named rules).\n";
     let _ = writeln!(o, "pub const NKIND: usize = {};\n", t.nkind);
     o += "/// A node kind (a named grammar rule).\n#[repr(u8)]\n";
@@ -144,7 +168,7 @@ fn node_kinds_rs(t: &Tables, names: &Names, header: &str) -> String {
     o += &pack(names.kind.iter().map(|v| format!("NodeKind::{v}")), "        ", W);
     o += "    ];\n\n";
     o += "    /// The node kind id.\n    pub const fn id(self) -> u8 {\n        self as u8\n    }\n\n";
-    o += "    /// The rule's nonterminal id in `ll1_table` (equal to the kind id).\n";
+    let _ = writeln!(o, "    /// The rule's nonterminal id in `{p}ll1_table` (equal to the kind id).");
     o += "    pub const fn nt(self) -> u16 {\n        self as u16\n    }\n\n";
     o += "    /// The node kind with id `id`.\n    pub const fn from_id(id: u8) -> Option<NodeKind> {\n";
     o += "        if (id as usize) < NKIND { Some(Self::ALL[id as usize]) } else { None }\n    }\n\n";
@@ -156,22 +180,28 @@ fn node_kinds_rs(t: &Tables, names: &Names, header: &str) -> String {
     o
 }
 
-fn ll1_table_rs(t: &Tables, names: &Names, header: &str) -> String {
+fn ll1_table_rs(t: &Tables, names: &Names, header: &str, prof: &Profile) -> String {
     let (rhs, off) = packed_rhs(t);
     let nnt = t.nts.len();
+    let p = prof.file_prefix;
+    let start = &t.nts[0].name;
     let mut o = format!("// {header}\n");
     o += "//! LL(1) parse table. Nonterminal ids `0..NKIND` are the named rules (start rule\n";
     o += "//! first, id = `NodeKind` id); `NKIND..NNT` are helpers from `? * +` and groups, each with\n";
-    o += "//! its origin rule. Every conflict is one of the listed greedy overrides, resolved to the\n";
-    o += "//! first listed alternative.\n\n";
-    o += "use super::terminals::NTERM;\n\n";
+    if t.overrides.is_empty() {
+        o += "//! its origin rule. The grammar is LL(1) with no override.\n\n";
+    } else {
+        o += "//! its origin rule. Every conflict is one of the listed greedy overrides, resolved to the\n";
+        o += "//! first listed alternative.\n\n";
+    }
+    let _ = writeln!(o, "use super::{p}terminals::NTERM;\n");
     o += "/// Number of nonterminals.\n";
     let _ = writeln!(o, "pub const NNT: usize = {nnt};");
     o += "/// Number of productions.\n";
     let _ = writeln!(o, "pub const NPROD: usize = {};", t.prods.len());
     o += "/// Total length of all right-hand sides.\n";
     let _ = writeln!(o, "pub const NRHS: usize = {};", rhs.len());
-    o += "/// The start nonterminal (`File`).\npub const START: u16 = 0;\n";
+    let _ = writeln!(o, "/// The start nonterminal (`{start}`).\npub const START: u16 = 0;");
     o += "/// Marks a nonterminal in `PROD_RHS`; the low bits are its id.\npub const NT_BIT: u16 = 0x8000;\n\n";
     o += "/// Name per nonterminal (`Rule#n` for helpers).\npub static NT_NAME: [&str; NNT] = [\n";
     o += &pack(t.nts.iter().map(|n| format!("{:?}", n.name)), "    ", W);
@@ -209,6 +239,11 @@ fn ll1_table_rs(t: &Tables, names: &Names, header: &str) -> String {
     o += "/// Production `prod`'s right-hand side, reversed (push order).\n#[inline]\n";
     o += "pub fn rhs_rev(prod: u16) -> &'static [u16] {\n";
     o += "    &PROD_RHS[PROD_OFF[prod as usize] as usize..PROD_OFF[prod as usize + 1] as usize]\n}\n\n";
+    if t.overrides.is_empty() {
+        o.truncate(o.trim_end().len());
+        o.push('\n');
+        return o;
+    }
     o += "/// Number of override cells (the grammar's listed LL(1) conflicts).\n";
     let _ = writeln!(o, "pub const NOVERRIDE: usize = {};\n", t.overrides.len());
     for (i, ov) in t.overrides.iter().enumerate() {
@@ -234,12 +269,13 @@ pub fn list(t: &Tables, f: impl Fn(&crate::OverrideCell) -> u16) -> String {
     t.overrides.iter().map(|c| f(c).to_string()).collect::<Vec<_>>().join(", ")
 }
 
-pub fn emit(t: &Tables, names: &Names, header: &str) -> Vec<Output> {
-    let out = |file: &str, content: String| Output { path: format!("{RUST_DIR}/{file}"), content };
+pub fn emit(t: &Tables, names: &Names, header: &str, prof: &Profile) -> Vec<Output> {
+    let (dir, p) = (prof.rust_dir, prof.file_prefix);
+    let out = |file: &str, content: String| Output { path: format!("{dir}/{file}"), content };
     vec![
-        out("mod.rs", mod_rs(header)),
-        out("ll1_table.rs", ll1_table_rs(t, names, header)),
-        out("terminals.rs", terminals_rs(t, names, header)),
-        out("node_kinds.rs", node_kinds_rs(t, names, header)),
+        out("mod.rs", mod_rs(header, prof)),
+        out(&format!("{p}ll1_table.rs"), ll1_table_rs(t, names, header, prof)),
+        out(&format!("{p}terminals.rs"), terminals_rs(t, names, header, prof)),
+        out(&format!("{p}node_kinds.rs"), node_kinds_rs(t, names, header, prof)),
     ]
 }
