@@ -35,7 +35,8 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
 - `diags`: stage1 writes the diagnostics of the stages it has, in stage0's lines. Its gate compares
   them with stage0's lines of the codes those stages report (`Stage::of_code`, driver
   `pipeline.rs`); the exit status (1 with any diagnostic, else 0) is compared where all of stage0's
-  diagnostics are of those codes.
+  diagnostics are of those codes. E0005 counts only as the bracket depth form (the item cut); its
+  expression and type forms come from later stages.
 - `ast` `KIND`: the grammar rule name of the node. A node of a pass-through rule (the expression
   levels `Expr` .. `Postfix`, grammar.ebnf header) with exactly one child node and no token of its
   own does not exist: its child takes its place, in `N` numbering and in every other dump.
