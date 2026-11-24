@@ -290,7 +290,7 @@ const ATTRS: &str = "stave.ir 4 \"x86_64-linux-v2\" debug checked
 type t0 int s 32
 type t1 str
 type t2 ref t1
-type t3 int u size
+type t3 int u 32
 str s0 \"x\"
 site 0 \"src/app.stv\" 2 4 app.wide
 fn @0.u app.wide<t0,3>(t0) -> t0 needs(avx2) site 0 {
@@ -303,7 +303,7 @@ b0(%0: t0):
   ret %1
 }
 fn @1 libc.printf(t2) -> t0 symbol \"printf\" variadic
-fn @2 runtime.panic.trap(t3) known altstack
+fn @2 runtime.panic.trap(t3, t3) known altstack
 fn @3 app.neon_only() needs(neon) unbuilt
 fn @0.0 app.wide() -> t0 {
 b0():
