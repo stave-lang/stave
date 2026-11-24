@@ -517,6 +517,19 @@ fn path_decl(cx: &Cx, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, g: u
     return (cx.uses.target.as_slice()[hi - 1], 0u8);
 }
 
+// The outcome of a postfix chain at row g whose head path names a const: a head const without
+// a value fails, any other is a form not evaluated here.
+fn head_state(cx: &Cx, tree: &ast.Ast, ds: &decls.Decls, it: u32, base: usize, g: usize) -> u8 {
+    if kind(tree, g) != K_POSTFIX { return CV_UNSUP; }
+    let head = base + tree.kids.row(g)[0] as usize;
+    let (lo, hi) = cx.uses.range(it, (head - base) as% u32);
+    if lo == hi || cx.uses.tag.as_slice()[hi - 1] != resolve.TAG_DECL { return CV_UNSUP; }
+    let d = cx.uses.target.as_slice()[hi - 1] as usize;
+    if ds.kind.as_slice()[d] != decls.DK_CONST { return CV_UNSUP; }
+    let st = cx.consts.state.as_slice()[d];
+    return if st == CV_FAIL || st == CV_LAYOUT then st else CV_UNSUP;
+}
+
 // The int type a cast's target `Type` row names (a built-in int name), else NONE.
 fn cast_target(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, base: usize, g: usize) -> u32 {
     let mut x = g;
@@ -735,7 +748,9 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 }
                 let (d, how) = path_decl(cx, tree, t, it, base, cur);
                 if how == 2 {
-                    ev.fail(CV_UNSUP);
+                    // steps past a path (an index, a call): the head is evaluated first, so a
+                    // head const without a value fails the whole
+                    ev.fail(head_state(cx, tree, ds, it, base, cur));
                     continue;
                 }
                 if how == 1 || d == NONE {

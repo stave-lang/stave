@@ -683,7 +683,7 @@ fn visit_garg(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens
             lw.garg(types.GA_TYPE, ERR, 0);
             return;
         }
-        lw.frame(OP_GARG_ARR, c as usize, 0, 0);
+        lw.frame(OP_GARG_ARR, c as usize, tree.tok.as_slice()[ga], 0);
         lw.frame(OP_TY, e as usize, 0, 0);
         return;
     }
@@ -702,7 +702,7 @@ fn expr_child(tree: &ast.Ast, base: usize, g: usize) -> u32 {
 
 // An array type of element `elem` written at row g (a `Type` or `ArrOrIdx` starting with `[`
 // or holding the element and length): its length is an expression child, else a slice.
-fn array_of(cx: &mut consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, base: usize, g: usize, elem: u32, need_lit: bool, sc: consteval.Scope) -> u32 {
+fn array_of(cx: &mut consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, base: usize, g: usize, elem: u32, open: u32, need_lit: bool, sc: consteval.Scope) -> u32 {
     let e = expr_child(tree, base, g);
     if e != NONE {
         let us = cx.tab.usize_t();
@@ -712,8 +712,7 @@ fn array_of(cx: &mut consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.I
         cx.tab.push_garg(k, x, y);
         return cx.tab.intern(types.TK_ARRAY, elem, 0);
     }
-    let a = tree.tok.as_slice()[g];
-    let close = close_of(cut, a);
+    let close = close_of(cut, open);
     let mut al: u32 = 0;
     if close >= 2 && tk(t, close - 2) == T_KW_ALIGN && (!need_lit || tk(t, close - 1) == T_INT_LIT) {
         let (ok, v, big) = int_lit(t, set, cut, it, close - 1);
@@ -940,13 +939,13 @@ fn finish(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm
     }
     if op == OP_ARRAY {
         let elem = pop(lw);
-        let r = array_of(cx, tree, t, nm, set, cut, ds, it, base, g, elem, true, sc);
+        let r = array_of(cx, tree, t, nm, set, cut, ds, it, base, g, elem, tree.tok.as_slice()[g], true, sc);
         lw.vals.push(r);
         return;
     }
     if op == OP_GARG_ARR {
         let elem = pop(lw);
-        let r = array_of(cx, tree, t, nm, set, cut, ds, it, base, g, elem, false, sc);
+        let r = array_of(cx, tree, t, nm, set, cut, ds, it, base, g, elem, x, false, sc);
         lw.garg(types.GA_TYPE, r, 0);
         return;
     }
