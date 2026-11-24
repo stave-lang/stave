@@ -109,6 +109,8 @@ const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
 const T_CHAR_LIT: u8 = terminals.T_CHAR_LIT as% u8;
 const T_COMMA: u8 = terminals.T_COMMA as% u8;
 const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
+const T_SEMI: u8 = terminals.T_SEMI as% u8;
 const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
 const T_DOT_DOT_EQ: u8 = terminals.T_DOT_DOT_EQ as% u8;
 const T_KW_TRUE: u8 = terminals.T_KW_TRUE as% u8;
@@ -305,7 +307,7 @@ impl tc_rows.Typeck {
             }
             return ck == K_BLOCK || ck == K_IF_STMT;
         }
-        if pk == K_PRIMARY { return self.enter_primary(t, tree, r, k, c, h); }
+        if pk == K_PRIMARY { return self.enter_primary(sg, t, tree, r, k, c, h); }
         if pk == K_UNARY { return self.enter_unary(sg, t, tree, r, c, h); }
         if pk == K_CAST {
             if k == 0 {
@@ -453,10 +455,14 @@ impl tc_rows.Typeck {
         return true;
     }
 
-    fn enter_primary(&mut self, t: &lex.Tokens, tree: &ast.Ast, r: usize, k: usize, c: usize, h: u32) -> bool {
+    fn enter_primary(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize, k: usize, c: usize, h: u32) -> bool {
         let a = first_tok(tree, r);
         let ft = tk(t, a);
         let ck = kind(tree, c);
+        if ft == T_L_BRACKET && is_expr(ck) {
+            self.enter_array(sg, t, tree, r, k, c, h);
+            return true;
+        }
         if ft == T_L_PAREN {
             let n = tree.kids.row(r).len();
             let close = tree.tok_end.as_slice()[r] - 1;
@@ -478,6 +484,91 @@ impl tc_rows.Typeck {
     // not checked yet.
     fn tuple_hint(&self, h: u32) -> u32 {
         return if h == NONE then NONE else UNK;
+    }
+
+    // Before element c (the k-th) of array literal row r, stage0's `array_lit`: a repeat's value
+    // has the context's element type as its context, its count `usize`. A list's element type so
+    // far (in `acc`) starts as the context's element type; without one, the first element whose
+    // value is a type other than `never` decides it, and is every later element's context.
+    fn enter_array(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize, k: usize, c: usize, h: u32) {
+        let tab = &mut sg.cx.tab;
+        if is_repeat(t, tree, self.base, r) {
+            let ch = if k == 0 then elem_hint(tab, h) else tab.usize_t();
+            self.set_hint(c, ch);
+            return;
+        }
+        if k == 0 {
+            self.acc.as_mut_slice()[r] = elem_hint(tab, h);
+        } else {
+            self.array_elem_after(tree, r, k - 1);
+        }
+        self.set_hint_acc(c, r);
+    }
+
+    // Element j of array literal row r is checked: its value decides the element type if none
+    // did yet.
+    fn array_elem_after(&mut self, tree: &ast.Ast, r: usize, j: usize) {
+        if self.acc.as_slice()[r] != NONE { return; }
+        let v = self.resolve_at(self.base + tree.kids.row(r)[j] as usize);
+        if v == UNK || (!is_lit(v) && v != NONE && v != self.t_never) { self.acc.as_mut_slice()[r] = v; }
+    }
+
+    // An array literal `[]`, `[e; n]`, or `[a, b, ..]` with context type h (stage0 `array_lit`).
+    fn array_lit(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
+        let ks = tree.kids.row(r);
+        let n = ks.len();
+        if n == 0 {
+            if h == UNK { return UNK; }
+            let tab = &sg.cx.tab;
+            if h != NONE && tab.tag_of(h) == types.TK_ARRAY {
+                let xs = tab.x(h);
+                if xs[0] == types.GA_VALUE && xs[1] == 0 && xs[2] == 0 { return h; }
+            }
+            return self.err();
+        }
+        if is_repeat(t, tree, self.base, r) {
+            let e = self.base + ks[0] as usize;
+            let cnt = self.base + ks[1] as usize;
+            let eh = elem_hint(&sg.cx.tab, h);
+            let v = self.resolve_at(e);
+            let mut et = v;
+            if is_lit(v) {
+                if eh == UNK {
+                    self.poison(v);
+                    et = UNK;
+                } else if eh != NONE {
+                    self.coerce(&sg.cx.tab, e, eh);
+                    et = eh;
+                } else {
+                    et = self.force(v);
+                }
+            }
+            let us = sg.cx.tab.usize_t();
+            self.coerce(&sg.cx.tab, cnt, us);
+            // a count stage1 does not evaluate, or one stage0 rejects, is not modeled
+            let (gk, gx, gy) = consteval.eval_u64(&mut sg.cx, tree, t, nm, set, cut, ds, self.it, cnt, us, self.sc);
+            if et == NONE { return self.err(); }
+            if et == UNK || gk == types.GA_ERROR { return UNK; }
+            return array_ty(&mut sg.cx.tab, et, gk, gx, gy);
+        }
+        self.array_elem_after(tree, r, n - 1);
+        let mut elem = self.acc.as_slice()[r];
+        if elem == UNK { return self.unknown(tree, r); }
+        if elem == NONE {
+            // every element pending or `never`: one group, then no context
+            let mut u = self.resolve_at(self.base + ks[0] as usize);
+            for j in 1..n {
+                let v = self.resolve_at(self.base + ks[j] as usize);
+                u = self.unify(&sg.cx.tab, u, v);
+            }
+            elem = self.force(u);
+            if elem == UNK { return self.unknown(tree, r); }
+        }
+        for j in 0..n {
+            self.coerce(&sg.cx.tab, self.base + ks[j] as usize, elem);
+        }
+        let len = n as u64;
+        return array_ty(&mut sg.cx.tab, elem, types.GA_VALUE, (len >> 32) as% u32, len as% u32);
     }
 
     fn enter_unary(&mut self, sg: &sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize, c: usize, h: u32) -> bool {
@@ -597,7 +688,7 @@ impl tc_rows.Typeck {
 
     fn expr_value(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, k: u8) -> u32 {
         let h = self.hint.as_slice()[r];
-        if k == K_PRIMARY { return self.primary(sg, ds, set, t, cut, tree, r, h); }
+        if k == K_PRIMARY { return self.primary(sg, ds, nm, set, t, cut, tree, r, h); }
         if k == K_UNARY { return self.unary(sg, set, t, cut, tree, r, h); }
         if k == K_CAST { return self.cast(sg, ds, nm, set, t, cut, tree, r); }
         if is_chain(k) {
@@ -635,7 +726,7 @@ impl tc_rows.Typeck {
         return self.unknown(tree, r);
     }
 
-    fn primary(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
+    fn primary(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
         let a = first_tok(tree, r);
         let ft = tk(t, a);
         if ft == T_INT_LIT || ft == T_FLOAT_LIT { return self.literal(&mut sg.cx.tab, set, t, cut, a, false, h); }
@@ -657,7 +748,8 @@ impl tc_rows.Typeck {
         if ft == T_KW_SELF_TYPE { return NONE; }
         if ft == T_IDENT { return self.path_head(sg, ds, t, tree, r); }
         if ft == T_L_PAREN { return self.paren(sg, t, tree, r); }
-        // array literals, closures, f-strings: not checked yet
+        if ft == T_L_BRACKET { return self.array_lit(sg, ds, nm, set, t, cut, tree, r, h); }
+        // closures, f-strings: not checked yet
         let v = self.unknown(tree, r);
         if tk(t, a) == terminals.T_KW_FN as% u8 { self.rets.truncate(self.rets.len() - 1); }
         return v;
@@ -1116,6 +1208,26 @@ fn is_expr(k: u8) -> bool {
 
 fn is_chain(k: u8) -> bool {
     return k == K_ADD || k == K_MUL || k == K_SHIFT || k == K_BIT_AND || k == K_BIT_OR || k == K_BIT_XOR;
+}
+
+// Whether array literal row r is a repeat `[e; n]`.
+fn is_repeat(t: &lex.Tokens, tree: &ast.Ast, base: usize, r: usize) -> bool {
+    let ks = tree.kids.row(r);
+    return ks.len() == 2 && tk(t, tree.tok_end.as_slice()[base + ks[0] as usize]) == T_SEMI;
+}
+
+// The context of an array literal's elements under context type h: an array context's element
+// type, else none.
+fn elem_hint(tab: &types.Table, h: u32) -> u32 {
+    if h == UNK { return UNK; }
+    if h == NONE || tab.tag_of(h) != types.TK_ARRAY { return NONE; }
+    return tab.a_of(h);
+}
+
+fn array_ty(tab: &mut types.Table, elem: u32, k: u32, x: u32, y: u32) -> u32 {
+    tab.begin();
+    tab.push_garg(k, x, y);
+    return tab.intern(types.TK_ARRAY, elem, 0);
 }
 
 fn is_plain(op: u8) -> bool {
