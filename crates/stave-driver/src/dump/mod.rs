@@ -264,9 +264,8 @@ mod tests {
         assert_eq!(
             all,
             [
-                "tokens", "items", "ast", "strings", "names", "sigs", "kinds", "types", "borrow", "lir", "ir",
-                "opt",
-                "diags", "stats"
+                "tokens", "items", "ast", "strings", "names", "sigs", "kinds", "types", "borrow", "lir",
+                "ir", "opt", "diags", "stats"
             ]
         );
     }

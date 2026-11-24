@@ -1327,7 +1327,6 @@ fn needs_forbidden(sg: &Sigs, fl: &files.FileList, md: &modules.Modules, ds: &de
     return NONE;
 }
 
-
 // The module of a built-in package whose path text is b, or NONE.
 pub fn builtin_module(fl: &files.FileList, md: &modules.Modules, b: &[u8]) -> u32 {
     for m in 0..md.modules() {
