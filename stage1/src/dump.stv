@@ -1,0 +1,28 @@
+// Stage dumps (contracts/stage-gates.md), stage0's bytes.
+//
+// `tokens`: one line `F O KIND` per token, by (F, O); KIND is the terminal's name or spelling,
+// `ERROR` for an error token. `EOF` has no line.
+import lex;
+import text;
+import std.vec;
+
+pub fn tokens(lx: &lex.Lexer, t: &lex.Tokens) -> vec.Vec<u8> {
+    let mut buf = vec.Vec::<u8>.with_capacity(t.kind.len() * 12);
+    let kind = t.kind.as_slice();
+    let start = t.start.as_slice();
+    let ft = t.file_tok.as_slice();
+    for f in 0..t.files() {
+        let lo = ft[f] as usize;
+        let hi = ft[f + 1] as usize;
+        for i in lo..hi {
+            if kind[i] == lex.T_EOF { continue; }
+            text.push_u32(&mut buf, f as% u32);
+            buf.push(32);
+            text.push_u32(&mut buf, start[i]);
+            buf.push(32);
+            buf.extend_from_slice(lx.kind_name(kind[i]));
+            buf.push(10);
+        }
+    }
+    return buf;
+}

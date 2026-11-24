@@ -69,6 +69,27 @@ pub const O_RDWR: u32 = 2;
 pub const O_CREAT: u32 = 64;
 pub const O_TRUNC: u32 = 512;
 pub const O_CLOEXEC: u32 = 524288;
+// opens the path itself (fstat only, no read or write); follows symlinks, never blocks on a FIFO
+pub const O_PATH: u32 = 2097152;
+pub const AT_REMOVEDIR: u32 = 512;
+// an open that never waits (a FIFO opened for reading has no writer yet)
+pub const O_NONBLOCK: u32 = 2048;
+
+// `struct stat` (fstat): the u32 `st_mode` at this arch's offset; its S_IFMT bits give the kind.
+pub const STAT_SIZE: usize = 144;
+pub const STAT_MODE_OFF: usize = sys.STAT_MODE_OFF;
+pub const S_IFMT: u32 = 61440;
+pub const S_IFDIR: u32 = 16384;
+pub const S_IFREG: u32 = 32768;
+
+// linux_dirent64 (getdents64): d_reclen u16 at 16, d_type u8 at 18, NUL-terminated d_name at 19.
+pub const DIRENT_RECLEN_OFF: usize = 16;
+pub const DIRENT_TYPE_OFF: usize = 18;
+pub const DIRENT_NAME_OFF: usize = 19;
+pub const DT_UNKNOWN: u8 = 0;
+pub const DT_DIR: u8 = 4;
+pub const DT_REG: u8 = 8;
+pub const DT_LNK: u8 = 10;
 
 pub const PROT_NONE: u32 = 0;
 pub const PROT_READ: u32 = 1;

@@ -1,0 +1,317 @@
+// Package discovery: the source files of a build, numbered like stage0's (F = rank of (package
+// name, path in the package, package rank); package rank = rank of (name, directory)).
+//
+// - The root is a `.stv` file (one package `main` of one file) or a package directory: its
+//   modules are every `.stv` file under `src/`. The built-in packages `std` and `runtime` hold
+//   theirs directly in their directory, minus subdirectories with their own `stave.toml`
+//   (nested packages, such as the per-arch `runtime_x86_64`).
+// - Path dependencies (`[dependencies]`, then the arch table, then the target's table) are
+//   followed transitively; a dependency of a built-in package is built in too. A package other
+//   than a built-in never gets a dependency named `std` or `runtime`, and a dependency
+//   directory without `stave.toml` is skipped. Every package found adds its files, whatever
+//   imports name: the file set does not depend on name resolution.
+// - A package's directory key is its lexically normalized path. stage0 uses the canonical
+//   (absolute, symlinks resolved) path: the two orders agree when the root and the library
+//   directory are given as absolute paths without symlinks.
+import manifest;
+import paths;
+import text;
+import std.io;
+import std.mem;
+import std.string;
+import std.vec;
+
+// Deepest directory level walked below a package's source directory.
+const MAX_DIR_DEPTH: usize = 64;
+
+// The build target's name and its arch table name (`x86_64-linux`, `aarch64-linux`).
+pub struct Target {
+    pub name: string.String,
+    pub alias: string.String,
+}
+
+// The files of a build in F order.
+pub struct FileList {
+    pub package: vec.Vec<string.String>,
+    pub rel_path: vec.Vec<string.String>,
+    pub abs_path: vec.Vec<string.String>,
+}
+
+struct Loader {
+    name: vec.Vec<string.String>,
+    dir: vec.Vec<string.String>,
+    canonical: vec.Vec<string.String>,
+    builtin: vec.Vec<bool>,
+    // the effective dependency specs of each package, taken once when it is visited
+    specs: vec.Vec<vec.Vec<manifest.Dep>>,
+    f_pkg: vec.Vec<u32>,
+    f_rel: vec.Vec<string.String>,
+    f_abs: vec.Vec<string.String>,
+}
+
+pub fn is_file(p: &str) -> bool {
+    return match io.kind(p) {
+        Result.Ok(k) => k.is_file(),
+        Result.Err(_) => false,
+    };
+}
+
+pub fn is_dir(p: &str) -> bool {
+    return match io.kind(p) {
+        Result.Ok(k) => k.is_dir(),
+        Result.Err(_) => false,
+    };
+}
+
+fn dup(s: &string.String) -> string.String {
+    return string.String.from_str(s.as_str());
+}
+
+// Every `.stv` file below dir, as `/`-separated relative paths in byte order.
+fn stave_files(dir: &str) -> vec.Vec<string.String> {
+    let mut out = vec.Vec::<string.String>.new();
+    walk(dir, "", 0, &mut out);
+    let order = text.sorted(out.len(), fn(a: u32, b: u32) -> bool {
+        return text.cmp(out.get_ref(a as usize).as_bytes(), out.get_ref(b as usize).as_bytes()) < 0;
+    });
+    let mut sorted = vec.Vec::<string.String>.new();
+    for k in 0..order.len() {
+        let i = order.as_slice()[k] as usize;
+        sorted.push(dup(out.get_ref(i)));
+    }
+    return sorted;
+}
+
+rec fn walk(dir: &str, prefix: &str, depth: usize, out: &mut vec.Vec<string.String>) {
+    if depth > MAX_DIR_DEPTH { return; }
+    let entries = match io.read_dir(dir) {
+        Result.Ok(v) => v,
+        Result.Err(_) => vec.Vec::<io.DirEntry>.new(),
+    };
+    // names that are not UTF-8 are left out (stage0 reads them lossily)
+    let mut names = vec.Vec::<string.String>.new();
+    let mut kinds = vec.Vec::<io.Kind>.new();
+    for k in 0..entries.len() {
+        let e = entries.get_ref(k);
+        let mut b = vec.Vec::<u8>.new();
+        b.extend_from_slice(e.name.as_slice());
+        match string.String.from_utf8(b) {
+            Result.Ok(s) => {
+                names.push(s);
+                kinds.push(e.kind);
+            }
+            Result.Err(_) => {}
+        }
+    }
+    let order = text.sorted(names.len(), fn(a: u32, b: u32) -> bool {
+        return text.cmp(names.get_ref(a as usize).as_bytes(), names.get_ref(b as usize).as_bytes()) < 0;
+    });
+    for k in 0..order.len() {
+        let i = order.as_slice()[k] as usize;
+        let name = names.get_ref(i);
+        let kind = *kinds.get_ref(i);
+        let rel = if mem.str_bytes(prefix).len() == 0 then dup(name) else paths.join(prefix, name.as_str());
+        if kind.is_dir() {
+            let sub = paths.join(dir, name.as_str());
+            walk(sub.as_str(), rel.as_str(), depth + 1, out);
+        } else if kind.is_file() && text.ends_with(name.as_bytes(), mem.str_bytes(".stv")) {
+            out.push(rel);
+        }
+    }
+}
+
+// The files of a built-in package directory: its `.stv` files minus those inside a
+// subdirectory that holds a `stave.toml`.
+fn builtin_files(dir: &str) -> vec.Vec<string.String> {
+    let all = stave_files(dir);
+    let mut seen = vec.Vec::<string.String>.new();
+    let mut seen_pkg = vec.Vec::<bool>.new();
+    let mut out = vec.Vec::<string.String>.new();
+    for k in 0..all.len() {
+        let rel = all.get_ref(k).as_bytes();
+        let mut inside = false;
+        for j in 0..rel.len() {
+            if rel[j] != 47 || inside { continue; }
+            let d = &rel[0..j];
+            let mut hit = seen.len();
+            for s in 0..seen.len() {
+                if text.eq(seen.get_ref(s).as_bytes(), d) { hit = s; }
+            }
+            if hit == seen.len() {
+                let ds = text.string_of(d);
+                let sub = paths.join(dir, ds.as_str());
+                let m = paths.join(sub.as_str(), "stave.toml");
+                seen.push(ds);
+                seen_pkg.push(is_file(m.as_str()));
+            }
+            if *seen_pkg.get_ref(hit) { inside = true; }
+        }
+        if !inside { out.push(dup(all.get_ref(k))); }
+    }
+    return out;
+}
+
+impl Loader {
+    fn new() -> Loader {
+        return Loader.{
+            name: vec.Vec::<string.String>.new(),
+            dir: vec.Vec::<string.String>.new(),
+            canonical: vec.Vec::<string.String>.new(),
+            builtin: vec.Vec::<bool>.new(),
+            specs: vec.Vec::<vec.Vec<manifest.Dep>>.new(),
+            f_pkg: vec.Vec::<u32>.new(),
+            f_rel: vec.Vec::<string.String>.new(),
+            f_abs: vec.Vec::<string.String>.new(),
+        };
+    }
+
+    fn find_canonical(&self, c: &str) -> bool {
+        for k in 0..self.canonical.len() {
+            if text.eq(self.canonical.get_ref(k).as_bytes(), mem.str_bytes(c)) { return true; }
+        }
+        return false;
+    }
+
+    // Adds the package in dir: its manifest (required unless built in), its dependency specs,
+    // and its module files. Returns its index.
+    fn add_package(&mut self, dir: &str, builtin: bool, t: &Target) -> u32 {
+        let id = self.name.len() as% u32;
+        let mpath = paths.join(dir, "stave.toml");
+        let has_manifest = !builtin || is_file(mpath.as_str());
+        let mut m = if has_manifest then read_manifest(mpath.as_str()) else manifest.parse(mem.str_bytes(""));
+        self.specs.push(manifest.effective_deps(&m, t.name.as_str(), t.alias.as_str()));
+        let name = match mem.replace(&mut m.name, Option.None) {
+            Option.Some(n) => n,
+            Option.None => match paths.file_name(dir) {
+                Option.Some(d) => d,
+                Option.None => string.String.from_str("main"),
+            },
+        };
+        self.name.push(name);
+        self.dir.push(string.String.from_str(dir));
+        self.canonical.push(paths.normalize(dir));
+        self.builtin.push(builtin);
+        if builtin {
+            let fs = builtin_files(dir);
+            for k in 0..fs.len() {
+                let rel = fs.get_ref(k);
+                self.f_pkg.push(id);
+                self.f_abs.push(paths.join(dir, rel.as_str()));
+                self.f_rel.push(dup(rel));
+            }
+            return id;
+        }
+        let src = paths.join(dir, "src");
+        let fs = stave_files(src.as_str());
+        for k in 0..fs.len() {
+            let rel = fs.get_ref(k);
+            let mut r = string.String.from_str("src/");
+            r.push_str(rel.as_str());
+            self.f_pkg.push(id);
+            self.f_abs.push(paths.join(src.as_str(), rel.as_str()));
+            self.f_rel.push(r);
+        }
+        return id;
+    }
+}
+
+fn read_manifest(path: &str) -> manifest.Manifest {
+    return match io.read_file(path) {
+        Result.Ok(b) => manifest.parse(b.as_slice()),
+        Result.Err(_) => manifest.parse(mem.str_bytes("")),
+    };
+}
+
+fn is_builtin_name(n: &str) -> bool {
+    let b = mem.str_bytes(n);
+    return text.eq_str(b, "std") || text.eq_str(b, "runtime");
+}
+
+// The files of the build of root with the built-in packages in std_dir and runtime_dir.
+pub fn discover(root: &str, std_dir: &str, runtime_dir: &str, t: &Target) -> FileList {
+    let mut l = Loader.new();
+    let mut queue = vec.Vec::<u32>.new();
+    if paths.has_extension(root, "stv") && is_file(root) {
+        l.name.push(string.String.from_str("main"));
+        l.dir.push(paths.parent(root));
+        l.canonical.push(paths.normalize(root));
+        l.builtin.push(false);
+        l.specs.push(vec.Vec::<manifest.Dep>.new());
+        l.f_pkg.push(0);
+        let fname = match paths.file_name(root) {
+            Option.Some(n) => n,
+            Option.None => string.String.new(),
+        };
+        l.f_rel.push(fname);
+        l.f_abs.push(string.String.from_str(root));
+    } else {
+        queue.push(l.add_package(root, false, t));
+    }
+    let s = l.add_package(std_dir, true, t);
+    *l.name.get_mut(s as usize) = string.String.from_str("std");
+    queue.push(s);
+    let r = l.add_package(runtime_dir, true, t);
+    *l.name.get_mut(r as usize) = string.String.from_str("runtime");
+    queue.push(r);
+    loop {
+        if queue.len() == 0 { break; }
+        let p = match queue.pop() {
+            Option.Some(p) => p as usize,
+            Option.None => 0,
+        };
+        let deps = mem.replace(l.specs.get_mut(p), vec.Vec::<manifest.Dep>.new());
+        let builtin = *l.builtin.get_ref(p);
+        for k in 0..deps.len() {
+            let d = deps.get_ref(k);
+            if !builtin && is_builtin_name(d.name.as_str()) { continue; }
+            if d.path.is_none() { continue; }
+            let path = match &d.path {
+                Option.Some(x) => dup(x),
+                Option.None => string.String.new(),
+            };
+            let joined = paths.join(l.dir.get_ref(p).as_str(), path.as_str());
+            let dir = paths.normalize(joined.as_str());
+            let m = paths.join(dir.as_str(), "stave.toml");
+            if !is_file(m.as_str()) { continue; }
+            let canon = paths.normalize(dir.as_str());
+            if !l.find_canonical(canon.as_str()) { queue.push(l.add_package(dir.as_str(), builtin, t)); }
+        }
+    }
+    return ordered(&l);
+}
+
+// The files in F order: packages ranked by (name, directory), files by (package name, path,
+// package rank).
+fn ordered(l: &Loader) -> FileList {
+    let porder = text.sorted(l.name.len(), fn(a: u32, b: u32) -> bool {
+        let (x, y) = (a as usize, b as usize);
+        let c = text.cmp(l.name.get_ref(x).as_bytes(), l.name.get_ref(y).as_bytes());
+        if c != 0 { return c < 0; }
+        return text.cmp(l.canonical.get_ref(x).as_bytes(), l.canonical.get_ref(y).as_bytes()) < 0;
+    });
+    let mut rank = vec.Vec::<u32>.new();
+    for k in 0..porder.len() { rank.push(0); }
+    for k in 0..porder.len() {
+        let p = porder.as_slice()[k] as usize;
+        rank.as_mut_slice()[p] = k as% u32;
+    }
+    let forder = text.sorted(l.f_pkg.len(), fn(a: u32, b: u32) -> bool {
+        let (x, y) = (a as usize, b as usize);
+        let px = l.f_pkg.as_slice()[x] as usize;
+        let py = l.f_pkg.as_slice()[y] as usize;
+        let c = text.cmp(l.name.get_ref(px).as_bytes(), l.name.get_ref(py).as_bytes());
+        if c != 0 { return c < 0; }
+        let r = text.cmp(l.f_rel.get_ref(x).as_bytes(), l.f_rel.get_ref(y).as_bytes());
+        if r != 0 { return r < 0; }
+        return rank.as_slice()[px] < rank.as_slice()[py];
+    });
+    let mut out = FileList.{ package: vec.Vec::<string.String>.new(), rel_path: vec.Vec::<string.String>.new(), abs_path: vec.Vec::<string.String>.new() };
+    for k in 0..forder.len() {
+        let f = forder.as_slice()[k] as usize;
+        let p = l.f_pkg.as_slice()[f] as usize;
+        out.package.push(dup(l.name.get_ref(p)));
+        out.rel_path.push(dup(l.f_rel.get_ref(f)));
+        out.abs_path.push(dup(l.f_abs.get_ref(f)));
+    }
+    return out;
+}
