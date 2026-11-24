@@ -11,7 +11,7 @@ use stave_driver::build::codegen_link;
 use stave_driver::interp::{self, Limits};
 use stave_driver::pipeline::{self, Goal, Options};
 use stave_driver::shipped::Library;
-use stave_ir::ir::{ConstId, ValueDef};
+use stave_ir::ir::{ConstId, Target, ValueDef};
 use stave_ir::{
     Block, CastKind, Const, FuncId, IntrinsicId, Known, Module, Op, Operand, PanicKind, Site, StrId, Term,
     TypeId, Value, VecOp,
@@ -52,10 +52,15 @@ impl Rng {
     }
 }
 
-fn lowered(file: &str) -> (Module, FuncId) {
+/// Each program is lowered for each target, and a target's back end builds only its own module:
+/// lowering differs (vector widths, intrinsics), and a back end stops at the first fn it cannot
+/// build, so a module of the other target never reaches the program's own code.
+const TARGETS: [&str; 2] = ["x86_64-linux", "aarch64-linux"];
+
+fn lowered(file: &str, target: &str) -> (Module, FuncId) {
     let mut o = Options::new(Goal::Check).threads(Some(2));
     o.lower = true;
-    o.target = Some(Triple::parse("x86_64-linux").unwrap());
+    o.target = Some(Triple::parse(target).unwrap());
     let out = pipeline::run(&repo().join(file), &Library::in_dir(&repo()), &o).unwrap();
     assert!(!out.has_errors(), "{file}: {:?}", out.diagnostics);
     let main = out.main.unwrap_or_else(|| panic!("{file}: no main"));
@@ -162,8 +167,8 @@ fn operand(m: &Module, nv: usize, nc: usize, r: &mut Rng) -> Operand {
     }
 }
 
-/// Intrinsic names: the table's and a few it lacks.
-const NAMES: [&str; 24] = [
+/// Intrinsic names: the table's and a few it lacks, near-miss spellings among them.
+const NAMES: [&str; 28] = [
     "syscall0",
     "syscall3",
     "syscall6",
@@ -188,13 +193,53 @@ const NAMES: [&str; 24] = [
     "static_addr",
     "tid_x",
     "nope",
+    "syscall03",
+    "syscall+3",
+    "ccall013",
+    "atomic_load_u16",
 ];
+
+/// Edits the block or the argument span of a jump target; returns what it changed.
+fn edit_target(t: &mut Target, nblocks: usize, noperands: usize, r: &mut Rng) -> &'static str {
+    match r.below(4) {
+        0 => {
+            t.block = Block(r.below(nblocks + 1) as u32);
+            "block"
+        }
+        1 => {
+            t.args.len = t.args.len.wrapping_add(1);
+            "args len + 1"
+        }
+        2 => {
+            t.args.len = t.args.len.saturating_sub(1);
+            "args len - 1"
+        }
+        _ => {
+            t.args.start = r.below(noperands + 1) as u32;
+            "args start"
+        }
+    }
+}
 
 /// One single-field mutation of `m`; returns what it changed.
 fn mutate(m: &mut Module, r: &mut Rng) -> String {
     let with_body: Vec<usize> = (0..m.funcs.len()).filter(|&i| m.funcs[i].body.is_some()).collect();
-    let fi = with_body[r.below(with_body.len())];
-    let kind = r.below(24);
+    let kind = r.below(28);
+    // the control-flow mutations go to a fn that has the structure they edit
+    let has = |i: usize| {
+        let b = m.funcs[i].body.as_ref().expect("body");
+        let terms = || b.blocks.iter().map(|bd| bd.term);
+        match kind {
+            24 => terms().any(|t| matches!(t, Term::Br(_) | Term::Cbr { .. } | Term::Switch { .. })),
+            25 => !b.cases.is_empty(),
+            26 => terms().any(|t| matches!(t, Term::Cbr { .. })),
+            27 => terms().any(|t| matches!(t, Term::Cbr { .. } | Term::Switch { .. })),
+            _ => true,
+        }
+    };
+    let pool: Vec<usize> = with_body.iter().copied().filter(|&i| has(i)).collect();
+    let pool = if pool.is_empty() { with_body } else { pool };
+    let fi = pool[r.below(pool.len())];
     let ntypes = m.types.len();
     let nfuncs = m.funcs.len();
     let nsites = m.sites.len();
@@ -298,6 +343,63 @@ fn mutate(m: &mut Module, r: &mut Rng) -> String {
                     }
                 };
                 format!("fn {fi} b{k}: terminator {what}")
+            }
+            24 => {
+                // a jump's target: block or argument span, of `br`, `cbr`, or a switch default
+                let nb = b.blocks.len();
+                let nops = b.operands.len();
+                let jumps: Vec<usize> = (0..nb)
+                    .filter(|&k| !matches!(b.blocks[k].term, Term::Ret(_) | Term::Unreachable))
+                    .collect();
+                let k = jumps.get(r.below(jumps.len().max(1))).copied().unwrap_or(0);
+                let t = match &mut b.blocks[k].term {
+                    Term::Br(t) | Term::Switch { default: t, .. } => Some(t),
+                    Term::Cbr { then, els, .. } => Some(if r.flip() { then } else { els }),
+                    Term::Ret(_) | Term::Unreachable => None,
+                };
+                match t {
+                    Some(t) => format!("fn {fi} b{k}: jump target {}", edit_target(t, nb, nops, r)),
+                    None => "nothing".to_string(),
+                }
+            }
+            25 if !b.cases.is_empty() => {
+                let (nb, nops) = (b.blocks.len(), b.operands.len());
+                let k = r.below(b.cases.len());
+                let what = edit_target(&mut b.cases[k].target, nb, nops, r);
+                format!("fn {fi} case {k}: target {what}")
+            }
+            26 => {
+                // the else target of a conditional branch
+                let (nb, nops) = (b.blocks.len(), b.operands.len());
+                let cbrs: Vec<usize> =
+                    (0..nb).filter(|&k| matches!(b.blocks[k].term, Term::Cbr { .. })).collect();
+                match cbrs.get(r.below(cbrs.len().max(1))) {
+                    Some(&k) => {
+                        let Term::Cbr { els, .. } = &mut b.blocks[k].term else { unreachable!() };
+                        format!("fn {fi} b{k}: else target {}", edit_target(els, nb, nops, r))
+                    }
+                    None => "nothing".to_string(),
+                }
+            }
+            27 => {
+                // the condition of a `cbr`, or the scrutinee of a `switch`
+                let sel: Vec<usize> = (0..b.blocks.len())
+                    .filter(|&k| matches!(b.blocks[k].term, Term::Cbr { .. } | Term::Switch { .. }))
+                    .collect();
+                match sel.get(r.below(sel.len().max(1))) {
+                    Some(&k) => {
+                        let o = match (r.flip(), nv) {
+                            (true, 1..) => Operand::Value(Value(r.below(nv) as u32)),
+                            _ => operand(&snap, nv, nc, r),
+                        };
+                        match &mut b.blocks[k].term {
+                            Term::Cbr { cond: x, .. } | Term::Switch { scrut: x, .. } => *x = o,
+                            Term::Br(_) | Term::Ret(_) | Term::Unreachable => {}
+                        }
+                        format!("fn {fi} b{k}: branch operand {o:?}")
+                    }
+                    None => "nothing".to_string(),
+                }
             }
             22 if !b.cases.is_empty() => {
                 let k = r.below(b.cases.len());
@@ -408,47 +510,72 @@ fn verifies(m: &Module) -> bool {
     }
 }
 
-/// Everything after the verifier: both back ends in both build modes, and the interpreter.
-fn downstream(m: &Module, main: FuncId, release: bool) {
-    for t in ["x86_64-linux", "aarch64-linux"] {
-        let _ = codegen_link(m, main, Triple::parse(t).unwrap(), release, Some(1), None);
-    }
+/// Everything after the verifier, on a module lowered for `target`: its back end in one build mode,
+/// and the interpreter.
+fn downstream(m: &Module, main: FuncId, target: &str, release: bool) {
+    let triple = Triple::parse(target).unwrap();
+    let _ = codegen_link(m, main, triple, release, Some(1), None);
     if let Some(f) = m.func(main) {
         let limits = Limits { max_steps: 200_000, max_depth: 200, check: false, borrow: false };
-        let _ = interp::run(m, &f.path.clone(), Triple::parse("x86_64-linux").unwrap(), &[], &[], limits);
+        let _ = interp::run(m, &f.path.clone(), triple, &[], &[], limits);
     }
 }
 
+/// Mutants of every program, for each target: the verifier must not panic, and an accepted mutant
+/// must not panic the target's back end or the interpreter.
 #[test]
 fn verified_mutants_do_not_panic() {
-    let per: usize = std::env::var("STAVE_MUTANTS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+    let per: usize = std::env::var("STAVE_MUTANTS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
     let mut panics = Vec::new();
-    let (mut accepted, mut total) = (0usize, 0usize);
-    for (pi, file) in PROGRAMS.iter().enumerate() {
-        let (m, main) = lowered(file);
-        assert!(verifies(&m), "{file}: the unmutated module must verify");
-        let mut r = Rng(0x9e37_79b9_7f4a_7c15 ^ (pi as u64 + 1));
-        for k in 0..per {
-            let mut x = m.clone();
-            let what = mutate(&mut x, &mut r);
-            total += 1;
-            let ok = match catch_unwind(AssertUnwindSafe(|| verifies(&x))) {
-                Ok(ok) => ok,
-                Err(_) => {
-                    panics.push(format!("{file} #{k} ({what}): the verifier panicked"));
+    for (ti, target) in TARGETS.iter().enumerate() {
+        let (mut accepted, mut total) = (0usize, 0usize);
+        let mut classes = [
+            ("jump target", 0usize, 0usize),
+            ("case", 0, 0),
+            ("else target", 0, 0),
+            ("branch operand", 0, 0),
+        ];
+        for (pi, file) in PROGRAMS.iter().enumerate() {
+            let (m, main) = lowered(file, target);
+            assert!(verifies(&m), "{file} for {target}: the unmutated module must verify");
+            // the mutants reach the program's own code only if the back end builds the whole module
+            for release in [false, true] {
+                let triple = Triple::parse(target).unwrap();
+                let built = codegen_link(&m, main, triple, release, Some(1), None);
+                assert!(built.is_ok(), "{file} for {target} (release {release}): {:?}", built.err());
+            }
+            let mut r = Rng(0x9e37_79b9_7f4a_7c15 ^ (pi as u64 + 1) ^ ((ti as u64) << 32));
+            for k in 0..per {
+                let mut x = m.clone();
+                let what = mutate(&mut x, &mut r);
+                total += 1;
+                let class = classes.iter().position(|c| what.contains(c.0));
+                if let Some(c) = class {
+                    classes[c].1 += 1;
+                }
+                let ok = match catch_unwind(AssertUnwindSafe(|| verifies(&x))) {
+                    Ok(ok) => ok,
+                    Err(_) => {
+                        panics.push(format!("{target} {file} #{k} ({what}): the verifier panicked"));
+                        continue;
+                    }
+                };
+                if !ok {
                     continue;
                 }
-            };
-            if !ok {
-                continue;
-            }
-            accepted += 1;
-            let release = k % 2 == 1;
-            if catch_unwind(AssertUnwindSafe(|| downstream(&x, main, release))).is_err() {
-                panics.push(format!("{file} #{k} ({what}, release {release}): verified, then a panic"));
+                accepted += 1;
+                if let Some(c) = class {
+                    classes[c].2 += 1;
+                }
+                let release = k % 2 == 1;
+                if catch_unwind(AssertUnwindSafe(|| downstream(&x, main, target, release))).is_err() {
+                    panics.push(format!(
+                        "{target} {file} #{k} ({what}, release {release}): verified, then a panic"
+                    ));
+                }
             }
         }
+        eprintln!("verify mutants for {target}: {accepted} of {total} accepted; new classes {classes:?}");
     }
-    eprintln!("verify mutants: {accepted} of {total} accepted");
     assert!(panics.is_empty(), "{} panics:\n{}", panics.len(), panics.join("\n"));
 }
