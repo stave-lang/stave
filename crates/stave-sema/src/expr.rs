@@ -3481,7 +3481,7 @@ impl<'a> Ck<'a> {
 
     fn intrinsic_arch(&mut self, at: Span, decl: DeclId) {
         let name = self.prog.decl(decl).map_or("", |d| self.prog.strings.get(d.name));
-        let Some((arch, _, _)) = builtins::intrinsic(name) else { return };
+        let Some(builtins::Intrinsic { arch, .. }) = builtins::intrinsic(name) else { return };
         let ok = match arch {
             builtins::IArch::Both => true,
             builtins::IArch::X86 => self.prog.target.arch() == stave_target::Arch::X86_64,
@@ -3493,7 +3493,7 @@ impl<'a> Ck<'a> {
             let f = match arch {
                 builtins::IArch::X86 => "x86_64",
                 builtins::IArch::A64 => "aarch64",
-                _ => "ptx",
+                builtins::IArch::Ptx | builtins::IArch::Both => "ptx",
             };
             let roles: Vec<(&str, Span)> =
                 self.prog.decl(decl).map(|d| ("callee", d.name_span)).into_iter().collect();

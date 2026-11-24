@@ -537,118 +537,33 @@ impl crate::typeck::Ck<'_> {
     }
 }
 
-/// Arch of an intrinsic (contracts/intrinsics.md).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IArch {
-    X86,
-    A64,
-    Both,
-    Ptx,
+pub use stave_ir::intrinsics::{IArch, Intrinsic};
+
+/// The table entry of intrinsic `name` (the one table, [`stave_ir::intrinsics`]).
+pub fn intrinsic(name: &str) -> Option<Intrinsic> {
+    stave_ir::intrinsics::lookup(name)
 }
 
-/// The table entry of intrinsic `name`: (arch, params, ret); `None`: not in the table. PTX
-/// intrinsics have no checked signature (`params` empty, ret `ERROR`). The types are well-known
-/// ids of a fresh table ([`ids`]); map them with [`Interner::fixed_ty`] on a canonical table.
-pub fn intrinsic(name: &str) -> Option<(IArch, Vec<TypeId>, IRet)> {
-    let us = ids::USIZE;
-    if let Some(k) = name.strip_prefix("syscall").and_then(|s| s.parse::<usize>().ok()) {
-        return (k <= 6).then(|| (IArch::Both, vec![us; k + 1], IRet::T(ids::ISIZE)));
-    }
-    if let Some(k) = name.strip_prefix("ccall").and_then(|s| s.parse::<usize>().ok()) {
-        return (k <= 12).then(|| (IArch::Both, vec![us; k + 1], IRet::T(us)));
-    }
-    Some(match name {
-        "cpuid" => (IArch::X86, vec![ids::U32, ids::U32], IRet::Cpuid),
-        "xgetbv" => (IArch::X86, vec![ids::U32], IRet::T(ids::U64)),
-        "thread_start_addr"
-        | "main_addr"
-        | "signal_handler_addr"
-        | "site_table"
-        | "pc_table"
-        | "stack_table"
-        | "thread_block" => (IArch::Both, vec![], IRet::T(us)),
-        "set_thread_block" => (IArch::A64, vec![us], IRet::T(ids::UNIT)),
-        "call_on_stack" => (IArch::Both, vec![us, us, us], IRet::T(us)),
-        "cpu_init" => (IArch::Both, vec![], IRet::T(ids::UNIT)),
-        "cpu_baseline" => (IArch::Both, vec![], IRet::T(ids::U64)),
-        "thread_clone" => (IArch::Both, vec![us; 7], IRet::T(ids::ISIZE)),
-        "atomic_load_u32" => (IArch::Both, vec![us], IRet::T(ids::U32)),
-        "atomic_load_u64" => (IArch::Both, vec![us], IRet::T(ids::U64)),
-        "atomic_xchg_u32" | "atomic_add_u32" => (IArch::Both, vec![us, ids::U32], IRet::T(ids::U32)),
-        "atomic_xchg_u64" | "atomic_add_u64" => (IArch::Both, vec![us, ids::U64], IRet::T(ids::U64)),
-        "atomic_cas_u32" => (IArch::Both, vec![us, ids::U32, ids::U32], IRet::T(ids::U32)),
-        "atomic_cas_u64" => (IArch::Both, vec![us, ids::U64, ids::U64], IRet::T(ids::U64)),
-        "copy_bytes" => (IArch::Both, vec![], IRet::CopyBytes),
-        _ => {
-            if is_ptx_intrinsic(name) {
-                (IArch::Ptx, vec![], IRet::Any)
-            } else {
-                return None;
-            }
+/// Whether `t` is the table type `want`.
+fn is_ity<I: Interner + ?Sized>(cx: &I, t: TypeId, want: stave_ir::intrinsics::ITy) -> bool {
+    use stave_ir::intrinsics::ITy;
+    let fixed = |f| t == cx.fixed_ty(f);
+    let ptr = |m: bool| matches!(cx.kind(t), TypeKind::Ptr { mutable, inner } if *mutable == m && *inner == cx.fixed_ty(ids::U8));
+    match want {
+        ITy::Usize => fixed(ids::USIZE),
+        ITy::Isize => fixed(ids::ISIZE),
+        ITy::U32 => fixed(ids::U32),
+        ITy::U64 => fixed(ids::U64),
+        ITy::Unit => fixed(ids::UNIT),
+        ITy::U32x4 => {
+            matches!(cx.kind(t), TypeKind::Tuple(ts) if ts.len() == 4 && ts.iter().all(|&x| x == cx.fixed_ty(ids::U32)))
         }
-    })
-}
-
-/// An intrinsic's return type shape.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IRet {
-    T(TypeId),
-    /// `(u32, u32, u32, u32)`.
-    Cpuid,
-    /// Not checked (PTX set).
-    Any,
-    /// The whole signature `(dst: *mut u8, src: *const u8, n: usize)` with a unit result:
-    /// pointer types have no well-known id ([`copy_bytes_ok`]).
-    CopyBytes,
-}
-
-/// Whether `params` and `ret` are the signature of `copy_bytes`.
-pub fn copy_bytes_ok<I: Interner + ?Sized>(cx: &I, params: &[TypeId], ret: TypeId) -> bool {
-    let u8t = cx.fixed_ty(ids::U8);
-    let ptr = |t: TypeId, m: bool| matches!(cx.kind(t), TypeKind::Ptr { mutable, inner } if *mutable == m && *inner == u8t);
-    matches!(params, [d, s, n] if ptr(*d, true) && ptr(*s, false) && *n == cx.fixed_ty(ids::USIZE))
-        && ret == cx.fixed_ty(ids::UNIT)
-}
-
-fn is_ptx_intrinsic(name: &str) -> bool {
-    const FIXED: &[&str] = &[
-        "fence_sc_gpu",
-        "fence_sc_sys",
-        "fence_acqrel_gpu",
-        "nanosleep",
-        "globaltimer",
-        "clock64",
-        "tid_x",
-        "tid_y",
-        "tid_z",
-        "ntid_x",
-        "ntid_y",
-        "ntid_z",
-        "ctaid_x",
-        "ctaid_y",
-        "ctaid_z",
-        "nctaid_x",
-        "nctaid_y",
-        "nctaid_z",
-        "laneid",
-        "smid",
-        "activemask",
-        "match_any_u32",
-        "shfl_idx_u32",
-        "vote_ballot",
-        "bar_sync",
-        "bar_warp_sync",
-        "ld_shared_u32",
-        "st_shared_u32",
-        "stacksave",
-        "thread_exit",
-    ];
-    if FIXED.contains(&name) {
-        return true;
+        ITy::MutPtrU8 => ptr(true),
+        ITy::ConstPtrU8 => ptr(false),
+        ITy::ConstPtrUsize => {
+            matches!(cx.kind(t), TypeKind::Ptr { mutable: false, inner } if *inner == cx.fixed_ty(ids::USIZE))
+        }
     }
-    let pre = ["ld_acquire_", "st_release_", "ld_relaxed_", "st_relaxed_", "atom_"];
-    pre.iter().any(|p| name.starts_with(p))
-        && (name.ends_with("u32") || name.ends_with("u64") || name.ends_with("_acqrel"))
 }
 
 /// E0805: `extern "stave-intrinsic"` outside the shipped packages (once per block, at the ABI
@@ -694,15 +609,12 @@ pub(crate) fn check_intrinsics(
         let name = prog.strings.get(d.name);
         let ok = match intrinsic(name) {
             None => false,
-            Some((_, _, IRet::Any)) => true,
-            Some((_, _, IRet::CopyBytes)) => copy_bytes_ok(tys, &sig.params, sig.ret) && !sig.variadic,
-            Some((_, params, ret)) => {
-                let ret_ok = match ret {
-                    IRet::T(t) => sig.ret == t,
-                    IRet::Cpuid => cpuid_ok(tys, sig.ret),
-                    IRet::Any | IRet::CopyBytes => true,
-                };
-                params == sig.params && ret_ok && !sig.variadic
+            Some(Intrinsic { sig: None, .. }) => true,
+            Some(Intrinsic { sig: Some((params, ret)), .. }) => {
+                params.len() == sig.params.len()
+                    && params.iter().zip(&sig.params).all(|(&p, &t)| is_ity(tys, t, p))
+                    && is_ity(tys, sig.ret, ret)
+                    && !sig.variadic
             }
         };
         if !ok {
@@ -710,11 +622,6 @@ pub(crate) fn check_intrinsics(
         }
     }
     out
-}
-
-/// Whether `t` is `(u32, u32, u32, u32)`.
-pub fn cpuid_ok<I: Interner + ?Sized>(cx: &I, t: TypeId) -> bool {
-    matches!(cx.kind(t), TypeKind::Tuple(ts) if ts.len() == 4 && ts.iter().all(|&x| x == cx.fixed_ty(ids::U32)))
 }
 
 /// The static name of a type-relative built-in (for [`crate::typeck::Target::Builtin`]).

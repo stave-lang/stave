@@ -250,7 +250,7 @@ impl Layouts {
             TypeKey::Vec { lane, n } => {
                 let Lanes::Fixed(n) = n else { return Err(LayoutError::Unsized) };
                 let l = Self::get(types, st, *lane, depth)?;
-                let size = l.size * *n as u64;
+                let size = l.size.checked_mul(u64::from(*n)).ok_or(LayoutError::Overflow)?;
                 Ok(Layout { size, align: size.max(1), shape: Shape::Bytes })
             }
             TypeKey::Mask { width, n } => {
