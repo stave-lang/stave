@@ -1,3 +1,4 @@
+stave.ir 4 "x86_64-linux-v2" debug checked
 type t0 int u size
 type t1 int s 32
 type t2 bool
@@ -9,7 +10,13 @@ type t7 array t1 8
 type t8 slice t1
 type t9 vec t1 4
 type t10 mask 32 4
-fn @0 main.add {
+type t11 int u 8
+site 0 "src/main.stv" 10 4 main.add
+site 1 "src/main.stv" 14 7 main.add
+site 2 "src/main.stv" 19 4 main.main
+site 3 "src/main.stv" 3 4 main.scale
+main @1
+fn @0 main.add(t5, t1) site 0 {
 b0(%0: t5, %1: t1):
   %2 = slot t6
   %3 = slot t6
@@ -36,22 +43,22 @@ b3():
   cbr %15 b4() b5()
 b4():
   %16 = mask.first_n t10 %14
-  %17 = vec.load_masked t9 %0 %7 %16
+  %17 = vec.load_masked t9 %0 %7 %16 !1
   store () %3 %17
   %18 = load t9 %3
   %19 = vec.add.wrap t9 %18 %4
   store () %3 %19
   %20 = load t9 %3
-  vec.store_masked () %0 %7 %20 %16
+  vec.store_masked () %0 %7 %20 %16 !1
   br b5()
 b5():
   ret
 }
-fn @1 main.main {
+fn @1 main.main() -> t1 site 2 {
 b0():
   ret 0
 }
-fn @2 main.scale {
+fn @2 main.scale(t4, t1) site 3 {
 b0(%0: t4, %1: t1):
   %2 = slot t6
   %3 = vec.splat t9 %1

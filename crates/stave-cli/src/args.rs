@@ -23,6 +23,7 @@ pub enum Cmd {
     Lowering,
     Explain,
     Daemon,
+    Ir,
 }
 
 impl Cmd {
@@ -39,6 +40,7 @@ impl Cmd {
             Cmd::Lowering => "lowering",
             Cmd::Explain => "explain",
             Cmd::Daemon => "daemon",
+            Cmd::Ir => "ir",
         }
     }
 
@@ -55,6 +57,7 @@ impl Cmd {
             Cmd::Lowering,
             Cmd::Explain,
             Cmd::Daemon,
+            Cmd::Ir,
         ]
         .into_iter()
         .find(|c| c.name() == s)
@@ -67,8 +70,40 @@ impl Cmd {
             Cmd::Run => Some(CompileCommand::Run),
             Cmd::Check => Some(CompileCommand::Check),
             Cmd::Test => Some(CompileCommand::Test),
+            // Only `stave ir emit` compiles a program; the other verbs read IR text.
+            Cmd::Ir => Some(CompileCommand::Build),
             _ => None,
         }
+    }
+}
+
+/// The verbs of `stave ir`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrVerb {
+    Check,
+    Fmt,
+    Opt,
+    Run,
+    Build,
+    Emit,
+}
+
+impl IrVerb {
+    pub fn name(self) -> &'static str {
+        match self {
+            IrVerb::Check => "check",
+            IrVerb::Fmt => "fmt",
+            IrVerb::Opt => "opt",
+            IrVerb::Run => "run",
+            IrVerb::Build => "build",
+            IrVerb::Emit => "emit",
+        }
+    }
+
+    fn parse(s: &str) -> Option<IrVerb> {
+        [IrVerb::Check, IrVerb::Fmt, IrVerb::Opt, IrVerb::Run, IrVerb::Build, IrVerb::Emit]
+            .into_iter()
+            .find(|v| v.name() == s)
     }
 }
 
@@ -87,13 +122,15 @@ pub enum DiagFormat {
 }
 
 /// `--dump` stages, in contract order (stage-gates.md).
-pub const DUMP_STAGES: [&str; 10] =
-    ["tokens", "items", "ast", "strings", "names", "types", "borrow", "ir", "diags", "stats"];
+pub const DUMP_STAGES: [&str; 12] =
+    ["tokens", "items", "ast", "strings", "names", "types", "borrow", "lir", "ir", "opt", "diags", "stats"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Args {
     pub cmd: Cmd,
-    /// `PKG_DIR` (default: the current directory).
+    /// `stave ir`: the verb.
+    pub ir: Option<IrVerb>,
+    /// `PKG_DIR` (default: the current directory); `stave ir`: the FILE, or emit's `PKG_DIR`.
     pub pkg_dir: Option<PathBuf>,
     pub release: bool,
     /// Target and features, validated (baseline ∪ `--features`; default: host baseline).
@@ -178,6 +215,11 @@ commands:
   lowering --target T [--op OP]
   explain EXXXX
   daemon status|stop|evict [PKG_DIR]
+  ir check|fmt|opt|run|build FILE [-o OUT] [-- ARGS...]
+  ir emit [PKG_DIR] [--release] [--target T] [-o FILE]
+                        (IR text: contracts/checked-ir.md; `emit` prints a program's IR text with
+                        its stack section, the other verbs load, check, reprint, optimize,
+                        interpret, or build a file; -o: `build` and `emit` only)
 
 flags of build, run, check, test:
   --target T            x86_64-linux[-v2|-v3|-v4], aarch64-linux[+sve|+sve2], gpu-sm86
@@ -185,8 +227,8 @@ flags of build, run, check, test:
   --features F,...      add features to the target baseline (not implemented yet)
   --compiler auto|cpu|gpu
   --dump=STAGE,... --dump-dir DIR
-                        stages: tokens items ast strings names types borrow ir diags
-                        stats
+                        stages: tokens items ast strings names types borrow lir ir opt diags
+                        stats (opt: with --release only)
   --diagnostics human|json
   --timings             per-stage times on stderr
   --cache DIR           incremental cache (not implemented yet)
@@ -223,6 +265,7 @@ fn allowed(cmd: Cmd, flag: &str) -> bool {
         Cmd::Lowering => matches!(flag, "--target" | "--op" | "--compiler"),
         Cmd::Explain => flag == "--compiler",
         Cmd::Daemon => false,
+        Cmd::Ir => matches!(flag, "--release" | "--target" | "-o"),
     }
 }
 
@@ -319,7 +362,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
         let arg = argv[i].as_str();
         i += 1;
         if arg == "--" {
-            if cmd != Cmd::Run {
+            if cmd != Cmd::Run && cmd != Cmd::Ir {
                 return err(format!("`--` is only accepted by `stave run`, not `stave {}`", cmd.name()));
             }
             run_args = argv[i..].to_vec();
@@ -408,6 +451,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
 
     // Positional arguments.
     let mut pkg_dir = None;
+    let mut ir = None;
     let mut code = None;
     let mut daemon = None;
     let mut paths = Vec::new();
@@ -437,6 +481,30 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
             daemon = Some(d);
         }
         Cmd::Lowering => {}
+        Cmd::Ir => {
+            let Some(v) = pos.next() else {
+                return err("`stave ir` needs a verb: check, fmt, opt, run, build, or emit");
+            };
+            let Some(verb) = IrVerb::parse(&v) else {
+                return err(format!("`stave ir` takes check, fmt, opt, run, build, or emit, not `{v}`"));
+            };
+            pkg_dir = pos.next().map(PathBuf::from);
+            if pkg_dir.is_none() && verb != IrVerb::Emit {
+                return err(format!("`stave ir {v}` needs a FILE"));
+            }
+            if !run_args.is_empty() && verb != IrVerb::Run {
+                return err(format!("`--` is only accepted by `stave ir run`, not `stave ir {v}`"));
+            }
+            if verb != IrVerb::Emit && (release || target.is_some()) {
+                return err(format!(
+                    "`stave ir {v}` takes the target and mode from the file: no --release or --target"
+                ));
+            }
+            if out.is_some() && !matches!(verb, IrVerb::Build | IrVerb::Emit) {
+                return err(format!("`stave ir {v}` does not take -o"));
+            }
+            ir = Some(verb);
+        }
         // `stave run SCRIPT a b` is what the kernel runs for `./SCRIPT a b` when SCRIPT starts
         // with `#!/usr/bin/env -S stave run`: the words after the root are the program's.
         Cmd::Run => {
@@ -477,6 +545,9 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     if cmd == Cmd::Test && !dump.is_empty() {
         return err("`stave test` does not take --dump");
     }
+    if dump.contains(&"opt") && !release {
+        return err("--dump=opt needs --release");
+    }
     if !dump.is_empty() && dump_dir.is_none() {
         return err("--dump needs --dump-dir DIR");
     }
@@ -489,6 +560,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
 
     Ok(Parsed::Args(Box::new(Args {
         cmd,
+        ir,
         pkg_dir,
         release,
         target: tgt,
@@ -538,6 +610,31 @@ mod tests {
             Err(UsageError(m)) => m,
             other => panic!("{s}: expected a usage error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ir_verbs() {
+        let a = args("ir emit app --release --target aarch64-linux -o out.ir");
+        assert_eq!((a.cmd, a.ir), (Cmd::Ir, Some(IrVerb::Emit)));
+        assert_eq!(a.pkg_dir, Some(PathBuf::from("app")));
+        assert!(a.release && a.out == Some(PathBuf::from("out.ir")));
+        assert_eq!(args("ir emit").pkg_dir, None);
+        for v in ["check", "fmt", "opt", "run", "build"] {
+            let a = args(&format!("ir {v} f.ir"));
+            assert_eq!(a.ir.map(IrVerb::name), Some(v));
+            assert_eq!(a.pkg_dir, Some(PathBuf::from("f.ir")));
+            assert!(usage(&format!("ir {v}")).contains("needs a FILE"));
+            assert!(usage(&format!("ir {v} f.ir --release")).contains("from the file"));
+            assert!(usage(&format!("ir {v} f.ir --target aarch64-linux")).contains("from the file"));
+        }
+        assert_eq!(args("ir run f.ir -- a -b").run_args, ["a", "-b"]);
+        assert!(usage("ir check f.ir -- a").contains("only accepted by `stave ir run`"));
+        assert_eq!(args("ir build f.ir -o x").out, Some(PathBuf::from("x")));
+        assert!(usage("ir check f.ir -o x").contains("does not take -o"));
+        assert!(usage("ir").contains("needs a verb"));
+        assert!(usage("ir show f.ir").contains("not `show`"));
+        assert!(usage("ir emit a b").contains("unexpected argument"));
+        assert!(usage("ir emit --dump=ir").contains("does not take --dump"));
     }
 
     #[test]
@@ -636,6 +733,8 @@ mod tests {
         assert!(usage("build --dump=lex --dump-dir d").contains("unknown --dump stage"));
         assert_eq!(args("check --dump=tokens,borrow --dump-dir d").dump, ["tokens", "borrow"]);
         assert_eq!(args("build --dump=ir,types --dump-dir d").dump, ["ir", "types"]);
+        assert_eq!(args("build --dump=lir,opt --release --dump-dir d").dump, ["lir", "opt"]);
+        assert!(usage("build --dump=opt --dump-dir d").contains("--release"));
         assert!(usage("test --dump=tokens --dump-dir d").contains("does not take --dump"));
         assert!(usage("build --alloc-check").contains("gpu-sm86"));
         assert!(usage("build a b").contains("unexpected argument `b`"));

@@ -1,0 +1,84 @@
+stave.ir 4 "x86_64-linux-v2" debug lowered
+decl d24 enum main.Shape
+type t0 int u 8
+type t1 int u 32
+type t2 int s 32
+type t3 bool
+type t4 adt d24
+type t5 int u size
+shape t4 enum | | t1 | t1 t1
+site 0 "src/main.stv" 6 4 main.area
+site 1 "src/main.stv" 10 41 main.area
+site 2 "src/main.stv" 12 39 main.area
+site 3 "src/main.stv" 17 4 main.kind
+site 4 "src/main.stv" 25 4 main.main
+site 5 "src/main.stv" 26 13 main.main
+site 6 "src/main.stv" 27 13 main.main
+site 7 "src/main.stv" 28 17 main.main
+main @2
+fn @0 main.area(t4, t3) -> t1 site 0 {
+b0(%0: t4, %1: t3):
+  %2 = enum.tag t1 %0
+  switch %2 0:b1() 1:b3() _:b8()
+b1():
+  br b2()
+b2():
+  br b10(1)
+b3():
+  %3 = enum.get t1 %0 1 0
+  br b4()
+b4():
+  cbr %1 b5() b6()
+b5():
+  %4 = mul t1 %3 2 !1
+  br b10(%4)
+b6():
+  %5 = enum.get t1 %0 1 0
+  br b7()
+b7():
+  br b10(%5)
+b8():
+  %6 = enum.get t1 %0 2 0
+  %7 = enum.get t1 %0 2 1
+  br b9()
+b9():
+  %8 = mul t1 %6 %7 !2
+  br b10(%8)
+b10(%9: t1):
+  ret %9
+}
+fn @1 main.kind(t0, t3) -> t1 site 3 {
+b0(%0: t0, %1: t3):
+  switch %0 0:b1() 1:b3() _:b6()
+b1():
+  br b2()
+b2():
+  br b8(10)
+b3():
+  br b4()
+b4():
+  cbr %1 b5() b6()
+b5():
+  br b8(11)
+b6():
+  br b7()
+b7():
+  br b8(12)
+b8(%2: t1):
+  ret %2
+}
+fn @2 main.main() -> t2 site 4 {
+b0():
+  %0 = enum.make t4 2 2 3
+  %1 = call t1 @0 %0 0 !5
+  %2 = call t1 @1 1 1 !6
+  %3 = add t1 %1 %2 !7
+  %4 = eq t3 %3 17
+  cbr %4 b1() b2()
+b1():
+  br b3(0)
+b2():
+  br b3(1)
+b3(%5: t2):
+  ret %5
+}

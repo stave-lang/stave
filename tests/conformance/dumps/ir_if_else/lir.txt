@@ -1,0 +1,40 @@
+stave.ir 4 "x86_64-linux-v2" debug lowered
+type t0 int s 32
+type t1 int s 64
+type t2 bool
+type t3 int u 8
+type t4 int u size
+site 0 "src/main.stv" 4 4 main.sign
+site 1 "src/main.stv" 9 4 main.main
+site 2 "src/main.stv" 10 13 main.main
+main @1
+fn @0 main.sign(t1) -> t1 site 0 {
+b0(%0: t1):
+  %1 = lt t2 %0 0
+  cbr %1 b1() b2()
+b1():
+  br b3(-1)
+b2():
+  %2 = eq t2 %0 0
+  cbr %2 b4() b5()
+b3(%3: t1):
+  ret %3
+b4():
+  br b6(0)
+b5():
+  br b6(1)
+b6(%4: t1):
+  br b3(%4)
+}
+fn @1 main.main() -> t0 site 1 {
+b0():
+  %0 = call t1 @0 -7 !2
+  %1 = eq t2 %0 -1
+  cbr %1 b1() b2()
+b1():
+  br b3(0)
+b2():
+  br b3(1)
+b3(%2: t0):
+  ret %2
+}

@@ -1,27 +1,42 @@
+stave.ir 4 "x86_64-linux-v2" debug checked
 type t0 int s 32
 type t1 bool
 type t2 str
 type t3 ref t2
-fn @0 std.io.print {
+type t4 int u 8
+type t5 int u size
+str s0 ""
+str s1 "HELLO\n"
+str s2 "hello\n"
+site 0 "std/io.stv" 2 8 std.io.print
+site 1 "src/main.stv" 5 4 main.greet
+site 2 "src/main.stv" 7 12 main.greet
+site 3 "src/main.stv" 9 12 main.greet
+site 4 "src/main.stv" 11 8 main.greet
+site 5 "src/main.stv" 12 8 main.greet
+site 6 "src/main.stv" 15 4 main.main
+site 7 "src/main.stv" 16 5 main.main
+main @2
+fn @0 std.io.print(t3) site 0 {
 b0(%0: t3):
   ret
 }
-fn @1 main.greet {
+fn @1 main.greet(t1) site 1 {
 b0(%0: t1):
   cbr %0 b1() b2()
 b1():
-  call () @0 s1
+  call () @0 s1 !2
   br b3()
 b2():
-  call () @0 s2
+  call () @0 s2 !3
   br b3()
 b3():
-  call () @0 s2
-  call () @0 s0
+  call () @0 s2 !4
+  call () @0 s0 !5
   ret
 }
-fn @2 main.main {
+fn @2 main.main() -> t0 site 6 {
 b0():
-  call () @1 1
+  call () @1 1 !7
   ret 0
 }

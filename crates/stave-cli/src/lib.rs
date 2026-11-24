@@ -27,6 +27,9 @@
 //!   when DIR is a package, also its `test fn`s (stave_driver::harness).
 //! - `fix [--dry-run]`: `check` in rounds, applying the `exact` fixes between them ([`fix`]).
 //! - `lowering --target T [--op OP]`: the lowering table of the target's tier ([`lowering`]).
+//! - `ir emit [PKG_DIR] [--release] [--target T] [-o FILE]`: the program's IR text with its
+//!   stack section, as a build up to the removal of proven checks (diagnostics, exit codes, and
+//!   summary line of `build`). The other `ir` verbs read IR text and are not implemented yet.
 //!
 //! `--features` beyond the target's baseline and `--cache` are parsed and validated, then refused
 //! as not implemented (exit 2): no flag is accepted and ignored.
@@ -46,7 +49,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use args::{Args, Cmd, DaemonCmd, DiagFormat, Parsed, USAGE};
+use args::{Args, Cmd, DaemonCmd, DiagFormat, IrVerb, Parsed, USAGE};
 use stave_driver::build::Failure;
 use stave_driver::conformance::{self, Config, stage0};
 use stave_driver::dump::{self, DumpError, DumpStage};
@@ -98,6 +101,12 @@ pub(crate) fn not_implemented(what: &str, reason: &str, err: &mut dyn Write) -> 
 }
 
 fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    if let (Cmd::Ir, Some(verb)) = (a.cmd, a.ir)
+        && verb != IrVerb::Emit
+    {
+        let what = format!("ir {}", verb.name());
+        return not_implemented(&what, "stage0 has no IR text reader yet", err);
+    }
     if let Some(command) = a.cmd.compile_command() {
         if a.target.features != a.target.triple.baseline() {
             return not_implemented(
@@ -129,7 +138,7 @@ fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                     EXIT_USAGE
                 }
                 Ok(threads) if a.cmd == Cmd::Test => test(a, threads, &selection, out, err),
-                Ok(threads) => compile(a, threads, &selection, err),
+                Ok(threads) => compile(a, threads, &selection, out, err),
             },
         };
     }
@@ -267,16 +276,28 @@ fn runs_shebang_script(a: &Args, root: &Path) -> bool {
 }
 
 /// `stave check`, `stave build`, `stave run`, and the `STAVE_PROFILE` step profile of the run.
-fn compile(a: &Args, threads: Option<usize>, selection: &Selection, err: &mut dyn Write) -> i32 {
+fn compile(
+    a: &Args,
+    threads: Option<usize>,
+    selection: &Selection,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
     prof::start();
-    let code = compile_steps(a, threads, selection, err);
+    let code = compile_steps(a, threads, selection, out, err);
     // the pipeline's output and the worker pool are released by now
     prof::mark("release");
     let _ = err.write_all(prof::report().as_bytes());
     code
 }
 
-fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &mut dyn Write) -> i32 {
+fn compile_steps(
+    a: &Args,
+    threads: Option<usize>,
+    selection: &Selection,
+    stdout: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
     let path = pkg_path(a);
     if let Err(e) = package::check_root(&path) {
         let _ = writeln!(err, "stave: {e}");
@@ -293,7 +314,8 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
         Ok(l) => l,
         Err(code) => return code,
     };
-    let goal = if a.cmd == Cmd::Check { Goal::Check } else { Goal::Build };
+    // `ir emit` is a build that stops after lowering.
+    let goal = if matches!(a.cmd, Cmd::Check | Cmd::Ir) { Goal::Check } else { Goal::Build };
     let pool = match pipeline::thread_pool(threads) {
         Ok(p) => p,
         Err(e) => {
@@ -305,7 +327,9 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
     let mut opts = Options::new(goal).threads(threads);
     opts.target = Some(triple);
     opts.release = a.release;
-    opts.lower = a.dump.contains(&"ir");
+    opts.lower = a.cmd == Cmd::Ir || a.dump.iter().any(|d| matches!(*d, "lir" | "ir" | "opt"));
+    opts.keep_lowered = a.dump.contains(&"lir");
+    opts.emit_ir = a.cmd == Cmd::Ir;
     opts.borrow_dump = a.dump.contains(&"borrow");
     prof::mark("setup");
     let output = pipeline::run_on(&pool, &path, &lib, &opts);
@@ -327,7 +351,9 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
         match pool.install(|| dump::write_dumps(&output, &stages, dir)) {
             Ok(()) => {}
             Err(DumpError::Locate(e)) => return internal_error(&e.to_string(), err),
-            Err(DumpError::NotRun(DumpStage::Ir)) if output.failure.is_some() => {}
+            Err(DumpError::Internal(e)) => return internal_error(&e, err),
+            Err(DumpError::NotRun(DumpStage::Lir | DumpStage::Ir | DumpStage::Opt))
+                if output.failure.is_some() => {}
             Err(e) => {
                 let _ = writeln!(err, "stave: {e}");
                 return EXIT_USAGE;
@@ -378,6 +404,8 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
                 EXIT_USAGE
             }
         }
+    } else if a.cmd == Cmd::Ir {
+        emit_ir(a, &output, stdout, err)
     } else {
         EXIT_OK
     };
@@ -411,6 +439,28 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
         Ok(r) => r.exit,
         Err(e) => {
             let _ = writeln!(err, "stave: cannot run the program: {e}");
+            EXIT_USAGE
+        }
+    }
+}
+
+/// `stave ir emit`: the IR text of the lowered program, in the emit form, to `-o FILE` or stdout.
+fn emit_ir(a: &Args, output: &Output, stdout: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let text = match dump::emit_text(output) {
+        Ok(t) => t,
+        Err(DumpError::Internal(e)) => return internal_error(&e, err),
+        Err(e) => return internal_error(&e.to_string(), err),
+    };
+    let written = match &a.out {
+        Some(p) => {
+            std::fs::write(p, text.as_bytes()).map_err(|e| format!("cannot write {}: {e}", p.display()))
+        }
+        None => stdout.write_all(text.as_bytes()).map_err(|e| format!("cannot write the output: {e}")),
+    };
+    match written {
+        Ok(()) => EXIT_OK,
+        Err(e) => {
+            let _ = writeln!(err, "stave: {e}");
             EXIT_USAGE
         }
     }

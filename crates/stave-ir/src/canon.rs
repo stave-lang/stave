@@ -100,6 +100,13 @@ where
     remap
 }
 
+/// Whether `m` is its own canonical form ([`canonicalize`] changes nothing).
+pub fn is_canonical(m: &Module) -> bool {
+    let mut c = m.clone();
+    canonicalize(&mut c);
+    c == *m
+}
+
 /// Moves the rows of a per-function table with their functions: row `i` goes to `remap[i]`.
 /// The table is first extended to `remap.len()` rows with `T::default()` (the row a missing one
 /// means); rows past `remap.len()` are dropped.

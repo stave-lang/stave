@@ -345,13 +345,15 @@ fn checked_ir_of_small_fns() {
     let m = lowered(&dir, "x86_64-linux", Mode::Release, None);
     let text = stave_ir::print_checked(&m);
     let f = |name: &str| -> String {
-        let start = text.find(&format!(" {name} {{\n")).map(|i| text[..i].rfind("fn @").unwrap_or(i));
+        let start = text.find(&format!(" {name}(")).map(|i| text[..i].rfind("fn @").unwrap_or(i));
         let s = start.unwrap_or_else(|| panic!("no {name} in\n{text}"));
         let e = text[s..].find("}\n").map_or(text.len(), |e| s + e + 2);
         text[s..e].to_string()
     };
     let max = f("main.max");
-    let max_body: String = max.lines().skip(1).collect::<Vec<_>>().join("\n");
+    // the instructions' site rows (`!N`) are not under test here
+    let no_sites = |l: &str| l.split(" !").next().unwrap().to_string();
+    let max_body: String = max.lines().skip(1).map(no_sites).collect::<Vec<_>>().join("\n");
     assert_eq!(
         max_body,
         "b0(%0: t3, %1: t3):\n  %2 = gt t5 %0 %1\n  cbr %2 b1() b2()\nb1():\n  ret %0\nb2():\n  ret %1\n}"
@@ -659,9 +661,12 @@ fn main() -> i32 {
     let dir = temp_pkg("tour", src);
     let mut m = lowered(&dir, "x86_64-linux", Mode::Debug, None);
     let text = stave_ir::print_checked(&m);
-    assert!(text.lines().any(|l| l.starts_with("fn @") && l.contains('.') && l.ends_with("main.main {")));
+    assert!(text.lines().any(|l| l.starts_with("fn @") && l.contains(" main.main(")));
     assert!(
-        text.lines().any(|l| l.starts_with("fn @") && l.split(' ').nth(1).is_some_and(|i| i.contains('.'))),
+        text.lines().any(|l| l
+            .strip_prefix("fn @")
+            .and_then(|r| r.split(' ').next())
+            .is_some_and(|i| i.contains('.'))),
         "a closure fn @k.0"
     );
     let r = run(&mut m, SyscallAbi::X86_64, &[]);

@@ -1,0 +1,80 @@
+stave.ir 4 "x86_64-linux-v2" debug lowered
+type t0 int u 32
+type t1 int s 32
+type t2 ref mut t0
+type t3 ref mut t2
+type t4 ref mut t5
+type t5 tuple t2 t2
+type t6 fntype t0 -> t0
+type t7 int u 8
+type t8 int u size
+type t9 bool
+site 0 "src/main.stv" 6 4 main.twice
+site 1 "src/main.stv" 7 14 main.twice
+site 2 "src/main.stv" 10 4 main.apply
+site 3 "src/main.stv" 11 12 main.apply
+site 4 "src/main.stv" 14 4 main.main
+site 5 "src/main.stv" 19 13 main.main
+site 6 "src/main.stv" 19 27 main.main
+site 7 "src/main.stv" 19 29 main.main
+site 8 "src/main.stv" 19 45 main.main
+site 9 "src/main.stv" 19 47 main.main
+site 10 "src/main.stv" 21 15 main.main
+site 11 "src/main.stv" 21 17 main.main
+site 12 "src/main.stv" 17 15 main.main
+site 13 "src/main.stv" 17 41 main.main
+site 14 "src/main.stv" 17 55 main.main
+site 15 "src/main.stv" 18 17 main.main
+site 16 "src/main.stv" 18 46 main.main
+main @2
+fn @0 main.twice(t0) -> t0 site 0 {
+b0(%0: t0):
+  %1 = mul t0 %0 2 !1
+  ret %1
+}
+fn @1 main.apply(t6, t0) -> t0 site 2 {
+b0(%0: t6, %1: t0):
+  %2 = call.ind t0 %0 %1 !3
+  ret %2
+}
+fn @2 main.main() -> t1 site 4 {
+b0():
+  %0 = slot t2
+  %1 = slot t2
+  %2 = slot t4
+  store () %0 3
+  store () %1 0
+  %3 = addr.field t3 %2 0
+  store () %3 %0
+  %4 = addr.field t3 %2 1
+  store () %4 %1
+  %5 = fn.make t6 @2.0 %2
+  %6 = call t0 @1 %5 1 !5
+  %7 = call t0 @1 @2.1 1 !7
+  %8 = add t0 %6 %7 !6
+  %9 = call t0 @1 @0 1 !9
+  %10 = add t0 %8 %9 !8
+  %11 = load t0 %1
+  %12 = call.ind t0 @0 %11 !11
+  %13 = add t0 %10 %12 !10
+  %14 = cast.wrap t1 %13
+  ret %14
+}
+fn @2.0 main.main(t0, t4) -> t0 site 12 {
+b0(%0: t0, %1: t4):
+  %2 = addr.field t3 %1 0
+  %3 = load t2 %2
+  %4 = addr.field t3 %1 1
+  %5 = load t2 %4
+  %6 = load t0 %5
+  %7 = add t0 %6 1 !13
+  store () %5 %7
+  %8 = load t0 %3
+  %9 = add t0 %0 %8 !14
+  ret %9
+}
+fn @2.1 main.main(t0) -> t0 site 15 {
+b0(%0: t0):
+  %1 = add t0 %0 1 !16
+  ret %1
+}

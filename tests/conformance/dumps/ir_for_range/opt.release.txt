@@ -1,0 +1,36 @@
+stave.ir 4 "x86_64-linux-v2" release opt
+type t0 int u 64
+type t1 int s 32
+type t2 bool
+type t3 int u 8
+type t4 int u size
+site 0 "src/main.stv" 3 4 main.sum
+site 1 "src/main.stv" 6 15 main.sum
+site 2 "src/main.stv" 11 4 main.main
+site 3 "src/main.stv" 12 15 main.main
+main @1
+fn @0 main.sum(t0) -> t0 site 0 {
+b0(%0: t0):
+  br b1(0, 0)
+b1(%1: t0, %2: t0):
+  %3 = lt t2 %1 %0
+  cbr %3 b2() b3(%2)
+b2():
+  %4 = add t0 %2 %1 !1
+  %5 = add.wrap t0 %1 1
+  br b1(%5, %4)
+b3(%6: t0):
+  ret %6
+}
+fn @1 main.main() -> t1 site 2 {
+b0():
+  %0 = call t0 @0 4 !3
+  %1 = eq t2 %0 6
+  cbr %1 b1() b2()
+b1():
+  br b3(0)
+b2():
+  br b3(1)
+b3(%2: t1):
+  ret %2
+}

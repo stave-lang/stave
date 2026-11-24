@@ -1,3 +1,4 @@
+stave.ir 4 "x86_64-linux-v2" release checked
 type t0 int u 32
 type t1 int u size
 type t2 int s 32
@@ -8,7 +9,38 @@ type t6 ref t9
 type t7 ref mut t8
 type t8 array t0 4
 type t9 slice t0
-fn @0 main.sum {
+type t10 int u 8
+site 0 "src/main.stv" 5 4 main.sum
+site 1 "src/main.stv" 8 11 main.sum
+site 2 "src/main.stv" 8 16 main.sum
+site 3 "src/main.stv" 32 4 main.pair_sum
+site 4 "src/main.stv" 35 13 main.pair_sum
+site 5 "src/main.stv" 36 11 main.pair_sum
+site 6 "src/main.stv" 36 16 main.pair_sum
+site 7 "src/main.stv" 36 20 main.pair_sum
+site 8 "src/main.stv" 36 24 main.pair_sum
+site 9 "src/main.stv" 36 27 main.pair_sum
+site 10 "src/main.stv" 37 11 main.pair_sum
+site 11 "src/main.stv" 24 4 main.rises
+site 12 "src/main.stv" 27 11 main.rises
+site 13 "src/main.stv" 27 16 main.rises
+site 14 "src/main.stv" 27 25 main.rises
+site 15 "src/main.stv" 27 28 main.rises
+site 16 "src/main.stv" 13 4 main.dot
+site 17 "src/main.stv" 19 11 main.dot
+site 18 "src/main.stv" 19 15 main.dot
+site 19 "src/main.stv" 19 19 main.dot
+site 20 "src/main.stv" 19 22 main.dot
+site 21 "src/main.stv" 42 4 main.main
+site 22 "src/main.stv" 45 17 main.main
+site 23 "src/main.stv" 45 25 main.main
+site 24 "src/main.stv" 45 27 main.main
+site 25 "src/main.stv" 45 39 main.main
+site 26 "src/main.stv" 45 41 main.main
+site 27 "src/main.stv" 45 51 main.main
+site 28 "src/main.stv" 45 53 main.main
+main @4
+fn @0 main.sum(t6) -> t0 site 0 {
 b0(%0: t6):
   %1 = slice.len t1 %0
   br b1(0, 0)
@@ -19,17 +51,17 @@ b2():
   %5 = slice.len t1 %0
   %6 = addr.elem t4 %0 %2
   %7 = load t0 %6
-  %8 = add t0 %3 %7
+  %8 = add t0 %3 %7 !1
   %9 = add.wrap t1 %2 1
   br b1(%9, %8)
 b3(%10: t0):
   ret %10
 }
-fn @1 main.pair_sum {
+fn @1 main.pair_sum(t6) -> t0 site 3 {
 b0(%0: t6):
   br b1(0, 0)
 b1(%1: t0, %2: t1):
-  %3 = add t1 %2 1
+  %3 = add t1 %2 1 !4
   %4 = slice.len t1 %0
   %5 = lt t3 %3 %4
   cbr %5 b2() b3(%1)
@@ -37,18 +69,18 @@ b2():
   %6 = slice.len t1 %0
   %7 = addr.elem t4 %0 %2
   %8 = load t0 %7
-  %9 = add t1 %2 1
+  %9 = add t1 %2 1 !9
   %10 = slice.len t1 %0
   %11 = addr.elem t4 %0 %9
   %12 = load t0 %11
-  %13 = add t0 %8 %12
-  %14 = add t0 %1 %13
-  %15 = add t1 %2 1
+  %13 = add t0 %8 %12 !7
+  %14 = add t0 %1 %13 !5
+  %15 = add t1 %2 1 !10
   br b1(%14, %15)
 b3(%16: t0):
   ret %16
 }
-fn @2 main.rises {
+fn @2 main.rises(t6) -> t0 site 11 {
 b0(%0: t6):
   %1 = slice.len t1 %0
   br b1(1, 0)
@@ -59,18 +91,18 @@ b2():
   %5 = slice.len t1 %0
   %6 = addr.elem t4 %0 %2
   %7 = load t0 %6
-  %8 = sub t1 %2 1
+  %8 = sub t1 %2 1 !15
   %9 = slice.len t1 %0
   %10 = addr.elem t4 %0 %8
   %11 = load t0 %10
   %12 = sub.wrap t0 %7 %11
-  %13 = add t0 %3 %12
+  %13 = add t0 %3 %12 !12
   %14 = add.wrap t1 %2 1
   br b1(%14, %13)
 b3(%15: t0):
   ret %15
 }
-fn @3 main.dot {
+fn @3 main.dot(t6, t6) -> t0 site 16 {
 b0(%0: t6, %1: t6):
   %2 = slice.len t1 %0
   %3 = slice.len t1 %1
@@ -91,14 +123,14 @@ b4():
   %12 = slice.len t1 %1
   %13 = addr.elem t4 %1 %6
   %14 = load t0 %13
-  %15 = mul t0 %11 %14
-  %16 = add t0 %7 %15
+  %15 = mul t0 %11 %14 !19
+  %16 = add t0 %7 %15 !17
   %17 = add.wrap t1 %6 1
   br b3(%17, %16)
 b5(%18: t0):
   ret %18
 }
-fn @4 main.main {
+fn @4 main.main() -> t2 site 21 {
 b0():
   %0 = slot t7
   %1 = slot t7
@@ -109,25 +141,25 @@ b0():
   %4 = cast t5 %0
   %5 = addr.elem t4 %4 0
   %6 = slice.make t6 %5 4
-  %7 = call t0 @0 %6
+  %7 = call t0 @0 %6 !22
   %8 = cast t5 %0
   %9 = addr.elem t4 %8 0
   %10 = slice.make t6 %9 4
   %11 = cast t5 %1
   %12 = addr.elem t4 %11 0
   %13 = slice.make t6 %12 4
-  %14 = call t0 @3 %10 %13
-  %15 = add t0 %7 %14
+  %14 = call t0 @3 %10 %13 !24
+  %15 = add t0 %7 %14 !23
   %16 = cast t5 %0
   %17 = addr.elem t4 %16 0
   %18 = slice.make t6 %17 4
-  %19 = call t0 @2 %18
-  %20 = add t0 %15 %19
+  %19 = call t0 @2 %18 !26
+  %20 = add t0 %15 %19 !25
   %21 = cast t5 %0
   %22 = addr.elem t4 %21 0
   %23 = slice.make t6 %22 4
-  %24 = call t0 @1 %23
-  %25 = add t0 %20 %24
+  %24 = call t0 @1 %23 !28
+  %25 = add t0 %20 %24 !27
   %26 = eq t3 %25 98
   cbr %26 b1() b2()
 b1():

@@ -127,6 +127,9 @@ pub struct Lowered {
     pub removed: Vec<Proved>,
     /// Per function: the call-graph nodes it stands for ([`stave_sema::lower_mapped`]).
     pub nodes_of_func: Vec<Vec<u32>>,
+    /// The canonical module before the removal of proven checks (level `lowered`), when asked
+    /// for.
+    pub lowered: Option<Module>,
 }
 
 /// Lowers (mono + lower), verifies, and removes the bounds checks that have a checked witness.
@@ -139,6 +142,19 @@ pub fn lower(
     borrows: bool,
     drops: Option<&stave_sema::drops::Schedules>,
 ) -> Result<Lowered, Failure> {
+    lower_keeping(prog, tc, mode, borrows, drops, false)
+}
+
+/// [`lower`], keeping with `keep_lowered` the canonical module as it stands after the verifier
+/// and before the removal of proven checks ([`Lowered::lowered`]).
+pub fn lower_keeping(
+    prog: &Program,
+    tc: &Typeck,
+    mode: Mode,
+    borrows: bool,
+    drops: Option<&stave_sema::drops::Schedules>,
+    keep_lowered: bool,
+) -> Result<Lowered, Failure> {
     let (lowered, tm) = stave_sema::lower_mapped(prog, tc, mode, borrows, drops);
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
@@ -146,6 +162,11 @@ pub fn lower(
     let (mut m, mut nodes_of_func) = lowered.map_err(|es| lower_failure(&es))?;
     verified(&m, Stage::Lower)?;
     prof::mark("verify");
+    let lowered = keep_lowered.then(|| {
+        let mut c = m.clone();
+        canonical(&mut c);
+        c
+    });
     let r = remove_proven_checks(&mut m, true)?;
     extend_nodes(&mut nodes_of_func, &r.removal);
     let mut removed: Vec<Proved> = r.proved.into_iter().filter(|p| !p.witness.removed.is_empty()).collect();
@@ -160,7 +181,7 @@ pub fn lower(
         verified(&m, Stage::Lower)?;
     }
     prof::mark("canonical");
-    Ok(Lowered { module: m, removed, nodes_of_func })
+    Ok(Lowered { module: m, removed, nodes_of_func, lowered })
 }
 
 /// [`stave_ir::canon::canonicalize`] with the bodies rewritten in parallel. Every module that is
@@ -355,25 +376,7 @@ pub fn codegen_link(
     }
     let owned;
     let m = if release {
-        let mut c = m.clone();
-        stave_opt::slices::declare_elem_pointers(&mut c.types);
-        let types = &c.types;
-        c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(|b| stave_opt::optimize(types, b));
-        prof::mark("opt");
-        // The passes keep every function, so only the bodies are renumbered.
-        let remap = canonical(&mut c);
-        if !stave_ir::canon::is_identity(&remap) {
-            let message = "the release passes moved a function".to_string();
-            return Err(Failure::Internal { stage: Stage::Opt, message });
-        }
-        prof::mark("opt-canonical");
-        // The optimizer's output is checked like the lowering's: it must be valid IR in which
-        // every element access still has its check or a proof.
-        verified(&c, Stage::Opt)?;
-        prof::mark("opt-verify");
-        audited(&c, Stage::Opt)?;
-        prof::mark("opt-audit");
-        owned = c;
+        owned = release_passes(m)?;
         &owned
     } else {
         m
@@ -383,6 +386,31 @@ pub fn codegen_link(
         Arch::Aarch64 => a64(m, main, release, funcs, stack),
         Arch::Gpu => Err(Failure::Target(triple)),
     }
+}
+
+/// The release passes on the canonical module `m`: element pointer types, the optimizer on
+/// every body, then the canonical numbering again (the passes keep every function), the IR
+/// verifier and the bounds audit on the result. The module the release backends compile and
+/// the `opt` dump prints.
+pub fn release_passes(m: &Module) -> Result<Module, Failure> {
+    let mut c = m.clone();
+    stave_opt::slices::declare_elem_pointers(&mut c.types);
+    let types = &c.types;
+    c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(|b| stave_opt::optimize(types, b));
+    prof::mark("opt");
+    let remap = canonical(&mut c);
+    if !stave_ir::canon::is_identity(&remap) {
+        let message = "the release passes moved a function".to_string();
+        return Err(Failure::Internal { stage: Stage::Opt, message });
+    }
+    prof::mark("opt-canonical");
+    // The optimizer's output is checked like the lowering's: it must be valid IR in which every
+    // element access still has its check or a proof.
+    verified(&c, Stage::Opt)?;
+    prof::mark("opt-verify");
+    audited(&c, Stage::Opt)?;
+    prof::mark("opt-audit");
+    Ok(c)
 }
 
 /// Whether the backend of `triple` generates code for vector values and ops.

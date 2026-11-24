@@ -1,0 +1,39 @@
+stave.ir 4 "x86_64-linux-v2" debug lowered
+type t0 int u 32
+type t1 int u size
+type t2 int s 32
+type t3 bool
+type t4 ref t5
+type t5 slice t0
+type t6 vec t0 4
+type t7 int u 8
+site 0 "src/main.stv" 3 4 main.total
+site 1 "src/main.stv" 7 7 main.total
+site 2 "src/main.stv" 11 4 main.main
+main @1
+fn @0 main.total(t4) -> t0 site 0 {
+b0(%0: t4):
+  %1 = vec.splat t6 0
+  %2 = slice.len t1 %0
+  %3 = sub.sat t1 %2 3
+  br b1(0, %1)
+b1(%4: t1, %5: t6):
+  %6 = lt t3 %4 %3
+  cbr %6 b2() b3()
+b2():
+  %7 = vec.load t6 %0 %4
+  %8 = vec.add.wrap t6 %5 %7
+  %9 = add.wrap t1 %4 4
+  br b1(%9, %8)
+b3():
+  %10 = sub.wrap t1 %2 %4
+  check.bounds () %10 1 !1
+  br b4(%5)
+b4(%11: t6):
+  %12 = vec.reduce_add_wrap t0 %11
+  ret %12
+}
+fn @1 main.main() -> t2 site 2 {
+b0():
+  ret 0
+}

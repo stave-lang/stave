@@ -5,11 +5,13 @@
 //! stand-in library `tests/conformance/dumps/_lib` (`std/`, an empty `runtime/`; the CLI test
 //! uses it through `STAVE_STD_DIR`): the goldens do not move with the shipped std/.
 //!
-//! Checked-IR goldens (contracts/checked-ir.md): every `ir_<construct>/` case is a
-//! package `input` plus the expected `ir.txt` of a debug lowering (`stave check --dump=ir`) and, when
-//! present, `ir.release.txt` of a `--release` lowering (instance root sets; the `ir_bounds_*`
-//! cases: the bounds checks left in each mode, which must be the same ones). A case whose input
-//! has an error diagnostic has no `ir.txt`, and none may be written for it.
+//! IR text goldens (contracts/checked-ir.md): every `ir_<construct>/` case is a package `input`
+//! plus the expected `ir.txt` of a debug lowering (`stave check --dump=ir`), its `lir.txt`
+//! (`--dump=lir`: the module before the removal of proven checks) and, when present,
+//! `ir.release.txt` of a `--release` lowering (instance root sets; the `ir_bounds_*` cases: the
+//! bounds checks left in each mode, which must be the same ones) and `opt.release.txt` (its
+//! `--dump=opt`). A case whose input has an error diagnostic has none of them, and none may be
+//! written for it.
 //!
 //! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!).
 
@@ -18,13 +20,16 @@ use std::path::{Path, PathBuf};
 #[path = "../../../tests/support/checked_ir.rs"]
 mod checked_ir;
 
-use stave_driver::dump::{DumpStage, write_dumps};
+use stave_driver::dump::{DumpStage, emit_text, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
 
 const CASES: [&str; 4] = ["valid_small", "dropped_item", "unbalanced", "multi_file"];
 /// The `ir_` cases that also have a golden of the release lowering.
 const RELEASE_CASES: [&str; 3] = ["ir_bounds_kept", "ir_bounds_removed", "ir_roots"];
+/// The `ir_` cases that also have the golden of the release passes' output (`opt.release.txt`).
+const OPT_CASES: [&str; 5] =
+    ["ir_bounds_kept", "ir_bounds_removed", "ir_roots", "ir_for_range", "ir_for_chunk_scalar"];
 const COMPARED: [DumpStage; 7] = [
     DumpStage::Tokens,
     DumpStage::Items,
@@ -279,10 +284,12 @@ fn ir_cases() -> Vec<String> {
     v
 }
 
-/// Writes `ir.txt` (plus `diags.txt`) of `case` lowered in debug or release mode.
+/// Writes `lir.txt`, `ir.txt`, with `--release` `opt.txt` (plus `diags.txt`) of `case` lowered in
+/// debug or release mode.
 fn run_ir_case(case: &str, release: bool, threads: usize) -> (PathBuf, Output) {
     let mut opts = Options::new(Goal::Check).threads(Some(threads));
     opts.lower = true;
+    opts.keep_lowered = true;
     opts.release = release;
     // Fixed target: the dispatch arms dropped for another arch must not depend on the host.
     opts.target = Some(stave_target::Triple::parse("x86_64-linux").unwrap());
@@ -292,9 +299,31 @@ fn run_ir_case(case: &str, release: bool, threads: usize) -> (PathBuf, Output) {
         .join(format!("ir_{case}_{}_{threads}", if release { "release" } else { "debug" }));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("ir.txt"), "stale").unwrap();
-    write_dumps(&out, &[DumpStage::Ir, DumpStage::Diags], &dir).unwrap();
+    for stale in ["lir.txt", "ir.txt", "opt.txt"] {
+        std::fs::write(dir.join(stale), "stale").unwrap();
+    }
+    let mut stages = vec![DumpStage::Lir, DumpStage::Ir, DumpStage::Diags];
+    if release {
+        stages.insert(2, DumpStage::Opt);
+    }
+    write_dumps(&out, &stages, &dir).unwrap();
     (dir, out)
+}
+
+/// The goldens of one run: (file in the case directory, file in the run directory).
+fn ir_files(case: &str, release: bool) -> Vec<(&'static str, &'static str)> {
+    if release {
+        let mut v = Vec::new();
+        if RELEASE_CASES.contains(&case) {
+            v.push(("ir.release.txt", "ir.txt"));
+        }
+        if OPT_CASES.contains(&case) {
+            v.push(("opt.release.txt", "opt.txt"));
+        }
+        v
+    } else {
+        vec![("ir.txt", "ir.txt"), ("lir.txt", "lir.txt")]
+    }
 }
 
 #[test]
@@ -304,39 +333,50 @@ fn ir_goldens() {
     assert!(cases.len() >= 15, "ir cases: {cases:?}");
     let mut failures = Vec::new();
     for case in &cases {
-        for (release, file) in [(false, "ir.txt"), (true, "ir.release.txt")] {
-            let want_path = dumps_dir(case).join(file);
-            let has_release = RELEASE_CASES.contains(&case.as_str());
-            if release && !want_path.exists() && !(bless && has_release) {
-                assert!(!has_release, "{case}: no {file}");
+        for release in [false, true] {
+            let files = ir_files(case, release);
+            if files.is_empty() {
                 continue;
             }
             let (dir, out) = run_ir_case(case, release, 2);
-            let got_path = dir.join("ir.txt");
-            if out.has_errors() {
-                // No checked IR for a build with errors: the stale file is removed, none is expected.
-                assert!(!got_path.exists(), "{case}: ir.txt written for a build with errors");
-                assert!(!want_path.exists(), "{case}: a golden {file} for a build with errors");
-                assert!(!read(&dir.join("diags.txt")).is_empty());
-                continue;
-            }
-            assert!(
-                out.module.is_some(),
-                "{case}: no module ({:?})",
-                out.failure.as_ref().map(|f| f.to_string())
-            );
-            let got = read(&got_path);
-            check_lines(&format!("{case}/{file}"), &got);
-            assert!(got.starts_with("type t0 ") || got.starts_with("fn @"), "{case}: {got}");
-            if bless {
-                std::fs::write(&want_path, &got).unwrap();
-                continue;
-            }
-            match std::fs::read_to_string(&want_path) {
-                Ok(want) if want == got => {}
-                Ok(want) => failures
-                    .push(format!("{case}/{file}: differs from the golden\n--- want\n{want}--- got\n{got}")),
-                Err(e) => failures.push(format!("{}: {e}", want_path.display())),
+            for (file, made) in files {
+                let want_path = dumps_dir(case).join(file);
+                let got_path = dir.join(made);
+                if out.has_errors() {
+                    // No IR for a build with errors: the stale file is removed, none is expected.
+                    assert!(!got_path.exists(), "{case}: {made} written for a build with errors");
+                    assert!(!want_path.exists(), "{case}: a golden {file} for a build with errors");
+                    assert!(!read(&dir.join("diags.txt")).is_empty());
+                    continue;
+                }
+                assert!(
+                    out.module.is_some(),
+                    "{case}: no module ({:?})",
+                    out.failure.as_ref().map(|f| f.to_string())
+                );
+                let got = read(&got_path);
+                check_lines(&format!("{case}/{file}"), &got);
+                let level = match made {
+                    "lir.txt" => "lowered",
+                    "ir.txt" => "checked",
+                    _ => "opt",
+                };
+                let header = format!(
+                    "stave.ir 4 \"x86_64-linux-v2\" {} {level}\n",
+                    if release { "release" } else { "debug" }
+                );
+                assert!(got.starts_with(&header), "{case}/{file}: {got}");
+                if bless {
+                    std::fs::write(&want_path, &got).unwrap();
+                    continue;
+                }
+                match std::fs::read_to_string(&want_path) {
+                    Ok(want) if want == got => {}
+                    Ok(want) => failures.push(format!(
+                        "{case}/{file}: differs from the golden\n--- want\n{want}--- got\n{got}"
+                    )),
+                    Err(e) => failures.push(format!("{}: {e}", want_path.display())),
+                }
             }
         }
     }
@@ -352,9 +392,19 @@ fn ir_dump_properties() {
         if o1.has_errors() {
             continue;
         }
-        let (d8, _) = run_ir_case(&case, false, 8);
+        let (d8, o8) = run_ir_case(&case, false, 8);
         let a = read(&d1.join("ir.txt"));
         assert_eq!(a, read(&d8.join("ir.txt")), "{case}: ir differs between 1 and 8 threads");
+        assert_eq!(
+            read(&d1.join("lir.txt")),
+            read(&d8.join("lir.txt")),
+            "{case}: lir differs between 1 and 8 threads"
+        );
+        assert_eq!(
+            emit_text(&o1).unwrap(),
+            emit_text(&o8).unwrap(),
+            "{case}: the emit form differs between 1 and 8 threads"
+        );
         // type lines dense from t0, before every fn; fns by instance id.
         let mut next_t = 0u32;
         let mut seen_fn = false;
@@ -385,9 +435,38 @@ fn ir_dump_properties() {
         let paths = |t: &str| -> std::collections::BTreeSet<String> {
             t.lines()
                 .filter_map(|l| l.strip_prefix("fn @"))
-                .map(|r| r.split(' ').nth(1).unwrap().to_string())
+                .map(|r| r.split(' ').nth(1).unwrap().split(['(', '<']).next().unwrap().to_string())
                 .collect()
         };
         assert!(paths(&rel).is_subset(&paths(&a)), "{case}: release prints a fn debug does not");
     }
+}
+
+/// The emit form is the gate form plus the stack section: dropping the stack lines gives the
+/// `ir` dump, byte for byte, and the stack lines stand together before the first fn.
+#[test]
+fn emit_form_is_the_gate_form_plus_the_stack_section() {
+    let is_stack = |l: &str| {
+        l == "truncated" || ["runstack ", "node ", "edge ", "nodes "].iter().any(|p| l.starts_with(p))
+    };
+    let mut with_stack = 0;
+    for case in ir_cases() {
+        let (dir, out) = run_ir_case(&case, false, 2);
+        if out.has_errors() {
+            assert!(emit_text(&out).is_err(), "{case}: an emit form for a build with errors");
+            continue;
+        }
+        let emit = emit_text(&out).unwrap();
+        let gate = read(&dir.join("ir.txt"));
+        let filtered: String = emit.lines().filter(|l| !is_stack(l)).flat_map(|l| [l, "\n"]).collect();
+        assert_eq!(filtered, gate, "{case}: emit minus the stack lines is not the ir dump");
+        let at: Vec<usize> = emit.lines().enumerate().filter(|(_, l)| is_stack(l)).map(|(i, _)| i).collect();
+        if let (Some(&first), Some(&last)) = (at.first(), at.last()) {
+            with_stack += 1;
+            assert_eq!(last - first + 1, at.len(), "{case}: the stack section is not contiguous");
+            let after = emit.lines().nth(last + 1).unwrap_or("");
+            assert!(after.starts_with("fn @"), "{case}: the stack section is not followed by a fn: {after}");
+        }
+    }
+    assert!(with_stack > 10, "stack sections: {with_stack}");
 }

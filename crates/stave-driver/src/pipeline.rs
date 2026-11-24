@@ -217,8 +217,14 @@ pub struct Options {
     /// `stave test`: lower the `test fn`s too ([`Mode::Test`], with `release`
     /// [`Mode::ReleaseTest`]).
     pub tests: bool,
-    /// Lower even when the goal is [`Goal::Check`] (the `ir` dump).
+    /// Lower even when the goal is [`Goal::Check`] (the `lir`, `ir`, and `opt` dumps).
     pub lower: bool,
+    /// Keep the module as lowering leaves it, before the removal of proven checks
+    /// ([`Output::lowered`]; the `lir` dump). Needs [`Options::lower`] or a build.
+    pub keep_lowered: bool,
+    /// `stave ir emit`: a check that is also a build's front end (E0108: no `main`) and lowers,
+    /// without code generation.
+    pub emit_ir: bool,
     /// Collect the borrow checker's per-access lines (the `borrow` dump).
     pub borrow_dump: bool,
     /// Lower with the borrow side table (`Body::borrows`), for the interpreter's borrow
@@ -250,6 +256,8 @@ impl Options {
             release: false,
             tests: false,
             lower: false,
+            keep_lowered: false,
+            emit_ir: false,
             borrow_dump: false,
             borrow_marks: false,
             tracked: crate::interp::borrow_from_env(),
@@ -311,6 +319,13 @@ pub struct Output {
     /// diagnostics): the lowered program after the removal of the bounds checks that have a
     /// checked witness, the same in every build mode.
     pub module: Option<Module>,
+    /// The module as lowering leaves it, canonical, before the removal of proven checks
+    /// (level `lowered`): kept only with [`Options::keep_lowered`].
+    pub lowered: Option<Module>,
+    /// Per fn of [`Output::module`]: the call-graph nodes it stands for.
+    pub nodes_of_func: Vec<Vec<u32>>,
+    /// The build was `--release`.
+    pub release: bool,
     /// [`Output::module`] lowered again with the borrow side table ([`Options::tracked`]): what
     /// the borrow-tracking interpreter runs. Not the canonical checked IR.
     pub tracked: Option<Module>,
@@ -502,6 +517,9 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
             diagnostics,
             timings,
             module: None,
+            lowered: None,
+            nodes_of_func: Vec::new(),
+            release: opts.release,
             tracked: None,
             removed_checks: Vec::new(),
             main: None,
@@ -525,6 +543,9 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
             diagnostics,
             timings,
             module: None,
+            lowered: None,
+            nodes_of_func: Vec::new(),
+            release: opts.release,
             tracked: None,
             removed_checks: Vec::new(),
             main: None,
@@ -563,7 +584,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     let mut has_errors = diagnostics.iter().any(|d| d.severity() == Severity::Error);
     // E0108: a build needs `main` (reported only without other errors: a dropped or invalid item
     // may be `main`)
-    if opts.goal == Goal::Build
+    if (opts.goal == Goal::Build || opts.emit_ir)
         && !has_errors
         && let Some(d) = build::no_main(&program)
     {
@@ -620,6 +641,9 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         diagnostics,
         timings,
         module: None,
+        lowered: None,
+        nodes_of_func: Vec::new(),
+        release: opts.release,
         tracked: None,
         removed_checks: Vec::new(),
         main: None,
@@ -646,13 +670,15 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     // ---- mono + lower + verify + removal of the bounds checks with a checked witness.
     let t0 = Instant::now();
     let drops = out.borrowck.as_ref().map(|b| &b.schedules);
-    let lowered = build::lower(&out.program, &tc, opts.mode(), opts.borrow_marks, drops);
+    let lowered =
+        build::lower_keeping(&out.program, &tc, opts.mode(), opts.borrow_marks, drops, opts.keep_lowered);
     let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);
     let (module, nodes_of_func) = match lowered {
         Ok(l) => {
             out.removed_checks = l.removed;
+            out.lowered = l.lowered;
             (l.module, l.nodes_of_func)
         }
         Err(f) => {
@@ -706,6 +732,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         }
     }
     out.module = Some(module);
+    out.nodes_of_func = nodes_of_func;
     out
 }
 

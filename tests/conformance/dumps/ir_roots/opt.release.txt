@@ -1,0 +1,61 @@
+stave.ir 4 "x86_64-linux-v2" release opt
+type t0 int u 8
+type t1 int u 32
+type t2 int s 32
+type t3 int u size
+type t4 bool
+site 0 "src/main.stv" 29 13 main.pick
+site 1 "src/main.stv" 31 4 main.for_export
+site 2 "src/main.stv" 9 4 main.ident
+site 3 "src/main.stv" 25 4 main.pick_base
+site 4 "src/main.stv" 26 14 main.pick_base
+site 5 "src/main.stv" 35 15 main.exported
+site 6 "src/main.stv" 36 12 main.exported
+site 7 "src/main.stv" 13 4 main.helper
+site 8 "src/main.stv" 14 12 main.helper
+site 9 "src/main.stv" 43 4 main.main
+site 10 "src/main.stv" 44 13 main.main
+site 11 "src/main.stv" 45 13 main.main
+site 12 "src/main.stv" 46 23 main.main
+site 13 "src/main.stv" 46 27 main.main
+site 14 "src/main.stv" 46 33 main.main
+main @6
+fn @0 main.pick(t1) -> t1 site 0 {
+b0(%0: t1):
+  %1 = call t1 @3 %0
+  ret %1
+}
+fn @1 main.for_export(t2) -> t2 site 1 {
+b0(%0: t2):
+  ret %0
+}
+fn @2 main.ident<t0>(t0) -> t0 site 2 {
+b0(%0: t0):
+  ret %0
+}
+fn @3 main.pick_base(t1) -> t1 site 3 {
+b0(%0: t1):
+  %1 = add t1 %0 2 !4
+  ret %1
+}
+fn @4 main.exported(t2) -> t2 symbol "exported" site 5 {
+b0(%0: t2):
+  %1 = call t2 @1 %0 !6
+  ret %1
+}
+fn @5 main.helper(t0) -> t0 site 7 {
+b0(%0: t0):
+  %1 = call t0 @2 %0 !8
+  ret %1
+}
+fn @6 main.main() -> t2 site 9 {
+b0():
+  %0 = call t0 @5 3 !10
+  %1 = call t1 @0 1 !11
+  %2 = cast t2 %0
+  %3 = sub t2 %2 3 !12
+  %4 = sub t1 %1 %1 !14
+  %5 = cast.wrap t2 %4
+  %6 = add t2 %3 %5 !13
+  ret %6
+}

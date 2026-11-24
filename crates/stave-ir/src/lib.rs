@@ -1,4 +1,4 @@
-//! SSA IR, reference interpreter, checked-IR printer.
+//! SSA IR, reference interpreter, IR text printer.
 //!
 //! - [`types`]: the type key ([`TypeKey`]), interned in a [`TypeTable`]; TypeKey
 //!   text; canonical renumbering.
@@ -11,7 +11,7 @@
 //!   [`memcheck`]: its checking mode (memory errors as an outcome).
 //! - [`borrowtrack`]: the dynamic borrow model of contracts/borrow-model.md as a state machine
 //!   over allocation ids and byte offsets.
-//! - [`print_checked`]: the canonical checked-IR text of contracts/checked-ir.md.
+//! - [`text`]: the IR text of contracts/checked-ir.md: the printer ([`print_module`]).
 //! - [`simd`]: vector and mask ops ([`VecOp`]) and their lane semantics.
 //! - [`arith`]: scalar op and cast semantics; [`layout`]: memory layout of IR types.
 //! - [`bounds`]: the audit of element accesses and the pass that proves bounds checks removable.
@@ -36,8 +36,8 @@ pub mod layout;
 pub mod link;
 pub mod mem;
 pub mod memcheck;
-pub mod print_checked;
 pub mod simd;
+pub mod text;
 pub mod traps;
 pub mod types;
 pub mod verify;
@@ -52,7 +52,7 @@ pub use ir::{
     SiteInfo, Static, StrId, Term, Value,
 };
 pub use known::Known;
-pub use print_checked::print_checked;
 pub use simd::VecOp;
+pub use text::{print_checked, print_module};
 pub use types::{AdtShape, DeclId, FloatBits, GenericArg, IntBits, Lanes, TypeId, TypeKey, TypeTable};
 pub use verify::{VerifyError, verify_func, verify_module};

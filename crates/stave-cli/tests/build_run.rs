@@ -537,7 +537,7 @@ fn ir_dump_written_without_errors_only() {
     assert_eq!(c, 0, "{err}");
     let ir = std::fs::read_to_string(d.join("dumps/ir.txt")).unwrap();
     assert!(
-        ir.lines().any(|l| l.starts_with("fn @") && l.contains(" main.main ")),
+        ir.lines().any(|l| l.starts_with("fn @") && l.contains(" main.main(")),
         "{}",
         &ir[..ir.len().min(2000)]
     );
@@ -552,6 +552,72 @@ fn ir_dump_written_without_errors_only() {
     assert_eq!(c, 1);
     assert!(!d.join("dumps/ir.txt").exists());
     assert!(d.join("dumps/diags.txt").is_file());
+}
+
+#[test]
+fn lir_ir_and_opt_dumps_have_their_levels() {
+    let d = tmp("levels");
+    let dd = d.join("dumps").display().to_string();
+    let fib = run_prog("fib");
+    let (c, _, err) = stave_in(&d, &["build", &fib, "--release", "--dump=lir,ir,opt", "--dump-dir", &dd]);
+    assert_eq!(c, 0, "{err}");
+    let head = |f: &str| {
+        let t = std::fs::read_to_string(d.join("dumps").join(f)).unwrap();
+        t.lines().next().unwrap().to_string()
+    };
+    let target = |l: &str| l.split(' ').nth(2).unwrap().to_string();
+    assert_eq!(head("lir.txt").split(' ').skip(3).collect::<Vec<_>>(), ["release", "lowered"]);
+    assert_eq!(head("ir.txt").split(' ').skip(3).collect::<Vec<_>>(), ["release", "checked"]);
+    assert_eq!(head("opt.txt").split(' ').skip(3).collect::<Vec<_>>(), ["release", "opt"]);
+    assert_eq!(target(&head("lir.txt")), target(&head("opt.txt")));
+    // `opt` is a release dump.
+    let (c, _, err) = stave_in(&d, &["build", &fib, "--dump=opt", "--dump-dir", &dd]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("--release"), "{err}");
+}
+
+#[test]
+fn ir_emit_prints_the_emit_form() {
+    let d = tmp("ir_emit");
+    let fib = run_prog("fib");
+    let (c, out, err) = stave_in(&d, &["ir", "emit", &fib]);
+    assert_eq!(c, 0, "{err}");
+    assert!(out.starts_with("stave.ir 4 \""), "{}", &out[..out.len().min(200)]);
+    assert!(out.ends_with("}\n") && out.contains("\nmain @") && out.contains("\nnode 0"), "emit form");
+    assert!(
+        err.contains("compiled on") && !out.contains("compiled on"),
+        "the summary line is on stderr: {err}"
+    );
+    // `-o FILE` writes the same text.
+    let (c, out2, err) = stave_in(&d, &["ir", "emit", &fib, "-o", "fib.ir"]);
+    assert_eq!(c, 0, "{err}");
+    assert!(out2.is_empty());
+    assert_eq!(std::fs::read_to_string(d.join("fib.ir")).unwrap(), out);
+    // The gate form of the same build is the emit form without the stack lines.
+    let dd = d.join("dumps").display().to_string();
+    let (c, _, err) = stave_in(&d, &["check", &fib, "--dump=ir", "--dump-dir", &dd]);
+    assert_eq!(c, 0, "{err}");
+    let gate = std::fs::read_to_string(d.join("dumps/ir.txt")).unwrap();
+    let stack = |l: &str| {
+        l == "truncated" || ["runstack ", "node ", "edge ", "nodes "].iter().any(|p| l.starts_with(p))
+    };
+    let filtered: String = out.lines().filter(|l| !stack(l)).flat_map(|l| [l, "\n"]).collect();
+    assert_eq!(filtered, gate);
+}
+
+#[test]
+fn ir_emit_of_a_program_without_main_is_e0108_and_the_other_verbs_wait_for_the_reader() {
+    let d = tmp("ir_emit_nomain");
+    let src = d.join("nomain.stv");
+    std::fs::write(&src, "fn f() -> i32 {\n    return 1;\n}\n").unwrap();
+    let (c, out, err) = stave_in(&d, &["ir", "emit", "nomain.stv"]);
+    assert_eq!(c, 1, "{err}");
+    assert!(out.is_empty() && err.contains("E0108"), "{err}");
+    for verb in ["check", "fmt", "opt", "run", "build"] {
+        let (c, out, err) = stave_in(&d, &["ir", verb, "x.ir"]);
+        assert_eq!(c, 2, "ir {verb}: {err}");
+        assert!(out.is_empty() && err.contains(&format!("`ir {verb}` is not implemented yet")), "{err}");
+    }
 }
 
 #[test]

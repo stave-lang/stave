@@ -1,0 +1,85 @@
+stave.ir 4 "x86_64-linux-v2" debug lowered
+decl d22 enum main.Tag
+decl d29 struct main.Pair
+type t0 int u 16
+type t1 int u 32
+type t2 int u 64
+type t3 int u size
+type t4 int s 8
+type t5 int s 32
+type t6 float 32
+type t7 float 64
+type t8 bool
+type t9 ref t4
+type t10 ref t6
+type t11 ref t17
+type t12 ref t18
+type t13 ref mut t6
+type t14 ref mut t17
+type t15 ptr const t6
+type t16 array t2 3
+type t17 array t4 2
+type t18 slice t4
+type t19 tuple t8 t7
+type t20 adt d22
+type t21 adt d29 t0
+type t22 fntype t1 -> t1
+type t23 int u 8
+type t24 char
+shape t20 enum | | t24
+shape t21 struct t0 t0
+site 0 "src/main.stv" 16 4 main.twice
+site 1 "src/main.stv" 8 4 main.take
+site 2 "src/main.stv" 12 4 main.apply
+site 3 "src/main.stv" 13 12 main.apply
+site 4 "src/main.stv" 20 4 main.main
+site 5 "src/main.stv" 24 13 main.main
+site 6 "src/main.stv" 25 13 main.main
+main @3
+fn @0 main.twice(t1) -> t1 site 0 {
+b0(%0: t1):
+  %1 = mul.wrap t1 %0 2
+  ret %1
+}
+fn @1 main.take(t21, t20, t12, t16, t15, t19) -> t3 site 1 {
+b0(%0: t21, %1: t20, %2: t12, %3: t16, %4: t15, %5: t19):
+  %6 = slice.len t3 %2
+  ret %6
+}
+fn @2 main.apply(t22, t1) -> t1 site 2 {
+b0(%0: t22, %1: t1):
+  %2 = call.ind t1 %0 %1 !3
+  ret %2
+}
+fn @3 main.main() -> t5 site 4 {
+b0():
+  %0 = slot t13
+  %1 = slot t14
+  store () %0 0x3fc00000
+  %2 = make t16 1 2 3
+  %3 = make t17 1 2
+  store () %1 %3
+  %4 = make t21 1 2
+  %5 = enum.make t20 1 122
+  %6 = cast t11 %1
+  %7 = addr.elem t9 %6 0
+  %8 = slice.make t12 %7 2
+  %9 = cast t10 %0
+  %10 = cast t15 %9
+  %11 = make t19 1 0x4000000000000000
+  %12 = call t3 @1 %4 %5 %8 %2 %10 %11 !5
+  %13 = call t1 @2 @0 2 !6
+  %14 = eq t8 %12 2
+  cbr %14 b4() b5(0)
+b1():
+  br b3(0)
+b2():
+  br b3(1)
+b3(%15: t5):
+  ret %15
+b4():
+  %16 = eq t8 %13 4
+  br b5(%16)
+b5(%17: t8):
+  cbr %17 b1() b2()
+}
