@@ -262,8 +262,10 @@ equals `m`, and `print(read(t))` equals `t` for every printed `t`.
 
 The text leaves out what no consumer of a lowered module reads: the borrow side table (only the
 interpreter's tracked lowering has it, which is never printed), the witnesses of removed checks,
-and the proofs inside summaries (only their rows are printed). Equality of modules ignores those
-parts.
+and the proofs inside summaries (only their rows are printed). Two modules are equal when what
+their text carries is equal: every section row by row, and of each fn's summary its `claim`
+rows (a `pre` row with its `checked` mark), so a summary without rows equals none. The parts the
+text leaves out are not part of equality.
 
 ## Loading
 

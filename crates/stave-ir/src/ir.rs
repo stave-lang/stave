@@ -539,8 +539,8 @@ impl Insts {
     }
 }
 
-/// A function body.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// A function body. Equality leaves out the borrow side table ([`Module`]'s equality).
+#[derive(Clone, Debug, Default)]
 pub struct Body {
     pub blocks: Vec<BlockData>,
     pub block_params: Vec<Value>,
@@ -796,10 +796,12 @@ pub enum DataTarget {
     Static(u32),
 }
 
-/// A whole program (or the part of it being printed / run). Equality is structural: two
-/// modules are equal when every table is, row by row (compare canonical modules,
-/// [`crate::canon::canonicalize`]).
-#[derive(Clone, Debug, Default, PartialEq)]
+/// A whole program (or the part of it being printed / run). Two modules are equal when what
+/// their text carries is (contracts/checked-ir.md "Canonical module"): every table row by row,
+/// `stated` by its claim rows; the borrow side table (`frozen`, `clauses`, [`Body::borrows`],
+/// [`Body::events`]) and the proofs inside summaries are not part of it. Compare canonical
+/// modules ([`crate::canon::canonicalize`]).
+#[derive(Clone, Debug, Default)]
 pub struct Module {
     pub types: TypeTable,
     pub funcs: Vec<Func>,
@@ -831,6 +833,60 @@ pub struct Module {
     pub frozen: Vec<bool>,
     /// Per function, in a module lowered with the borrow side table: its `from` clauses.
     pub clauses: Vec<Clauses>,
+}
+
+impl PartialEq for Body {
+    fn eq(&self, o: &Body) -> bool {
+        let Body { blocks, block_params, insts, operands, consts, cases, values, borrows: _, events: _ } =
+            self;
+        *blocks == o.blocks
+            && *block_params == o.block_params
+            && *insts == o.insts
+            && *operands == o.operands
+            && *consts == o.consts
+            && *cases == o.cases
+            && *values == o.values
+    }
+}
+
+impl PartialEq for Module {
+    fn eq(&self, o: &Module) -> bool {
+        let Module {
+            types,
+            funcs,
+            strings,
+            intrinsics,
+            sites,
+            statics,
+            stated,
+            main,
+            cell,
+            decls,
+            frozen: _,
+            clauses: _,
+        } = self;
+        *types == o.types
+            && *funcs == o.funcs
+            && *strings == o.strings
+            && *intrinsics == o.intrinsics
+            && *sites == o.sites
+            && *statics == o.statics
+            && *main == o.main
+            && *cell == o.cell
+            && *decls == o.decls
+            && (0..stated.len().max(o.stated.len())).all(|f| {
+                let rows = |s: &[Option<std::sync::Arc<crate::witness::Summary>>]| {
+                    s.get(f).and_then(|x| x.as_deref()).map(claim_rows).unwrap_or_default()
+                };
+                rows(stated) == rows(&o.stated)
+            })
+    }
+}
+
+/// What a summary's `claim` lines carry: its `pre` rows with their `checked` mark, then its
+/// `post` rows. No rows and no summary print alike.
+fn claim_rows(s: &crate::witness::Summary) -> (Vec<(crate::witness::Row, bool)>, Vec<crate::witness::Row>) {
+    (s.pre.iter().map(|p| (p.row, p.entry != crate::witness::NO_BLOCK)).collect(), s.post.clone())
 }
 
 impl Module {
