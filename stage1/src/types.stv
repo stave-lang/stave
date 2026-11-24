@@ -82,6 +82,7 @@ pub struct Table {
     pub extra: ragged.Ragged<u32>,
     pub height: vec.Vec<u32>,
     pub refused: u32,
+    usize_id: u32,
     // the interning index: open addressing over the keys' hashes
     slots: vec.Vec<u32>,
     hashes: vec.Vec<u64>,
@@ -98,6 +99,7 @@ impl Table {
             extra: ragged.Ragged::<u32>.new(),
             height: vec.Vec::<u32>.new(),
             refused: 0,
+            usize_id: NONE,
             slots: col.filled(64, NONE),
             hashes: vec.Vec::<u64>.new(),
             pend: vec.Vec::<u32>.new(),
@@ -201,16 +203,9 @@ impl Table {
     // The id of key (tag, a, b) with the pending extra words; `ERR` if a component is the error
     // type or the key is taller than `MAX_HEIGHT` (a refusal).
     pub fn intern(&mut self, tag: u8, a: u32, b: u32) -> u32 {
-        let mut kids = vec.Vec::<u32>.new();
         let pend = self.pend.as_slice();
-        self.kids_of(tag, a, b, pend, &mut kids);
-        let mut h: u32 = 0;
-        for k in 0..kids.len() {
-            let c = kids.as_slice()[k];
-            if c == ERR || c == NONE { return ERR; }
-            let ch = self.height.as_slice()[c as usize];
-            if ch > h { h = ch; }
-        }
+        let h = comp_height(self.height.as_slice(), tag, a, b, pend);
+        if h == ERR { return ERR; }
         let hash = Table.hash_of(tag, a, b, pend);
         let mask = self.slots.len() - 1;
         let mut at = (hash as usize) & mask;
@@ -263,7 +258,8 @@ impl Table {
     }
 
     pub fn usize_t(&mut self) -> u32 {
-        return self.int(false, W_SIZE);
+        if self.usize_id == NONE { self.usize_id = self.int(false, W_SIZE); }
+        return self.usize_id;
     }
 
     // Whether t is or holds the error type: only `ERR` itself (keys never hold it).
@@ -468,6 +464,40 @@ impl Table {
             lo = hi;
         }
     }
+}
+
+// The tallest component height of key (tag, a, b, xs), or ERR if a component is the error type.
+fn comp_height(height: &[u32], tag: u8, a: u32, b: u32, xs: &[u32]) -> u32 {
+    let mut h: u32 = 0;
+    if tag == TK_REF || tag == TK_PTR {
+        if b == ERR || b == NONE { return ERR; }
+        return height[b as usize];
+    }
+    if tag == TK_ARRAY || tag == TK_SLICE || tag == TK_VECTOR || tag == TK_RANGE {
+        if a == ERR || a == NONE { return ERR; }
+        return height[a as usize];
+    }
+    if tag == TK_TUPLE || tag == TK_FN {
+        let n = if tag == TK_FN then a as usize + 1 else xs.len();
+        for k in 0..n {
+            let c = xs[k];
+            if c == ERR || c == NONE { return ERR; }
+            if height[c as usize] > h { h = height[c as usize]; }
+        }
+        return h;
+    }
+    if tag == TK_ADT {
+        let mut k: usize = 0;
+        while k + 2 < xs.len() {
+            if xs[k] == GA_TYPE {
+                let c = xs[k + 1];
+                if c == ERR || c == NONE { return ERR; }
+                if height[c as usize] > h { h = height[c as usize]; }
+            }
+            k = k + 3;
+        }
+    }
+    return h;
 }
 
 fn cmp_u32(x: u32, y: u32) -> i32 {

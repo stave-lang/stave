@@ -310,12 +310,19 @@ pub fn parse_int(b: &[u8]) -> (u64, bool, u8) {
     if !any { return (0, false, 255u8); }
     let suf = &b[i..b.len()];
     if suf.len() == 0 { return (v, big, 0u8); }
-    let names = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"];
-    for k in 0..10usize {
-        if suf.eq(std_bytes(names[k])) { return (v, big, (k + 1) as% u8); }
-    }
+    let k = int_suffix(suf);
+    if k != 0 { return (v, big, k); }
     if radix == 10 && (suf.eq(std_bytes("f32")) || suf.eq(std_bytes("f64")) || suf.eq(std_bytes("f16")) || suf.eq(std_bytes("bf16"))) { return (v, big, 100u8); }
     return (v, big, 255u8);
+}
+
+// The suffix code of an int type name (1 ..= 10, as `suffix_ty`), 0 for none.
+fn int_suffix(b: &[u8]) -> u8 {
+    if b.len() < 2 || (b[0] != 105 && b[0] != 117) { return 0u8; }
+    let r = &b[1..b.len()];
+    let w: u8 = if r.eq(std_bytes("8")) then 1u8 else if r.eq(std_bytes("16")) then 2u8 else if r.eq(std_bytes("32")) then 3u8 else if r.eq(std_bytes("64")) then 4u8 else if r.eq(std_bytes("size")) then 5u8 else 0u8;
+    if w == 0 { return 0u8; }
+    return if b[0] == 105 then w else w + 5;
 }
 
 fn std_bytes(s: &str) -> &[u8] from s {
@@ -543,12 +550,9 @@ fn cast_target(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned
     if tk(t, a) != T_IDENT || tree.tok_end.as_slice()[x] != a + 1 { return NONE; }
     let s = nm.tok_str.as_slice()[a as usize];
     if s == NONE { return NONE; }
-    let b = nm.tab.text(s as usize);
-    let names = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"];
-    for k in 0..10usize {
-        if b.eq(std_bytes(names[k])) { return suffix_ty(&mut cx.tab, (k + 1) as% u8); }
-    }
-    return NONE;
+    let k = int_suffix(nm.tab.text(s as usize));
+    if k == 0 { return NONE; }
+    return suffix_ty(&mut cx.tab, k);
 }
 
 fn is_chain(k: u8) -> bool {
@@ -573,6 +577,10 @@ fn names_generic(cx: &Cx, tree: &ast.Ast, it: u32, base: usize, g: usize) -> boo
 // one stage1 cannot evaluate its outcome.
 pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32) -> (u8, u32, bool, u64) {
     let base = tree.item_node.as_slice()[it as usize] as usize;
+    let a = tree.tok.as_slice()[g];
+    if kind(tree, g) == K_PRIMARY && tk(t, a) == T_INT_LIT && tree.tok_end.as_slice()[g] == a + 1 {
+        return lone_literal(cx, t, set, cut, it, a, want);
+    }
     let lo = g - tree.size.as_slice()[g] as usize;
     let n = g - lo + 1;
     let mut ev = Ev.{
@@ -622,6 +630,20 @@ pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, s
     if r != CV_OK { return (r, types.ERR, false, 0); }
     let x = g - lo;
     return (CV_OK, ev.nty.as_slice()[x] as% u32, ev.vneg.as_slice()[x], ev.vmag.as_slice()[x]);
+}
+
+// An expression that is one int literal at token a, expected type `want` (NONE: none): the
+// two passes collapse to this (a suffix gives its type, else the expected type does).
+fn lone_literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, a: u32, want: u32) -> (u8, u32, bool, u64) {
+    let f = cut.file.as_slice()[it as usize] as usize;
+    let (s, e) = lit_text(t, set, cut, it, a);
+    let (mag, big, suf) = parse_int(&set.file(f)[s..e]);
+    if suf == 255 || (suf == 100 && want != NONE) { return (CV_FAIL, types.ERR, false, 0); }
+    if suf == 100 { return (CV_UNSUP, types.ERR, false, 0); }
+    let ty = if suf != 0 then suffix_ty(&mut cx.tab, suf) else want;
+    if ty == NONE || (want != NONE && ty != want) || cx.tab.tag_of(ty) != types.TK_INT { return (CV_FAIL, types.ERR, false, 0); }
+    if big || !in_range(&cx.tab, ty, false, mag) { return (CV_FAIL, types.ERR, false, 0); }
+    return (CV_OK, ty, false, mag);
 }
 
 // The decide pass from row g with hint `want`: the type of g (a T or a group).

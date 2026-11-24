@@ -384,12 +384,13 @@ fn has_gen(k: u8) -> bool {
     return is_fn(k) || k == decls.DK_STRUCT || k == decls.DK_ENUM || k == decls.DK_TRAIT || k == decls.DK_IMPL || k == decls.DK_TYPE_ALIAS;
 }
 
-const DECL_KINDS: &str = "module fn struct enum trait const static alias impl field variant method trait-method error";
-const FLAG_NAMES: &str = "pub unsafe view test kernel dispatch extern-import extern-export trait-impl tuple record has-self mut rec";
+fn kind_name(k: u8) -> &str {
+    return if k == 0 then "module" else if k == 1 then "fn" else if k == 2 then "struct" else if k == 3 then "enum" else if k == 4 then "trait" else if k == 5 then "const" else if k == 6 then "static" else if k == 7 then "alias" else if k == 8 then "impl" else if k == 9 then "field" else if k == 10 then "variant" else if k == 11 then "method" else if k == 12 then "trait-method" else "error";
+}
 
-fn push_word(buf: &mut vec.Vec<u8>, words: &str, k: usize) {
-    let (a, b) = sigs.word(words, k);
-    buf.extend_from_slice(&mem.str_bytes(words)[a..b]);
+// The name of decl flag bit b, in the dump's flag order.
+fn flag_name(b: usize) -> &str {
+    return if b == 0 then "pub" else if b == 1 then "unsafe" else if b == 2 then "view" else if b == 3 then "test" else if b == 4 then "kernel" else if b == 5 then "dispatch" else if b == 6 then "extern-import" else if b == 7 then "extern-export" else if b == 8 then "trait-impl" else if b == 9 then "tuple" else if b == 10 then "record" else if b == 11 then "has-self" else if b == 12 then "mut" else "rec";
 }
 
 fn push_opt(buf: &mut vec.Vec<u8>, v: u32) {
@@ -444,7 +445,7 @@ fn decl_line(buf: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, md: &modul
     buf.push(100);
     text.push_u32(buf, d as% u32);
     buf.push(32);
-    push_word(buf, DECL_KINDS, k as usize);
+    push_str(buf, kind_name(k));
     let m = ds.module.as_slice()[d];
     push_str(buf, " ");
     let md_d = if m == types.NONE then types.NONE else ds.mod_decl.as_slice()[m as usize];
@@ -473,7 +474,7 @@ fn decl_line(buf: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, md: &modul
     for b in 0..14usize {
         if (fl >> b as% u16) & 1 == 1 {
             if any { buf.push(44); }
-            push_word(buf, FLAG_NAMES, b);
+            push_str(buf, flag_name(b));
             any = true;
         }
     }
