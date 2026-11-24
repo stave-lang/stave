@@ -294,9 +294,12 @@ fn run_ir_case(case: &str, release: bool, threads: usize) -> (PathBuf, Output) {
     // Fixed target: the dispatch arms dropped for another arch must not depend on the host.
     opts.target = Some(stave_target::Triple::parse("x86_64-linux").unwrap());
     let out = pipeline::run(&dumps_dir(case).join("input"), &golden_std(), &opts).unwrap();
+    // one directory per call: tests run in parallel and lower the same case with equal options
+    static CALL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("dump_goldens")
-        .join(format!("ir_{case}_{}_{threads}", if release { "release" } else { "debug" }));
+        .join(format!("ir_{case}_{}_{threads}_{call}", if release { "release" } else { "debug" }));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     for stale in ["lir.txt", "ir.txt", "opt.txt"] {
