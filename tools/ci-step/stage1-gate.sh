@@ -23,8 +23,10 @@
 # lines are compared one by one. stage1 prints `?` as T for an expression node it does not type
 # yet; that line is counted, every other difference fails. Two ratchets, each moved only toward
 # completion: at least TYPES_EXACT_MIN roots have a `types.txt` byte-equal to stage0's, and at
-# most TYPES_UNKNOWN_MAX `?` lines are printed over the corpus. With no `?` line left, the key
-# rewrite and the count go: every `types.txt` must be stage0's bytes, as for the other dumps.
+# most TYPES_UNKNOWN_PPM of every million `types` lines of the corpus are `?` lines (rounded up).
+# The ceiling is a share, not a count: every root carries std and runtime, so a count would move
+# with each root added. With no `?` line left, the key rewrite and the count go: every
+# `types.txt` must be stage0's bytes, as for the other dumps.
 #
 # Exit status: stage1 exits 1 exactly when it printed a diagnostic, else 0 (a root with an error
 # of a stage stage1 lacks still exits 0 there). Where stage0's diagnostics are all stage1's and
@@ -52,7 +54,7 @@ export STAVE_STD_DIR="$ROOT"
 # Codes of the stages stage1 has so far; add a stage's codes with its dump. E0005 is stage1's only
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
 TYPES_EXACT_MIN=0
-TYPES_UNKNOWN_MAX=49277
+TYPES_UNKNOWN_PPM=2009
 S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0410|E0414|E0416|E0419|E0420|E0421|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
 # Messages of the shapes of those codes that later stages raise.
 LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)|"code":"E0414".*"message":"[^"]*is a view, (but|and) '
@@ -224,7 +226,9 @@ echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilin
 fail=0
 if grep -v '^SAME' "$OUT/result.txt"; then fail=1; fi
 if [ "$yexact" -lt "$TYPES_EXACT_MIN" ]; then echo "stage1-gate: types: $yexact roots exact, fewer than $TYPES_EXACT_MIN"; fail=1; fi
-if [ "$yunk" -gt "$TYPES_UNKNOWN_MAX" ]; then echo "stage1-gate: types: $yunk ? lines, more than $TYPES_UNKNOWN_MAX"; fail=1; fi
+yppm=0
+if [ "$ylines" -gt 0 ]; then yppm=$(( (yunk * 1000000 + ylines - 1) / ylines )); fi
+if [ "$yppm" -gt "$TYPES_UNKNOWN_PPM" ]; then echo "stage1-gate: types: $yunk ? of $ylines lines = $yppm per million, more than $TYPES_UNKNOWN_PPM"; fail=1; fi
 if [ "$fail" = 1 ]; then
   echo "stage1-gate: FAILED" >&2
   exit 1
