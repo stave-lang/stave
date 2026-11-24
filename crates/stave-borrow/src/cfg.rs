@@ -288,6 +288,9 @@ pub struct Local {
     /// E0513); a call result or returned value that cannot reach a fn value does not keep that
     /// loan ([`Builder::drop_env`]).
     pub env: bool,
+    /// A binding of a `match` arm, `for`, or tail pattern: it is bound where its block begins,
+    /// so no declaration of it can move before a statement or local around that block.
+    pub matched: bool,
 }
 
 /// What ends a temporary: its statement ([`stave_sema::temps`]), or the `for` loop whose
@@ -803,6 +806,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             static_root: false,
             static_item: false,
             env: false,
+            matched: false,
         });
         let l = (self.body.locals.len() - 1) as LocalId;
         if let Some(n) = temp {
@@ -837,6 +841,13 @@ impl<'a, 'b> Builder<'a, 'b> {
         };
         let l = self.new_local(ty, mutable, span, String::new(), None);
         self.body.locals[l as usize].node = b;
+        self.body.locals[l as usize].matched = bind.is_some_and(|x| {
+            use stave_sema::BindKind;
+            match x.kind {
+                BindKind::Arm | BindKind::For | BindKind::Tail => true,
+                BindKind::Let | BindKind::Param | BindKind::SelfParam | BindKind::ClosureParam => false,
+            }
+        });
         self.by_node.insert(b, l);
         if let Some(s) = self.scopes.last_mut() {
             s.push(l);
@@ -1381,12 +1392,17 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// (`dead`), then the storage ends of the lent ones without.
     fn exit_temps(&mut self, from: TempMark, to: Option<TempMark>, dead: bool, at: Span, point: Point) {
         let (d1, m1) = to.map_or((self.temps.len(), self.made.len()), |t| (t.drops, t.made));
-        let ts: Vec<LocalId> = self.temps.get(from.drops..d1.max(from.drops)).unwrap_or(&[]).to_vec();
+        // the marks of open statements nest: one that does not names temporaries this exit
+        // cannot know, and an exit that dropped none of them would be unchecked code
+        let (Some(ts), Some(made)) = (self.temps.get(from.drops..d1), self.made.get(from.made..m1)) else {
+            self.body.internal.get_or_insert("an exit's temporaries outside the marks of its statements");
+            return;
+        };
+        let (ts, made) = (ts.to_vec(), made.to_vec());
         for &t in ts.iter().rev() {
             self.end_local(t, dead, Some(at), point);
         }
         if dead {
-            let made: Vec<LocalId> = self.made.get(from.made..m1.max(from.made)).unwrap_or(&[]).to_vec();
             for &t in made.iter().rev() {
                 if self.lent.get(t as usize) == Some(&true) && !ts.contains(&t) {
                     self.end_local_storage(t, Some(at));
@@ -1981,6 +1997,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let call = Rvalue::call(vec![rop], flows.clone(), icx.a(f));
                 let res = self.put_temp(call, opt_ty, iter);
                 let V::P(rp) = res else { return };
+                // The `Option` is taken apart at the head, as the code does: a `Some` hands its
+                // payload to the iteration's item (an owner of its own), a `None` holds nothing.
+                // It is no owner, so it has no drop: one would drop the item a second time, under
+                // the key of the source, which names the iterator.
+                if let Some(i) = self.temps.iter().rposition(|&t| t == rp.local) {
+                    self.temps.remove(i);
+                }
                 let some = self.some_index();
                 Some(rp.with(Proj::EnumField(some, 0), *item_ty))
             }
