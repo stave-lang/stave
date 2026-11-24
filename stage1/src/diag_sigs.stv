@@ -346,7 +346,7 @@ pub fn sigs_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &int
         let sc = &r.gscope.as_slice()[4 * k..4 * k + 4];
         if code == sigs.D_E0709 {
             d.begin(709, if r.b.as_slice()[k] == 1 then "test" else "");
-            let w = if a == sigs.W_MAIN then "`main`" else if a == sigs.W_TRAIT_METHOD then "a trait method" else if a == sigs.W_EXPORT then "an `extern` export" else if a == sigs.W_TEST then "a `test fn`" else "an allocator fn";
+            let w = if a == sigs.W_MAIN then "`main`" else if a == sigs.W_TRAIT_METHOD then "a trait method" else if a == sigs.W_EXPORT then "an `extern` export" else if a == sigs.W_TEST then "a `test fn`" else if a == sigs.W_ALLOCATOR then "an allocator fn" else "a runtime entry fn";
             d.arg("what", mem.str_bytes(w));
         } else if code == sigs.D_E0708 || code == sigs.D_E1404 {
             d.begin(code, "");

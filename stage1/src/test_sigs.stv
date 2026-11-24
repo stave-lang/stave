@@ -1,13 +1,20 @@
 // Tests of `types`, `consteval`, and `sigs`: the canonical key order (tags, then fields; a
 // component by its rank, lists element by element with a prefix first, a type argument before a
 // const one, a value before a const param before an unknown value), and const evaluation as
-// signature building does it (literal typing, overflow, division by zero, shifts, casts, cycles).
+// signature building does it (literal typing, overflow, division by zero, shifts, casts, cycles),
+// and the E0709 shape of a fn the compiler knows by path.
 import consteval;
+import diag;
+import diag_out;
+import diag_reg;
+import diag_sigs;
 import files;
 import sigs;
 import test_kit;
+import text;
 import types;
 import std.debug;
+import std.mem;
 import std.vec;
 
 const NONE: u32 = 4294967295;
@@ -180,4 +187,47 @@ test fn layout_is_not_guessed() {
     debug.assert(sg.cx.skip == consteval.CV_LAYOUT, "a size_of length needs a layout");
     let (_, g) = build("fn f<T>(a: [u8; size_of::<T>()]) {}\nfn main() -> i32 { return 0; }\n");
     debug.assert(g.cx.skip == consteval.CV_NONE, "size_of of a type with params fails without a layout");
+}
+
+// stage0's line for `needs` on `std.string.String.new` in an edited copy of the shipped std
+// (the shape cannot arise from the shipped packages, which declare it on no such fn).
+const RUNTIME_ENTRY_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0709\",\"severity\":\"error\",\"message\":\"a runtime entry fn cannot declare `needs`\",\"primary\":{\"file\":\"/home/aleksei/stave-s1d-probes/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"related\":[{\"span\":{\"file\":\"/home/aleksei/stave-s1d-probes/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"label\":\"`needs` here\"}],\"fix\":{\"description\":\"remove `needs(...)` here, and call the feature-specific code through a `dispatch` function\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
+
+test fn runtime_entry_needs() {
+    let mut k = test_kit.kit();
+    let m = k.package("main", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(m, "std", s);
+    k.file(m, "main", "fn main() -> i32 { return 0; }\n");
+    k.file(s, "core", "pub enum Option<T> { Some(T), None }\npub trait Copy {}\n");
+    let mut src = vec.Vec::<u8>.new();
+    for _ in 0..20u32 {
+        src.extend_from_slice(mem.str_bytes("//\n"));
+    }
+    src.extend_from_slice(mem.str_bytes("pub struct String { n: u32 }\nimpl String {\n    pub fn new() -> String needs(avx2) {\n        return String.{ n: 0 };\n    }\n}\n"));
+    k.file(s, "string", text.string_of(src.as_slice()).as_str());
+    let o = k.run();
+    let mut fl = files.FileList.empty();
+    fl.pkg_builtin.push(false);
+    fl.pkg_builtin.push(true);
+    fl.pkg_root.push(true);
+    fl.pkg_root.push(false);
+    let sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let mut d = diag.Diags.new();
+    diag_sigs.sigs_diags(&mut d, &sg, &o.ds, &o.nm, &o.lx, &o.set, &o.toks, &o.cut);
+    debug.assert(d.len() == 1, "one diagnostic: E0709 on the known method");
+    let mut ft = diag_out.FileTable.{ rank: vec.Vec::<u32>.new(), path: diag_reg.Strs.new() };
+    ft.rank.push(0);
+    ft.rank.push(1);
+    ft.rank.push(2);
+    ft.path.push(mem.str_bytes("main.stv"));
+    ft.path.push(mem.str_bytes("/home/aleksei/stave-s1d-probes/lib709/std/core.stv"));
+    ft.path.push(mem.str_bytes("/home/aleksei/stave-s1d-probes/lib709/std/string.stv"));
+    let rows = d.order(ft.rank.as_slice());
+    let out = diag_out.render(&d, rows.as_slice(), &ft, &o.set, true);
+    debug.assert(out.as_slice().eq(mem.str_bytes(RUNTIME_ENTRY_LINE)), "the JSON line is stage0's");
+    // a user fn spelled like a known one is none
+    let uo = test_kit.single("pub struct String { n: u32 }\nimpl String {\n    pub fn new() -> String needs(avx2) {\n        return String.{ n: 0 };\n    }\n}\nfn main() -> i32 { return 0; }\n");
+    let u = sigs.build(&fl, &uo.md, &uo.ds, &uo.nm, &uo.set, &uo.toks, &uo.cut, &uo.tree, &uo.res);
+    debug.assert(u.rows.len() == 0, "a user item is no runtime entry");
 }

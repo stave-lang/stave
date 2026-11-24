@@ -293,6 +293,7 @@ pub const W_TRAIT_METHOD: u32 = 1;
 pub const W_EXPORT: u32 = 2;
 pub const W_TEST: u32 = 3;
 pub const W_ALLOCATOR: u32 = 4;
+pub const W_RUNTIME: u32 = 5;
 
 // The diagnostics of signature building, as rows: the code, the item, the first and last global
 // token of the primary span, and by code:
@@ -1480,7 +1481,8 @@ fn is_intrinsic(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, set: &source.SourceSe
 }
 
 // Whether fn d may not declare `needs` (E0709): a trait method, a trait impl's method, or an
-// entry point (a `test fn`, an export, the root package's `main`, an allocator fn).
+// entry point (a `test fn`, an export, the root package's `main`, an allocator fn, a fn the
+// compiler knows by path).
 fn needs_forbidden(sg: &Sigs, fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, d: u32) -> u32 {
     let k = ds.kind.as_slice()[d as usize];
     if k == decls.DK_TRAIT_METHOD { return W_TRAIT_METHOD; }
@@ -1511,7 +1513,60 @@ fn needs_forbidden(sg: &Sigs, fl: &files.FileList, md: &modules.Modules, ds: &de
             if s != NONE && ds.module_item(m, s) == d { return W_ALLOCATOR; }
         }
     }
+    if is_known_fn(fl, md, ds, nm, d) { return W_RUNTIME; }
     return NONE;
+}
+
+// The fns and methods the compiler knows by path (stave-ir `Known`, contracts/intrinsics.md
+// "Paths fixed by the compiler"): `module name method` (`-`: a fn), `;` between entries. An
+// entry names an item of a module of a built-in package; a user item spelled the same is none.
+const KNOWN_FNS: &str = "std.string String new;std.string String push_str;std.string String as_str;std.cell UnsafeCell new;std.atomic U32 new;std.atomic U64 new;std.atomic Usize new;std.atomic Bool new;std.sync Mutex new;std.sync Mutex lock;std.sync Once new;std.sync Once get_or_init;std.sync lock_pair -;std.mem forget -;std.slice copy_raw -;std.thread join -;std.thread par_for -;std.thread par_for_mut -;runtime.start entry -;runtime.panic trap -;runtime.panic trap_msg -;runtime.panic trap_err -;runtime.panic abort -;runtime.panic on_signal -;runtime.panic begin -;runtime.panic requires_failed -;runtime.panic ensures_failed -;runtime.panic set_user_site -;runtime.panic test_input -;runtime.panic test_skip -;runtime.errtrace push -;runtime.errtrace restart -;runtime.errtrace save -;runtime.errtrace restore -;runtime.thread entry -;runtime.thread start -;runtime.thread join -;runtime.thread scope_spawn -;runtime.thread scope_join -;runtime.thread run_queued -;runtime.cpu features -;runtime.cpu init -;runtime.cpu trace -;runtime.alloc alloc -;runtime.alloc try_alloc -;runtime.alloc free -;runtime.alloc realloc -;runtime.alloc try_realloc -;runtime.atomic lock -;runtime.atomic try_lock -;runtime.atomic unlock -;runtime.os futex -;runtime.os read -;runtime.os write -;runtime.os pread64 -;runtime.os pwrite64 -;runtime.os openat -;runtime.os flock -";
+
+// The module of a built-in package whose path text is b, or NONE.
+fn builtin_module(fl: &files.FileList, md: &modules.Modules, b: &[u8]) -> u32 {
+    for m in 0..md.modules() {
+        let p = md.mod_pkg.as_slice()[m] as usize;
+        if p < fl.pkg_builtin.len() && fl.pkg_builtin.as_slice()[p] && md.text(m).eq(b) { return m as% u32; }
+    }
+    return NONE;
+}
+
+// Whether fn or method d is one of `KNOWN_FNS` (a method: the first inherent one of that name).
+fn is_known_fn(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, d: u32) -> bool {
+    let w = mem.str_bytes(KNOWN_FNS);
+    let mut at: usize = 0;
+    while at < w.len() {
+        let mut e = at;
+        while e < w.len() && w[e] != 59 {
+            e = e + 1;
+        }
+        // three words: module, name, method
+        let mut sp = [0usize; 2];
+        let mut k: usize = 0;
+        for i in at..e {
+            if w[i] == 32 && k < 2 {
+                sp[k] = i;
+                k = k + 1;
+            }
+        }
+        let m = builtin_module(fl, md, &w[at..sp[0]]);
+        let name = modules.lookup(&nm.tab, &w[sp[0] + 1..sp[1]]);
+        let meth = &w[sp[1] + 1..e];
+        at = e + 1;
+        if m == NONE || name == NONE { continue; }
+        let item = ds.module_item(m, name);
+        if item == NONE { continue; }
+        if meth.eq(mem.str_bytes("-")) {
+            if item == d { return true; }
+            continue;
+        }
+        let ms = modules.lookup(&nm.tab, meth);
+        if ms == NONE { continue; }
+        let key = search.pair(item, ms);
+        let j = search.lower_bound(ds.inh_key.as_slice(), key);
+        if j < ds.inh_key.len() && ds.inh_key.as_slice()[j] == key && ds.inh_decl.as_slice()[j] == d { return true; }
+    }
+    return false;
 }
 
 // The `self` token of `SelfParam` row sp.
