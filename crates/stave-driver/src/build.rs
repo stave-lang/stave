@@ -10,9 +10,11 @@
 //!   every build mode: per function, the bounds audit (an element access without a check or proof
 //!   is a compiler bug) and the proofs of removable checks ([`stave_ir::bounds::analyze_func`]); the
 //!   witness checker on every proof ([`stave_ir::witness::check`]; a refused witness is a
-//!   compiler bug); then the removal of the accepted checks. The module it returns is the
-//!   checked IR: what the `ir` dump prints, the interpreter runs, and both code generators get.
-//! - [`codegen_link`]: release builds first run the IR passes of stave-opt, then the IR verifier
+//!   compiler bug); then the removal of the accepted checks; then the canonical numbering
+//!   ([`canonical`]). The module it returns is the checked IR: what the `ir` dump prints, the
+//!   interpreter runs, and both code generators get.
+//! - [`codegen_link`]: release builds first run the IR passes of stave-opt and renumber their
+//!   result canonically, then the IR verifier
 //!   and the bounds audit again on their result (a failure is a compiler bug); then per-function
 //!   code generation in parallel (rayon on the caller's pool for AArch64; stave-codegen-x64 uses
 //!   its own scoped threads), then the link. Debug builds use stave-obj's debug layout (padded
@@ -146,8 +148,26 @@ pub fn lower(
     prof::mark("verify");
     let r = remove_proven_checks(&mut m, true)?;
     extend_nodes(&mut nodes_of_func, &r.removal);
-    let removed = r.proved.into_iter().filter(|p| !p.witness.removed.is_empty()).collect();
+    let mut removed: Vec<Proved> = r.proved.into_iter().filter(|p| !p.witness.removed.is_empty()).collect();
+    let remap = canonical(&mut m);
+    stave_ir::canon::permute_by_func(&mut nodes_of_func, &remap);
+    for p in &mut removed {
+        p.witness.func = remap.get(p.witness.func.index()).copied().unwrap_or(p.witness.func);
+    }
+    removed.sort_by_key(|p| p.witness.func);
+    // The renumbering keeps the module valid; builds with debug assertions verify it again.
+    if cfg!(debug_assertions) {
+        verified(&m, Stage::Lower)?;
+    }
+    prof::mark("canonical");
     Ok(Lowered { module: m, removed, nodes_of_func })
+}
+
+/// [`stave_ir::canon::canonicalize`] with the bodies rewritten in parallel. Every module that is
+/// printed, interpreted or given to a code generator is canonical: lowering's result, and again
+/// the release passes' result.
+pub fn canonical(m: &mut Module) -> Vec<FuncId> {
+    stave_ir::canon::canonicalize_by(m, |funcs, one| funcs.par_iter_mut().for_each(one))
 }
 
 /// Gives every unchecked entry that is a function of its own the call-graph nodes of the
@@ -306,7 +326,10 @@ pub fn image_options(machine: Machine, release: bool) -> stave_obj::Options {
 
 /// Generates code for every function of `m` and links the static executable whose `main` is
 /// `main` (`__stave_main`; contracts/intrinsics.md). With `stack`, the stack table holds the
-/// computed bound; without, it is empty (every stack gets the `[run] stack` default).
+/// computed bound; without, it is empty (every stack gets the `[run] stack` default). `m` is
+/// canonical ([`canonical`]), as [`lower`] returns it: the code generators read functions,
+/// blocks and values in id order, so only the canonical numbering makes the image a function of
+/// the module's content. A module whose functions are out of instance order is refused.
 pub fn codegen_link(
     m: &Module,
     main: FuncId,
@@ -326,6 +349,10 @@ pub fn codegen_link(
         });
     }
     let funcs = m.funcs.iter().filter(|f| f.body.is_some()).count() as u64;
+    if !m.funcs.windows(2).all(|w| w[0].instance <= w[1].instance) {
+        let message = "the module is not canonical: functions out of instance order".to_string();
+        return Err(Failure::Internal { stage: Stage::Codegen, message });
+    }
     let owned;
     let m = if release {
         let mut c = m.clone();
@@ -333,6 +360,13 @@ pub fn codegen_link(
         let types = &c.types;
         c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(|b| stave_opt::optimize(types, b));
         prof::mark("opt");
+        // The passes keep every function, so only the bodies are renumbered.
+        let remap = canonical(&mut c);
+        if !stave_ir::canon::is_identity(&remap) {
+            let message = "the release passes moved a function".to_string();
+            return Err(Failure::Internal { stage: Stage::Opt, message });
+        }
+        prof::mark("opt-canonical");
         // The optimizer's output is checked like the lowering's: it must be valid IR in which
         // every element access still has its check or a proof.
         verified(&c, Stage::Opt)?;

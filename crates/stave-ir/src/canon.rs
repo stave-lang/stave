@@ -1,0 +1,325 @@
+//! The canonical form of a module: one numbering of functions, blocks, values, constants,
+//! operands and intrinsic names, decided by a stated rule ([`canonicalize`]) and not by the order
+//! in which lowering, check removal or the optimizer happened to build them. Two modules that
+//! print the same text have, once canonical, equal [`Module`]s; code generation reads only
+//! canonical modules, so its output does not depend on construction order.
+
+use rustc_hash::FxHashMap;
+
+use crate::ir::{
+    Block, BlockData, Body, BorrowMark, Const, ConstId, EventMark, Func, FuncId, Insts, IntrinsicId, Module,
+    Op, Operand, Site, Span, SwitchCase, Target, Term, Value, ValueData, ValueDef,
+};
+use crate::types::TypeId;
+
+/// Rewrites `m` into canonical form and returns where each function went (`old -> new`).
+///
+/// The rule:
+///
+/// 1. **Functions** are in ascending [`crate::InstanceId`] order (lexicographic: a closure
+///    `41.k` follows `41`, the unchecked entry `41.u` follows the closures of `41`), bodiless
+///    functions included. Equal instance ids, which a lowered module does not have, keep their
+///    stored order. Every `Operand::Func` is rewritten.
+/// 2. **Per-function tables** of the module (`stated`, `clauses`) move with their function. A
+///    table that is not empty is first extended to one row per function with the row that a
+///    missing one means (`None`, the default clauses).
+/// 3. **Intrinsic names** are the names the bodies use, sorted by bytes, without duplicates.
+/// 4. **Blocks** of a body: those reachable from `b0`, in stored order, numbered densely from 0.
+///    Unreachable blocks and their instructions are dropped.
+/// 5. **Values**: dense from 0 in block order, per block its params, then its instruction
+///    results (the printed `%N`). A value no kept block defines is dropped; one that is still
+///    used (malformed input only) is numbered after the defined ones, in order of first use, and
+///    has no definition.
+/// 6. **Pools** are rebuilt in print order: block params per block; instructions per block;
+///    operands per instruction, then the terminator's (condition or scrutinee, then each target's
+///    args: `then`, `els`; the cases, then `default`); switch cases per terminator; and the
+///    constant pool with one entry per distinct constant (kind and bits), in order of its first
+///    operand in that same order (an inline condition, scrutinee, or return operand included).
+///    Operands with equal constants share the entry: the bounds audit reads two constant
+///    operands as the same integer when they name the same entry, so sharing must follow the
+///    value, not which operands lowering happened to build from one constant.
+/// 7. **Borrow side table** (`borrows`, `events`): stored order, values renumbered, marks of
+///    dropped values dropped.
+///
+/// Types, strings, sites and statics are canonical as lowered (ranked by contracted keys) and
+/// are not changed. Callers that hold other per-function tables move them with the result
+/// ([`permute_by_func`]). The pass is idempotent.
+pub fn canonicalize(m: &mut Module) -> Vec<FuncId> {
+    canonicalize_by(m, |funcs, one| funcs.iter_mut().for_each(one))
+}
+
+/// [`canonicalize`] with the bodies rewritten by `each`: it must call the given function once on
+/// every element of the slice, in any order or in parallel (functions are independent).
+pub fn canonicalize_by<E>(m: &mut Module, each: E) -> Vec<FuncId>
+where
+    E: FnOnce(&mut [Func], &(dyn Fn(&mut Func) + Sync)),
+{
+    let n = m.funcs.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| m.funcs[a].instance.cmp(&m.funcs[b].instance));
+    let mut remap = vec![FuncId(0); n];
+    for (new, &old) in order.iter().enumerate() {
+        remap[old] = FuncId(new as u32);
+    }
+
+    let mut used: Vec<&str> = Vec::new();
+    for f in &m.funcs {
+        for op in f.body.iter().flat_map(|b| &b.insts.op) {
+            if let Op::Intrinsic(id) = op
+                && let Some(name) = m.intrinsic_name(*id)
+            {
+                used.push(name);
+            }
+        }
+    }
+    used.sort_unstable();
+    used.dedup();
+    let names: Vec<String> = used.into_iter().map(str::to_string).collect();
+    let intrinsics: Vec<IntrinsicId> = m
+        .intrinsics
+        .iter()
+        .map(|s| names.binary_search(s).map_or(IntrinsicId(u32::MAX), |i| IntrinsicId(i as u32)))
+        .collect();
+
+    let mut old: Vec<Option<Func>> = std::mem::take(&mut m.funcs).into_iter().map(Some).collect();
+    m.funcs = order.iter().filter_map(|&i| old[i].take()).collect();
+    if !m.stated.is_empty() {
+        permute_by_func(&mut m.stated, &remap);
+    }
+    if !m.clauses.is_empty() {
+        permute_by_func(&mut m.clauses, &remap);
+    }
+    m.intrinsics = names;
+
+    let maps = Maps { funcs: &remap, intrinsics: &intrinsics };
+    each(&mut m.funcs, &|f: &mut Func| {
+        if let Some(b) = &f.body {
+            f.body = Some(canonical_body(b, &maps));
+        }
+    });
+    remap
+}
+
+/// Moves the rows of a per-function table with their functions: row `i` goes to `remap[i]`.
+/// The table is first extended to `remap.len()` rows with `T::default()` (the row a missing one
+/// means); rows past `remap.len()` are dropped.
+pub fn permute_by_func<T: Default>(table: &mut Vec<T>, remap: &[FuncId]) {
+    table.resize_with(remap.len().max(table.len()), T::default);
+    table.truncate(remap.len());
+    let mut old: Vec<Option<T>> = std::mem::take(table).into_iter().map(Some).collect();
+    let mut new: Vec<Option<T>> = (0..remap.len()).map(|_| None).collect();
+    for (i, row) in old.iter_mut().enumerate() {
+        if let Some(slot) = remap.get(i).and_then(|f| new.get_mut(f.index())) {
+            *slot = row.take();
+        }
+    }
+    *table = new.into_iter().map(Option::unwrap_or_default).collect();
+}
+
+/// Whether `remap` (of [`canonicalize`]) left every function where it was.
+pub fn is_identity(remap: &[FuncId]) -> bool {
+    remap.iter().enumerate().all(|(i, f)| f.index() == i)
+}
+
+struct Maps<'a> {
+    funcs: &'a [FuncId],
+    intrinsics: &'a [IntrinsicId],
+}
+
+/// The canonical rewrite of one body (rules 4 to 7 of [`canonicalize`]).
+fn canonical_body(b: &Body, maps: &Maps<'_>) -> Body {
+    let reach = b.reachable();
+    let kept: Vec<usize> = (0..b.blocks.len()).filter(|&i| reach[i]).collect();
+    let mut block_num = vec![u32::MAX; b.blocks.len()];
+    for (n, &bi) in kept.iter().enumerate() {
+        block_num[bi] = n as u32;
+    }
+
+    // Values defined by kept blocks, in print order.
+    let mut value_num = vec![u32::MAX; b.values.len()];
+    let mut values: Vec<ValueData> = Vec::new();
+    for &bi in &kept {
+        let bd = &b.blocks[bi];
+        let results = bd.insts.indices().filter_map(|i| b.insts.result.get(i as usize).copied().flatten());
+        for v in bd.params.of(&b.block_params).iter().copied().chain(results) {
+            if let Some(slot) = value_num.get_mut(v.index())
+                && *slot == u32::MAX
+            {
+                *slot = values.len() as u32;
+                values.push(ValueData { ty: b.values[v.index()].ty, def: ValueDef::Inst(u32::MAX) });
+            }
+        }
+    }
+
+    let mut cx = Rewrite {
+        b,
+        maps,
+        block_num: &block_num,
+        value_num,
+        out: Body::default(),
+        values,
+        const_ids: FxHashMap::default(),
+    };
+    let mut blocks = Vec::with_capacity(kept.len());
+    for &bi in &kept {
+        let bd = b.blocks[bi];
+        let nb = blocks.len() as u32;
+        let params = bd.params.of(&b.block_params);
+        let pspan = Span { start: cx.out.block_params.len() as u32, len: params.len() as u32 };
+        for (j, &v) in params.iter().enumerate() {
+            let nv = cx.value(v);
+            cx.out.block_params.push(nv);
+            cx.define(nv, ValueDef::Param { block: Block(nb), index: j as u32 });
+        }
+        let start = cx.out.insts.len() as u32;
+        for i in bd.insts.indices() {
+            cx.inst(i as usize);
+        }
+        let ispan = Span { start, len: cx.out.insts.len() as u32 - start };
+        let term = cx.term(bd.term);
+        blocks.push(BlockData { params: pspan, insts: ispan, term });
+    }
+    let Rewrite { value_num, mut out, values, .. } = cx;
+    out.blocks = blocks;
+    out.values = values;
+    let num = |v: Value| value_num.get(v.index()).copied().filter(|&n| n != u32::MAX).map(Value);
+    out.borrows =
+        b.borrows.iter().filter_map(|x| num(x.value).map(|value| BorrowMark { value, ..*x })).collect();
+    out.events =
+        b.events.iter().filter_map(|x| num(x.value).map(|value| EventMark { value, ..*x })).collect();
+    out
+}
+
+struct Rewrite<'a> {
+    b: &'a Body,
+    maps: &'a Maps<'a>,
+    block_num: &'a [u32],
+    value_num: Vec<u32>,
+    /// The body being built; its `values` are kept apart until the end.
+    out: Body,
+    values: Vec<ValueData>,
+    /// The new pool entry of each constant (by [`const_key`]).
+    const_ids: FxHashMap<(u8, u128), u32>,
+}
+
+/// A constant's kind and bits: equal keys are equal constants.
+fn const_key(c: Const) -> (u8, u128) {
+    match c {
+        Const::Int(x) => (0, x as u128),
+        Const::F16(x) => (1, u128::from(x)),
+        Const::BF16(x) => (2, u128::from(x)),
+        Const::F32(x) => (3, u128::from(x)),
+        Const::F64(x) => (4, u128::from(x)),
+    }
+}
+
+impl Rewrite<'_> {
+    /// The new number of `v`; a value no kept block defines gets the next one, without a
+    /// definition.
+    fn value(&mut self, v: Value) -> Value {
+        match self.value_num.get(v.index()).copied() {
+            Some(n) if n != u32::MAX => Value(n),
+            known => {
+                let n = self.values.len() as u32;
+                let ty = self.b.values.get(v.index()).map_or(TypeId(u32::MAX), |d| d.ty);
+                self.values.push(ValueData { ty, def: ValueDef::Inst(u32::MAX) });
+                if known.is_some() {
+                    self.value_num[v.index()] = n;
+                }
+                Value(n)
+            }
+        }
+    }
+
+    /// Records the first definition of new value `v`.
+    fn define(&mut self, v: Value, def: ValueDef) {
+        if let Some(d) = self.values.get_mut(v.index())
+            && d.def == ValueDef::Inst(u32::MAX)
+        {
+            d.def = def;
+        }
+    }
+
+    fn operand(&mut self, o: Operand) -> Operand {
+        match o {
+            Operand::Value(v) => Operand::Value(self.value(v)),
+            Operand::Const(c) => match self.b.konst(c) {
+                Some(k) => {
+                    let next = self.out.consts.len() as u32;
+                    let id = *self.const_ids.entry(const_key(k)).or_insert(next);
+                    if id == next {
+                        self.out.consts.push(k);
+                    }
+                    Operand::Const(ConstId(id))
+                }
+                None => Operand::Const(ConstId(u32::MAX)),
+            },
+            Operand::Func(f) => {
+                Operand::Func(self.maps.funcs.get(f.index()).copied().unwrap_or(FuncId(u32::MAX)))
+            }
+            Operand::Str(_) | Operand::Type(_) => o,
+        }
+    }
+
+    fn operands(&mut self, span: Span) -> Span {
+        let start = self.out.operands.len() as u32;
+        for &o in span.of(&self.b.operands) {
+            let n = self.operand(o);
+            self.out.operands.push(n);
+        }
+        Span { start, len: self.out.operands.len() as u32 - start }
+    }
+
+    fn inst(&mut self, i: usize) {
+        let b = self.b;
+        // A span past the instruction arrays (malformed input only) names no instruction.
+        let op = match b.insts.op.get(i).copied() {
+            Some(Op::Intrinsic(id)) => {
+                Op::Intrinsic(self.maps.intrinsics.get(id.index()).copied().unwrap_or(IntrinsicId(u32::MAX)))
+            }
+            Some(op) => op,
+            None => return,
+        };
+        let args = self.operands(b.insts.args.get(i).copied().unwrap_or_default());
+        let result = b.insts.result.get(i).copied().flatten().map(|v| self.value(v));
+        let idx = self.out.insts.len() as u32;
+        if let Some(v) = result {
+            self.define(v, ValueDef::Inst(idx));
+        }
+        let insts: &mut Insts = &mut self.out.insts;
+        insts.op.push(op);
+        insts.ty.push(b.insts.ty.get(i).copied().flatten());
+        insts.result.push(result);
+        insts.args.push(args);
+        insts.site.push(b.insts.site.get(i).copied().unwrap_or(Site::NONE));
+    }
+
+    fn target(&mut self, t: Target) -> Target {
+        let block = Block(self.block_num.get(t.block.index()).copied().unwrap_or(u32::MAX));
+        Target { block, args: self.operands(t.args) }
+    }
+
+    fn term(&mut self, t: Term) -> Term {
+        match t {
+            Term::Br(t) => Term::Br(self.target(t)),
+            Term::Cbr { cond, then, els } => {
+                let cond = self.operand(cond);
+                let then = self.target(then);
+                Term::Cbr { cond, then, els: self.target(els) }
+            }
+            Term::Switch { scrut, cases, default } => {
+                let scrut = self.operand(scrut);
+                let mut new: Vec<SwitchCase> = Vec::with_capacity(cases.len as usize);
+                for c in cases.of(&self.b.cases) {
+                    new.push(SwitchCase { value: c.value, target: self.target(c.target) });
+                }
+                let default = self.target(default);
+                let span = Span { start: self.out.cases.len() as u32, len: new.len() as u32 };
+                self.out.cases.extend(new);
+                Term::Switch { scrut, cases: span, default }
+            }
+            Term::Ret(o) => Term::Ret(o.map(|o| self.operand(o))),
+            Term::Unreachable => Term::Unreachable,
+        }
+    }
+}
