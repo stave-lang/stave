@@ -381,7 +381,7 @@ impl tc_rows.Typeck {
                 return true;
             }
             if k == 1 {
-                self.chain_start(sg, ds, set, t, cut, tree, r);
+                self.chain_start(sg, ds, nm, set, t, cut, tree, r);
             } else {
                 let prev = self.base + tree.kids.row(r)[k - 1] as usize;
                 self.chain_apply(sg, ds, tree, r, prev);
@@ -619,7 +619,7 @@ impl tc_rows.Typeck {
         if k == K_POSTFIX {
             let ks = tree.kids.row(r);
             if ks.len() == 1 {
-                self.chain_start(sg, ds, set, t, cut, tree, r);
+                self.chain_start(sg, ds, nm, set, t, cut, tree, r);
             } else {
                 let last = self.base + ks[ks.len() - 1] as usize;
                 self.chain_apply(sg, ds, tree, r, last);

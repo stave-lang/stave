@@ -1133,7 +1133,7 @@ fn run(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &
 
 // The generic arguments at `GenericArgs` row ga (NONE: none) for the params of decl d, into
 // out (3 words each); false on a count mismatch (E0201).
-fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, d: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) -> bool {
+pub fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, d: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) -> bool {
     out.clear();
     let base = tree.item_node.as_slice()[it as usize] as usize;
     let glo = cx.gens.lo.as_slice()[d as usize] as usize;
