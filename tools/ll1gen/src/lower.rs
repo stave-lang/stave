@@ -12,11 +12,13 @@ use crate::Error;
 use crate::ebnf::{Expr, Rule, same};
 use std::collections::BTreeMap;
 
-/// Names that are terminals (lexical classes of the token stream), not rules.
-pub const LEX_CLASSES: [&str; 7] = ["Ident", "IntLit", "FloatLit", "StrLit", "FmtLit", "CharLit", "EOF"];
-
-/// The end-of-input terminal.
+/// The end-of-input terminal. It is always a lexical class.
 pub const EOF: &str = "EOF";
+
+/// True if `name` is a terminal (a lexical class of the token stream, or `EOF`), not a rule.
+pub fn is_class(classes: &[&str], name: &str) -> bool {
+    name == EOF || classes.contains(&name)
+}
 
 /// A BNF symbol before terminal interning.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +54,7 @@ pub struct Grammar {
 }
 
 struct Lowering<'a> {
+    classes: &'a [&'a str],
     g: Grammar,
     names: BTreeMap<&'a str, usize>,
     serials: Vec<u32>,
@@ -75,7 +78,7 @@ impl Lowering<'_> {
         Ok(match e {
             Expr::Term(t, _) => vec![Sym::T(t.clone())],
             Expr::Name(n, line) => {
-                if LEX_CLASSES.contains(&n.as_str()) {
+                if is_class(self.classes, n) {
                     vec![Sym::T(n.clone())]
                 } else if let Some(&i) = self.names.get(n.as_str()) {
                     vec![Sym::N(i)]
@@ -167,18 +170,19 @@ fn sepfix(items: &[Expr]) -> Vec<Expr> {
     out
 }
 
-/// Lowers the rules; rule `i` becomes nonterminal `i`.
-pub fn lower(rules: &[Rule]) -> Result<Grammar, Error> {
+/// Lowers the rules; rule `i` becomes nonterminal `i`. `classes` are the lexical class names.
+pub fn lower(rules: &[Rule], classes: &[&str]) -> Result<Grammar, Error> {
     let mut names = BTreeMap::new();
     let mut nts = Vec::new();
     for (i, r) in rules.iter().enumerate() {
-        if LEX_CLASSES.contains(&r.name.as_str()) {
+        if is_class(classes, &r.name) {
             return Err(Error::at(r.line, format!("rule `{}` redefines a lexical class", r.name)));
         }
         names.insert(r.name.as_str(), i);
         nts.push(Nt { name: r.name.clone(), origin: i, helper: false, serial: 0, line: r.line });
     }
     let mut l = Lowering {
+        classes,
         g: Grammar { nts, prods: Vec::new(), rules: rules.len() },
         names,
         serials: vec![0; rules.len()],

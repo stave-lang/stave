@@ -99,8 +99,9 @@ A file is these sections in this order; each kind of line has one section.
 7. Per static, `0` up, dense: its `static` line, its `data` lines by ascending offset, its `ref`
    lines by ascending offset.
 8. `main`, then `cell`, each at most once.
-9. The stack section (emit form only): `runstack` and `truncated`, each at most once; `node`
-   lines, `0` up, dense; `edge` lines by ascending (from, to); `nodes` lines by instance id.
+9. The stack section (emit form only), in this order: `runstack` and `truncated`, each at most
+   once; `node` lines, `0` up, dense; `edge` lines by ascending (from, to); `nodes` lines by
+   instance id.
 10. Per fn, by instance id ("Ids"): its header; with a body, the body's blocks (each a block
     header, its instructions, one terminator) and `}`; then its `claim` lines, the `pre` rows
     then the `post` rows, each in the summary's order.
@@ -235,10 +236,24 @@ except `d<D>`.
 
 At every printed point the driver canonicalizes the module before it prints, builds, or runs
 it: fns in instance-id order (a fn's index is its rank), unreachable blocks deleted, blocks and
-values numbered densely in print order, one constant-pool entry per constant operand in print
-order, intrinsic names numbered by first use in print order. The interpreter and the back ends
-get this module. Then `read(print(m))` equals `m`, and `print(read(t))` equals `t` for every
-printed `t`.
+values numbered densely in print order, each body's constant pool holding one entry per
+distinct constant, numbered by first use in print order, the module's intrinsic names listed once
+each, sorted by bytes. The interpreter and the back ends get this module. Then `read(print(m))`
+equals `m`, and `print(read(t))` equals `t` for every printed `t`.
+
+- Two constants are the same constant when they have the same kind (`int`, `f16`, `bf16`, `f32`,
+  `f64`) and the same bits: an int by its value (the operand position gives its type, so `0` is
+  one entry wherever it appears); a float by its IEEE bits, so `0.0` and `-0.0` are two
+  entries, NaNs with different payloads are two, and `0` (int) and `0x00000000` (f32) are two,
+  as are `f16` and `bf16` constants of equal bits. The pool is per body, numbered over the
+  blocks in order: a block's instruction operands, then its terminator's (the `cbr` condition,
+  `switch` scrutinee, or `ret` value first, then the operands of each target as printed).
+- The bounds audit calls two operands the same when they are the same value or the same pool
+  entry; with this pool that is the same constant. A pool with one entry per operand would make
+  the guard `check.bounds () 0 %n` and the access `addr.elem t %s 0` use different constants.
+- The text has no pool and no intrinsic table: a reader builds both from the operands and the
+  `intrinsic.<name>` ops it reads, so a loaded module is canonical in both. The table holds the
+  names the bodies use, not the names only removed code used.
 
 The text leaves out what no consumer of a lowered module reads: the borrow side table (only the
 interpreter's tracked lowering has it, which is never printed), the witnesses of removed checks,
@@ -252,7 +267,8 @@ step stops before the next.
 
 1. **Lines.** Each line is lexed and parsed with ir-text.ebnf. An error prints
    `FILE:LINE:COL: error: MSG` on stderr, one per bad line, at most 100.
-2. **Structure.** One sequential pass checks "Sections" and the rules below, errors as in step 1:
+2. **Structure.** One sequential pass checks "Sections" and the rules below. Errors print as in
+   step 1, one per fault (a line with two undefined values has two), at most 100 in all:
    - ids of a dense section run from 0 without gaps; ascending sections have no repeats;
    - every `t<T>`, `s<S>`, site row, static index, `d<D>`, node number, and `@<inst>` names an
      existing line; at most one `nodes` line per fn; each `@<inst>` heads one fn; fn headers may come in any order (they are
@@ -260,16 +276,19 @@ step stops before the next.
    - a body begins with block `b0`; block labels and values are unique within their fn, with any
      numbers (they are renumbered in text order: blocks by their headers, values by their
      definitions); every value and block a fn names is its own; a block is its header, its
-     instructions, and one terminator, and `}` follows the last block's terminator;
-   - `claim` lines follow the body of the fn they name; none at level `lowered`;
-   - a `known` mark names a known item by the fn's path; `data` bytes lie inside their static
-     and do not overlap; `opt` only with `release`.
-3. **Verification.** The IR verifier on the type table, shapes and statics, then on every fn with
-   a body (fns in parallel). An error prints `FILE:LINE: verify: MSG`, at the line of the
-   instruction, terminator, block, or fn it is about (a module error: the line of the `type` or
-   `static` it names, else line 1). On loaded text the verifier also requires every
-   `intrinsic.<name>` to be an intrinsic of intrinsics.md with its operand and result types, and
-   a `known` fn to have its item's signature.
+     instructions, and one terminator, and `}` follows the last block's terminator; every block
+     is reachable from `b0`;
+   - `claim` lines follow the body of the fn they name; none at level `lowered`; a fn without a
+     body has none;
+   - a `known` mark names a known item by the fn's path; `data` bytes do not overlap; `opt` only
+     with `release`.
+3. **Verification.** The IR verifier on the type table, shapes and statics (each static's `data`
+   bytes lie inside its type's size), then on every fn with a body (fns in parallel). An error
+   prints `FILE:LINE: verify: MSG`, at the line of the instruction, terminator, block, or fn it
+   is about: a block error at the block's terminator, except the entry block's params, at its
+   header (a module error: the line of the `type` or `static` it names, else line 1). On loaded
+   text the verifier also requires every `intrinsic.<name>` to be an intrinsic of intrinsics.md
+   with its operand and result types, and a `known` fn to have its item's signature.
 4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds
    checks"); it computes the summaries. A contract check that fails whenever reached is reported
    as in step 3.
