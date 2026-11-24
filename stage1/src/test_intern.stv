@@ -324,7 +324,7 @@ fn one_file(src: &[u8], pkg: &str, rel: &str, module: &str) -> (source.SourceSet
     s.bytes.extend_from_slice(src);
     s.file_off.push(src.len() as u64);
     s.read_ok.push(true);
-    let mut fl = files.FileList.{ package: vec.Vec::<string.String>.new(), rel_path: vec.Vec::<string.String>.new(), abs_path: vec.Vec::<string.String>.new(), module: vec.Vec::<string.String>.new(), pkg_name: vec.Vec::<string.String>.new() };
+    let mut fl = files.FileList.empty();
     fl.package.push(string.String.from_str(pkg));
     fl.rel_path.push(string.String.from_str(rel));
     fl.abs_path.push(string.String.from_str(rel));

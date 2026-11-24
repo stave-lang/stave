@@ -588,10 +588,11 @@ pub struct Dep {
     pub path: Option<string.String>,
 }
 
-// What discovery reads from a manifest: `name` (a string), and the dependency tables in
+// What discovery reads from a manifest: `name` and `kind` (strings), and the dependency tables in
 // manifest order, each with the target it applies to ("" for `[dependencies]`).
 pub struct Manifest {
     pub name: Option<string.String>,
+    pub kind: Option<string.String>,
     pub dep_target: vec.Vec<string.String>,
     pub deps: vec.Vec<Dep>,
 }
@@ -641,12 +642,14 @@ fn read_deps(d: &Doc, t: u32, target: &[u8], m: &mut Manifest) {
 }
 
 fn read_back(d: &Doc) -> Manifest {
-    let mut m = Manifest.{ name: Option.None, dep_target: vec.Vec::<string.String>.new(), deps: vec.Vec::<Dep>.new() };
+    let mut m = Manifest.{ name: Option.None, kind: Option.None, dep_target: vec.Vec::<string.String>.new(), deps: vec.Vec::<Dep>.new() };
     for e in 0..d.e_table.len() {
         if d.e_table.as_slice()[e] != 0 { continue; }
         let key = d.e_key.get_ref(e).as_slice();
         if text.eq_str(key, "name") {
             m.name = entry_string(d, e);
+        } else if text.eq_str(key, "kind") {
+            m.kind = entry_string(d, e);
         } else if text.eq_str(key, "dependencies") {
             match d.sub_table(e) {
                 Option.Some(t) => { read_deps(d, t, mem.str_bytes(""), &mut m); }

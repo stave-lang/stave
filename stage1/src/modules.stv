@@ -1,0 +1,697 @@
+// The module graph of a build, as stage0 builds it: packages, one module per file, import paths,
+// and import cycles.
+//
+// - Module path: in the root package the file's path under `src/` (`src/a/b.stv` is `a.b`); in a
+//   dependency its package name, then that path, the root module (`src/lib.stv` or
+//   `src/main.stv`) being the package name alone; in a built-in package the package name, then
+//   the path in its directory. M = rank of (module path text, package rank).
+// - Lookup by (package, path in the package) goes through a trie of path prefixes: node p below
+//   the package count is package p's root, and an edge (parent node, segment) leads to the node
+//   of the prefix one segment longer. The edges are one sorted u64 column of
+//   `search.pair(parent, segment)` keys, built level by level: a level's keys are sorted and cut
+//   into runs of equal keys, one new node per run, and the next level keys by those nodes. A node
+//   names a module, a directory, or both.
+// - Import path `s0.s1...` from package P: s0 = P's name: the rest is a path in P (nothing left:
+//   P's root module); else s0 = a dependency binding of P: the rest is a path in that package,
+//   unless s0 also starts a path of P (`src/s0.stv` or `src/s0/`: E0107, the path names
+//   nothing); else the whole path is a path in P. A segment whose prefix names a module records
+//   it; the first segment naming neither a module nor a directory fails the path (E0101). An
+//   import binds its last segment, or its `as` name, to its target. `allocator a.b;` names a
+//   module the same way.
+// - Cycles: the strongly connected components of the import graph that hold a cycle (Tarjan with
+//   explicit stacks: a component is the same set whatever order the walk takes). They only raise
+//   E0102; every import keeps its target.
+import ast;
+import files;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import items;
+import lex;
+import prims.col;
+import prims.perm;
+import prims.rle;
+import prims.scan;
+import prims.search;
+import prims.sort;
+import prims.xxhash;
+import resdiag;
+import source;
+import text;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_DOT: u8 = terminals.T_DOT as% u8;
+const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
+const B_DOT: u8 = 46;
+
+pub struct Modules {
+    // per package rank: its name S, its root module (NONE for a built-in package or none)
+    pub pkg_sym: vec.Vec<u32>,
+    pub pkg_root_mod: vec.Vec<u32>,
+    // dependency bindings: `dep_key[k]` = pair(package, name S), sorted, bound to `dep_to[k]`
+    pub dep_key: vec.Vec<u64>,
+    pub dep_to: vec.Vec<u32>,
+    // per file F: its module M
+    pub file_mod: vec.Vec<u32>,
+    // per module M: its file, package, module path segments (`path`, S ids), the path text
+    pub mod_file: vec.Vec<u32>,
+    pub mod_pkg: vec.Vec<u32>,
+    pub path_off: vec.Vec<u32>,
+    pub path_seg: vec.Vec<u32>,
+    pub text_off: vec.Vec<u32>,
+    pub text_bytes: vec.Vec<u8>,
+    // the module sees the prelude (its package is `std` or binds it)
+    pub prelude_ok: vec.Vec<bool>,
+    // `std.core` (the prelude) and `std.soa` of the built-in `std`, or NONE
+    pub core_mod: u32,
+    pub soa_mod: u32,
+    // the trie: node -> module (NONE for a package root or a directory only), sorted edges
+    pub node_mod: vec.Vec<u32>,
+    pub edge_key: vec.Vec<u64>,
+    pub edge_node: vec.Vec<u32>,
+    // imports, in item order: item I, importing module, target module (NONE: failed), the bound
+    // name S and its token; segments `seg_off[k]..seg_off[k + 1]` (global token, module or NONE)
+    pub imp_item: vec.Vec<u32>,
+    pub imp_mod: vec.Vec<u32>,
+    pub imp_target: vec.Vec<u32>,
+    pub imp_bound: vec.Vec<u32>,
+    pub imp_bound_tok: vec.Vec<u32>,
+    pub seg_off: vec.Vec<u32>,
+    pub seg_tok: vec.Vec<u32>,
+    pub seg_mod: vec.Vec<u32>,
+    // allocator items, in item order: item, its `AllocatorDecl` node, segments as for imports
+    pub alloc_item: vec.Vec<u32>,
+    pub alloc_node: vec.Vec<u32>,
+    pub alloc_seg_off: vec.Vec<u32>,
+    pub alloc_seg_tok: vec.Vec<u32>,
+    pub alloc_seg_mod: vec.Vec<u32>,
+    // per module: in a cyclic component (component id, else NONE)
+    pub cycle_comp: vec.Vec<u32>,
+}
+
+impl Modules {
+    pub fn modules(&self) -> usize {
+        return self.mod_file.len();
+    }
+
+    pub fn path(&self, m: usize) -> &[u32] from self {
+        let o = self.path_off.as_slice();
+        return &self.path_seg.as_slice()[o[m] as usize..o[m + 1] as usize];
+    }
+
+    // The module path text (`a.b`).
+    pub fn text(&self, m: usize) -> &[u8] from self {
+        let o = self.text_off.as_slice();
+        return &self.text_bytes.as_slice()[o[m] as usize..o[m + 1] as usize];
+    }
+
+    // The trie node one segment below `node`, or NONE.
+    pub fn child(&self, node: u32, seg: u32) -> u32 {
+        if node == NONE || seg == NONE { return NONE; }
+        let key = search.pair(node, seg);
+        let ks = self.edge_key.as_slice();
+        let k = search.lower_bound(ks, key);
+        if k < ks.len() && ks[k] == key { return self.edge_node.as_slice()[k]; }
+        return NONE;
+    }
+
+    // The package package `from` binds to the name S, or NONE.
+    pub fn dep(&self, pkg: u32, name: u32) -> u32 {
+        if name == NONE { return NONE; }
+        let key = search.pair(pkg, name);
+        let ks = self.dep_key.as_slice();
+        let k = search.lower_bound(ks, key);
+        if k < ks.len() && ks[k] == key { return self.dep_to.as_slice()[k]; }
+        return NONE;
+    }
+}
+
+// The id of the interned string b, or NONE: the strings of one hash are a run of ids.
+pub fn lookup(tab: &intern.Table, b: &[u8]) -> u32 {
+    let h = xxhash.hash32(b, 0);
+    let hs = tab.str_hash.as_slice();
+    let mut k = search.lower_bound(hs, h);
+    while k < hs.len() && hs[k] == h {
+        if tab.text(k).eq(b) { return k as% u32; }
+        k = k + 1;
+    }
+    return NONE;
+}
+
+// The file of global token g.
+pub fn file_of(t: &lex.Tokens, g: u32) -> u32 {
+    return (search.upper_bound(t.file_tok.as_slice(), g) - 1) as% u32;
+}
+
+// The span (file, byte offset, byte length) of global token g.
+pub fn tok_span(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, g: u32) -> (u32, u32, u32) {
+    let f = file_of(t, g);
+    let ft = t.file_tok.as_slice();
+    let lo = ft[f as usize] as usize;
+    let hi = ft[f as usize + 1] as usize;
+    let i = g as usize - lo;
+    let start = t.start.as_slice()[g as usize];
+    let end = lx.token_end(set.file(f as usize), &t.kind.as_slice()[lo..hi], &t.start.as_slice()[lo..hi], i);
+    return (f, start, (end as% u32) - start);
+}
+
+// The identifier chain `Ident ("." Ident)*` at global token g (empty unless g is an Ident).
+pub fn ident_chain(kind: &[u8], g: usize, out: &mut vec.Vec<u32>) {
+    out.clear();
+    if g >= kind.len() || kind[g] != T_IDENT { return; }
+    out.push(g as% u32);
+    let mut p = g + 1;
+    while p + 1 < kind.len() && kind[p] == T_DOT && kind[p + 1] == T_IDENT {
+        out.push((p + 1) as% u32);
+        p = p + 2;
+    }
+}
+
+fn seg_text_has_dot(tab: &intern.Table, s: u32) -> bool {
+    let b = tab.text(s as usize);
+    for k in 0..b.len() {
+        if b[k] == B_DOT { return true; }
+    }
+    return false;
+}
+
+// What a path names: the target module (NONE if none), per segment the module its prefix names,
+// the segment that names nothing (NONE if none), and whether the first segment is ambiguous.
+struct PathRes {
+    target: u32,
+    failed: u32,
+    ambiguous: bool,
+}
+
+// Resolves the path `segs` (S ids) from package `from`; `seg_mod` gets one entry per segment.
+fn resolve_path(md: &Modules, own: u32, segs: &[u32], seg_mod: &mut vec.Vec<u32>) -> PathRes {
+    let base = seg_mod.len();
+    for _ in 0..segs.len() {
+        seg_mod.push(NONE);
+    }
+    if segs.len() == 0 { return PathRes.{ target: NONE, failed: NONE, ambiguous: false }; }
+    let s0 = segs[0];
+    let mut pkg = own;
+    let mut skip: usize = 0;
+    if s0 == md.pkg_sym.as_slice()[own as usize] {
+        skip = 1;
+    } else {
+        let d = md.dep(own, s0);
+        if d != NONE {
+            if md.child(own, s0) != NONE { return PathRes.{ target: NONE, failed: NONE, ambiguous: true }; }
+            pkg = d;
+            skip = 1;
+        }
+    }
+    let sm = seg_mod.as_mut_slice();
+    if skip == 1 { sm[base] = md.pkg_root_mod.as_slice()[pkg as usize]; }
+    if segs.len() == skip {
+        let target = sm[base];
+        return PathRes.{ target: target, failed: if target == NONE then 0u32 else NONE, ambiguous: false };
+    }
+    let mut node = pkg;
+    let mut failed = NONE;
+    for k in skip..segs.len() {
+        node = md.child(node, segs[k]);
+        if node == NONE {
+            failed = k as% u32;
+            break;
+        }
+        sm[base + k] = md.node_mod.as_slice()[node as usize];
+    }
+    let mut target = NONE;
+    if failed == NONE {
+        target = sm[base + segs.len() - 1];
+        if target == NONE { failed = (segs.len() - 1) as% u32; }
+    }
+    return PathRes.{ target: target, failed: failed, ambiguous: false };
+}
+
+fn is_builtin_pkg_name(fl: &files.FileList, b: &[u8]) -> bool {
+    for p in 0..fl.pkg_name.len() {
+        if fl.pkg_builtin.as_slice()[p] && text.eq(fl.pkg_name.get_ref(p).as_bytes(), b) { return true; }
+    }
+    return false;
+}
+
+// The module table, the trie, and the package facts.
+fn module_table(fl: &files.FileList, nm: &intern.Interned) -> Modules {
+    let tab = &nm.tab;
+    let npkg = fl.pkg_name.len();
+    let nfile = fl.file_pkg.len();
+    // dependency bindings by (package, name S); a name never interned binds nothing an import can name
+    let mut dkey = vec.Vec::<u64>.new();
+    let mut dto = vec.Vec::<u32>.new();
+    for p in 0..npkg {
+        let o = fl.dep_off.as_slice();
+        for k in o[p] as usize..o[p + 1] as usize {
+            let s = lookup(tab, fl.dep_name.get_ref(k).as_bytes());
+            if s == NONE { continue; }
+            dkey.push(search.pair(p as% u32, s));
+            dto.push(fl.dep_pkg.as_slice()[k]);
+        }
+    }
+    let dperm = sort.sort_perm(dkey.as_slice());
+    let lib_sym = lookup(tab, mem.str_bytes("lib"));
+    let main_sym = lookup(tab, mem.str_bytes("main"));
+    // module paths per file
+    let mut fpath_off = vec.Vec::<u32>.new();
+    let mut fpath = vec.Vec::<u32>.new();
+    let mut toff = vec.Vec::<u32>.new();
+    let mut tbytes = vec.Vec::<u8>.new();
+    fpath_off.push(0);
+    toff.push(0);
+    for f in 0..nfile {
+        let p = fl.file_pkg.as_slice()[f] as usize;
+        let rel = &nm.seg_str.as_slice()[nm.file_seg.as_slice()[f] as usize..nm.file_seg.as_slice()[f + 1] as usize];
+        let ps = nm.pkg_str.as_slice()[p];
+        let root_sym = if fl.pkg_lib.as_slice()[p] then lib_sym else main_sym;
+        if fl.pkg_builtin.as_slice()[p] {
+            fpath.push(ps);
+            fpath.extend_from_slice(rel);
+        } else if fl.pkg_root.as_slice()[p] {
+            fpath.extend_from_slice(rel);
+        } else if rel.len() == 1 && rel[0] == root_sym {
+            fpath.push(ps);
+        } else {
+            fpath.push(ps);
+            fpath.extend_from_slice(rel);
+        }
+        fpath_off.push(fpath.len() as% u32);
+        let segs = &fpath.as_slice()[fpath_off.as_slice()[f] as usize..fpath.len()];
+        for k in 0..segs.len() {
+            if k > 0 { tbytes.push(B_DOT); }
+            tbytes.extend_from_slice(tab.text(segs[k] as usize));
+        }
+        toff.push(tbytes.len() as% u32);
+    }
+    let order = text.sorted(nfile, fn(a: u32, b: u32) -> bool {
+        let o = toff.as_slice();
+        let tb = tbytes.as_slice();
+        let c = text.cmp(&tb[o[a as usize] as usize..o[a as usize + 1] as usize], &tb[o[b as usize] as usize..o[b as usize + 1] as usize]);
+        if c != 0 { return c < 0; }
+        return fl.file_pkg.as_slice()[a as usize] < fl.file_pkg.as_slice()[b as usize];
+    });
+    let file_mod = perm.invert(order.as_slice());
+    let mut md = Modules.{
+        pkg_sym: vec.Vec::<u32>.new(),
+        pkg_root_mod: col.filled(npkg, NONE),
+        dep_key: perm.gather(dkey.as_slice(), dperm.as_slice()),
+        dep_to: perm.gather(dto.as_slice(), dperm.as_slice()),
+        file_mod: file_mod,
+        mod_file: order,
+        mod_pkg: vec.Vec::<u32>.new(),
+        path_off: vec.Vec::<u32>.new(),
+        path_seg: vec.Vec::<u32>.new(),
+        text_off: vec.Vec::<u32>.new(),
+        text_bytes: vec.Vec::<u8>.new(),
+        prelude_ok: vec.Vec::<bool>.new(),
+        core_mod: NONE,
+        soa_mod: NONE,
+        node_mod: col.filled(npkg, NONE),
+        edge_key: vec.Vec::<u64>.new(),
+        edge_node: vec.Vec::<u32>.new(),
+        imp_item: vec.Vec::<u32>.new(),
+        imp_mod: vec.Vec::<u32>.new(),
+        imp_target: vec.Vec::<u32>.new(),
+        imp_bound: vec.Vec::<u32>.new(),
+        imp_bound_tok: vec.Vec::<u32>.new(),
+        seg_off: vec.Vec::<u32>.new(),
+        seg_tok: vec.Vec::<u32>.new(),
+        seg_mod: vec.Vec::<u32>.new(),
+        alloc_item: vec.Vec::<u32>.new(),
+        alloc_node: vec.Vec::<u32>.new(),
+        alloc_seg_off: vec.Vec::<u32>.new(),
+        alloc_seg_tok: vec.Vec::<u32>.new(),
+        alloc_seg_mod: vec.Vec::<u32>.new(),
+        cycle_comp: vec.Vec::<u32>.new(),
+    };
+    md.pkg_sym.extend_from_slice(nm.pkg_str.as_slice());
+    md.path_off.push(0);
+    md.text_off.push(0);
+    md.seg_off.push(0);
+    md.alloc_seg_off.push(0);
+    for m in 0..nfile {
+        let f = md.mod_file.as_slice()[m] as usize;
+        md.mod_pkg.push(fl.file_pkg.as_slice()[f]);
+        md.path_seg.extend_from_slice(&fpath.as_slice()[fpath_off.as_slice()[f] as usize..fpath_off.as_slice()[f + 1] as usize]);
+        md.path_off.push(md.path_seg.len() as% u32);
+        md.text_bytes.extend_from_slice(&tbytes.as_slice()[toff.as_slice()[f] as usize..toff.as_slice()[f + 1] as usize]);
+        md.text_off.push(md.text_bytes.len() as% u32);
+    }
+    build_trie(&mut md, fl, nm);
+    // root modules, the prelude package, std.core and std.soa
+    let mut std_pkg = NONE;
+    for p in 0..npkg {
+        if std_pkg == NONE && fl.pkg_builtin.as_slice()[p] && text.eq_str(fl.pkg_name.get_ref(p).as_bytes(), "std") { std_pkg = p as% u32; }
+        if !fl.pkg_builtin.as_slice()[p] {
+            let rs = if fl.pkg_lib.as_slice()[p] then lib_sym else main_sym;
+            let n = md.child(p as% u32, rs);
+            if n != NONE { md.pkg_root_mod.as_mut_slice()[p] = md.node_mod.as_slice()[n as usize]; }
+        }
+    }
+    if std_pkg != NONE {
+        let c = md.child(std_pkg, lookup(tab, mem.str_bytes("core")));
+        if c != NONE { md.core_mod = md.node_mod.as_slice()[c as usize]; }
+        let s = md.child(std_pkg, lookup(tab, mem.str_bytes("soa")));
+        if s != NONE { md.soa_mod = md.node_mod.as_slice()[s as usize]; }
+    }
+    for m in 0..nfile {
+        let p = md.mod_pkg.as_slice()[m] as usize;
+        let mut ok = std_pkg != NONE && p as% u32 == std_pkg;
+        let o = fl.dep_off.as_slice();
+        for k in o[p] as usize..o[p + 1] as usize {
+            if std_pkg != NONE && fl.dep_pkg.as_slice()[k] == std_pkg { ok = true; }
+        }
+        md.prelude_ok.push(ok);
+    }
+    return md;
+}
+
+// The trie of (package, path in the package) prefixes, level by level.
+fn build_trie(md: &mut Modules, fl: &files.FileList, nm: &intern.Interned) {
+    let nfile = fl.file_pkg.len();
+    let fseg = nm.file_seg.as_slice();
+    let mut cur = vec.Vec::<u32>.with_capacity(nfile);
+    cur.extend_from_slice(fl.file_pkg.as_slice());
+    let mut keys = vec.Vec::<u64>.new();
+    let mut nodes = vec.Vec::<u32>.new();
+    let mut level: usize = 0;
+    loop {
+        let mut lk = vec.Vec::<u64>.new();
+        let mut lf = vec.Vec::<u32>.new();
+        for f in 0..nfile {
+            let n = (fseg[f + 1] - fseg[f]) as usize;
+            if n <= level { continue; }
+            lk.push(search.pair(cur.as_slice()[f], nm.seg_str.as_slice()[fseg[f] as usize + level]));
+            lf.push(f as% u32);
+        }
+        if lk.len() == 0 { break; }
+        let p = sort.sort_perm(lk.as_slice());
+        let sk = perm.gather(lk.as_slice(), p.as_slice());
+        let runs = rle.encode(sk.as_slice());
+        let base = md.node_mod.len() as% u32;
+        for r in 0..runs.len() {
+            keys.push(runs.value.as_slice()[r]);
+            nodes.push(base + r as% u32);
+            md.node_mod.push(NONE);
+        }
+        for r in 0..runs.len() {
+            let lo = runs.start.as_slice()[r] as usize;
+            let hi = runs.start.as_slice()[r + 1] as usize;
+            for k in lo..hi {
+                let f = lf.as_slice()[p.as_slice()[k] as usize] as usize;
+                let node = base + r as% u32;
+                cur.as_mut_slice()[f] = node;
+                if (fseg[f + 1] - fseg[f]) as usize == level + 1 { md.node_mod.as_mut_slice()[node as usize] = md.file_mod.as_slice()[f]; }
+            }
+        }
+        level = level + 1;
+    }
+    let ep = sort.sort_perm(keys.as_slice());
+    md.edge_key = perm.gather(keys.as_slice(), ep.as_slice());
+    md.edge_node = perm.gather(nodes.as_slice(), ep.as_slice());
+}
+
+// E0107 `dotted` and `builtin`: module paths no import can name.
+fn path_rows(md: &Modules, fl: &files.FileList, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, rows: &mut resdiag.Rows) {
+    for m in 0..md.modules() {
+        let p = md.mod_pkg.as_slice()[m] as usize;
+        let path = md.path(m);
+        let mut seg = NONE;
+        let mut case: u32 = 0;
+        for k in 0..path.len() {
+            if seg == NONE && seg_text_has_dot(&nm.tab, path[k]) { seg = path[k]; }
+        }
+        if seg != NONE {
+            case = resdiag.CASE_DOTTED;
+        } else if path.len() > 0 && fl.pkg_root.as_slice()[p] && is_builtin_pkg_name(fl, nm.tab.text(path[0] as usize)) {
+            seg = path[0];
+            case = resdiag.CASE_BUILTIN;
+        }
+        if case == 0 { continue; }
+        let f = md.mod_file.as_slice()[m];
+        let g = t.file_tok.as_slice()[f as usize];
+        let (_, off, len) = tok_span(lx, set, t, g);
+        rows.add(resdiag.E0107, f, off, len, seg, case, m as% u32);
+    }
+}
+
+// Imports and allocators of every item not dropped.
+fn paths(md: &mut Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, rows: &mut resdiag.Rows) {
+    let kind = t.kind.as_slice();
+    let ts = nm.tok_str.as_slice();
+    let mut chain = vec.Vec::<u32>.new();
+    let mut syms = vec.Vec::<u32>.new();
+    let mut segm = vec.Vec::<u32>.new();
+    for i in 0..cut.len() {
+        if !tree.ok(i) { continue; }
+        let lo = tree.item_node.as_slice()[i] as usize;
+        let hi = tree.item_node.as_slice()[i + 1] as usize;
+        if hi == lo { continue; }
+        let root = hi - 1;
+        let f = cut.file.as_slice()[i] as usize;
+        let m = md.file_mod.as_slice()[f];
+        let pkg = md.mod_pkg.as_slice()[m as usize];
+        let rk = tree.kind.as_slice()[root];
+        let mut alloc_node = NONE;
+        if rk == node_kinds.KIND_IMPORT {
+            ident_chain(kind, tree.tok.as_slice()[root] as usize + 1, &mut chain);
+            if chain.len() == 0 { continue; }
+            let after = chain.as_slice()[chain.len() - 1] as usize + 1;
+            let bound = if after + 1 < kind.len() && kind[after] == T_KW_AS && kind[after + 1] == T_IDENT then (after + 1) as% u32 else chain.as_slice()[chain.len() - 1];
+            syms.clear();
+            for k in 0..chain.len() {
+                syms.push(ts[chain.as_slice()[k] as usize]);
+            }
+            segm.clear();
+            let r = resolve_path(md, pkg, syms.as_slice(), &mut segm);
+            md.seg_mod.extend_from_slice(segm.as_slice());
+            md.seg_tok.extend_from_slice(chain.as_slice());
+            md.seg_off.push(md.seg_tok.len() as% u32);
+            md.imp_item.push(i as% u32);
+            md.imp_mod.push(m);
+            md.imp_target.push(r.target);
+            md.imp_bound.push(ts[bound as usize]);
+            md.imp_bound_tok.push(bound);
+            path_failure(&r, chain.as_slice(), syms.as_slice(), pkg, lx, set, t, rows);
+            continue;
+        }
+        // an allocator is a direct child of the ItemBody under the item root
+        for n in lo..root {
+            if alloc_node == NONE && tree.kind.as_slice()[n] == node_kinds.KIND_ALLOCATOR_DECL { alloc_node = (n - lo) as% u32; }
+        }
+        if alloc_node == NONE { continue; }
+        ident_chain(kind, tree.tok.as_slice()[lo + alloc_node as usize] as usize + 1, &mut chain);
+        if chain.len() == 0 { continue; }
+        syms.clear();
+        for k in 0..chain.len() {
+            syms.push(ts[chain.as_slice()[k] as usize]);
+        }
+        segm.clear();
+        let r = resolve_path(md, pkg, syms.as_slice(), &mut segm);
+        md.alloc_seg_mod.extend_from_slice(segm.as_slice());
+        md.alloc_seg_tok.extend_from_slice(chain.as_slice());
+        md.alloc_seg_off.push(md.alloc_seg_tok.len() as% u32);
+        md.alloc_item.push(i as% u32);
+        md.alloc_node.push(alloc_node);
+        path_failure(&r, chain.as_slice(), syms.as_slice(), pkg, lx, set, t, rows);
+    }
+    // E0104: every allocator after the first (by item)
+    let na = md.alloc_item.len();
+    if na > 1 {
+        let first = cut.tok_lo.as_slice()[md.alloc_item.as_slice()[0] as usize];
+        let (ff, fo, fln) = tok_span(lx, set, t, first);
+        for k in 1..na {
+            let g = cut.tok_lo.as_slice()[md.alloc_item.as_slice()[k] as usize];
+            let (f, off, len) = tok_span(lx, set, t, g);
+            rows.related(ff, fo, fln);
+            rows.add(resdiag.E0104, f, off, len, NONE, NONE, NONE);
+        }
+    }
+}
+
+fn path_failure(r: &PathRes, chain: &[u32], syms: &[u32], pkg: u32, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, rows: &mut resdiag.Rows) {
+    if r.failed != NONE {
+        let (f, off, len) = tok_span(lx, set, t, chain[r.failed as usize]);
+        rows.add(resdiag.E0101, f, off, len, syms[r.failed as usize], 0, NONE);
+    }
+    if r.ambiguous {
+        let (f, off, len) = tok_span(lx, set, t, chain[0]);
+        rows.add(resdiag.E0107, f, off, len, syms[0], resdiag.CASE_AMBIGUOUS, pkg);
+    }
+}
+
+// The import graph's cyclic components (iterative Tarjan) and one E0102 per component.
+fn cycles(md: &mut Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, rows: &mut resdiag.Rows) {
+    let n = md.modules();
+    // successors of each module: its imports with a target, in item order
+    let mut cnt = col.filled(n, 0u32);
+    for k in 0..md.imp_item.len() {
+        if md.imp_target.as_slice()[k] == NONE { continue; }
+        let m = md.imp_mod.as_slice()[k] as usize;
+        let nv = cnt.as_slice()[m] + 1;
+        cnt.as_mut_slice()[m] = nv;
+    }
+    let soff = scan.offsets(cnt.as_slice());
+    let mut fill = col.filled(n, 0u32);
+    let mut succ = col.filled(soff.as_slice()[n] as usize, 0u32);
+    let mut sedge = col.filled(soff.as_slice()[n] as usize, 0u32);
+    for k in 0..md.imp_item.len() {
+        let tg = md.imp_target.as_slice()[k];
+        if tg == NONE { continue; }
+        let m = md.imp_mod.as_slice()[k] as usize;
+        let at = (soff.as_slice()[m] + fill.as_slice()[m]) as usize;
+        succ.as_mut_slice()[at] = tg;
+        sedge.as_mut_slice()[at] = k as% u32;
+        let nv = fill.as_slice()[m] + 1;
+        fill.as_mut_slice()[m] = nv;
+    }
+    let mut index = col.filled(n, NONE);
+    let mut low = col.filled(n, 0u32);
+    let mut on = col.filled(n, false);
+    let mut stack = vec.Vec::<u32>.new();
+    let mut call_v = vec.Vec::<u32>.new();
+    let mut call_pos = vec.Vec::<u32>.new();
+    let mut next: u32 = 0;
+    md.cycle_comp = col.filled(n, NONE);
+    let mut ncomp: u32 = 0;
+    let mut comp_first = vec.Vec::<u32>.new();
+    for root in 0..n {
+        if index.as_slice()[root] != NONE { continue; }
+        index.as_mut_slice()[root] = next;
+        low.as_mut_slice()[root] = next;
+        next = next + 1;
+        stack.push(root as% u32);
+        on.as_mut_slice()[root] = true;
+        call_v.push(root as% u32);
+        call_pos.push(0);
+        while call_v.len() > 0 {
+            let top = call_v.len() - 1;
+            let v = call_v.as_slice()[top] as usize;
+            let pos = call_pos.as_slice()[top];
+            let s_lo = soff.as_slice()[v];
+            let s_hi = soff.as_slice()[v + 1];
+            if s_lo + pos < s_hi {
+                let w = succ.as_slice()[(s_lo + pos) as usize] as usize;
+                call_pos.as_mut_slice()[top] = pos + 1;
+                if index.as_slice()[w] == NONE {
+                    index.as_mut_slice()[w] = next;
+                    low.as_mut_slice()[w] = next;
+                    next = next + 1;
+                    stack.push(w as% u32);
+                    on.as_mut_slice()[w] = true;
+                    call_v.push(w as% u32);
+                    call_pos.push(0);
+                } else if on.as_slice()[w] {
+                    let iw = index.as_slice()[w];
+                    if iw < low.as_slice()[v] { low.as_mut_slice()[v] = iw; }
+                }
+                continue;
+            }
+            let _ = call_v.pop();
+            let _ = call_pos.pop();
+            if call_v.len() > 0 {
+                let p = call_v.as_slice()[call_v.len() - 1] as usize;
+                let lv = low.as_slice()[v];
+                if lv < low.as_slice()[p] { low.as_mut_slice()[p] = lv; }
+            }
+            if low.as_slice()[v] == index.as_slice()[v] {
+                let mark = stack.len();
+                let mut size: usize = 0;
+                let mut k = mark;
+                while k > 0 {
+                    k = k - 1;
+                    size = size + 1;
+                    if stack.as_slice()[k] as usize == v { break; }
+                }
+                let mut self_loop = false;
+                for e in s_lo..s_hi {
+                    if succ.as_slice()[e as usize] as usize == v { self_loop = true; }
+                }
+                let cyclic = size > 1 || self_loop;
+                for j in k..mark {
+                    let w = stack.as_slice()[j] as usize;
+                    on.as_mut_slice()[w] = false;
+                    if cyclic { md.cycle_comp.as_mut_slice()[w] = ncomp; }
+                }
+                if cyclic {
+                    comp_first.push(v as% u32);
+                    ncomp = ncomp + 1;
+                }
+                stack.truncate(k);
+            }
+        }
+    }
+    // per component: from its smallest module path, follow each module's first import into the
+    // component until a module repeats; the loop starts at its smallest module path
+    let mut walk_m = vec.Vec::<u32>.new();
+    let mut walk_e = vec.Vec::<u32>.new();
+    for c in 0..ncomp as usize {
+        let mut start = NONE;
+        for m in 0..n {
+            if md.cycle_comp.as_slice()[m] != c as% u32 { continue; }
+            if start == NONE || text.cmp(md.text(m), md.text(start as usize)) < 0 { start = m as% u32; }
+        }
+        walk_m.clear();
+        walk_e.clear();
+        let mut cur = start;
+        let mut cut_at: usize = 0;
+        loop {
+            let mut seen = walk_m.len();
+            for j in 0..walk_m.len() {
+                if walk_m.as_slice()[j] == cur { seen = j; }
+            }
+            if seen < walk_m.len() {
+                cut_at = seen;
+                break;
+            }
+            let v = cur as usize;
+            let mut e = NONE;
+            for x in soff.as_slice()[v]..soff.as_slice()[v + 1] {
+                if e == NONE && md.cycle_comp.as_slice()[succ.as_slice()[x as usize] as usize] == c as% u32 { e = x; }
+            }
+            if e == NONE {
+                cut_at = walk_m.len();
+                break;
+            }
+            walk_m.push(cur);
+            walk_e.push(sedge.as_slice()[e as usize]);
+            cur = succ.as_slice()[e as usize];
+        }
+        let len = walk_m.len() - cut_at;
+        if len == 0 { continue; }
+        let mut first = cut_at;
+        for j in cut_at..walk_m.len() {
+            if text.cmp(md.text(walk_m.as_slice()[j] as usize), md.text(walk_m.as_slice()[first] as usize)) < 0 { first = j; }
+        }
+        for r in 1..len {
+            let j = cut_at + (first - cut_at + r) % len;
+            let (f, off, sl) = import_span(md, lx, set, t, cut, walk_e.as_slice()[j]);
+            rows.related(f, off, sl);
+        }
+        let (f, off, sl) = import_span(md, lx, set, t, cut, walk_e.as_slice()[first]);
+        rows.add(resdiag.E0102, f, off, sl, walk_m.as_slice()[first], NONE, NONE);
+    }
+}
+
+// The span of import k: its first token through its last.
+fn import_span(md: &Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, k: u32) -> (u32, u32, u32) {
+    let i = md.imp_item.as_slice()[k as usize] as usize;
+    let (f, off, _) = tok_span(lx, set, t, cut.tok_lo.as_slice()[i]);
+    let (_, loff, llen) = tok_span(lx, set, t, cut.tok_hi.as_slice()[i] - 1);
+    return (f, off, loff + llen - off);
+}
+
+// The module graph of the build.
+pub fn build(fl: &files.FileList, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, rows: &mut resdiag.Rows) -> Modules {
+    let mut md = module_table(fl, nm);
+    path_rows(&md, fl, nm, lx, set, t, rows);
+    paths(&mut md, nm, lx, set, t, cut, tree, rows);
+    cycles(&mut md, lx, set, t, cut, rows);
+    return md;
+}
