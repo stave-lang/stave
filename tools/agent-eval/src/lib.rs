@@ -1,8 +1,10 @@
 //! agent-eval: scores a directory of Stave answers against the task set in `tests/agent-eval/`.
 //!
-//! A task is a directory `<tasks>/<name>/` holding `task.md` (the whole prompt an agent gets
-//! besides `LANG.md`) and `expected.stdout`; `<tasks>/index.txt` lists every task once with its
-//! difficulty and feature areas. An answer is the file `<answers>/<name>/<answer file>`
+//! A task is a directory `<tasks>/<name>/` holding `task.md` and `expected.stdout`;
+//! `<tasks>/index.txt` lists every task once with its difficulty and feature areas. The prompt an
+//! agent gets is `LANG.md`, then `<tasks>/PROMPT.md` (the rules every task shares), then the
+//! task's `task.md`, which starts at its `## Task` heading and repeats none of the shared rules.
+//! An answer is the file `<answers>/<name>/<answer file>`
 //! (default `answer.stv`). Who wrote the answers is outside the scorer.
 //!
 //! Each answer gets one try: `stave check` (verdict, and the first error code on failure), then
@@ -22,6 +24,8 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_ANSWER_FILE: &str = "answer.stv";
 const INDEX_FILE: &str = "index.txt";
+const PROMPT_FILE: &str = "PROMPT.md";
+const TASK_HEADING: &str = "## Task\n";
 const BYTES_PER_TOKEN: usize = 4;
 const TOP_CODES: usize = 10;
 pub const DIFFICULTIES: [&str; 3] = ["easy", "medium", "hard"];
@@ -52,9 +56,13 @@ pub struct Task {
 }
 
 /// Reads and validates `<tasks>/index.txt`: known difficulty and areas, each name once, and
-/// every listed directory holding `task.md` and `expected.stdout`, every task directory listed.
+/// every listed directory holding `task.md` and `expected.stdout`, every task directory listed;
+/// the shared `PROMPT.md` present, every `task.md` starting at its `## Task` heading.
 pub fn read_index(tasks: &Path) -> Result<Vec<Task>, String> {
     let path = tasks.join(INDEX_FILE);
+    if !tasks.join(PROMPT_FILE).is_file() {
+        return Err(format!("{}: {PROMPT_FILE} missing", tasks.display()));
+    }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut out: Vec<Task> = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -81,6 +89,11 @@ pub fn read_index(tasks: &Path) -> Result<Vec<Task>, String> {
             if !tasks.join(name).join(f).is_file() {
                 return Err(format!("{}: {name}/{f} missing", at()));
             }
+        }
+        let task = tasks.join(name).join("task.md");
+        let text = std::fs::read_to_string(&task).map_err(|e| format!("{}: {e}", task.display()))?;
+        if !text.starts_with(TASK_HEADING) {
+            return Err(format!("{}: {name}/task.md must start with `## Task`", at()));
         }
         out.push(Task { name: name.to_string(), difficulty: difficulty.to_string(), areas });
     }
