@@ -283,6 +283,9 @@ pub(crate) struct LoopCx {
     pub exit: usize,
     pub scope: usize,
     pub kind: LoopKind,
+    /// The lengths of `temps` and `stmt_slots` where the loop began: a `break` or `continue`
+    /// leaves what lies above them ([`crate::drops::Leave::Outside`]).
+    pub marks: (usize, usize),
 }
 
 /// One function being built (the instance, a closure, or drop glue).
@@ -1948,43 +1951,44 @@ impl<'a> FnCx<'a> {
     }
 
     /// Drops, on a path that leaves it, the temporaries of open statement `i` (keeping them for
-    /// the paths that stay), last made first, then ends the slots of the rvalues it took the
-    /// address of.
-    fn exit_stmt(&mut self, i: usize) {
-        let (t0, t1) = (self.f.stmts[i], self.f.stmts.get(i + 1).copied().unwrap_or(self.f.temps.len()));
-        let ts: Vec<usize> = self.f.temps.get(t0..t1.max(t0)).unwrap_or(&[]).to_vec();
+    /// the paths that stay), last made first; `end`: then ends the slots of the rvalues it took
+    /// the address of.
+    fn exit_stmt(&mut self, i: usize, end: bool) {
+        let t0 = self.f.stmts[i];
+        let s0 = self.f.slot_marks.get(i).copied().unwrap_or(self.f.stmt_slots.len());
+        self.exit_temps((t0, s0), i + 1, end);
+    }
+
+    /// The temporaries from `temps[from.0]` and the slots from `stmt_slots[from.1]` up to where
+    /// open statement `to` (none open: the last) begins: drops, last made first, then, `end`,
+    /// the slot ends.
+    fn exit_temps(&mut self, from: (usize, usize), to: usize, end: bool) {
+        let t1 = self.f.stmts.get(to).copied().unwrap_or(self.f.temps.len());
+        let ts: Vec<usize> = self.f.temps.get(from.0..t1.max(from.0)).unwrap_or(&[]).to_vec();
         for &l in ts.iter().rev() {
             self.drop_owner(l);
         }
-        let s0 = self.f.slot_marks.get(i).copied().unwrap_or(self.f.stmt_slots.len());
-        let s1 = self.f.slot_marks.get(i + 1).copied().unwrap_or(self.f.stmt_slots.len());
-        self.end_slots(s0, s1);
+        if end {
+            let s1 = self.f.slot_marks.get(to).copied().unwrap_or(self.f.stmt_slots.len());
+            self.end_slots(from.1, s1);
+        }
     }
 
-    /// The drops of exit `point`, which leaves the open statements from index `stmts` on and
-    /// the scopes `scopes..`, in the order [`crate::drops::exit_order`] gives, with the ends
-    /// of the slots it says end there (a statement's always).
-    pub fn exit_drops(&mut self, point: Point, stmts: usize, scopes: usize) {
+    /// The drops of exit `point`, which leaves the open statements from index `stmts` on, the
+    /// scopes `scopes..`, and the temporaries and slots above `marks` (lengths of `temps` and
+    /// `stmt_slots`; a frame exit: 0), in the order [`crate::drops::exit_order`] gives, with the
+    /// ends it says run there.
+    pub fn exit_drops(&mut self, point: Point, stmts: usize, scopes: usize, marks: (usize, usize)) {
         let outer = std::mem::replace(&mut self.f.point, point);
         self.begin_run();
         let frame = !matches!(point, Point::Jump(_));
         let order = crate::drops::exit_order(&self.f.stmt_depth, stmts, scopes, self.f.scopes.len(), frame);
         for (step, end) in order {
             match step {
-                crate::drops::Leave::Stmt(i) => self.exit_stmt(i),
+                crate::drops::Leave::Stmt(i) => self.exit_stmt(i, end),
                 crate::drops::Leave::Scope(s) => self.exit_scope(s, end),
+                crate::drops::Leave::Outside => self.exit_temps(marks, stmts, end),
             }
-        }
-        if frame {
-            // temporaries made outside every statement (none: each belongs to the statement
-            // whose end ends it) would end last, as in the checker
-            let t1 = self.f.stmts.first().copied().unwrap_or(self.f.temps.len());
-            let ts: Vec<usize> = self.f.temps.get(..t1).unwrap_or(&[]).to_vec();
-            for &l in ts.iter().rev() {
-                self.drop_owner(l);
-            }
-            let s1 = self.f.slot_marks.first().copied().unwrap_or(self.f.stmt_slots.len());
-            self.end_slots(0, s1);
         }
         self.end_run();
         self.f.point = outer;

@@ -1366,7 +1366,8 @@ impl<'a> FnCx<'a> {
         self.f.b.cbr(cv, body, &[], eb, &args);
         self.f.b.switch_to(body);
         let scope = self.f.scopes.len();
-        self.f.loops.push(LoopCx { head, exit, scope, kind: LoopKind::Plain });
+        let marks = (self.f.temps.len(), self.f.stmt_slots.len());
+        self.f.loops.push(LoopCx { head, exit, scope, kind: LoopKind::Plain, marks });
         self.block(b);
         self.br_join(head, &[]);
         self.f.loops.pop();
@@ -1379,7 +1380,8 @@ impl<'a> FnCx<'a> {
         self.br_join(body, &[]);
         self.enter(body);
         let scope = self.f.scopes.len();
-        self.f.loops.push(LoopCx { head: body, exit, scope, kind: LoopKind::Plain });
+        let marks = (self.f.temps.len(), self.f.stmt_slots.len());
+        self.f.loops.push(LoopCx { head: body, exit, scope, kind: LoopKind::Plain, marks });
         self.block(b);
         self.br_join(body, &[]);
         self.f.loops.pop();
@@ -1411,7 +1413,7 @@ impl<'a> FnCx<'a> {
         };
         // the statements opened inside the loop's body are left
         let from = self.stmts_inside(lp.scope);
-        self.exit_drops(Point::Jump(tok), from, lp.scope);
+        self.exit_drops(Point::Jump(tok), from, lp.scope, lp.marks);
         if is_break {
             self.br_join(lp.exit, &[]);
         } else {
@@ -1443,7 +1445,7 @@ impl<'a> FnCx<'a> {
             }
             None => None,
         };
-        self.exit_drops(Point::Return(at), 0, 0);
+        self.exit_drops(Point::Return(at), 0, 0, (0, 0));
         self.ensures_checks(v, at);
         if self.open() {
             self.f.b.ret(v);
@@ -1615,7 +1617,8 @@ impl<'a> FnCx<'a> {
         self.f.b.switch_to(bb);
         let scope = self.f.scopes.len();
         let kind = LoopKind::Count { i, ty, end: inclusive.then_some(end), step: 1 };
-        self.f.loops.push(LoopCx { head, exit, scope, kind: kind.clone() });
+        let marks = (self.f.temps.len(), self.f.stmt_slots.len());
+        self.f.loops.push(LoopCx { head, exit, scope, kind: kind.clone(), marks });
         self.push_scope();
         let item = match seq {
             None => Some(Place { base: Base::Val(i, ty), proj: Vec::new(), ty, root: None }),
@@ -1783,7 +1786,8 @@ impl<'a> FnCx<'a> {
         self.f.b.switch_to(bb);
         let scope = self.f.scopes.len();
         let kind = LoopKind::Count { i, ty: us, end: None, step: lanes };
-        self.f.loops.push(LoopCx { head, exit, scope, kind: kind.clone() });
+        let marks = (self.f.temps.len(), self.f.stmt_slots.len());
+        self.f.loops.push(LoopCx { head, exit, scope, kind: kind.clone(), marks });
         self.push_scope();
         let tok = icx.a(f);
         let Some(x) = self.vop(tok, VecOp::Load, Some(vt), &[s, i]) else { return };
@@ -2009,7 +2013,8 @@ impl<'a> FnCx<'a> {
         self.f.b.cbr(c, bb, &[], eb, &args);
         self.f.b.switch_to(bb);
         let scope = self.f.scopes.len();
-        self.f.loops.push(LoopCx { head, exit, scope, kind: LoopKind::Plain });
+        let marks = (self.f.temps.len(), self.f.stmt_slots.len());
+        self.f.loops.push(LoopCx { head, exit, scope, kind: LoopKind::Plain, marks });
         self.push_scope();
         let xt = match self.kind(ret) {
             TypeKind::Adt { args, .. } => match args.first() {

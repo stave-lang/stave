@@ -241,6 +241,11 @@ pub enum Leave {
     Stmt(usize),
     /// The scope with this depth index (0 the outermost) is left: its locals end.
     Scope(usize),
+    /// The temporaries above the exit's mark that no statement it leaves holds: made after a
+    /// loop began and before its body's first statement (a `for` iteration's item), or, at a
+    /// frame exit, outside every statement (none: each temporary belongs to the statement
+    /// whose end ends it). Always the last step.
+    Outside,
 }
 
 /// The order in which an exit (`return`, `?`, `break`, `continue`) leaves the open statements
@@ -254,7 +259,7 @@ pub enum Leave {
 /// ends all of it. A frame exit (`frame`: `return`, `?`) ends everything up to the last
 /// statement it leaves, so a drop after it cannot read a local or temporary that its normal
 /// end would have ended first; the scopes after that statement (the fn body's block, the
-/// params) end with the frame.
+/// params) and [`Leave::Outside`] end with the frame.
 pub fn exit_order(
     opened: &[usize],
     stmts: usize,
@@ -275,6 +280,7 @@ pub fn exit_order(
         i -= 1;
         out.push((Leave::Stmt(i), true));
     }
+    out.push((Leave::Outside, true));
     if frame {
         let last = out.iter().rposition(|x| matches!(x.0, Leave::Stmt(_))).map_or(0, |k| k + 1);
         for x in &mut out[last..] {
@@ -716,21 +722,30 @@ mod tests {
 
     #[test]
     fn an_exit_leaves_innermost_first() {
-        use Leave::{Scope, Stmt};
+        use Leave::{Outside, Scope, Stmt};
         let leaves = |v: Vec<(Leave, bool)>| v.into_iter().map(|x| x.0).collect::<Vec<_>>();
         // fn scope 0, body block 1: `match` statement 0 in the block, arm block 2 with
         // statement 1 (`if`), its block 3 with statement 2 (`return`)
         let opened = [2, 3, 4];
         let ret = exit_order(&opened, 0, 0, 4, true);
-        assert_eq!(leaves(ret.clone()), [Stmt(2), Scope(3), Stmt(1), Scope(2), Stmt(0), Scope(1), Scope(0)]);
+        assert_eq!(
+            leaves(ret.clone()),
+            [Stmt(2), Scope(3), Stmt(1), Scope(2), Stmt(0), Scope(1), Scope(0), Outside]
+        );
         // a `return` ends all but the body's block and the params: the frame ends them
-        assert_eq!(ret.iter().map(|x| x.1).collect::<Vec<_>>(), [true, true, true, true, true, false, false]);
+        assert_eq!(
+            ret.iter().map(|x| x.1).collect::<Vec<_>>(),
+            [true, true, true, true, true, false, false, false]
+        );
         // a loop body opened at depth 2 inside statement 0: `break` leaves scopes 2.. and the
         // statements opened in them, and ends all of them
         let brk = exit_order(&opened, 1, 2, 4, false);
-        assert_eq!(brk, [(Stmt(2), true), (Scope(3), true), (Stmt(1), true), (Scope(2), true)]);
+        assert_eq!(
+            brk,
+            [(Stmt(2), true), (Scope(3), true), (Stmt(1), true), (Scope(2), true), (Outside, true)]
+        );
         // statements opened outside every scope left are left after them
-        assert_eq!(leaves(exit_order(&[1, 1], 0, 1, 2, false)), [Scope(1), Stmt(1), Stmt(0)]);
+        assert_eq!(leaves(exit_order(&[1, 1], 0, 1, 2, false)), [Scope(1), Stmt(1), Stmt(0), Outside]);
     }
 
     #[test]

@@ -1353,12 +1353,12 @@ impl<'a, 'b> Builder<'a, 'b> {
                     self.exit_temps(from, to, end, at, point);
                 }
                 Leave::Scope(s) => self.exit_scope(s, end, at, point),
+                Leave::Outside => {
+                    let to = self.stmts.get(first).map(|o| o.mark);
+                    self.exit_temps(temps, to, end, at, point);
+                }
             }
         }
-        // temporaries made outside every statement left (none: each belongs to the statement
-        // whose end ends it) would end last
-        let to = self.stmts.get(first).map(|o| o.mark);
-        self.exit_temps(temps, to, dead, at, point);
     }
 
     /// How an E0501 fix names statement `s` (a choice of its `before` hole): by the keyword
