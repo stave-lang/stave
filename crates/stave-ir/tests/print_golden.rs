@@ -19,7 +19,7 @@ fn check(m: &mut Module, name: &str) {
     if let Err(e) = verify_module(m) {
         panic!("verify: {e:#?}");
     }
-    let got = print_checked(m);
+    let got = print_checked(m).unwrap();
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/print_golden")
         .join(format!("{name}.ir"));
@@ -58,7 +58,7 @@ fn contract_example() {
     .unwrap();
     let start = doc.find("```\nstave.ir 4 ").expect("the contract example") + 4;
     let example = &doc[start..start + doc[start..].find("```").unwrap()];
-    assert_eq!(print_checked(&m), example);
+    assert_eq!(print_checked(&m).unwrap(), example);
     assert_eq!(ret_val(run(&m, f, vec![Val::S(3), Val::S(9)])), Val::S(9));
 }
 

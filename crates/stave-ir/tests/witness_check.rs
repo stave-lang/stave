@@ -555,6 +555,10 @@ fn field_fixture(behind: Behind, getter: Option<u32>) -> (Module, FuncId, [Value
         Behind::NoCell => None,
         Behind::Shared | Behind::Mut => Some(DeclId(8)),
     };
+    record_decl(&mut m, sd, stave_ir::types::AdtKind::Struct, "app.S");
+    if let Some(c) = m.cell {
+        record_decl(&mut m, c, stave_ir::types::AdtKind::Struct, "std.cell.UnsafeCell");
+    }
     let ps = m.types.ref_(behind == Behind::Mut, st);
     let pf = m.types.ref_(behind == Behind::Mut, us);
     let sl = m.types.slice(u32t);

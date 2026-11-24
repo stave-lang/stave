@@ -318,6 +318,7 @@ fn aggregate_typing_errors() {
     let arr = m.types.array(i32t, 2);
     let e =
         m.types.adt(stave_ir::DeclId(1), vec![], stave_ir::AdtShape::enumeration(vec![vec![], vec![i32t]]));
+    record_decl(&mut m, stave_ir::DeclId(1), stave_ir::types::AdtKind::Enum, "t.E");
     define(&mut m, &[0], "t.f", &[pair, arr, e], None, |b, _| {
         let ps = b.params().to_vec();
         let k = b.int(1);
@@ -424,6 +425,7 @@ fn bad_type_table() {
 fn infinite_struct_is_a_layout_error() {
     let mut m = Module::new();
     let s = m.types.intern(TypeKey::Adt { def: stave_ir::DeclId(1), args: vec![] });
+    record_decl(&mut m, stave_ir::DeclId(1), stave_ir::types::AdtKind::Struct, "t.S");
     m.types.set_shape(s, stave_ir::AdtShape::structure(vec![s]));
     let ps = m.types.ref_(true, s);
     let f = define(&mut m, &[0], "t.f", &[], None, |b, _| {

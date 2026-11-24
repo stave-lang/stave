@@ -32,6 +32,7 @@ fn mk(w: u8, n: u8) -> TypeKey {
     TypeKey::Mask { width: w, n: Lanes::Fixed(n) }
 }
 fn option(m: &mut Module, t: TypeId) -> TypeId {
+    record_decl(m, DeclId(0), stave_ir::types::AdtKind::Enum, "t.Option");
     m.types.adt(DeclId(0), vec![GenericArg::Type(t)], AdtShape::enumeration(vec![vec![], vec![t]]))
 }
 
@@ -1240,7 +1241,7 @@ fn printed_as_ops() {
         b.ret(Some(r.into()));
     });
     m.canonicalize_types().unwrap();
-    let text = stave_ir::print_checked(&m);
+    let text = stave_ir::print_checked(&m).unwrap();
     assert!(text.contains("= vec.lt t"), "{text}");
     assert!(text.contains("= mask.select t"), "{text}");
     assert!(!text.contains("intrinsic."), "{text}");

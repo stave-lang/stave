@@ -117,6 +117,11 @@ decl path. The kind of a decl equals that of the shapes of its `adt` types.
 
 **type.** Every type of the module, by id; no two lines have equal keys. The key's components
 name `type` lines and never form a cycle (a recursive ADT recurses only through its shape).
+The module is monomorphized: no type is a generic parameter, which has no key text. The IR
+verifier refuses a module with one, or with an `adt` key or `cell` whose decl the module does not
+record, a recorded decl nothing names, or a shape of another kind than its decl; the printer
+refuses every module whose text a reader would refuse in steps 1 and 2 of "Loading" (an id that
+names no line, one of these keys), so it prints no line that cannot load.
 
 **shape.** The monomorphized shape of an `adt` type: `struct` and its field types in field
 order, or `enum` and one `|` group per variant in variant index order, each holding the

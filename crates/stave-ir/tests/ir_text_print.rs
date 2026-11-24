@@ -316,7 +316,7 @@ const InstanceIdU: u32 = stave_ir::InstanceId::UNCHECKED_ENTRY;
 
 fn emit_form() -> String {
     let (m, stack) = sink();
-    print_module(&m, &header(Level::Checked), Some(&stack))
+    print_module(&m, &header(Level::Checked), Some(&stack)).unwrap()
 }
 
 #[test]
@@ -472,8 +472,8 @@ fn every_production_of_the_grammar_is_printed() {
     let lowered = {
         let (m, stack) = sink();
         let h = Header { target: Triple::X86_64(X86Level::V2), mode: Mode::Release, level: Level::Opt };
-        let l = print_module(&m, &Header { level: Level::Lowered, ..header(Level::Lowered) }, None);
-        let o = print_module(&m, &h, Some(&stack));
+        let l = print_module(&m, &Header { level: Level::Lowered, ..header(Level::Lowered) }, None).unwrap();
+        let o = print_module(&m, &h, Some(&stack)).unwrap();
         format!("{l}{o}")
     };
     let all = format!("{text}{lowered}");
@@ -614,7 +614,7 @@ fn every_op_of_the_grammar_prints_in_its_group_shape() {
     }
     b.ret(Some(ps[0]));
     m.define(f, b.finish().unwrap());
-    let text = print_module(&m, &header(Level::Checked), None);
+    let text = print_module(&m, &header(Level::Checked), None).unwrap();
     let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("  ") && !l.starts_with("  ret")).collect();
     assert_eq!(lines.len(), want.len());
     let mut next = 4usize;
@@ -651,7 +651,7 @@ fn keyword_lists_equal_the_code() {
         let mut m = Module::new();
         let d = m.declare(inst(&[0]), "a.f", vec![], None);
         m.func_mut(d).unwrap().features = FeatureSet::of(f);
-        let text = print_module(&m, &header(Level::Checked), None);
+        let text = print_module(&m, &header(Level::Checked), None).unwrap();
         let line = text.lines().find(|l| l.starts_with("fn ")).unwrap().to_string();
         let inner = line.split("needs(").nth(1).unwrap().split(')').next().unwrap().to_string();
         assert!(inner.split(", ").any(|x| x == f.name()), "{line}");
@@ -668,7 +668,7 @@ fn keyword_lists_equal_the_code() {
         "gpu-sm86",
     ]) {
         let h = Header { target: *t, mode: Mode::Release, level: Level::Opt };
-        let text = print_module(&Module::new(), &h, None);
+        let text = print_module(&Module::new(), &h, None).unwrap();
         assert_eq!(text, format!("stave.ir 4 \"{name}\" release opt\n"));
     }
     assert_eq!(terminals("Mode"), ["debug", "release"]);
@@ -709,8 +709,8 @@ fn text_discipline() {
 fn the_gate_form_is_the_emit_form_without_the_stack_lines() {
     let (m, stack) = sink();
     let h = header(Level::Checked);
-    let emit = print_module(&m, &h, Some(&stack));
-    let gate = print_module(&m, &h, None);
+    let emit = print_module(&m, &h, Some(&stack)).unwrap();
+    let gate = print_module(&m, &h, None).unwrap();
     let is_stack = |l: &str| {
         l == "truncated" || ["runstack ", "node ", "edge ", "nodes "].iter().any(|p| l.starts_with(p))
     };
@@ -722,8 +722,8 @@ fn the_gate_form_is_the_emit_form_without_the_stack_lines() {
 #[test]
 fn lowered_prints_no_claims_and_levels_differ_in_the_header_only() {
     let (m, _) = sink();
-    let checked = print_module(&m, &header(Level::Checked), None);
-    let lowered = print_module(&m, &header(Level::Lowered), None);
+    let checked = print_module(&m, &header(Level::Checked), None).unwrap();
+    let lowered = print_module(&m, &header(Level::Lowered), None).unwrap();
     assert!(checked.contains("claim @1 "));
     assert!(!lowered.contains("claim "));
     let strip = |t: &str| -> String {
@@ -743,9 +743,9 @@ fn lowered_prints_no_claims_and_levels_differ_in_the_header_only() {
 fn print_is_a_function_of_the_module() {
     let (m, stack) = sink();
     let h = header(Level::Checked);
-    let a = print_module(&m, &h, Some(&stack));
-    assert_eq!(a, print_module(&m, &h, Some(&stack)));
-    assert_eq!(a, print_module(&m.clone(), &h, Some(&stack)));
+    let a = print_module(&m, &h, Some(&stack)).unwrap();
+    assert_eq!(a, print_module(&m, &h, Some(&stack)).unwrap());
+    assert_eq!(a, print_module(&m.clone(), &h, Some(&stack)).unwrap());
     assert!(canon::is_canonical(&m));
 }
 
@@ -788,15 +788,16 @@ fn a_module_that_is_not_canonical_prints_as_its_canonical_form() {
     let (b, bstack) = build(true);
     assert!(!canon::is_canonical(&a), "an unreachable block");
     assert!(!canon::is_canonical(&b));
-    let ta = print_module(&a, &h, Some(&astack));
-    assert_eq!(ta, print_module(&b, &h, Some(&bstack)));
+    let ta = print_module(&a, &h, Some(&astack)).unwrap();
+    assert_eq!(ta, print_module(&b, &h, Some(&bstack)).unwrap());
     assert!(ta.contains("main @1\n") && ta.contains("nodes @1 0\nnodes @5 1\n"), "{ta}");
     assert!(!ta.contains("b1():"), "the unreachable block is dropped: {ta}");
 }
 
-/// An id that names nothing prints so that no reader accepts it, and never panics.
+/// A module the verifier refuses is not printed: an id that names nothing, a decl that is
+/// missing, a generic parameter key, a site past the table. Never a panic.
 #[test]
-fn malformed_ids_print_without_panicking() {
+fn a_module_the_verifier_refuses_is_not_printed() {
     let mut m = Module::new();
     let t0 = m.types.i32();
     let f = m.declare(inst(&[0]), "app.f", vec![t0], Some(t0));
@@ -806,8 +807,41 @@ fn malformed_ids_print_without_panicking() {
     b.ret(Some(v.into()));
     m.define(f, b.finish().unwrap());
     m.main = Some(FuncId(9));
-    let text = print_module(&m, &header(Level::Checked), None);
-    assert!(text.contains("@?"), "{text}");
-    assert!(!text.contains("main @"));
+    let refused = |m: &Module| print_module(m, &header(Level::Checked), None).unwrap_err();
+    let es = refused(&m);
+    assert!(es.iter().any(|e| e.msg.contains("main: fn #9 out of range")), "{es:?}");
+    assert!(es.iter().any(|e| e.msg.contains("out of range")), "{es:?}");
     let _ = (StrId(0), Block(0));
+
+    let ok = |extra: &dyn Fn(&mut Module)| {
+        let mut m = Module::new();
+        let t0 = m.types.i32();
+        let f = m.declare(inst(&[0]), "app.f", vec![t0], Some(t0));
+        let mut b = FuncBuilder::new(&[t0]);
+        let x = b.param(0).unwrap();
+        b.ret(Some(x.into()));
+        m.define(f, b.finish().unwrap());
+        extra(&mut m);
+        m
+    };
+    assert!(print_module(&ok(&|_| {}), &header(Level::Checked), None).is_ok());
+    let no_decl = ok(&|m| {
+        let t = m.types.adt(DeclId(3), vec![], AdtShape::structure(vec![]));
+        m.declare(inst(&[1]), "app.g", vec![t], None);
+    });
+    let es = refused(&no_decl);
+    assert!(es.iter().any(|e| e.msg.contains("adt d3 has no decl")), "{es:?}");
+    let param = ok(&|m| {
+        let t = m.types.intern(TypeKey::Param(0));
+        m.declare(inst(&[1]), "app.g", vec![t], None);
+    });
+    let es = refused(&param);
+    assert!(es.iter().any(|e| e.msg.contains("a generic parameter in a monomorphized module")), "{es:?}");
+    let site = ok(&|m| m.funcs[0].name_site = Site(4));
+    let es = refused(&site);
+    assert!(es.iter().any(|e| e.msg.contains("name site 4 out of range")), "{es:?}");
+    let unnamed =
+        ok(&|m| m.decls.push(DeclInfo { id: DeclId(5), kind: AdtKind::Struct, path: "app.S".into() }));
+    let es = refused(&unnamed);
+    assert!(es.iter().any(|e| e.msg.contains("decl d5: no type or `cell` names it")), "{es:?}");
 }

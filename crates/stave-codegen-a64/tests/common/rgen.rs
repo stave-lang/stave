@@ -616,6 +616,8 @@ fn program_shaped(seed: u64, nf: Option<usize>, stress: bool) -> Prog {
     tys.push(t.str_ref);
     let mut opts = Vec::new();
     for (k, &a) in scalars.iter().enumerate() {
+        let d = stave_ir::DeclId(20_000 + k as u32);
+        p.m.record_decl(d, stave_ir::types::AdtKind::Enum, format!("t.Opt{k}"));
         let o = p.m.types.adt(
             stave_ir::DeclId(20_000 + k as u32),
             vec![],

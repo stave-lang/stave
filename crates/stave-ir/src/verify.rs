@@ -74,11 +74,63 @@ pub fn verify_types(m: &Module) -> Result<Vec<VerifyError>, Vec<VerifyError>> {
             }
         }
     }
+    errs.extend(module_faults(m).into_iter().map(module_err));
     errs.extend(verify_static_refs(m).into_iter().map(module_err));
     if types_ok {
         errs.extend(verify_static_layout(m).into_iter().map(module_err));
     }
     if types_ok { Ok(errs) } else { Err(errs) }
+}
+
+/// The keys the text can spell and the decls they name: no generic parameter (the module is
+/// monomorphized), every `adt` key's decl and `cell` in `decls`, `decls` ascending by id with
+/// none that no key or `cell` names, and an ADT shape of its decl's kind; `main` names a fn. The
+/// printer refuses a module with any of these too: its text would not load.
+pub(crate) fn module_faults(m: &Module) -> Vec<String> {
+    let mut errs = Vec::new();
+    if let Some(f) = m.main.filter(|f| f.index() >= m.funcs.len()) {
+        errs.push(format!("main: fn #{} out of range", f.0));
+    }
+    if !m.decls.windows(2).all(|w| w[0].id < w[1].id) {
+        errs.push("decls: not ascending by id, or an id twice".to_string());
+    }
+    let decl = |d: crate::types::DeclId| m.decls.binary_search_by_key(&d, |x| x.id).ok().map(|k| &m.decls[k]);
+    let mut named = vec![false; m.decls.len()];
+    let mut name = |d: crate::types::DeclId| {
+        if let Ok(k) = m.decls.binary_search_by_key(&d, |x| x.id) {
+            named[k] = true;
+        }
+    };
+    for (i, k) in m.types.keys().iter().enumerate() {
+        match k {
+            TypeKey::Param(_) | TypeKey::ConstParam(_) => {
+                errs.push(format!("t{i}: a generic parameter in a monomorphized module"));
+            }
+            TypeKey::Adt { def, .. } => {
+                name(*def);
+                match (decl(*def), m.types.shape(TypeId(i as u32))) {
+                    (None, _) => errs.push(format!("t{i}: adt d{} has no decl", def.0)),
+                    (Some(d), Some(s)) if s.kind != d.kind => {
+                        errs.push(format!("t{i}: a {:?} shape of {:?} decl d{}", s.kind, d.kind, def.0));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(c) = m.cell {
+        name(c);
+        if decl(c).is_none() {
+            errs.push(format!("cell: d{} has no decl", c.0));
+        }
+    }
+    for (k, d) in m.decls.iter().enumerate() {
+        if !named[k] {
+            errs.push(format!("decl d{}: no type or `cell` names it", d.id.0));
+        }
+    }
+    errs
 }
 
 /// Every static's `init` holds exactly its type's size, and a static with address words has a

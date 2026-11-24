@@ -4,8 +4,9 @@
 //! The output is a function of the module, header and stack section alone: every
 //! table is walked by index, none by hash order. A module that is not canonical
 //! ([`crate::canon`]) is canonicalized (a copy) first, so the text is the canonical module's.
-//! Malformed input still prints without panicking: an id that names nothing prints as `%?`,
-//! `b?`, `@?`, or `?`, which no reader accepts.
+//! A module whose text would not load in the reader's first two steps is refused
+//! ([`super::spell`]): every printed id names a line, every key has a spelling (no generic
+//! parameter, every `adt` key's decl recorded).
 
 use std::fmt::Write as _;
 
@@ -13,11 +14,25 @@ use super::{Header, StackInput, VERSION};
 use crate::canon;
 use crate::ir::{Body, Const, DataTarget, Func, Module, Op, Operand, Site, Target, Term};
 use crate::types::{GenericArg, TypeId, feature_generators};
+use crate::verify::VerifyError;
 use crate::witness::{NO_BLOCK, Row, Summary, Term as RowTerm};
 
 /// The text of `m` (checked-ir.md): the gate form, or with `stack` the emit form, which is the
-/// gate form plus the stack section.
-pub fn print_module(m: &Module, header: &Header, stack: Option<&StackInput>) -> String {
+/// gate form plus the stack section. A module whose text would not load is not printed: its
+/// faults ([`super::spell`]).
+pub fn print_module(
+    m: &Module,
+    header: &Header,
+    stack: Option<&StackInput>,
+) -> Result<String, Vec<VerifyError>> {
+    let errs = super::spell::faults(m, stack);
+    if !errs.is_empty() {
+        return Err(errs);
+    }
+    Ok(print_verified(m, header, stack))
+}
+
+fn print_verified(m: &Module, header: &Header, stack: Option<&StackInput>) -> String {
     if canon::is_canonical(m) {
         return Printer::new(m, header).print(stack);
     }
@@ -33,7 +48,7 @@ pub fn print_module(m: &Module, header: &Header, stack: Option<&StackInput>) -> 
 
 /// The checked-level text of a bare module, for callers that have only a module: header
 /// `x86_64-linux-v2 debug checked`, no stack section.
-pub fn print_checked(m: &Module) -> String {
+pub fn print_checked(m: &Module) -> Result<String, Vec<VerifyError>> {
     use super::{Level, Mode};
     use stave_target::{Triple, X86Level};
     let header = Header { target: Triple::X86_64(X86Level::V2), mode: Mode::Debug, level: Level::Checked };

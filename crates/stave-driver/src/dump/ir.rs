@@ -41,18 +41,21 @@ pub fn text(level: Level, out: &Output, emit: bool) -> Result<String, DumpError>
     }
     let header = Header { target: out.program.target, mode: mode(out), level };
     let stack = (emit && level == Level::Checked).then(|| stack_input(out)).flatten();
+    let print = |m: &stave_ir::Module, stack: Option<&StackInput>| {
+        stave_ir::print_module(m, &header, stack).map_err(|es| {
+            let first = es.first().map_or_else(String::new, ToString::to_string);
+            DumpError::Internal(format!("IR verifier: {first}"))
+        })
+    };
     match (level, &out.module) {
-        (Level::Lowered, Some(_)) => {
-            let m = out.lowered.as_ref().ok_or(DumpError::NotRun(stage))?;
-            Ok(stave_ir::print_module(m, &header, None))
-        }
-        (Level::Checked, Some(m)) => Ok(stave_ir::print_module(m, &header, stack.as_ref())),
+        (Level::Lowered, Some(_)) => print(out.lowered.as_ref().ok_or(DumpError::NotRun(stage))?, None),
+        (Level::Checked, Some(m)) => print(m, stack.as_ref()),
         (Level::Opt, Some(m)) => {
             if !out.release {
                 return Err(DumpError::NotRun(stage));
             }
             let m = crate::build::release_passes(m).map_err(|f| DumpError::Internal(f.to_string()))?;
-            Ok(stave_ir::print_module(&m, &header, None))
+            print(&m, None)
         }
         _ => Err(DumpError::NotRun(stage)),
     }

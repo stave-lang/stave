@@ -961,6 +961,19 @@ impl Module {
         self.func(f).is_some_and(|x| x.known == Some(k))
     }
 
+    /// Records declaration `id` in [`Module::decls`] (ascending, once; an id already there is
+    /// kept): every decl an `adt` key or `cell` names must be recorded.
+    pub fn record_decl(
+        &mut self,
+        id: crate::types::DeclId,
+        kind: crate::types::AdtKind,
+        path: impl Into<String>,
+    ) {
+        if let Err(k) = self.decls.binary_search_by_key(&id, |d| d.id) {
+            self.decls.insert(k, crate::types::DeclInfo { id, kind, path: path.into() });
+        }
+    }
+
     pub fn add_string(&mut self, bytes: impl Into<Vec<u8>>) -> StrId {
         self.strings.push(bytes.into());
         StrId(self.strings.len() as u32 - 1)
