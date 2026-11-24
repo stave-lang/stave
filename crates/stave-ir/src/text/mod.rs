@@ -151,9 +151,8 @@ pub struct LineMap {
 #[derive(Clone, Debug)]
 pub struct Loaded {
     pub header: Header,
+    /// The module; its `main` line is [`Module::main`].
     pub module: Module,
-    /// The program's `fn main` (`None`: a library).
-    pub main: Option<FuncId>,
     /// The stack section (`None`: the text has none).
     pub stack: Option<StackInput>,
     pub lines: LineMap,
@@ -237,7 +236,7 @@ fn verify_err(line: u32, msg: impl Into<String>) -> ReadError {
 /// Step 3, first part: the type table is well formed, then each static gets its bytes (its type's
 /// size, zero but where `data` lines say otherwise) and its address words.
 fn lay_out_statics(b: build::Built) -> Result<Loaded, Vec<ReadError>> {
-    let build::Built { header, mut module, statics, main, stack, lines } = b;
+    let build::Built { header, mut module, statics, stack, lines } = b;
     if let Err(e) = module.types.check_well_formed() {
         let (t, msg) = match e {
             CanonError::BadComponent { ty, component } => {
@@ -273,7 +272,7 @@ fn lay_out_statics(b: build::Built) -> Result<Loaded, Vec<ReadError>> {
     if !errs.is_empty() {
         return Err(errs);
     }
-    Ok(Loaded { header, module, main, stack, lines })
+    Ok(Loaded { header, module, stack, lines })
 }
 
 /// The `data` bytes of static `i` lie inside its type's size (checked-ir.md "Loading" step 2,

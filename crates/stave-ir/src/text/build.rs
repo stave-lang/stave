@@ -40,7 +40,6 @@ pub(crate) struct Built {
     pub header: Header,
     pub module: Module,
     pub statics: Vec<StaticG>,
-    pub main: Option<FuncId>,
     pub stack: Option<StackInput>,
     pub lines: LineMap,
 }
@@ -627,6 +626,7 @@ pub(crate) fn structure(lines: Vec<Ln>) -> Result<Built, Vec<ReadError>> {
     module.intrinsics = intrinsics;
     module.stated = stated;
     module.cell = cell.map(|c| c.1);
+    module.main = main;
     module.decls = decls.into_iter().map(|d| d.2).collect();
     map.statics = statics.iter().map(|s| s.line).collect();
     let stack = stack_lines.then(|| StackInput {
@@ -636,7 +636,7 @@ pub(crate) fn structure(lines: Vec<Ln>) -> Result<Built, Vec<ReadError>> {
         edges,
         nodes_of_func,
     });
-    Ok(Built { header, module, statics, main, stack, lines: map })
+    Ok(Built { header, module, statics, stack, lines: map })
 }
 
 /// The compiler-known item whose path is `path`.

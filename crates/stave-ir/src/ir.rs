@@ -816,6 +816,9 @@ pub struct Module {
     /// call is no longer provable from the bodies alone once the callee's own checks are gone:
     /// the bounds audit reads calls with these rows.
     pub stated: Vec<Option<std::sync::Arc<crate::witness::Summary>>>,
+    /// The program's entry, the fn `main` of its root module (`None`: a library, or a module
+    /// with no entry). The text's `main` line; code generation makes it `__stave_main`.
+    pub main: Option<FuncId>,
     /// The declaration of `std.cell.UnsafeCell` (`None`: the program has none, or it is
     /// unknown): the bytes of a value of such a type are not read-only behind a `&`. The
     /// bounds pass reads a field behind a `&` parameter as one value only when this is known.

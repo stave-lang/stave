@@ -60,6 +60,7 @@ fn reversed(m: &Module) -> Module {
     let remap: Vec<FuncId> = (0..n).map(|i| FuncId((n - 1 - i) as u32)).collect();
     let mut p = m.clone();
     p.funcs.reverse();
+    p.main = m.main.map(|g| remap[g.index()]);
     for f in &mut p.funcs {
         for o in f.body.iter_mut().flat_map(|b| &mut b.operands) {
             if let Operand::Func(g) = o {

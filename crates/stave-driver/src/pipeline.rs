@@ -38,7 +38,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use stave_diag::{Diagnostic, Severity, SourceFiles};
-use stave_ir::{FuncId, Module};
+use stave_ir::Module;
 use stave_obj::ObjectImage;
 use stave_sema::{DeclKind, Mode, Program, Typeck};
 use stave_target::Triple;
@@ -332,8 +332,6 @@ pub struct Output {
     /// The bounds checks [`Output::module`] no longer has, per function: the witness the
     /// checker accepted and the rule behind each row.
     pub removed_checks: Vec<stave_ir::bounds::Proved>,
-    /// The checked-IR function of the root package's `main`, if any.
-    pub main: Option<FuncId>,
     /// The executable ([`Goal::Build`] without errors).
     pub image: Option<ObjectImage>,
     /// The stack bound of the executable ([`crate::stack`]).
@@ -522,7 +520,6 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
             release: opts.release,
             tracked: None,
             removed_checks: Vec::new(),
-            main: None,
             image: None,
             stack: None,
             failure: None,
@@ -548,7 +545,6 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
             release: opts.release,
             tracked: None,
             removed_checks: Vec::new(),
-            main: None,
             image: None,
             stack: None,
             failure: Some(Failure::Unsupported { stage: Stage::Typeck, message: what }),
@@ -646,7 +642,6 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         release: opts.release,
         tracked: None,
         removed_checks: Vec::new(),
-        main: None,
         image: None,
         stack: None,
         failure,
@@ -686,8 +681,6 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
             return out;
         }
     };
-    out.main = build::main_path(&out.program).and_then(|p| module.find_func(&p));
-    prof::mark("find-main");
     if opts.tracked
         && !opts.borrow_marks
         && let Some(tc) = &out.typeck
@@ -703,10 +696,9 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     if opts.goal == Goal::Build {
         // ---- codegen + link.
         let triple = opts.target.or_else(Triple::host);
-        match (triple, out.main) {
-            (None, _) => out.failure = Some(Failure::NoHostTarget),
-            (Some(_), None) => out.failure = Some(Failure::NoMain),
-            (Some(t), Some(main)) => {
+        match triple {
+            None => out.failure = Some(Failure::NoHostTarget),
+            Some(t) => {
                 let run_stack = out.program.packages.iter().find(|p| p.is_root).and_then(|p| p.run_stack);
                 let built = match &out.typeck {
                     Some(tc) => {
@@ -715,9 +707,9 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
                             nodes_of_func: &nodes_of_func,
                             run_stack,
                         };
-                        build::codegen_link(&module, main, t, opts.release, opts.threads, Some(&input))
+                        build::codegen_link(&module, t, opts.release, opts.threads, Some(&input))
                     }
-                    None => build::codegen_link(&module, main, t, opts.release, opts.threads, None),
+                    None => build::codegen_link(&module, t, opts.release, opts.threads, None),
                 };
                 match built {
                     Ok(b) => {

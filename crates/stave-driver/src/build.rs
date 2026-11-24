@@ -160,6 +160,7 @@ pub fn lower_keeping(
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");
     let (mut m, mut nodes_of_func) = lowered.map_err(|es| lower_failure(&es))?;
+    m.main = main_path(prog).and_then(|p| m.find_func(&p));
     verified(&m, Stage::Lower)?;
     prof::mark("verify");
     let lowered = keep_lowered.then(|| {
@@ -346,14 +347,14 @@ pub fn image_options(machine: Machine, release: bool) -> stave_obj::Options {
 }
 
 /// Generates code for every function of `m` and links the static executable whose `main` is
-/// `main` (`__stave_main`; contracts/intrinsics.md). With `stack`, the stack table holds the
-/// computed bound; without, it is empty (every stack gets the `[run] stack` default). `m` is
-/// canonical ([`canonical`]), as [`lower`] returns it: the code generators read functions,
-/// blocks and values in id order, so only the canonical numbering makes the image a function of
-/// the module's content. A module whose functions are out of instance order is refused.
+/// [`Module::main`] (`__stave_main`; contracts/intrinsics.md; none: [`Failure::NoMain`]). With
+/// `stack`, the stack table holds the computed bound; without, it is empty (every stack gets the
+/// `[run] stack` default). `m` is canonical ([`canonical`]), as [`lower`] returns it: the code
+/// generators read functions, blocks and values in id order, so only the canonical numbering
+/// makes the image a function of the module's content. A module whose functions are out of
+/// instance order is refused.
 pub fn codegen_link(
     m: &Module,
-    main: FuncId,
     triple: Triple,
     release: bool,
     threads: Option<usize>,
@@ -369,6 +370,7 @@ pub fn codegen_link(
             message: format!("vector code generation (in `{path}`)"),
         });
     }
+    let main = m.main.ok_or(Failure::NoMain)?;
     let funcs = m.funcs.iter().filter(|f| f.body.is_some()).count() as u64;
     if !m.funcs.windows(2).all(|w| w[0].instance <= w[1].instance) {
         let message = "the module is not canonical: functions out of instance order".to_string();

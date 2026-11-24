@@ -82,7 +82,7 @@ fn the_contract_example_loads() {
     assert_eq!(b.insts.result, vec![Some(Value(2))]);
     assert!(matches!(b.blocks[0].term, Term::Cbr { cond: Operand::Value(Value(2)), .. }));
     assert_eq!(b.blocks[1].term, Term::Ret(Some(Operand::Value(Value(0)))));
-    assert!(l.main.is_none() && l.stack.is_none());
+    assert!(l.module.main.is_none() && l.stack.is_none());
     // claims are read at `checked`: one row per fn, none stated
     assert_eq!(m.stated.len(), 1);
     assert!(m.stated[0].is_none());
@@ -246,7 +246,7 @@ fn strings_sites_statics_main_and_cell() {
             DataRef { offset: 8, target: DataTarget::Static(0), addend: 100 },
         ]
     );
-    assert_eq!(l.main, Some(FuncId(0)));
+    assert_eq!(l.module.main, Some(FuncId(0)));
     assert_eq!(m.cell, Some(DeclId(0)));
     assert_eq!(m.funcs[0].name_site, Site(1));
     assert_eq!(l.lines.statics, vec![11, 14]);

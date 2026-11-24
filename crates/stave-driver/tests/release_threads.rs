@@ -41,7 +41,7 @@ fn build(p: &Path, target: Triple, release: bool) -> Output {
     assert!(!out.has_errors(), "{}: diagnostics {:?}", p.display(), out.diagnostics);
     let mode = if release { "release" } else { "debug" };
     assert!(out.failure.is_none(), "{} ({target}, {mode}): {}", p.display(), out.failure.as_ref().unwrap());
-    assert!(out.image.is_some() && out.module.is_some() && out.main.is_some());
+    assert!(out.image.is_some() && out.module.as_ref().is_some_and(|m| m.main.is_some()));
     out
 }
 

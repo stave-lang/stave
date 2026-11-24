@@ -20,9 +20,9 @@ use crate::types::{DeclId, TypeId, TypeKey, TypeTable};
 ///    `41.k` follows `41`, the unchecked entry `41.u` follows the closures of `41`), bodiless
 ///    functions included. Equal instance ids, which a lowered module does not have, keep their
 ///    stored order. Every `Operand::Func` is rewritten.
-/// 2. **Per-function tables** of the module (`stated`, `clauses`) move with their function. A
-///    table that is not empty is first extended to one row per function with the row that a
-///    missing one means (`None`, the default clauses).
+/// 2. **Per-function tables** of the module (`stated`, `clauses`) and `main` move with their
+///    function. A table that is not empty is first extended to one row per function with the
+///    row that a missing one means (`None`, the default clauses).
 /// 3. **Intrinsic names** are the names the bodies use, sorted by bytes, without duplicates.
 /// 4. **Blocks** of a body: those reachable from `b0`, in stored order, numbered densely from 0.
 ///    Unreachable blocks and their instructions are dropped.
@@ -105,6 +105,7 @@ where
         permute_by_func(&mut m.clauses, &remap);
     }
     m.intrinsics = names;
+    m.main = m.main.map(|f| remap.get(f.index()).copied().unwrap_or(FuncId(u32::MAX)));
 
     let maps = Maps { funcs: &remap, intrinsics: &intrinsics };
     each(&mut m.funcs, &|f: &mut Func| {

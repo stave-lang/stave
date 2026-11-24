@@ -44,15 +44,15 @@ pub fn text(level: Level, out: &Output, emit: bool) -> Result<String, DumpError>
     match (level, &out.module) {
         (Level::Lowered, Some(_)) => {
             let m = out.lowered.as_ref().ok_or(DumpError::NotRun(stage))?;
-            Ok(stave_ir::print_module(m, &header, find_main(out, m), None))
+            Ok(stave_ir::print_module(m, &header, None))
         }
-        (Level::Checked, Some(m)) => Ok(stave_ir::print_module(m, &header, out.main, stack.as_ref())),
+        (Level::Checked, Some(m)) => Ok(stave_ir::print_module(m, &header, stack.as_ref())),
         (Level::Opt, Some(m)) => {
             if !out.release {
                 return Err(DumpError::NotRun(stage));
             }
             let m = crate::build::release_passes(m).map_err(|f| DumpError::Internal(f.to_string()))?;
-            Ok(stave_ir::print_module(&m, &header, out.main, None))
+            Ok(stave_ir::print_module(&m, &header, None))
         }
         _ => Err(DumpError::NotRun(stage)),
     }
@@ -60,12 +60,6 @@ pub fn text(level: Level, out: &Output, emit: bool) -> Result<String, DumpError>
 
 fn mode(out: &Output) -> Mode {
     if out.release { Mode::Release } else { Mode::Debug }
-}
-
-/// The entry of the module at level `lowered`: the fn `main` is, by path, as in the checked one.
-fn find_main(out: &Output, m: &stave_ir::Module) -> Option<stave_ir::FuncId> {
-    let path = crate::build::main_path(&out.program)?;
-    m.find_func(&path)
 }
 
 /// The stack section of `out`: the call graph and the run stack of the front end, the nodes each

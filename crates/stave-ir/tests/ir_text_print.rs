@@ -137,8 +137,8 @@ fn row(a: RowTerm, b: RowTerm, w: i128) -> Row {
 }
 
 /// A module that holds every line kind and every operand form the printer has: the kitchen sink.
-/// Returns it with its `main` and its stack section.
-fn sink() -> (Module, FuncId, StackInput) {
+/// Returns it with its stack section.
+fn sink() -> (Module, StackInput) {
     let mut m = Module::new();
     let t = types(&mut m);
     m.decls = vec![
@@ -190,6 +190,7 @@ fn sink() -> (Module, FuncId, StackInput) {
     // @1: `main`, every terminator and operand form.
     let main = m.declare(inst(&[1]), "app.main", vec![t.i32, t.bool], Some(t.i32));
     m.func_mut(main).unwrap().name_site = Site(0);
+    m.main = Some(main);
     let clo = m.declare(inst(&[1, 0]), "app.main", vec![t.i32], Some(t.i32));
     let unchecked = m.declare(inst(&[1, InstanceIdU]), "app.main", vec![t.i32, t.bool], Some(t.i32));
     // @2: a generic instance with needs.
@@ -306,7 +307,7 @@ fn sink() -> (Module, FuncId, StackInput) {
         ],
         nodes_of_func: vec![vec![], vec![0, 1], vec![2], vec![], vec![], vec![], vec![], vec![]],
     };
-    (m, main, stack)
+    (m, stack)
 }
 
 /// The last number of an unchecked entry's instance id.
@@ -314,8 +315,8 @@ fn sink() -> (Module, FuncId, StackInput) {
 const InstanceIdU: u32 = stave_ir::InstanceId::UNCHECKED_ENTRY;
 
 fn emit_form() -> String {
-    let (m, main, stack) = sink();
-    print_module(&m, &header(Level::Checked), Some(main), Some(&stack))
+    let (m, stack) = sink();
+    print_module(&m, &header(Level::Checked), Some(&stack))
 }
 
 #[test]
@@ -469,11 +470,10 @@ const WHERE: &[(&str, &[&str])] = &[
 fn every_production_of_the_grammar_is_printed() {
     let text = emit_form();
     let lowered = {
-        let (m, main, stack) = sink();
+        let (m, stack) = sink();
         let h = Header { target: Triple::X86_64(X86Level::V2), mode: Mode::Release, level: Level::Opt };
-        let l =
-            print_module(&m, &Header { level: Level::Lowered, ..header(Level::Lowered) }, Some(main), None);
-        let o = print_module(&m, &h, Some(main), Some(&stack));
+        let l = print_module(&m, &Header { level: Level::Lowered, ..header(Level::Lowered) }, None);
+        let o = print_module(&m, &h, Some(&stack));
         format!("{l}{o}")
     };
     let all = format!("{text}{lowered}");
@@ -614,7 +614,7 @@ fn every_op_of_the_grammar_prints_in_its_group_shape() {
     }
     b.ret(Some(ps[0]));
     m.define(f, b.finish().unwrap());
-    let text = print_module(&m, &header(Level::Checked), None, None);
+    let text = print_module(&m, &header(Level::Checked), None);
     let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("  ") && !l.starts_with("  ret")).collect();
     assert_eq!(lines.len(), want.len());
     let mut next = 4usize;
@@ -651,7 +651,7 @@ fn keyword_lists_equal_the_code() {
         let mut m = Module::new();
         let d = m.declare(inst(&[0]), "a.f", vec![], None);
         m.func_mut(d).unwrap().features = FeatureSet::of(f);
-        let text = print_module(&m, &header(Level::Checked), None, None);
+        let text = print_module(&m, &header(Level::Checked), None);
         let line = text.lines().find(|l| l.starts_with("fn ")).unwrap().to_string();
         let inner = line.split("needs(").nth(1).unwrap().split(')').next().unwrap().to_string();
         assert!(inner.split(", ").any(|x| x == f.name()), "{line}");
@@ -668,7 +668,7 @@ fn keyword_lists_equal_the_code() {
         "gpu-sm86",
     ]) {
         let h = Header { target: *t, mode: Mode::Release, level: Level::Opt };
-        let text = print_module(&Module::new(), &h, None, None);
+        let text = print_module(&Module::new(), &h, None);
         assert_eq!(text, format!("stave.ir 4 \"{name}\" release opt\n"));
     }
     assert_eq!(terminals("Mode"), ["debug", "release"]);
@@ -707,10 +707,10 @@ fn text_discipline() {
 
 #[test]
 fn the_gate_form_is_the_emit_form_without_the_stack_lines() {
-    let (m, main, stack) = sink();
+    let (m, stack) = sink();
     let h = header(Level::Checked);
-    let emit = print_module(&m, &h, Some(main), Some(&stack));
-    let gate = print_module(&m, &h, Some(main), None);
+    let emit = print_module(&m, &h, Some(&stack));
+    let gate = print_module(&m, &h, None);
     let is_stack = |l: &str| {
         l == "truncated" || ["runstack ", "node ", "edge ", "nodes "].iter().any(|p| l.starts_with(p))
     };
@@ -721,9 +721,9 @@ fn the_gate_form_is_the_emit_form_without_the_stack_lines() {
 
 #[test]
 fn lowered_prints_no_claims_and_levels_differ_in_the_header_only() {
-    let (m, main, _) = sink();
-    let checked = print_module(&m, &header(Level::Checked), Some(main), None);
-    let lowered = print_module(&m, &header(Level::Lowered), Some(main), None);
+    let (m, _) = sink();
+    let checked = print_module(&m, &header(Level::Checked), None);
+    let lowered = print_module(&m, &header(Level::Lowered), None);
     assert!(checked.contains("claim @1 "));
     assert!(!lowered.contains("claim "));
     let strip = |t: &str| -> String {
@@ -741,11 +741,11 @@ fn lowered_prints_no_claims_and_levels_differ_in_the_header_only() {
 /// its canonical form.
 #[test]
 fn print_is_a_function_of_the_module() {
-    let (m, main, stack) = sink();
+    let (m, stack) = sink();
     let h = header(Level::Checked);
-    let a = print_module(&m, &h, Some(main), Some(&stack));
-    assert_eq!(a, print_module(&m, &h, Some(main), Some(&stack)));
-    assert_eq!(a, print_module(&m.clone(), &h, Some(main), Some(&stack)));
+    let a = print_module(&m, &h, Some(&stack));
+    assert_eq!(a, print_module(&m, &h, Some(&stack)));
+    assert_eq!(a, print_module(&m.clone(), &h, Some(&stack)));
     assert!(canon::is_canonical(&m));
 }
 
@@ -753,7 +753,7 @@ fn print_is_a_function_of_the_module() {
 /// canonical form: the entry point and the stack rows follow their functions.
 #[test]
 fn a_module_that_is_not_canonical_prints_as_its_canonical_form() {
-    let build = |swapped: bool| -> (Module, FuncId, StackInput) {
+    let build = |swapped: bool| -> (Module, StackInput) {
         let mut m = Module::new();
         let i32t = m.types.i32();
         let (callee, caller);
@@ -780,15 +780,16 @@ fn a_module_that_is_not_canonical_prints_as_its_canonical_form() {
         nodes_of_func[caller.index()] = vec![0];
         nodes_of_func[callee.index()] = vec![1];
         let stack = StackInput { nodes: vec![false, false], nodes_of_func, ..StackInput::default() };
-        (m, caller, stack)
+        m.main = Some(caller);
+        (m, stack)
     };
     let h = header(Level::Checked);
-    let (a, amain, astack) = build(false);
-    let (b, bmain, bstack) = build(true);
+    let (a, astack) = build(false);
+    let (b, bstack) = build(true);
     assert!(!canon::is_canonical(&a), "an unreachable block");
     assert!(!canon::is_canonical(&b));
-    let ta = print_module(&a, &h, Some(amain), Some(&astack));
-    assert_eq!(ta, print_module(&b, &h, Some(bmain), Some(&bstack)));
+    let ta = print_module(&a, &h, Some(&astack));
+    assert_eq!(ta, print_module(&b, &h, Some(&bstack)));
     assert!(ta.contains("main @1\n") && ta.contains("nodes @1 0\nnodes @5 1\n"), "{ta}");
     assert!(!ta.contains("b1():"), "the unreachable block is dropped: {ta}");
 }
@@ -804,7 +805,8 @@ fn malformed_ids_print_without_panicking() {
     let v = b.op(Op::Add, t0, &[x.into(), Operand::Func(FuncId(77))]);
     b.ret(Some(v.into()));
     m.define(f, b.finish().unwrap());
-    let text = print_module(&m, &header(Level::Checked), Some(FuncId(9)), None);
+    m.main = Some(FuncId(9));
+    let text = print_module(&m, &header(Level::Checked), None);
     assert!(text.contains("@?"), "{text}");
     assert!(!text.contains("main @"));
     let _ = (StrId(0), Block(0));

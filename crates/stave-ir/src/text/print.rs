@@ -1,7 +1,7 @@
 //! The printer of contracts/checked-ir.md: sections in contract order, every line spelled as
 //! `ir-text.ebnf` says, from the canonical module only.
 //!
-//! The output is a function of the module, header, entry point and stack section alone: every
+//! The output is a function of the module, header and stack section alone: every
 //! table is walked by index, none by hash order. A module that is not canonical
 //! ([`crate::canon`]) is canonicalized (a copy) first, so the text is the canonical module's.
 //! Malformed input still prints without panicking: an id that names nothing prints as `%?`,
@@ -11,34 +11,33 @@ use std::fmt::Write as _;
 
 use super::{Header, StackInput, VERSION};
 use crate::canon;
-use crate::ir::{Body, Const, DataTarget, Func, FuncId, Module, Op, Operand, Site, Target, Term};
+use crate::ir::{Body, Const, DataTarget, Func, Module, Op, Operand, Site, Target, Term};
 use crate::types::{GenericArg, TypeId, feature_generators};
 use crate::witness::{NO_BLOCK, Row, Summary, Term as RowTerm};
 
 /// The text of `m` (checked-ir.md): the gate form, or with `stack` the emit form, which is the
-/// gate form plus the stack section. `main` is the program's entry (`None`: a library).
-pub fn print_module(m: &Module, header: &Header, main: Option<FuncId>, stack: Option<&StackInput>) -> String {
+/// gate form plus the stack section.
+pub fn print_module(m: &Module, header: &Header, stack: Option<&StackInput>) -> String {
     if canon::is_canonical(m) {
-        return Printer::new(m, header).print(main, stack);
+        return Printer::new(m, header).print(stack);
     }
     let mut c = m.clone();
     let remap = canon::canonicalize(&mut c);
-    let main = main.and_then(|f| remap.get(f.index()).copied());
     let stack = stack.map(|s| {
         let mut s = s.clone();
         canon::permute_by_func(&mut s.nodes_of_func, &remap);
         s
     });
-    Printer::new(&c, header).print(main, stack.as_ref())
+    Printer::new(&c, header).print(stack.as_ref())
 }
 
 /// The checked-level text of a bare module, for callers that have only a module: header
-/// `x86_64-linux-v2 debug checked`, no entry point, no stack section.
+/// `x86_64-linux-v2 debug checked`, no stack section.
 pub fn print_checked(m: &Module) -> String {
     use super::{Level, Mode};
     use stave_target::{Triple, X86Level};
     let header = Header { target: Triple::X86_64(X86Level::V2), mode: Mode::Debug, level: Level::Checked };
-    print_module(m, &header, None, None)
+    print_module(m, &header, None)
 }
 
 struct Printer<'a> {
@@ -52,7 +51,7 @@ impl<'a> Printer<'a> {
         Printer { m, header, out: String::new() }
     }
 
-    fn print(mut self, main: Option<FuncId>, stack: Option<&StackInput>) -> String {
+    fn print(mut self, stack: Option<&StackInput>) -> String {
         self.header_line();
         self.decls();
         self.types();
@@ -60,7 +59,7 @@ impl<'a> Printer<'a> {
         self.strings();
         self.sites();
         self.statics();
-        if let Some(f) = main.and_then(|f| self.m.func(f)) {
+        if let Some(f) = self.m.main.and_then(|f| self.m.func(f)) {
             let _ = writeln!(self.out, "main @{}", f.instance);
         }
         if let Some(d) = self.m.cell {
