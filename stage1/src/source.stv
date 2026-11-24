@@ -1,0 +1,41 @@
+// The source set: every file's bytes, concatenated in F order. File F is
+// `bytes[file_off[F]..file_off[F + 1]]` (global offsets are u64; offsets inside a file fit a u32
+// or the file is E0002). A file that cannot be read is empty here (stage0's E1003).
+import files;
+import std.io;
+import std.vec;
+
+pub struct SourceSet {
+    pub bytes: vec.Vec<u8>,
+    pub file_off: vec.Vec<u64>,
+    pub read_ok: vec.Vec<bool>,
+}
+
+impl SourceSet {
+    pub fn files(&self) -> usize {
+        return self.read_ok.len();
+    }
+
+    pub fn file(&self, f: usize) -> &[u8] from self {
+        let o = self.file_off.as_slice();
+        let lo = o[f] as usize;
+        let hi = o[f + 1] as usize;
+        return &self.bytes.as_slice()[lo..hi];
+    }
+}
+
+pub fn read_all(fl: &files.FileList) -> SourceSet {
+    let mut s = SourceSet.{ bytes: vec.Vec::<u8>.new(), file_off: vec.Vec::<u64>.new(), read_ok: vec.Vec::<bool>.new() };
+    s.file_off.push(0);
+    for f in 0..fl.abs_path.len() {
+        match io.read_file(fl.abs_path.get_ref(f).as_str()) {
+            Result.Ok(b) => {
+                s.bytes.extend_from_slice(b.as_slice());
+                s.read_ok.push(true);
+            }
+            Result.Err(_) => { s.read_ok.push(false); }
+        }
+        s.file_off.push(s.bytes.len() as u64);
+    }
+    return s;
+}

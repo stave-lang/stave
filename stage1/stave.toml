@@ -1,0 +1,4 @@
+# stage1: the Stave compiler written in Stave, built by stage0. Its modules are every file under
+# `src/`, the generated tables in `src/generated/` included (from contracts/ by the `gen` step).
+name = "stage1"
+kind = "bin"
