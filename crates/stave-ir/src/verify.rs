@@ -243,6 +243,34 @@ pub fn verify_func_body(m: &Module, fid: FuncId) -> Vec<VerifyError> {
     errs
 }
 
+/// The part of verification that needs the target: every `intrinsic.<name>` is built for `arch`
+/// ([`intrinsics::IArch::builds_for`], the rule the front end applies to a declaration). A name
+/// outside the table is [`verify_func_body`]'s error, not this one's.
+pub fn verify_target(m: &Module, arch: stave_target::Arch) -> Vec<VerifyError> {
+    let mut errs = Vec::new();
+    for (k, f) in m.funcs.iter().enumerate() {
+        let Some(b) = &f.body else { continue };
+        for (i, op) in b.insts.op.iter().enumerate() {
+            if let Op::Intrinsic(id) = op
+                && let Some(kind) = m.intrinsic_kind(*id)
+                && !kind.arch().builds_for(arch)
+            {
+                errs.push(VerifyError {
+                    func: Some(FuncId(k as u32)),
+                    block: None,
+                    inst: Some(i as u32),
+                    msg: format!(
+                        "`intrinsic.{}` is not built for the target arch {}",
+                        m.intrinsic_name(*id).unwrap_or("?"),
+                        arch.name()
+                    ),
+                });
+            }
+        }
+    }
+    errs
+}
+
 /// Verifies one function of the module.
 pub fn verify_func(m: &Module, fid: FuncId) -> Result<(), Vec<VerifyError>> {
     let mut errs = Vec::new();

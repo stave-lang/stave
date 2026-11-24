@@ -27,7 +27,7 @@ use crate::bounds;
 use crate::ir::{FuncId, Module};
 use crate::layout::Layouts;
 use crate::types::CanonError;
-use crate::verify::{VerifyError, verify_func_body, verify_types};
+use crate::verify::{VerifyError, verify_func_body, verify_target, verify_types};
 
 /// At most this many errors are reported.
 pub const MAX_ERRORS: usize = 100;
@@ -305,7 +305,8 @@ fn check_data_inside_statics(errs: &mut Vec<ReadError>, i: usize, s: &build::Sta
     }
 }
 
-/// Step 3: the verifier on the type table, shapes and statics, then on every fn.
+/// Step 3: the verifier on the type table, shapes and statics, then on every fn, then against
+/// the header's target.
 fn verify(l: &Loaded) -> Result<(), Vec<ReadError>> {
     let m = &l.module;
     let mut errs: Vec<VerifyError> = match verify_types(m) {
@@ -317,6 +318,9 @@ fn verify(l: &Loaded) -> Result<(), Vec<ReadError>> {
         if errs.len() >= MAX_ERRORS {
             break;
         }
+    }
+    if errs.is_empty() {
+        errs = verify_target(m, l.header.target.arch());
     }
     if errs.is_empty() { Ok(()) } else { Err(errs.iter().map(|e| locate(l, e)).take(MAX_ERRORS).collect()) }
 }

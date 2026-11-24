@@ -1378,3 +1378,39 @@ fn a_type_chain_deeper_than_the_limit_is_an_error() {
     rejects(&src, "verify: t");
     rejects(&src, ": nested deeper than 1000");
 }
+
+/// A text whose header names `target` and whose fns use `xgetbv` (x86-64 only) and
+/// `set_thread_block` (aarch64 only).
+fn arch_text(target: &str) -> String {
+    format!(
+        "stave.ir 4 \"{target}\" debug checked
+type t0 int u 32
+type t1 int u 64
+type t2 int u size
+fn @0 app.x(t0) -> t1 {{
+b0(%0: t0):
+  %1 = intrinsic.xgetbv t1 %0
+  ret %1
+}}
+fn @1 app.a(t2) {{
+b0(%0: t2):
+  intrinsic.set_thread_block () %0
+  ret
+}}
+"
+    )
+}
+
+#[test]
+fn an_intrinsic_of_another_arch_is_an_error_on_x86_64() {
+    let want = "t.ir:12: verify: `intrinsic.set_thread_block` is not built for the target arch x86-64";
+    let es = rejects(&arch_text("x86_64-linux-v2"), want);
+    assert_eq!(es.len(), 1, "{}", render(&es));
+}
+
+#[test]
+fn an_intrinsic_of_another_arch_is_an_error_on_aarch64() {
+    let want = "t.ir:7: verify: `intrinsic.xgetbv` is not built for the target arch AArch64";
+    let es = rejects(&arch_text("aarch64-linux"), want);
+    assert_eq!(es.len(), 1, "{}", render(&es));
+}

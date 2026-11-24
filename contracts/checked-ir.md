@@ -298,9 +298,11 @@ step stops before the next.
    bytes lie inside its type's size), then on every fn with a body (fns in parallel). An error
    prints `FILE:LINE: verify: MSG`, at the line of the instruction, terminator, block, or fn it
    is about: a block error at the block's terminator, except the entry block's params, at its
-   header (a module error: the line of the `type` or `static` it names, else line 1). On loaded
-   text the verifier also requires every `intrinsic.<name>` to be an intrinsic of intrinsics.md
-   with its operand and result types, and a `known` fn to have its item's signature.
+   header (a module error: the line of the `type` or `static` it names, else line 1). The
+   verifier requires every `intrinsic.<name>` to be an intrinsic of intrinsics.md with its
+   operand and result types, and a `known` fn to have its item's signature; against the header,
+   every intrinsic must be built for the target's arch (intrinsics.md, the rule E0704 applies to
+   a declaration).
 4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds
    checks"); it computes the summaries. A contract check that fails whenever reached, and a call
    that fails a `requires` whenever reached, are reported as in step 3 where a build reports them
@@ -309,9 +311,25 @@ step stops before the next.
    `checked` or `opt`) or the computed ones (`lowered`); an unguarded access is reported as in
    step 3.
 
-Loaded `claim` rows are assumptions: the audit trusts them as it trusts the computed summaries,
-and the text holds no proof to check them by. A forged row can let the audit accept an access
-without a check, so building from IR text is a developer path, not a safety boundary.
+After steps 3-5 the loaded module is renumbered canonically and verified again, and at level
+`lowered` the removal of step 4 is followed by the same numbering and verifier, as in a build.
+
+What loading proves depends on the level:
+- Every level: the module is well formed (steps 1-3: types, shapes, statics, signatures,
+  `known` items, intrinsics and their arch, SSA and op typing), and every element access has a
+  `check.bounds` or a proof the audit accepts (step 5).
+- `lowered`: no `claim` line. Step 4 computes the summaries from the bodies; a check is removed
+  only by a proof the witness checker accepts. This is the one level whose memory safety loading
+  establishes.
+- `checked`, `opt`: the `claim` rows are assertions of the text, not facts loading proves; the
+  text holds no proof to check them by. The audit trusts them as it trusts computed summaries: a
+  `pre` row lets an access of the fn go without a check, a `post` row lets a caller's access go
+  without one. So a text at these levels may omit checks by construction, and loading does not
+  establish its memory safety. A claim does nothing else: no step and no later pass (`ir opt`'s
+  release passes, `ir build`, `ir run`) removes a check, retargets a call, or reads a claim to
+  change code; the removal of proven checks runs only at level `lowered`.
+
+Building from `checked` or `opt` text is therefore a developer path, not a safety boundary.
 
 Every failure of steps 1-5 is an error in the input (exit 1), except a witness the witness
 checker refuses in step 4, which is a compiler bug (exit 3).

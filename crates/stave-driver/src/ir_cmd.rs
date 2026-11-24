@@ -2,8 +2,9 @@
 //! runs, as glue over [`stave_ir::text::read`], [`build`] and [`interp`].
 //!
 //! - [`load`]: contracts/checked-ir.md "Loading": the reader (lines, structure, verification,
-//!   audit), then at level `lowered` the removal of proven checks (step 4) and the canonical
-//!   numbering, as after lowering.
+//!   audit), then the canonical numbering and the verifier ([`build::canonical_verified`]), and
+//!   at level `lowered` the removal of proven checks (step 4) by the build's own
+//!   [`build::checked_module`].
 //! - [`fmt`], [`opt`]: the canonical text of the loaded module, or of the release passes' output.
 //! - [`build`]: the image, as `stave build` makes it from the same module.
 //! - [`run`]: the loaded module's `main` in the interpreter.
@@ -83,17 +84,16 @@ pub fn load(file: &str, src: &[u8]) -> Result<LoadedIr, IrError> {
     // The reader keeps the text's type numbering; the module the passes get is canonical. Fns,
     // blocks and instructions keep their places (the reader numbered them canonically), so the
     // line map still locates them.
-    let remap = build::canonical(&mut module);
-    if let Some(s) = &mut stack {
-        stave_ir::canon::permute_by_func(&mut s.nodes_of_func, &remap);
-    }
+    build::canonical_verified(&mut module, stack.as_mut().map(|s| &mut s.nodes_of_func))
+        .map_err(IrError::failure)?;
     let read = module.clone();
     let read_stack = stack.clone();
     if header.level != Level::Lowered {
         return Ok(LoadedIr { file: file.to_string(), header, read, module, read_stack, stack });
     }
     let mut m = module;
-    let r = build::remove_proven_checks(&mut m, true).map_err(IrError::failure)?;
+    let (r, _) = build::checked_module(&mut m, stack.as_mut().map(|s| &mut s.nodes_of_func))
+        .map_err(IrError::failure)?;
     let mut errs = Vec::new();
     let line_of = |f: FuncId, site: Site| -> u32 {
         let body = read.func(f).and_then(|x| x.body.as_ref());
@@ -123,13 +123,6 @@ pub fn load(file: &str, src: &[u8]) -> Result<LoadedIr, IrError> {
     }
     if !errs.is_empty() {
         return Err(IrError::Input(errs));
-    }
-    if let Some(s) = &mut stack {
-        build::extend_nodes(&mut s.nodes_of_func, &r.removal);
-    }
-    let remap = build::canonical(&mut m);
-    if let Some(s) = &mut stack {
-        stave_ir::canon::permute_by_func(&mut s.nodes_of_func, &remap);
     }
     Ok(LoadedIr { file: file.to_string(), header, read, module: m, read_stack, stack })
 }
