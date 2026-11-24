@@ -725,3 +725,215 @@ fn ir_dump_properties() {
         assert!(paths(&rel).is_subset(&paths(&a)), "{case}: release prints a fn debug does not");
     }
 }
+
+/// Stack of the thread [`deep_types_on_a_small_stack`] renders the dumps on: half the default of
+/// the threads `stave build --dump` writes them from.
+const SMALL_STACK: usize = 1 << 20;
+
+/// A chain of distinct types this long in each generated family; [`NEAR`]: a type term just
+/// under the type height limit (1000).
+const CHAIN: usize = 5000;
+const NEAR: usize = 990;
+
+/// Shared by every generated program (`_lib_kinds`): the leaves of the chains, and `W` with an
+/// impl that recurses through its type argument.
+const DEEP_BASE: &str = "struct W<T> { pub a: T }
+trait Area {}
+impl Area for u8 {}
+impl<T: Area> Area for W<T> {}
+fn base(a: u8, b: &u8, c: *const u8, d: (u8, u8), e: [u8; 1], f: W<u8>) {}
+fn main() -> i32 {
+    return 0;
+}
+";
+
+/// Every compared dump stage of `out`, rendered on a thread of [`SMALL_STACK`] bytes.
+fn dumps_on_small_stack(out: &Output) -> Vec<(DumpStage, String)> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(SMALL_STACK)
+            .spawn_scoped(s, || {
+                COMPARED
+                    .iter()
+                    .map(|&st| (st, String::from_utf8(render_to_vec(st, out).unwrap()).unwrap()))
+                    .collect()
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    })
+}
+
+/// `src` after [`DEEP_BASE`], checked against `_lib_kinds`, its dumps rendered on a small stack.
+fn deep_program(name: &str, src: &str) -> (Output, Vec<(DumpStage, String)>) {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("dump_deep");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.stv"));
+    std::fs::write(&path, format!("{DEEP_BASE}{src}")).unwrap();
+    let opts = Options::new(Goal::Check).threads(Some(2));
+    let out = pipeline::run(&path, &golden_std("kinds_"), &opts).unwrap();
+    let dumps = dumps_on_small_stack(&out);
+    (out, dumps)
+}
+
+fn stage(dumps: &[(DumpStage, String)], st: DumpStage) -> &str {
+    &dumps.iter().find(|(s, _)| *s == st).unwrap().1
+}
+
+/// The `kinds` lines with every `t<T>` and `d<D>` number dropped, counted: the lines of two
+/// programs that differ by added decls compare.
+fn kinds_shapes(kinds: &str) -> std::collections::BTreeMap<String, i64> {
+    let mut m = std::collections::BTreeMap::new();
+    for l in kinds.lines() {
+        let mut s = String::with_capacity(l.len());
+        let mut cut = false;
+        let mut prev = ' ';
+        for c in l.chars() {
+            if cut && c.is_ascii_digit() {
+                continue;
+            }
+            cut = (c == 't' || c == 'd') && (prev == ' ' || prev == '[');
+            s.push(c);
+            prev = c;
+        }
+        *m.entry(s).or_insert(0) += 1;
+    }
+    m
+}
+
+/// A chain of [`CHAIN`] structs `{p}0 ..`, each holding the next through `wrap` (`{}` stands
+/// for it), the last `u8`.
+fn chain(p: &str, view: bool, wrap: &str) -> String {
+    let v = if view { "view " } else { "" };
+    (0..CHAIN)
+        .map(|k| {
+            let next = if k + 1 < CHAIN { format!("{p}{}", k + 1) } else { "u8".into() };
+            format!("{v}struct {p}{k} {{ pub a: {} }}\n", wrap.replace("{}", &next))
+        })
+        .collect()
+}
+
+/// The dumps of types nested well past the depth limit (by value, through tuple and array
+/// elements), of chains as long through references and raw pointers, of a term of type
+/// arguments just under the height limit with an impl that recurses through it, and of terms
+/// past the height limit, rendered on a 1 MiB stack: every `kinds` line is the contract's answer
+/// (the flags by the structural rules; `depth over` and `size none` past the limit). The two
+/// conformance programs that walk such types with the shipped std likewise.
+#[test]
+fn deep_types_on_a_small_stack() {
+    let (base_out, base) = deep_program("base", "");
+    assert!(!base_out.has_errors(), "{:?}", base_out.diagnostics);
+    let base_kinds = kinds_shapes(stage(&base, DumpStage::Kinds));
+    let flat = "send,sync,sized,flat,frozen";
+    let sized = |d: usize, s: &str| {
+        if d > 1000 { "depth over size none".to_string() } else { format!("depth {d} size {s}") }
+    };
+    // (name, source, the kinds lines it adds to the base program's): the table holds a struct
+    // that a field names, so not the first of a chain
+    let mut families: Vec<(&str, String, Vec<String>)> = Vec::new();
+    let want =
+        (1..CHAIN).map(|k| format!("t {flat} {}", sized(CHAIN + 1 - k, "1 align 1 fields[0]"))).collect();
+    families.push(("by_value", chain("V", false, "{}"), want));
+    let mut want = Vec::new();
+    for _ in 1..CHAIN {
+        want.push("t view,send,sync,sized,frozen depth 3 size 8 align 8 fields[0]".to_string());
+        want.push("t copy,view,send,sync,sized,frozen depth 2 size 8 align 8".to_string());
+    }
+    families.push(("by_ref", chain("R", true, "&{}"), want));
+    let mut want = Vec::new();
+    for _ in 1..CHAIN {
+        want.push("t sized,frozen depth 3 size 8 align 8 fields[0]".to_string());
+        want.push("t copy,sized,frozen depth 2 size 8 align 8".to_string());
+    }
+    families.push(("by_ptr", chain("P", false, "*const {}"), want));
+    let mut want = Vec::new();
+    for k in 1..CHAIN {
+        let d = 3 + 2 * (CHAIN - 1 - k);
+        let s = CHAIN - k + 1;
+        want.push(format!("t {flat} {}", sized(d, &format!("{s} align 1 fields[0]"))));
+        want.push(format!("t {flat} {}", sized(d + 1, &format!("{} align 1 fields[0 1]", s + 1))));
+    }
+    families.push(("by_tuple", chain("T", false, "(u8, {})"), want));
+    let mut want = Vec::new();
+    for k in 1..CHAIN {
+        let d = 3 + 2 * (CHAIN - 1 - k);
+        want.push(format!("t {flat} {}", sized(d, "1 align 1 fields[0]")));
+        want.push(format!("t {flat} {}", sized(d + 1, "1 align 1")));
+    }
+    families.push(("by_array", chain("A", false, "[{}; 1]"), want));
+    // terms just under the height limit: W<..W<u8>..> (with an impl through the argument),
+    // &..&u8, [..[u8; 1]..; 1], (u8, (u8, .. u8)); their one-level forms are the base's
+    let mut want = Vec::new();
+    for k in 2..=NEAR {
+        want.push(format!("t {flat} depth {} size 1 align 1 fields[0]", k + 1));
+        want.push("apply t d [d]".to_string());
+        want.push(format!("t copy,view,send,sync,sized,frozen depth {} size 8 align 8", k + 1));
+        want.push(format!("t copy,{flat} depth {} size 1 align 1", k + 1));
+        want.push(format!("t copy,{flat} depth {} size {} align 1 fields[0 1]", k + 1, k + 1));
+    }
+    let src = format!(
+        "struct HW {{ pub a: {}u8{} }}\nview struct HR {{ pub a: {}u8 }}\nstruct HA {{ pub a: {}u8{} }}\n\
+         struct HT {{ pub a: {}u8{} }}\n",
+        "W<".repeat(NEAR),
+        ">".repeat(NEAR),
+        "&".repeat(NEAR),
+        "[".repeat(NEAR),
+        "; 1]".repeat(NEAR),
+        "(u8, ".repeat(NEAR),
+        ")".repeat(NEAR),
+    );
+    families.push(("near_limit_terms", src, want));
+
+    for (name, src, want) in families {
+        let (out, dumps) = deep_program(name, &src);
+        let mut got = kinds_shapes(stage(&dumps, DumpStage::Kinds));
+        for (l, n) in &base_kinds {
+            *got.entry(l.clone()).or_insert(0) -= n;
+        }
+        for l in want {
+            *got.entry(l).or_insert(0) -= 1;
+        }
+        got.retain(|_, n| *n != 0);
+        assert!(
+            got.is_empty(),
+            "{name}: kinds lines added to the base program's, less the expected: {got:?}"
+        );
+        let e0005 = out.diagnostics.iter().filter(|d| d.code() == "E0005").count();
+        assert_eq!(out.has_errors(), e0005 > 0, "{name}: {:?}", out.diagnostics.first());
+        assert!(stage(&dumps, DumpStage::Sigs).lines().count() > NEAR, "{name}: sigs");
+    }
+
+    // Terms past the height limit are refused (E0005): the table holds none of them.
+    let tall = format!(
+        "view struct X {{ pub a: {}u8, pub b: {}u8{}, pub c: {}u8{}, pub d: {}u8{} }}\n",
+        "&".repeat(CHAIN),
+        "W<".repeat(CHAIN),
+        ">".repeat(CHAIN),
+        "(u8, ".repeat(CHAIN),
+        ")".repeat(CHAIN),
+        "[".repeat(CHAIN),
+        "; 1]".repeat(CHAIN),
+    );
+    let (out, dumps) = deep_program("tall_terms", &tall);
+    assert!(out.diagnostics.iter().any(|d| d.code() == "E0005"), "tall_terms: {:?}", out.diagnostics.first());
+    let types = |m: &std::collections::BTreeMap<String, i64>| -> i64 {
+        m.iter().filter(|(l, _)| l.starts_with("t ")).map(|(_, n)| n).sum()
+    };
+    let added = types(&kinds_shapes(stage(&dumps, DumpStage::Kinds))) - types(&base_kinds);
+    assert_eq!(added, 0, "tall_terms: no type added");
+
+    // The conformance programs that walk such types, with the shipped std: `&P<u32>` of a
+    // polymorphic recursion past the height limit (its pointee is in no signature), and
+    // `S0 ..= S1101` of a chain of structs `S0 .. S2100` past the depth limit.
+    for (f, n_over) in [("neg_polyrec_walks", 0), ("match_search_limit", 1102)] {
+        let path = repo().join("tests/conformance/types").join(format!("{f}.stv"));
+        let opts = Options::new(Goal::Check).threads(Some(2));
+        let out = pipeline::run(&path, &Library::in_dir(&repo()), &opts).unwrap();
+        let dumps = dumps_on_small_stack(&out);
+        let kinds = stage(&dumps, DumpStage::Kinds);
+        let over: Vec<&str> = kinds.lines().filter(|l| l.contains(" depth over ")).collect();
+        assert_eq!(over.len(), n_over, "{f}: types past the depth limit");
+        let want = format!(" {flat} depth over size none");
+        assert!(over.iter().all(|l| l.ends_with(&want)), "{f}: {:?}", over.first());
+    }
+}
