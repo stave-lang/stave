@@ -1,0 +1,84 @@
+// The item recognizer: does the item's token run derive from `Item` (or `Import`) in the LL(1)
+// grammar? The same stack machine as stage0's parser, without nodes: nonterminal on top and
+// lookahead pick a production from the table, a terminal on top must match the lookahead. A
+// split token (`>>`, `>=`, `>>=`, `&&`) without an entry in a row uses the entry of its first
+// terminal, and a terminal on top may consume that first part and leave the rest as the
+// lookahead. The item's tokens are followed by a virtual EOF, so the item must end exactly at its
+// cut. Items are independent: one machine per item.
+import generated.ll1_table;
+import generated.terminals;
+import std.vec;
+
+const NTERM: usize = terminals.NTERM;
+const T_EOF: u16 = terminals.T_EOF;
+const NT_BIT: u16 = ll1_table.NT_BIT;
+const NT_MASK: u16 = 32767;
+
+pub struct Recognizer {
+    table: vec.Vec<i16>,
+    rhs: vec.Vec<u16>,
+    rhs_off: vec.Vec<u16>,
+    split_first: vec.Vec<i16>,
+    split_rest: vec.Vec<i16>,
+    stack: vec.Vec<u16>,
+}
+
+impl Recognizer {
+    pub fn new() -> Recognizer {
+        let mut table = vec.Vec::<i16>.new();
+        table.extend_from_slice(&ll1_table.TABLE);
+        let mut rhs = vec.Vec::<u16>.new();
+        rhs.extend_from_slice(&ll1_table.PROD_RHS);
+        let mut off = vec.Vec::<u16>.new();
+        off.extend_from_slice(&ll1_table.PROD_OFF);
+        let mut sf = vec.Vec::<i16>.new();
+        sf.extend_from_slice(&terminals.SPLIT_FIRST);
+        let mut sr = vec.Vec::<i16>.new();
+        sr.extend_from_slice(&terminals.SPLIT_REST);
+        return Recognizer.{ table: table, rhs: rhs, rhs_off: off, split_first: sf, split_rest: sr, stack: vec.Vec::<u16>.new() };
+    }
+
+    // The production of nonterminal nt on lookahead c, or -1.
+    fn cell(&self, nt: usize, c: usize) -> i32 {
+        if c >= NTERM { return -1; }
+        let tb = self.table.as_slice();
+        let p = tb[nt * NTERM + c];
+        if p >= 0 { return p as i32; }
+        let f = self.split_first.as_slice()[c];
+        if f < 0 || self.split_rest.as_slice()[c] < 0 { return -1; }
+        return tb[nt * NTERM + (f as% usize)] as i32;
+    }
+
+    // Whether kind[lo..hi] derives from nonterminal `start`.
+    pub fn accepts(&mut self, kind: &[u8], lo: usize, hi: usize, start: u8) -> bool {
+        self.stack.clear();
+        self.stack.push(T_EOF);
+        self.stack.push(NT_BIT | (start as u16));
+        let mut i = lo;
+        let mut cur: usize = if i < hi then kind[i] as usize else T_EOF as usize;
+        while self.stack.len() > 0 {
+            let top = self.stack.len() - 1;
+            let e = self.stack.as_slice()[top];
+            self.stack.truncate(top);
+            if e & NT_BIT != 0 {
+                let p = self.cell((e & NT_MASK) as usize, cur);
+                if p < 0 { return false; }
+                let a = self.rhs_off.as_slice()[p as% usize] as usize;
+                let b = self.rhs_off.as_slice()[p as% usize + 1] as usize;
+                self.stack.extend_from_slice(&self.rhs.as_slice()[a..b]);
+                continue;
+            }
+            if e as usize == cur {
+                i = i + 1;
+                cur = if i < hi then kind[i] as usize else T_EOF as usize;
+                continue;
+            }
+            if cur >= NTERM { return false; }
+            let f = self.split_first.as_slice()[cur];
+            let r = self.split_rest.as_slice()[cur];
+            if f < 0 || r < 0 || e != (f as% u16) { return false; }
+            cur = r as% usize;
+        }
+        return true;
+    }
+}

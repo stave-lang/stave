@@ -1,0 +1,35 @@
+// Stream compaction: keep the elements whose flag is set, in input order. Element i lands at
+// the number of set flags before it, the exclusive scan of the flags, so the result does not
+// depend on the order the elements are visited in.
+import col;
+import std.debug;
+import std.vec;
+
+// The number of set flags.
+pub fn count(keep: &[bool]) -> usize {
+    let mut n: usize = 0;
+    for i in 0..keep.len() {
+        if keep[i] { n = n + 1; }
+    }
+    return n;
+}
+
+// The elements of xs whose flag is set; xs and keep have the same length (`Assert`).
+pub fn select<T: Copy>(xs: &[T], keep: &[bool]) -> vec.Vec<T> {
+    debug.assert(xs.len() == keep.len(), "select: xs and keep differ in length");
+    let mut out = vec.Vec::<T>.with_capacity(count(keep));
+    for i in 0..keep.len() {
+        if keep[i] { out.push(xs[i]); }
+    }
+    return out;
+}
+
+// The positions of the set flags, ascending.
+pub fn indices(keep: &[bool]) -> vec.Vec<u32> {
+    let _ = col.ids(keep.len());
+    let mut out = vec.Vec::<u32>.with_capacity(count(keep));
+    for i in 0..keep.len() {
+        if keep[i] { out.push(i as% u32); }
+    }
+    return out;
+}

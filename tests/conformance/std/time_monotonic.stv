@@ -1,0 +1,21 @@
+//~ STDOUT time_monotonic.stdout
+// std.time.now_ns: successive readings never decrease. The output does not depend on the clock.
+import std.io;
+import std.time;
+
+fn main() -> i32 {
+    let first = time.now_ns();
+    let mut prev = first;
+    let mut ok = true;
+    let mut i: u32 = 0;
+    while i < 1000 {
+        let t = time.now_ns();
+        if t < prev { ok = false; }
+        prev = t;
+        i = i + 1;
+    }
+    let ordered = prev >= first;
+    io.print(f"non-decreasing {ok}\n");
+    io.print(f"after first {ordered}\n");
+    return 0;
+}

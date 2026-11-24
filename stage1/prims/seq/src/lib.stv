@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// prims (sequential): the bulk operations stage1 passes call instead of writing their own loops.
+//
+// Modules:
+//   word      the unsigned integer types the generic operations accept
+//   col       constructors of filled columns
+//   xxhash    xxHash32
+//   sort      stable LSD radix `sort_perm` of u8 / u16 / u32 / u64 keys
+//   scan      exclusive / inclusive prefix sums, offsets
+//   select    stream compaction by flags
+//   rle       run-length encoding
+//   search    lower_bound / upper_bound over a sorted column
+//   perm      gather, scatter, inverse permutation
+//   bracket   matching partner of each bracket of a depth-coded column
+//   bits      rows of bits
+//   ragged    offsets + data, rows as slices
+//   hindex    lookup-only hash index
+//
+// Every result depends on the input values alone, never on the order the elements are visited in
+// (stable sorts, duplicate indices resolved by position), so a data-parallel implementation gives
+// the same bytes. Sizes and positions are `usize`; ids and offsets stored in columns are `u32`
+// (a length above `u32::MAX` traps `Assert`).

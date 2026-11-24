@@ -1,0 +1,142 @@
+// sort_perm against a quadratic stable insertion sort, on edge shapes and on fixed-seed data.
+import col;
+import perm;
+import sort;
+import test_util;
+import word;
+import std.debug;
+import std.vec;
+
+// The stable order by insertion: each position goes after every key not above it.
+fn reference<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
+    let mut p = col.filled(keys.len(), 0u32);
+    let ps = p.as_mut_slice();
+    for i in 0..keys.len() {
+        let mut j = i;
+        while j > 0 && keys[i].less(keys[ps[j - 1] as usize]) {
+            ps[j] = ps[j - 1];
+            j = j - 1;
+        }
+        ps[j] = i as% u32;
+    }
+    return p;
+}
+
+fn check<T: word.Word + Copy>(keys: &[T], what: &str) {
+    let got = sort.sort_perm(keys);
+    let want = reference(keys);
+    debug.assert(got.as_slice().eq(want.as_slice()), what);
+    debug.assert(perm.is_perm(got.as_slice()), what);
+    let sorted = perm.gather(keys, got.as_slice());
+    let s = sorted.as_slice();
+    for i in 1..s.len() {
+        debug.assert(!s[i].less(s[i - 1]), what);
+    }
+}
+
+test fn empty_and_single() {
+    check(&[0u32; 0], "empty u32");
+    check(&[0u64; 0], "empty u64");
+    check(&[7u32], "one u32");
+    check(&[u64_max()], "one u64");
+    debug.assert(sort.sort_perm(&[0u32; 0]).len() == 0, "empty result");
+}
+
+fn u64_max() -> u64 {
+    return ~0u64;
+}
+
+test fn all_equal() {
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        check(col.filled(n, 5u32).as_slice(), "all equal u32");
+        check(col.filled(n, u64_max()).as_slice(), "all equal u64");
+    }
+}
+
+test fn sorted_and_reversed() {
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        let mut up = vec.Vec::<u32>.new();
+        let mut down = vec.Vec::<u64>.new();
+        for i in 0..n {
+            up.push((i as% u32) * 1000);
+            down.push(((n - i) as u64) << 40);
+        }
+        check(up.as_slice(), "sorted u32");
+        check(down.as_slice(), "reversed u64");
+        let p = sort.sort_perm(up.as_slice());
+        debug.assert(p.as_slice().eq(col.iota(n).as_slice()), "sorted input: identity");
+    }
+}
+
+test fn extreme_keys() {
+    let a = [4294967295u32, 0, 4294967295, 1, 0, 2147483648, 4294967294, 255, 256, 65535, 65536];
+    check(&a, "u32 extremes");
+    let b = [u64_max(), 0, u64_max(), 1, 0, 9223372036854775808, u64_max() - 1, 255, 256, 4294967295, 4294967296];
+    check(&b, "u64 extremes");
+    let c = [255u8, 0, 255, 128, 1, 0];
+    check(&c, "u8");
+    let d = [65535u16, 0, 256, 255, 65535];
+    check(&d, "u16");
+}
+
+test fn one_byte_differs() {
+    // only one byte of the key varies: the passes over the others are skipped
+    let mut r = test_util.Rng.new(11);
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        for b in 0..4u64 {
+            let mut v = vec.Vec::<u32>.new();
+            for _ in 0..n {
+                v.push(((r.below(3) as% u32) << ((b * 8) as% u32)) | 0x01010101);
+            }
+            check(v.as_slice(), "one varying byte u32");
+        }
+        let mut w = vec.Vec::<u64>.new();
+        for _ in 0..n {
+            w.push((r.below(4) << 56) | 7);
+        }
+        check(w.as_slice(), "top byte u64");
+    }
+}
+
+test fn random_u32() {
+    let mut r = test_util.Rng.new(12345);
+    let ranges = [2u64, 256, 70000, 4294967296];
+    for k in 0..test_util.SIZES.len() {
+        for q in 0..ranges.len() {
+            let v = test_util.keys_u32(&mut r, test_util.SIZES[k], ranges[q]);
+            check(v.as_slice(), "random u32");
+        }
+    }
+}
+
+test fn random_u64() {
+    let mut r = test_util.Rng.new(98765);
+    let ranges = [2u64, 1000, 4294967296];
+    let shifts = [0u64, 20, 31];
+    for k in 0..test_util.SIZES.len() {
+        for q in 0..ranges.len() {
+            let v = test_util.keys_u64(&mut r, test_util.SIZES[k], ranges[q], shifts[q]);
+            check(v.as_slice(), "random u64");
+        }
+    }
+}
+
+// Equal keys keep their input order: sorting by the high half only leaves the low half's
+// order alone.
+test fn stability_by_construction() {
+    let mut r = test_util.Rng.new(5);
+    let mut keys = vec.Vec::<u32>.new();
+    for _ in 0..500usize {
+        keys.push(r.below(8) as% u32);
+    }
+    let p = sort.sort_perm(keys.as_slice());
+    let ps = p.as_slice();
+    for i in 1..ps.len() {
+        let a = keys.as_slice()[ps[i - 1] as usize];
+        let b = keys.as_slice()[ps[i] as usize];
+        debug.assert(a < b || (a == b && ps[i - 1] < ps[i]), "equal keys in input order");
+    }
+}
