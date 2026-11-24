@@ -197,7 +197,7 @@ test fn size_of_in_signatures() {
 
 // stage0's line for `needs` on `std.string.String.new` in an edited copy of the shipped std
 // (the shape cannot arise from the shipped packages, which declare it on no such fn).
-const RUNTIME_ENTRY_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0709\",\"severity\":\"error\",\"message\":\"a runtime entry fn cannot declare `needs`\",\"primary\":{\"file\":\"/home/aleksei/stave-s1d-probes/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"related\":[{\"span\":{\"file\":\"/home/aleksei/stave-s1d-probes/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"label\":\"`needs` here\"}],\"fix\":{\"description\":\"remove `needs(...)` here, and call the feature-specific code through a `dispatch` function\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
+const RUNTIME_ENTRY_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0709\",\"severity\":\"error\",\"message\":\"a runtime entry fn cannot declare `needs`\",\"primary\":{\"file\":\"/probe/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"related\":[{\"span\":{\"file\":\"/probe/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"label\":\"`needs` here\"}],\"fix\":{\"description\":\"remove `needs(...)` here, and call the feature-specific code through a `dispatch` function\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
 
 test fn runtime_entry_needs() {
     let mut k = test_kit.kit();
@@ -222,13 +222,14 @@ test fn runtime_entry_needs() {
     let mut d = diag.Diags.new();
     diag_sigs.sigs_diags(&mut d, &sg, &o.ds, &o.nm, &o.lx, &o.set, &o.toks, &o.cut);
     debug.assert(d.len() == 1, "one diagnostic: E0709 on the known method");
-    let mut ft = diag_out.FileTable.{ rank: vec.Vec::<u32>.new(), path: diag_reg.Strs.new() };
+    let mut ft = diag_out.FileTable.sources();
     ft.rank.push(0);
     ft.rank.push(1);
     ft.rank.push(2);
     ft.path.push(mem.str_bytes("main.stv"));
-    ft.path.push(mem.str_bytes("/home/aleksei/stave-s1d-probes/lib709/std/core.stv"));
-    ft.path.push(mem.str_bytes("/home/aleksei/stave-s1d-probes/lib709/std/string.stv"));
+    ft.path.push(mem.str_bytes("/probe/lib709/std/core.stv"));
+    ft.path.push(mem.str_bytes("/probe/lib709/std/string.stv"));
+    ft.nsrc = ft.rank.len();
     let rows = d.order(ft.rank.as_slice());
     let out = diag_out.render(&d, rows.as_slice(), &ft, &o.set, true);
     debug.assert(out.as_slice().eq(mem.str_bytes(RUNTIME_ENTRY_LINE)), "the JSON line is stage0's");

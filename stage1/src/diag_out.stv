@@ -32,6 +32,14 @@ pub struct FileTable {
 }
 
 impl FileTable {
+    // A table without manifests, for the caller to fill: push `rank` and `path` per source file
+    // and set `nsrc` to their count.
+    pub fn sources() -> FileTable {
+        let mut mo = vec.Vec::<u64>.new();
+        mo.push(0);
+        return FileTable.{ rank: vec.Vec::<u32>.new(), path: diag_reg.Strs.new(), nsrc: 0, man_bytes: vec.Vec::<u8>.new(), man_off: mo };
+    }
+
     // The text of manifest m.
     fn manifest(&self, m: usize) -> &[u8] from self {
         let o = self.man_off.as_slice();

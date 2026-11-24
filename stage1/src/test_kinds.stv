@@ -116,7 +116,7 @@ test fn layouts_and_flags() {
 
 // stage0's line for an `impl Add for u32` added at line 196 of a copy of the shipped std.core (the
 // shape cannot arise outside std: an operator impl for a built-in type elsewhere is E0420).
-const OP_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0903\",\"severity\":\"error\",\"message\":\"overlapping impls of `std.core.Add` for `u32`\",\"primary\":{\"file\":\"/home/aleksei/stave-s1d-probes/libop/std/core.stv\",\"line\":196,\"col\":1,\"len\":4},\"related\":[{\"span\":{\"file\":\"/home/aleksei/stave-s1d-probes/libop/std/core.stv\",\"line\":196,\"col\":1,\"len\":4},\"label\":\"this impl\"}],\"fix\":{\"description\":\"remove one of the two impls of `std.core.Add`, or narrow one so that their types differ\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
+const OP_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0903\",\"severity\":\"error\",\"message\":\"overlapping impls of `std.core.Add` for `u32`\",\"primary\":{\"file\":\"/probe/libop/std/core.stv\",\"line\":196,\"col\":1,\"len\":4},\"related\":[{\"span\":{\"file\":\"/probe/libop/std/core.stv\",\"line\":196,\"col\":1,\"len\":4},\"label\":\"this impl\"}],\"fix\":{\"description\":\"remove one of the two impls of `std.core.Add`, or narrow one so that their types differ\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
 
 test fn operator_impl_beside_builtin() {
     let mut core = vec.Vec::<u8>.new();
@@ -136,11 +136,12 @@ test fn operator_impl_beside_builtin() {
     let mut d = diag.Diags.new();
     diag_kinds.impl_diags(&mut d, &mut sg, &o.ds, &o.md, &o.nm, &fl, &o.lx, &o.set, &o.toks, &o.tree);
     debug.assert(d.len() == 1, "one diagnostic: E0903 against the built-in operator");
-    let mut ft = diag_out.FileTable.{ rank: vec.Vec::<u32>.new(), path: diag_reg.Strs.new() };
+    let mut ft = diag_out.FileTable.sources();
     for f in 0..o.set.files() {
         ft.rank.push(f as% u32);
-        ft.path.push(mem.str_bytes(if o.set.file(f).len() > 600 then "/home/aleksei/stave-s1d-probes/libop/std/core.stv" else "other.stv"));
+        ft.path.push(mem.str_bytes(if o.set.file(f).len() > 600 then "/probe/libop/std/core.stv" else "other.stv"));
     }
+    ft.nsrc = ft.rank.len();
     let rows = d.order(ft.rank.as_slice());
     let out = diag_out.render(&d, rows.as_slice(), &ft, &o.set, true);
     debug.assert(out.as_slice().eq(mem.str_bytes(OP_LINE)), "the JSON line is stage0's");
