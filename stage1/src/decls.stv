@@ -34,6 +34,7 @@ import prims.sort;
 import resdiag;
 import source;
 import text;
+import std.debug;
 import std.mem;
 import std.vec;
 
@@ -662,56 +663,80 @@ fn seq_cmp(md: &modules.Modules, x: u32, y: u32) -> i32 {
 fn canonical_order(raw: &Raw, md: &modules.Modules) -> vec.Vec<u32> {
     let n = raw.len();
     let (pfull, pparent) = path_ranks(md);
-    let mut k0 = vec.Vec::<u32>.with_capacity(n);
-    let mut depth = vec.Vec::<u8>.with_capacity(n);
+    let pf = pfull.as_slice();
+    let pp = pparent.as_slice();
+    let rk = raw.kind.as_slice();
+    let rm = raw.module.as_slice();
+    let rp = raw.parent.as_slice();
+    let rn = raw.name.as_slice();
+    let ri = raw.item.as_slice();
+    let rx = raw.index.as_slice();
+    let ro = raw.off.as_slice();
+    let mpkg = md.mod_pkg.as_slice();
+    let mut k0 = col.filled(n, 0u32);
+    let mut depth = col.filled(n, 0u8);
     let mut sa = col.filled(3 * n, 0u64);
     let mut sb = col.filled(3 * n, 0u64);
-    for d in 0..n {
-        let kind = raw.kind.as_slice()[d];
-        let m = raw.module.as_slice()[d] as usize;
-        let p = raw.parent.as_slice()[d];
-        let a = (1u64 << 40) | ((raw.name.as_slice()[d] as u64) << 8) | (kind as u64);
-        let mut tie = raw.item.as_slice()[d];
-        let mut lev: usize = 0;
-        if kind == DK_MODULE {
-            k0.push(pparent.as_slice()[m]);
-            tie = md.mod_pkg.as_slice()[m];
-        } else if p == NONE {
-            k0.push(pfull.as_slice()[m]);
-        } else {
-            let pk = k0.as_slice()[p as usize];
-            k0.push(pk);
-            lev = depth.as_slice()[p as usize] as usize;
-            for s in 0..lev {
-                let nv = sa.as_slice()[3 * p as usize + s];
-                sa.as_mut_slice()[3 * d + s] = nv;
-                let nv = sb.as_slice()[3 * p as usize + s];
-                sb.as_mut_slice()[3 * d + s] = nv;
+    {
+        let k0s = k0.as_mut_slice();
+        let dp = depth.as_mut_slice();
+        let xa = sa.as_mut_slice();
+        let xb = sb.as_mut_slice();
+        // a member's key extends its parent's (parents precede their members)
+        for d in 0..n {
+            let kind = rk[d];
+            let m = rm[d] as usize;
+            let p = rp[d];
+            let a = (1u64 << 40) | ((rn[d] as u64) << 8) | (kind as u64);
+            let mut tie = ri[d];
+            let mut lev: usize = 0;
+            if kind == DK_MODULE {
+                k0s[d] = pp[m];
+                tie = mpkg[m];
+            } else if p == NONE {
+                k0s[d] = pf[m];
+            } else {
+                let pu = p as usize;
+                debug.assert(pu < d, "decls: a parent follows its member");
+                k0s[d] = k0s[pu];
+                lev = dp[pu] as usize;
+                for s in 0..lev {
+                    xa[3 * d + s] = xa[3 * pu + s];
+                    xb[3 * d + s] = xb[3 * pu + s];
+                }
+                tie = rx[d];
             }
-            tie = raw.index.as_slice()[d];
+            xa[3 * d + lev] = a;
+            xb[3 * d + lev] = ((tie as u64) << 32) | (ro[d] as u64);
+            dp[d] = (lev + 1) as% u8;
         }
-        sa.as_mut_slice()[3 * d + lev] = a;
-        sb.as_mut_slice()[3 * d + lev] = ((tie as u64) << 32) | (raw.off.as_slice()[d] as u64);
-        depth.push((lev + 1) as% u8);
     }
     let mut order = col.iota(n);
-    let mut keys = vec.Vec::<u64>.with_capacity(n);
+    let mut keys = col.filled(n, 0u64);
     let mut s: usize = 3;
     while s > 0 {
         s = s - 1;
         for pass in 0usize..2 {
-            keys.clear();
-            for k in 0..n {
-                let d = order.as_slice()[k] as usize;
-                keys.push(if pass == 0 then sb.as_slice()[3 * d + s] else sa.as_slice()[3 * d + s]);
+            {
+                let os = order.as_slice();
+                let ks = keys.as_mut_slice();
+                let src = if pass == 0 then sb.as_slice() else sa.as_slice();
+                for k in 0..n {
+                    ks[k] = src[3 * os[k] as usize + s];
+                }
             }
             let p = sort.sort_perm(keys.as_slice());
             order = perm.gather(order.as_slice(), p.as_slice());
         }
     }
-    let mut k0s = vec.Vec::<u32>.with_capacity(n);
-    for k in 0..n {
-        k0s.push(k0.as_slice()[order.as_slice()[k] as usize]);
+    let mut k0s = col.filled(n, 0u32);
+    {
+        let os = order.as_slice();
+        let kv = k0.as_slice();
+        let w = k0s.as_mut_slice();
+        for k in 0..n {
+            w[k] = kv[os[k] as usize];
+        }
     }
     let p = sort.sort_perm(k0s.as_slice());
     return perm.gather(order.as_slice(), p.as_slice());
@@ -720,6 +745,10 @@ fn canonical_order(raw: &Raw, md: &modules.Modules) -> vec.Vec<u32> {
 // Whether string S spells a built-in type: a scalar, `vec`, `mask`, `never`, a vector `TxN` of a
 // lane type, a mask `maskWxN` (N a power of two from 2 to 64, or `n`).
 fn prim_name(b: &[u8]) -> bool {
+    // every such name is at most 9 bytes and starts with one of `b c f i m n s u v`
+    if b.len() == 0 || b.len() > 9 { return false; }
+    let c = b[0];
+    if c != 98 && c != 99 && c != 102 && c != 105 && c != 109 && c != 110 && c != 115 && c != 117 && c != 118 { return false; }
     if is_scalar(b) || text.eq_str(b, "vec") || text.eq_str(b, "mask") || text.eq_str(b, "never") { return true; }
     let mut x = b.len();
     while x > 0 && b[x - 1] != 120 { x = x - 1; }
@@ -744,6 +773,8 @@ fn is_scalar(b: &[u8]) -> bool {
 }
 
 fn builtin_name(b: &[u8]) -> u8 {
+    // every such name starts with `a`, `f`, or `s`
+    if b.len() == 0 || (b[0] != 97 && b[0] != 102 && b[0] != 115) { return 0; }
     if text.eq_str(b, "size_of") || text.eq_str(b, "align_of") || text.eq_str(b, "fence_stream") { return 1; }
     if text.eq_str(b, "soa_row_size") || text.eq_str(b, "soa_read") || text.eq_str(b, "soa_write") { return 2; }
     return 0;
@@ -941,24 +972,38 @@ pub fn build(md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &s
         is_prim: vec.Vec::<bool>.with_capacity(nm.tab.len()),
         builtin: vec.Vec::<u8>.with_capacity(nm.tab.len()),
     };
-    for d in 0..n {
-        let p = raw.parent.as_slice()[corder.as_slice()[d] as usize];
-        ds.parent.push(if p == NONE then NONE else cs[p as usize]);
+    {
+        let rp = raw.parent.as_slice();
+        let co = corder.as_slice();
+        for d in 0..n {
+            let p = rp[co[d] as usize];
+            ds.parent.push(if p == NONE then NONE else cs[p as usize]);
+        }
     }
     for m in 0..nmod {
         ds.mod_decl.push(cs[m]);
     }
-    for i in 0..cut.len() {
-        let d = c.item_decl.as_slice()[i];
-        ds.item_decl.push(if d == NONE then NONE else cs[d as usize]);
+    {
+        let idl = c.item_decl.as_slice();
+        for i in 0..cut.len() {
+            let d = idl[i];
+            ds.item_decl.push(if d == NONE then NONE else cs[d as usize]);
+        }
     }
-    for s in 0..scope_raw.len() {
-        ds.scope_decl.push(cs[scope_raw.as_slice()[s] as usize]);
+    {
+        let sr = scope_raw.as_slice();
+        for s in 0..sr.len() {
+            ds.scope_decl.push(cs[sr[s] as usize]);
+        }
     }
-    for s in 0..nm.tab.len() {
-        let b = nm.tab.text(s);
-        ds.is_prim.push(prim_name(b));
-        ds.builtin.push(builtin_name(b));
+    {
+        let so = nm.tab.str_off.as_slice();
+        let sb = nm.tab.str_bytes.as_slice();
+        for s in 0..nm.tab.len() {
+            let b = &sb[so[s] as usize..so[s + 1] as usize];
+            ds.is_prim.push(prim_name(b));
+            ds.builtin.push(builtin_name(b));
+        }
     }
     let pp = sort.sort_perm(c.poisoned.as_slice());
     let pz = perm.gather(c.poisoned.as_slice(), pp.as_slice());
