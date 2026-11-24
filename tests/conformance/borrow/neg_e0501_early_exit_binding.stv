@@ -1,0 +1,140 @@
+//~ CHECK-ONLY
+// E0501 on an exit that ends a local bound by a `match` arm or `for` pattern while a borrow of
+// it is held by what is dropped after it on the way out (a temporary of a statement around the
+// block, or a local declared before it). Such a binding is bound where its block begins, so it
+// cannot be declared earlier: the fix the diagnostic prints is to copy it into a local declared
+// before the holder and borrow that. Each case below is followed by that fix applied.
+import std.io;
+
+struct D { id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        io.print(f" {self.id}");
+    }
+}
+
+view struct G { r: &u32 }
+
+impl Drop for G {
+    fn drop(&mut self) {
+        let n = *self.r;
+        io.print(f" G{n}");
+    }
+}
+
+static Z: u32 = 9;
+
+fn mkg() -> G {
+    return G.{ r: &Z };
+}
+
+fn mk(id: u32) -> D {
+    return D.{ id: id };
+}
+
+fn arm_binding_local_holder() {
+    let mut g = mkg();
+    match mk(5) {
+        D.{ id } => {
+            g.r = &id;
+            return; //~ ERROR E0501
+        }
+    }
+}
+
+fn arm_binding_temp_holder() {
+    match &mut mkg() {
+        v => {
+            match mk(5) {
+                D.{ id } => {
+                    v.r = &id;
+                    return; //~ ERROR E0501
+                }
+            }
+        }
+    }
+}
+
+fn for_binding_temp_holder() {
+    match &mut mkg() {
+        v => {
+            for i in 0u32..2 {
+                v.r = &i;
+                return; //~ ERROR E0501
+            }
+        }
+    }
+}
+
+fn for_binding_local_holder() {
+    let mut g = mkg();
+    for i in 0u32..2 {
+        g.r = &i;
+        return; //~ ERROR E0501
+    }
+}
+
+// Each of the above with the fix the diagnostic prints applied.
+
+fn arm_binding_local_holder_fixed() {
+    let mut y: u32 = 0;
+    let mut g = mkg();
+    match mk(5) {
+        D.{ id } => {
+            y = id;
+            g.r = &y;
+            return;
+        }
+    }
+}
+
+fn arm_binding_temp_holder_fixed() {
+    let mut y: u32 = 0;
+    match &mut mkg() {
+        v => {
+            match mk(5) {
+                D.{ id } => {
+                    y = id;
+                    v.r = &y;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn for_binding_temp_holder_fixed() {
+    let mut y: u32 = 0;
+    match &mut mkg() {
+        v => {
+            for i in 0u32..2 {
+                y = i;
+                v.r = &y;
+                return;
+            }
+        }
+    }
+}
+
+fn for_binding_local_holder_fixed() {
+    let mut y: u32 = 0;
+    let mut g = mkg();
+    for i in 0u32..2 {
+        y = i;
+        g.r = &y;
+        return;
+    }
+}
+
+fn main() {
+    arm_binding_local_holder();
+    arm_binding_temp_holder();
+    for_binding_temp_holder();
+    for_binding_local_holder();
+    arm_binding_local_holder_fixed();
+    arm_binding_temp_holder_fixed();
+    for_binding_temp_holder_fixed();
+    for_binding_local_holder_fixed();
+    io.print("\n");
+}

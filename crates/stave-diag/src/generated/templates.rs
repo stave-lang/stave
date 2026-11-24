@@ -2841,7 +2841,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
-        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check; `temporary-old`: the operand `e` of an `old(e)`, which ends where it is evaluated, at fn entry; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it); case `exit-temp`: an exit (`return`, `?`, `break`, `continue`) ends a local of a block inside a statement it leaves, and a temporary of that statement (the holder), dropped after it on the way out, reads a borrow of it in its drop; case `exit-local`: the holder is a local declared before the borrowed one",
+        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check; `temporary-old`: the operand `e` of an `old(e)`, which ends where it is evaluated, at fn entry; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it); case `exit-temp`: an exit (`return`, `?`, `break`, `continue`) ends a local of a block inside a statement it leaves, and a temporary of that statement (the holder), dropped after it on the way out, reads a borrow of it in its drop; case `exit-local`: the holder is a local declared before the borrowed one; cases `exit-temp-binding`, `exit-local-binding`: the same, with the borrowed local bound by a `match` arm, `for`, or tail pattern, which binds it where its block begins (it cannot be declared earlier)",
         retired: false,
         located: true,
         holes: &[
@@ -2886,6 +2886,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "exit-local-binding",
+                message: "cannot {access} `{place}`: it has a live {loan} borrow",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "{access} here: this exit leaves the block of `{place}`" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used later here: `{holder}` is dropped after `{place}` on this exit, and its drop reads the borrow" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{place}` is bound by its pattern, where its block begins: declare a local before `{holder}`, copy or move `{place}` into it, and borrow that local, so that it is dropped after `{holder}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "exit-temp",
                 message: "cannot {access} `{place}`: it has a live {loan} borrow",
                 labels: &[
@@ -2895,6 +2909,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare `{place}` before {before}, so that it is dropped after the temporary `{holder}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "exit-temp-binding",
+                message: "cannot {access} `{place}`: it has a live {loan} borrow",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "{access} here: this exit leaves the block of `{place}` before {before}" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used later here: the temporary `{holder}` of {before} is dropped after `{place}` on this exit, and its drop reads the borrow" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "`{place}` is bound by its pattern, where its block begins: declare a local before {before}, copy or move `{place}` into it, and borrow that local, so that it is dropped after the temporary `{holder}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
