@@ -1,0 +1,1234 @@
+// Const evaluation (types/consteval): the value of a const-expr in its decided type, as
+// signature building needs it (an array length, a const generic argument, the value of a const
+// item they name). One evaluator: later stages extend this module, never add a second one.
+//
+// An evaluation runs in two passes over the expression's nodes, as stage0's does. `decide`
+// gives every node its type top-down with an explicit stack: an unsuffixed literal joins a group
+// that takes the type of the other operand of its operator, of the expected type, or of the
+// chain it is in (`200 + 100 - 100u8` is `u8` throughout); the expected type fixes a group when
+// the literal is made. Then the literals are checked against their types and `value` evaluates
+// the decided nodes bottom-up (node ids are postorder, so a node's operands come first and the
+// first failing node is the one a left-to-right evaluation fails at), each in its decided type:
+// overflow, division by zero, `MIN / -1`, and a shift amount outside the width fail.
+//
+// Const items are evaluated in dependency rounds (`round_consts`): a const whose initializer
+// and type name only consts of earlier rounds is in the next round; the consts left over are on
+// a cycle or depend on one, and have no value (stage0: E0904 case `cycle`).
+//
+// The forms evaluated: int literals, a const item by path, a bare const generic parameter as a
+// whole length or argument, parentheses, the operators `+ - * / %` (and their `%` and `|`
+// forms), `& | ^ << >> <<%`, unary `-` and `~`, and `as` / `as%` / `as|` between int types.
+// A form outside these makes the evaluation `UNSUP` (stage1 does not decide it: the caller
+// writes no dump).
+//
+// `size_of::<T>()` / `align_of::<T>()` of a type without parameters is a layout request (`Lay`,
+// keyed by the call's node row): decided, it is T's size or alignment (or a failure: T has no
+// layout); pending, the evaluation is `LAYOUT` and counts in `Cx.hits`, and signature building
+// decides the requests between rounds (`sigs.build`).
+import ast;
+import decls;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import items;
+import lex;
+import resolve;
+import source;
+import types;
+import prims.col;
+import prims.search;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+
+// Outcome of an evaluation, and the state of a const item's value.
+pub const CV_NONE: u8 = 0;
+pub const CV_OK: u8 = 1;
+pub const CV_FAIL: u8 = 2;
+pub const CV_UNSUP: u8 = 3;
+pub const CV_LAYOUT: u8 = 4;
+
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
+const T_FLOAT_LIT: u8 = terminals.T_FLOAT_LIT as% u8;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_COMMA: u8 = terminals.T_COMMA as% u8;
+const T_DOT: u8 = terminals.T_DOT as% u8;
+const T_MINUS: u8 = terminals.T_MINUS as% u8;
+const T_TILDE: u8 = terminals.T_TILDE as% u8;
+const T_PLUS: u8 = terminals.T_PLUS as% u8;
+const T_STAR: u8 = terminals.T_STAR as% u8;
+const T_SLASH: u8 = terminals.T_SLASH as% u8;
+const T_PERCENT: u8 = terminals.T_PERCENT as% u8;
+const T_PLUS_PERCENT: u8 = terminals.T_PLUS_PERCENT as% u8;
+const T_MINUS_PERCENT: u8 = terminals.T_MINUS_PERCENT as% u8;
+const T_STAR_PERCENT: u8 = terminals.T_STAR_PERCENT as% u8;
+const T_PLUS_PIPE: u8 = terminals.T_PLUS_PIPE as% u8;
+const T_MINUS_PIPE: u8 = terminals.T_MINUS_PIPE as% u8;
+const T_STAR_PIPE: u8 = terminals.T_STAR_PIPE as% u8;
+const T_AMP: u8 = terminals.T_AMP as% u8;
+const T_PIPE: u8 = terminals.T_PIPE as% u8;
+const T_CARET: u8 = terminals.T_CARET as% u8;
+const T_LT_LT: u8 = terminals.T_LT_LT as% u8;
+const T_LT_LT_PERCENT: u8 = terminals.T_LT_LT_PERCENT as% u8;
+const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
+const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
+const T_AS_PERCENT: u8 = terminals.T_AS_PERCENT as% u8;
+const T_AS_PIPE: u8 = terminals.T_AS_PIPE as% u8;
+const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
+
+const K_ADD: u8 = node_kinds.KIND_ADD;
+const K_MUL: u8 = node_kinds.KIND_MUL;
+const K_SHIFT: u8 = node_kinds.KIND_SHIFT;
+const K_BIT_AND: u8 = node_kinds.KIND_BIT_AND;
+const K_BIT_OR: u8 = node_kinds.KIND_BIT_OR;
+const K_BIT_XOR: u8 = node_kinds.KIND_BIT_XOR;
+const K_UNARY: u8 = node_kinds.KIND_UNARY;
+const K_PRIMARY: u8 = node_kinds.KIND_PRIMARY;
+const K_POSTFIX: u8 = node_kinds.KIND_POSTFIX;
+const K_CAST: u8 = node_kinds.KIND_CAST;
+const K_TYPE: u8 = node_kinds.KIND_TYPE;
+const K_TYPE_BASE: u8 = node_kinds.KIND_TYPE_BASE;
+const K_GENERIC_ARGS: u8 = node_kinds.KIND_GENERIC_ARGS;
+const K_GENERIC_PARAM: u8 = node_kinds.KIND_GENERIC_PARAM;
+const K_GENERICS: u8 = node_kinds.KIND_GENERICS;
+const K_IMPL_DECL: u8 = node_kinds.KIND_IMPL_DECL;
+const K_TRAIT_DECL: u8 = node_kinds.KIND_TRAIT_DECL;
+const K_MATCH: u8 = node_kinds.KIND_MATCH_EXPR;
+const K_RANGE: u8 = node_kinds.KIND_RANGE_EXPR;
+
+// The resolutions of every use, by (item, key node), then offset: `resolve`'s rows with a
+// search key.
+pub struct Uses {
+    pub key: vec.Vec<u64>,
+    pub off: vec.Vec<u32>,
+    pub tag: vec.Vec<u8>,
+    pub target: vec.Vec<u32>,
+}
+
+impl Uses {
+    pub fn new(r: &resolve.Names) -> Uses {
+        let n = r.len();
+        let mut key = vec.Vec::<u64>.with_capacity(n);
+        for k in 0..n {
+            key.push(search.pair(r.item.as_slice()[k], r.node.as_slice()[k]));
+        }
+        let mut off = vec.Vec::<u32>.new();
+        off.extend_from_slice(r.off.as_slice());
+        let mut tag = vec.Vec::<u8>.new();
+        tag.extend_from_slice(r.tag.as_slice());
+        let mut target = vec.Vec::<u32>.new();
+        target.extend_from_slice(r.target.as_slice());
+        return Uses.{ key: key, off: off, tag: tag, target: target };
+    }
+
+    // The rows keyed at node n of item i: `lo..hi`.
+    pub fn range(&self, i: u32, n: u32) -> (usize, usize) {
+        let k = search.pair(i, n);
+        let lo = search.lower_bound(self.key.as_slice(), k);
+        let hi = search.upper_bound(self.key.as_slice(), k);
+        return (lo, hi);
+    }
+}
+
+// Generic parameters, one row per `GenericParam` of a decl's own list (`Gens.lo[d]..lo[d + 1]`):
+// name S, node N, const or not, the declared type of a const one (`ERR` until lowered, and for
+// a const param of no unsigned int type).
+pub struct Gens {
+    pub lo: vec.Vec<u32>,
+    pub name: vec.Vec<u32>,
+    pub node: vec.Vec<u32>,
+    pub is_const: vec.Vec<bool>,
+    pub cty: vec.Vec<u32>,
+    pub is_view: vec.Vec<bool>,
+}
+
+// The generics in scope of a lowering: the flat list is the rows `par_lo..par_hi` then
+// `own_lo..own_hi` (a method: its impl's or trait's, then its own; anything else: its own); the
+// decl whose own list is `own_lo..own_hi` is `own` (NONE: none); `self_ty` is `Self` (NONE: none).
+pub struct Scope {
+    pub par_lo: u32,
+    pub par_hi: u32,
+    pub own_lo: u32,
+    pub own_hi: u32,
+    pub own: u32,
+    pub self_ty: u32,
+}
+
+impl Copy for Scope {}
+
+impl Scope {
+    pub fn n_parent(&self) -> u32 {
+        return self.par_hi - self.par_lo;
+    }
+
+    // The GP row of flat index i, or NONE.
+    pub fn row(&self, i: u32) -> u32 {
+        let np = self.par_hi - self.par_lo;
+        if i < np { return self.par_lo + i; }
+        if i - np < self.own_hi - self.own_lo { return self.own_lo + i - np; }
+        return NONE;
+    }
+}
+
+pub fn no_scope() -> Scope {
+    return Scope.{ par_lo: 0, par_hi: 0, own_lo: 0, own_hi: 0, own: NONE, self_ty: NONE };
+}
+
+// The values of const items, per decl D: state, declared type, int value (sign, magnitude).
+pub struct Consts {
+    pub state: vec.Vec<u8>,
+    pub ty: vec.Vec<u32>,
+    pub neg: vec.Vec<bool>,
+    pub mag: vec.Vec<u64>,
+}
+
+// The layout requests of `size_of` / `align_of` calls, by the call's node row: the state
+// (`CV_OK`, `CV_FAIL`, or pending `CV_LAYOUT`), size and alignment once decided, and the item and
+// scope the type argument is lowered in, as of the round that last met the request (`met`: this
+// round did; the scope's types are this round's).
+pub struct Lay {
+    pub row: vec.Vec<u32>,
+    pub st: vec.Vec<u8>,
+    pub size: vec.Vec<u64>,
+    pub aln: vec.Vec<u64>,
+    pub it: vec.Vec<u32>,
+    pub sc: vec.Vec<Scope>,
+    pub met: vec.Vec<bool>,
+}
+
+impl Lay {
+    pub fn new() -> Lay {
+        return Lay.{ row: vec.Vec::<u32>.new(), st: vec.Vec::<u8>.new(), size: vec.Vec::<u64>.new(), aln: vec.Vec::<u64>.new(), it: vec.Vec::<u32>.new(), sc: vec.Vec::<Scope>.new(), met: vec.Vec::<bool>.new() };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.row.len();
+    }
+
+    // The request of node row g, or NONE.
+    pub fn find(&self, g: u32) -> u32 {
+        for k in 0..self.row.len() {
+            if self.row.as_slice()[k] == g { return k as% u32; }
+        }
+        return NONE;
+    }
+
+    pub fn add(&mut self, g: u32, it: u32, sc: Scope) {
+        self.row.push(g);
+        self.st.push(CV_LAYOUT);
+        self.size.push(0);
+        self.aln.push(0);
+        self.it.push(it);
+        self.sc.push(sc);
+        self.met.push(true);
+    }
+
+    pub fn pending(&self) -> usize {
+        let mut n: usize = 0;
+        for k in 0..self.st.len() {
+            if self.st.as_slice()[k] == CV_LAYOUT { n = n + 1; }
+        }
+        return n;
+    }
+
+    // Starts a round: no request met yet.
+    pub fn new_round(&mut self) {
+        for k in 0..self.met.len() {
+            self.met.as_mut_slice()[k] = false;
+        }
+    }
+
+    // Decides every pending request as failed (what waits on itself).
+    pub fn fail_pending(&mut self) {
+        for k in 0..self.st.len() {
+            if self.st.as_slice()[k] == CV_LAYOUT { self.st.as_mut_slice()[k] = CV_FAIL; }
+        }
+    }
+}
+
+// The shared state of signature building: the type table, the uses, the node parents, the
+// generic params, the const values, the layout requests, and the first reason a needed fact is
+// not decided here.
+pub struct Cx {
+    pub tab: types.Table,
+    pub uses: Uses,
+    // per global node row: its parent row (NONE for an item root)
+    pub parent: vec.Vec<u32>,
+    pub gens: Gens,
+    pub consts: Consts,
+    // per decl D: its type (const, static, field), alias target, impl self type, or fn return;
+    // whether an alias target is ready (not on or behind an alias cycle)
+    pub ty: vec.Vec<u32>,
+    pub ready: vec.Vec<bool>,
+    pub skip: u8,
+    pub lay: Lay,
+    // the scope of the evaluation running (a request's type argument is lowered in it)
+    pub sc: Scope,
+    // evaluations so far that wait for a layout; per decl D: whether its signature waited
+    pub hits: u32,
+    pub wait: vec.Vec<bool>,
+}
+
+impl Cx {
+    pub fn note_skip(&mut self, why: u8) {
+        if self.skip == CV_NONE { self.skip = why; }
+    }
+}
+
+// The parent row of every node row.
+pub fn parents(tree: &ast.Ast) -> vec.Vec<u32> {
+    let mut p = col.filled(tree.nodes(), NONE);
+    let inode = tree.item_node.as_slice();
+    for i in 0..tree.items() {
+        let base = inode[i] as usize;
+        for g in base..inode[i + 1] as usize {
+            let ks = tree.kids.row(g);
+            for k in 0..ks.len() {
+                p.as_mut_slice()[base + ks[k] as usize] = g as% u32;
+            }
+        }
+    }
+    return p;
+}
+
+pub fn kind(tree: &ast.Ast, g: usize) -> u8 {
+    return tree.kind.as_slice()[g];
+}
+
+pub fn tk(t: &lex.Tokens, tok: u32) -> u8 {
+    if tok as usize >= t.kind.len() { return 255u8; }
+    return t.kind.as_slice()[tok as usize];
+}
+
+// The first child row of row g of kind k (item base `base`), or NONE.
+pub fn child(tree: &ast.Ast, base: usize, g: usize, k: u8) -> u32 {
+    let ks = tree.kids.row(g);
+    for j in 0..ks.len() {
+        let c = base + ks[j] as usize;
+        if tree.kind.as_slice()[c] == k { return c as% u32; }
+    }
+    return NONE;
+}
+
+pub fn is_expr_kind(k: u8) -> bool {
+    return k == node_kinds.KIND_IF_EXPR || k == K_MATCH || k == K_RANGE || k == node_kinds.KIND_OR_EXPR || k == node_kinds.KIND_AND_EXPR || k == node_kinds.KIND_CMP_EXPR || k == K_BIT_OR || k == K_BIT_XOR || k == K_BIT_AND || k == K_SHIFT || k == K_ADD || k == K_MUL || k == K_CAST || k == K_UNARY || k == K_POSTFIX || k == K_PRIMARY;
+}
+
+// The flat index and constness of the generic param whose node is row gp, seen from scope sc:
+// a method's own params follow its container's.
+pub fn generic_index(cx: &Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, it: u32, gp: usize, sc: Scope) -> (u32, bool, bool) {
+    let p = cx.parent.as_slice()[gp];
+    if p == NONE || kind(tree, p as usize) != K_GENERICS { return (NONE, false, false); }
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let ks = tree.kids.row(p as usize);
+    let mut idx: u32 = 0;
+    for j in 0..ks.len() {
+        let c = base + ks[j] as usize;
+        if c == gp { break; }
+        if kind(tree, c) == K_GENERIC_PARAM { idx = idx + 1; }
+    }
+    let owner = cx.parent.as_slice()[p as usize];
+    let ok = if owner == NONE then 255u8 else kind(tree, owner as usize);
+    let d = ds.item_decl.as_slice()[it as usize];
+    let container = d != NONE && (ds.kind.as_slice()[d as usize] == decls.DK_IMPL || ds.kind.as_slice()[d as usize] == decls.DK_TRAIT);
+    let level1 = container && ok != K_IMPL_DECL && ok != K_TRAIT_DECL;
+    let is_const = tk(t, tree.tok.as_slice()[gp]) == T_KW_CONST;
+    return (if level1 then sc.n_parent() + idx else idx, is_const, true);
+}
+
+// The bytes of the int literal at global token tok of item it: the alphanumeric run.
+fn lit_text(t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, tok: u32) -> (usize, usize) {
+    let f = cut.file.as_slice()[it as usize] as usize;
+    let src = set.file(f);
+    let s = t.start.as_slice()[tok as usize] as usize;
+    let mut e = s;
+    while e < src.len() {
+        let c = src[e];
+        let ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+        if !ok { break; }
+        e = e + 1;
+    }
+    return (s, e);
+}
+
+// An int literal: (magnitude, too big for u64, suffix type code: 0 none, 1.. int types as
+// `suffix_ty`, 100 a float suffix, 255 malformed).
+pub fn parse_int(b: &[u8]) -> (u64, bool, u8) {
+    let mut radix: u64 = 10;
+    let mut i: usize = 0;
+    if b.len() >= 2 && b[0] == 48 && (b[1] == 120 || b[1] == 98 || b[1] == 111) {
+        radix = if b[1] == 120 then 16u64 else if b[1] == 98 then 2u64 else 8u64;
+        i = 2;
+    }
+    let mut v: u64 = 0;
+    let mut big = false;
+    let mut any = false;
+    while i < b.len() {
+        let c = b[i];
+        if c == 95 {
+            i = i + 1;
+            continue;
+        }
+        let d: u64 = if c >= 48 && c <= 57 then (c - 48) as u64 else if c >= 97 && c <= 102 then (c - 87) as u64 else if c >= 65 && c <= 70 then (c - 55) as u64 else 99u64;
+        if d >= radix { break; }
+        any = true;
+        let hi = v.mul_hi(radix);
+        let lo = v *% radix;
+        if hi != 0 { big = true; }
+        let s = lo +% d;
+        if s < lo { big = true; }
+        v = s;
+        i = i + 1;
+    }
+    if !any { return (0, false, 255u8); }
+    let suf = &b[i..b.len()];
+    if suf.len() == 0 { return (v, big, 0u8); }
+    let k = int_suffix(suf);
+    if k != 0 { return (v, big, k); }
+    if radix == 10 && (suf.eq(std_bytes("f32")) || suf.eq(std_bytes("f64")) || suf.eq(std_bytes("f16")) || suf.eq(std_bytes("bf16"))) { return (v, big, 100u8); }
+    return (v, big, 255u8);
+}
+
+// The suffix code of an int type name (1 ..= 10, as `suffix_ty`), 0 for none.
+fn int_suffix(b: &[u8]) -> u8 {
+    if b.len() < 2 || (b[0] != 105 && b[0] != 117) { return 0u8; }
+    let r = &b[1..b.len()];
+    let w: u8 = if r.eq(std_bytes("8")) then 1u8 else if r.eq(std_bytes("16")) then 2u8 else if r.eq(std_bytes("32")) then 3u8 else if r.eq(std_bytes("64")) then 4u8 else if r.eq(std_bytes("size")) then 5u8 else 0u8;
+    if w == 0 { return 0u8; }
+    return if b[0] == 105 then w else w + 5;
+}
+
+fn std_bytes(s: &str) -> &[u8] from s {
+    return mem.str_bytes(s);
+}
+
+// The int type of suffix code k (1 ..= 10: i8 i16 i32 i64 isize u8 u16 u32 u64 usize).
+pub fn suffix_ty(tab: &mut types.Table, k: u8) -> u32 {
+    let signed = k <= 5;
+    let w = ((k - 1) % 5) as% u32;
+    return tab.int(signed, w);
+}
+
+// The range of int type t: (lo negative, lo magnitude, hi).
+fn range_of(tab: &types.Table, t: u32) -> (bool, u64, u64) {
+    let bits = tab.int_bits(t);
+    if tab.is_signed(t) {
+        let half: u64 = 1u64 << (bits - 1) as u64;
+        return (true, half, half - 1);
+    }
+    let hi: u64 = if bits == 64 then 18446744073709551615u64 else (1u64 << bits as u64) - 1;
+    return (false, 0, hi);
+}
+
+fn in_range(tab: &types.Table, t: u32, neg: bool, mag: u64) -> bool {
+    let (_, lo, hi) = range_of(tab, t);
+    if neg { return mag == 0 || (tab.is_signed(t) && mag <= lo); }
+    return mag <= hi;
+}
+
+// Two's complement word of (neg, mag).
+fn word(neg: bool, mag: u64) -> u64 {
+    return if neg then 0u64 -% mag else mag;
+}
+
+// The value of the low `bits` of word w in a signed or unsigned type: (neg, mag).
+fn wrap(w: u64, signed: bool, bits: u32) -> (bool, u64) {
+    let mut v = w;
+    if bits < 64 {
+        let m: u64 = (1u64 << bits as u64) - 1;
+        v = v & m;
+        if signed && (v >> (bits - 1) as u64) & 1 == 1 {
+            return (true, (m - v) + 1);
+        }
+        return (false, v);
+    }
+    if signed && (v >> 63) == 1 { return (true, 0u64 -% v); }
+    return (false, v);
+}
+
+// Exact sum of two signed magnitudes: (neg, mag, overflow past 64 bits).
+fn add_exact(an: bool, am: u64, bn: bool, bm: u64) -> (bool, u64, bool) {
+    if an == bn {
+        let s = am +% bm;
+        return (an && s != 0, s, s < am);
+    }
+    if am >= bm { return (an && am != bm, am - bm, false); }
+    return (bn, bm - am, false);
+}
+
+// One evaluation's state: per node of the expression's subtree (offset from `lo`), the decided
+// type (a T, or a literal group `LIT | g`), and for a literal its sign and magnitude.
+struct Ev {
+    it: u32,
+    base: usize,
+    lo: usize,
+    nty: vec.Vec<u64>,
+    lit: vec.Vec<u8>,
+    lneg: vec.Vec<bool>,
+    lmag: vec.Vec<u64>,
+    lbig: vec.Vec<bool>,
+    vneg: vec.Vec<bool>,
+    vmag: vec.Vec<u64>,
+    cast_to: vec.Vec<u32>,
+    gpar: vec.Vec<u32>,
+    gfix: vec.Vec<u32>,
+    out: u8,
+}
+
+const NO_TY: u64 = 18446744073709551615;
+const LIT: u64 = 4294967296;
+
+impl Ev {
+    fn at(&self, g: usize) -> usize {
+        return g - self.lo;
+    }
+
+    fn find(&mut self, g: u32) -> u32 {
+        let mut r = g;
+        while self.gpar.as_slice()[r as usize] != r {
+            r = self.gpar.as_slice()[r as usize];
+        }
+        return r;
+    }
+
+    fn resolve(&mut self, t: u64) -> u64 {
+        if t & LIT == 0 { return t; }
+        let r = self.find((t & 4294967295) as% u32);
+        let f = self.gfix.as_slice()[r as usize];
+        if f != NONE { return f as u64; }
+        return LIT | (r as u64);
+    }
+
+    fn fix(&mut self, tab: &types.Table, g: u32, t: u32) -> bool {
+        let r = self.find(g);
+        let f = self.gfix.as_slice()[r as usize];
+        if f != NONE { return f == t; }
+        if tab.tag_of(t) != types.TK_INT { return false; }
+        self.gfix.as_mut_slice()[r as usize] = t;
+        return true;
+    }
+
+    fn fail(&mut self, why: u8) {
+        if self.out == CV_OK || (why != CV_FAIL && self.out == CV_FAIL) { self.out = why; }
+    }
+
+    // The type of a node of type t where `want` is required.
+    fn coerce(&mut self, tab: &types.Table, t: u64, want: u32) -> bool {
+        let r = self.resolve(t);
+        if r & LIT == 0 {
+            if r as% u32 == want { return true; }
+            self.fail(CV_FAIL);
+            return false;
+        }
+        if self.fix(tab, (r & 4294967295) as% u32, want) { return true; }
+        self.fail(CV_FAIL);
+        return false;
+    }
+
+    fn unify(&mut self, tab: &types.Table, a: u64, b: u64) -> u64 {
+        let x = self.resolve(a);
+        let y = self.resolve(b);
+        if x & LIT == 0 && y & LIT == 0 {
+            if x == y { return x; }
+            self.fail(CV_FAIL);
+            return NO_TY;
+        }
+        if x & LIT != 0 && y & LIT != 0 {
+            let g1 = (x & 4294967295) as% u32;
+            let g2 = (y & 4294967295) as% u32;
+            let (l, h) = if g1 < g2 then (g1, g2) else (g2, g1);
+            self.gpar.as_mut_slice()[h as usize] = l;
+            return LIT | (l as u64);
+        }
+        let (g, t) = if x & LIT != 0 then ((x & 4294967295) as% u32, y as% u32) else ((y & 4294967295) as% u32, x as% u32);
+        if self.fix(tab, g, t) { return t as u64; }
+        self.fail(CV_FAIL);
+        return NO_TY;
+    }
+
+    fn hint_of(&mut self, t: u64, outer: u32) -> u32 {
+        let r = self.resolve(t);
+        if r & LIT == 0 { return r as% u32; }
+        return outer;
+    }
+}
+
+// Decide frames: node row, hint, next child index, the chain's type so far.
+struct Frames {
+    node: vec.Vec<u32>,
+    hint: vec.Vec<u32>,
+    k: vec.Vec<u32>,
+    acc: vec.Vec<u64>,
+}
+
+// The value of the const item d: (state, type, neg, mag).
+fn const_value(cx: &Cx, d: u32) -> (u8, u32, bool, u64) {
+    let c = &cx.consts;
+    return (c.state.as_slice()[d as usize], c.ty.as_slice()[d as usize], c.neg.as_slice()[d as usize], c.mag.as_slice()[d as usize]);
+}
+
+// The decl a path at row g (a `Primary` head, a `Postfix` of path steps only, or a `TypeBase`)
+// names: (decl, 0) when every identifier of the path resolved and the last names a decl; (NONE,
+// 1) a failed path; (NONE, 2) a form that is no plain path.
+fn path_decl(cx: &Cx, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, g: usize) -> (u32, u8) {
+    let mut head = g;
+    if kind(tree, g) == K_POSTFIX {
+        let ks = tree.kids.row(g);
+        if ks.len() != 1 { return (NONE, 2u8); }
+        head = base + ks[0] as usize;
+        if kind(tree, head) != K_PRIMARY { return (NONE, 2u8); }
+    }
+    let a = tree.tok.as_slice()[head];
+    if tk(t, a) != T_IDENT { return (NONE, 2u8); }
+    let end = tree.tok_end.as_slice()[g];
+    if kind(tree, head) == K_PRIMARY && tree.kids.row(head).len() > 0 { return (NONE, 2u8); }
+    // identifiers `a . b . c` up to the node's end
+    let mut last = a;
+    let mut p = a + 1;
+    while p + 1 < end && tk(t, p) == T_DOT && tk(t, p + 1) == T_IDENT {
+        last = p + 1;
+        p = p + 2;
+    }
+    if kind(tree, g) != K_TYPE_BASE && p != end { return (NONE, 2u8); }
+    let (lo, hi) = cx.uses.range(it, (head - base) as% u32);
+    if lo == hi { return (NONE, 1u8); }
+    let off = t.start.as_slice()[last as usize];
+    if cx.uses.off.as_slice()[hi - 1] != off || cx.uses.tag.as_slice()[hi - 1] != resolve.TAG_DECL { return (NONE, 1u8); }
+    return (cx.uses.target.as_slice()[hi - 1], 0u8);
+}
+
+// The outcome of a postfix chain at row g whose head path names a const: a head const without
+// a value fails, any other is a form not evaluated here.
+fn head_state(cx: &Cx, tree: &ast.Ast, ds: &decls.Decls, it: u32, base: usize, g: usize) -> u8 {
+    if kind(tree, g) != K_POSTFIX { return CV_UNSUP; }
+    let head = base + tree.kids.row(g)[0] as usize;
+    let (lo, hi) = cx.uses.range(it, (head - base) as% u32);
+    if lo == hi || cx.uses.tag.as_slice()[hi - 1] != resolve.TAG_DECL { return CV_UNSUP; }
+    let d = cx.uses.target.as_slice()[hi - 1] as usize;
+    if ds.kind.as_slice()[d] != decls.DK_CONST { return CV_UNSUP; }
+    let st = cx.consts.state.as_slice()[d];
+    return if st == CV_FAIL || st == CV_LAYOUT then st else CV_UNSUP;
+}
+
+// The int type a cast's target `Type` row names (a built-in int name), else NONE.
+fn cast_target(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, base: usize, g: usize) -> u32 {
+    let mut x = g;
+    if kind(tree, x) == K_TYPE {
+        let ks = tree.kids.row(x);
+        if ks.len() != 1 { return NONE; }
+        x = base + ks[0] as usize;
+    }
+    if kind(tree, x) != K_TYPE_BASE || tree.kids.row(x).len() != 0 { return NONE; }
+    let a = tree.tok.as_slice()[x];
+    if tk(t, a) != T_IDENT || tree.tok_end.as_slice()[x] != a + 1 { return NONE; }
+    let s = nm.tok_str.as_slice()[a as usize];
+    if s == NONE { return NONE; }
+    let k = int_suffix(nm.tab.text(s as usize));
+    if k == 0 { return NONE; }
+    return suffix_ty(&mut cx.tab, k);
+}
+
+fn is_chain(k: u8) -> bool {
+    return k == K_ADD || k == K_MUL || k == K_SHIFT || k == K_BIT_AND || k == K_BIT_OR || k == K_BIT_XOR;
+}
+
+// Whether the subtree of row g holds a use of a generic param (a `size_of` argument that names
+// one has no layout yet: E0904 case `generic`).
+fn names_generic(cx: &Cx, tree: &ast.Ast, it: u32, base: usize, g: usize) -> bool {
+    let lo = g - tree.size.as_slice()[g] as usize;
+    for x in lo..g + 1 {
+        let (a, b) = cx.uses.range(it, (x - base) as% u32);
+        for k in a..b {
+            if cx.uses.tag.as_slice()[k] == resolve.TAG_LOCAL { return true; }
+        }
+    }
+    return false;
+}
+
+// Evaluates the expression at row g (item it, item base `base`) expecting type `want` (NONE:
+// none): (outcome, type, neg, mag). A fail of a const it names without a value is `CV_FAIL`, of
+// one stage1 cannot evaluate its outcome.
+pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32) -> (u8, u32, bool, u64) {
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let a = tree.tok.as_slice()[g];
+    if kind(tree, g) == K_PRIMARY && tk(t, a) == T_INT_LIT && tree.tok_end.as_slice()[g] == a + 1 {
+        return lone_literal(cx, t, set, cut, it, a, want);
+    }
+    let lo = g - tree.size.as_slice()[g] as usize;
+    let n = g - lo + 1;
+    let mut ev = Ev.{
+        it: it,
+        base: base,
+        lo: lo,
+        nty: col.filled(n, NO_TY),
+        lit: col.filled(n, 0u8),
+        lneg: col.filled(n, false),
+        lmag: col.filled(n, 0u64),
+        lbig: col.filled(n, false),
+        vneg: col.filled(n, false),
+        vmag: col.filled(n, 0u64),
+        cast_to: col.filled(n, NONE),
+        gpar: vec.Vec::<u32>.new(),
+        gfix: vec.Vec::<u32>.new(),
+        out: CV_OK,
+    };
+    let top = decide(cx, tree, t, nm, set, cut, ds, &mut ev, g, want);
+    if ev.out != CV_OK { return (ev.out, types.ERR, false, 0); }
+    if want != NONE {
+        if !ev.coerce(&cx.tab, top, want) { return (ev.out, types.ERR, false, 0); }
+    } else if ev.resolve(top) & LIT != 0 {
+        return (CV_FAIL, types.ERR, false, 0);
+    }
+    // every group has a type, every literal fits it, every operator is defined on it
+    for k in 0..ev.gpar.len() {
+        let r = ev.find(k as% u32);
+        if ev.gfix.as_slice()[r as usize] == NONE { return (CV_FAIL, types.ERR, false, 0); }
+    }
+    for x in 0..n {
+        let ty = ev.nty.as_slice()[x];
+        if ty == NO_TY { continue; }
+        let rt = ev.resolve(ty);
+        ev.nty.as_mut_slice()[x] = rt;
+        if ev.lit.as_slice()[x] == 1 {
+            if ev.lbig.as_slice()[x] || !in_range(&cx.tab, rt as% u32, ev.lneg.as_slice()[x], ev.lmag.as_slice()[x]) { return (CV_FAIL, types.ERR, false, 0); }
+        }
+        let k = kind(tree, lo + x);
+        let rule = (is_chain(k) && tree.kids.row(lo + x).len() > 1) || k == K_UNARY;
+        if ev.lit.as_slice()[x] == 0 && rule {
+            if cx.tab.tag_of(rt as% u32) != types.TK_INT { return (CV_FAIL, types.ERR, false, 0); }
+            if k == K_UNARY && tk(t, tree.tok.as_slice()[lo + x]) == T_MINUS && !cx.tab.is_signed(rt as% u32) { return (CV_FAIL, types.ERR, false, 0); }
+        }
+    }
+    let r = value(cx, tree, t, ds, &mut ev, g);
+    if r != CV_OK { return (r, types.ERR, false, 0); }
+    let x = g - lo;
+    return (CV_OK, ev.nty.as_slice()[x] as% u32, ev.vneg.as_slice()[x], ev.vmag.as_slice()[x]);
+}
+
+// An expression that is one int literal at token a, expected type `want` (NONE: none): the
+// two passes collapse to this (a suffix gives its type, else the expected type does).
+fn lone_literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, a: u32, want: u32) -> (u8, u32, bool, u64) {
+    let f = cut.file.as_slice()[it as usize] as usize;
+    let (s, e) = lit_text(t, set, cut, it, a);
+    let (mag, big, suf) = parse_int(&set.file(f)[s..e]);
+    if suf == 255 || (suf == 100 && want != NONE) { return (CV_FAIL, types.ERR, false, 0); }
+    if suf == 100 { return (CV_UNSUP, types.ERR, false, 0); }
+    let ty = if suf != 0 then suffix_ty(&mut cx.tab, suf) else want;
+    if ty == NONE || (want != NONE && ty != want) || cx.tab.tag_of(ty) != types.TK_INT { return (CV_FAIL, types.ERR, false, 0); }
+    if big || !in_range(&cx.tab, ty, false, mag) { return (CV_FAIL, types.ERR, false, 0); }
+    return (CV_OK, ty, false, mag);
+}
+
+// The decide pass from row g with hint `want`: the type of g (a T or a group).
+fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, ev: &mut Ev, g: usize, want: u32) -> u64 {
+    let base = ev.base;
+    let it = ev.it;
+    let mut fr = Frames.{ node: vec.Vec::<u32>.new(), hint: vec.Vec::<u32>.new(), k: vec.Vec::<u32>.new(), acc: vec.Vec::<u64>.new() };
+    let mut cur = g;
+    let mut hint = want;
+    let mut ret: u64 = NO_TY;
+    // `entering`: cur/hint is a node to decide; else `ret` returns to the top frame
+    let mut entering = true;
+    loop {
+        if ev.out != CV_OK { return NO_TY; }
+        if entering {
+            let k = kind(tree, cur);
+            let ks = tree.kids.row(cur);
+            let a = tree.tok.as_slice()[cur];
+            if is_chain(k) && ks.len() > 1 {
+                fr.node.push(cur as% u32);
+                fr.hint.push(hint);
+                fr.k.push(1);
+                fr.acc.push(NO_TY);
+                cur = base + ks[0] as usize;
+                continue;
+            }
+            if (is_chain(k) || k == K_CAST) && ks.len() == 1 {
+                fr.node.push(cur as% u32);
+                fr.hint.push(hint);
+                fr.k.push(1);
+                fr.acc.push(NO_TY);
+                cur = base + ks[0] as usize;
+                continue;
+            }
+            if k == K_UNARY {
+                let c = base + ks[0] as usize;
+                let op = tk(t, a);
+                if op == T_MINUS {
+                    let p = down_to_primary(tree, t, base, c);
+                    if p != NONE && tree.tok.as_slice()[p as usize] == a + 1 && tk(t, a + 1) == T_INT_LIT {
+                        let r = literal(cx, t, set, cut, ev, cur, a + 1, true, hint);
+                        let mut x = c;
+                        while x != p as usize {
+                            ev.nty.as_mut_slice()[x - ev.lo] = r;
+                            x = base + tree.kids.row(x)[0] as usize;
+                        }
+                        ev.nty.as_mut_slice()[x - ev.lo] = r;
+                        ret = r;
+                        entering = false;
+                        continue;
+                    }
+                    if p != NONE && tree.tok.as_slice()[p as usize] == a + 1 && tk(t, a + 1) == T_FLOAT_LIT {
+                        ev.fail(CV_UNSUP);
+                        continue;
+                    }
+                }
+                if op != T_MINUS && op != T_TILDE {
+                    ev.fail(CV_UNSUP);
+                    continue;
+                }
+                // the operand has the node's type
+                fr.node.push(cur as% u32);
+                fr.hint.push(hint);
+                fr.k.push(1);
+                fr.acc.push(NO_TY);
+                cur = c;
+                continue;
+            }
+            if k == K_CAST {
+                if ks.len() != 2 {
+                    ev.fail(CV_UNSUP);
+                    continue;
+                }
+                fr.node.push(cur as% u32);
+                fr.hint.push(hint);
+                fr.k.push(1);
+                fr.acc.push(NO_TY);
+                cur = base + ks[0] as usize;
+                hint = NONE;
+                continue;
+            }
+            if k == K_PRIMARY {
+                let op = tk(t, a);
+                if op == T_INT_LIT {
+                    ret = literal(cx, t, set, cut, ev, cur, a, false, hint);
+                    entering = false;
+                    continue;
+                }
+                if op == T_L_PAREN {
+                    let close = tree.tok_end.as_slice()[cur] - 1;
+                    if ks.len() == 1 && tk(t, close - 1) != T_COMMA {
+                        fr.node.push(cur as% u32);
+                        fr.hint.push(hint);
+                        fr.k.push(1);
+                        fr.acc.push(NO_TY);
+                        cur = base + ks[0] as usize;
+                        continue;
+                    }
+                    ev.fail(CV_UNSUP);
+                    continue;
+                }
+                if op != T_IDENT {
+                    ev.fail(CV_UNSUP);
+                    continue;
+                }
+            }
+            if k == K_PRIMARY || k == K_POSTFIX || k == K_TYPE_BASE {
+                // `size_of::<T>()` / `align_of::<T>()`
+                if k == K_POSTFIX {
+                    let head = base + ks[0] as usize;
+                    let ha = tree.tok.as_slice()[head];
+                    if kind(tree, head) == K_PRIMARY && tk(t, ha) == T_IDENT && is_layout_fn(nm, name_of(nm, ha)) {
+                        let (ulo, uhi) = cx.uses.range(it, (head - base) as% u32);
+                        if ulo == uhi {
+                            let ga = child(tree, base, head, K_GENERIC_ARGS);
+                            if ga == NONE || names_generic(cx, tree, it, base, ga as usize) {
+                                ev.fail(CV_FAIL);
+                                continue;
+                            }
+                            let r = cx.lay.find(cur as% u32);
+                            if r == NONE {
+                                cx.lay.add(cur as% u32, it, cx.sc);
+                                ev.fail(CV_LAYOUT);
+                                continue;
+                            }
+                            let st = cx.lay.st.as_slice()[r as usize];
+                            if st == CV_LAYOUT {
+                                cx.lay.it.as_mut_slice()[r as usize] = it;
+                                cx.lay.sc.as_mut_slice()[r as usize] = cx.sc;
+                                cx.lay.met.as_mut_slice()[r as usize] = true;
+                            }
+                            if st != CV_OK {
+                                ev.fail(st);
+                                continue;
+                            }
+                            let is_size = nm.tab.text(name_of(nm, ha) as usize).eq(std_bytes("size_of"));
+                            let x = cur - ev.lo;
+                            ev.lit.as_mut_slice()[x] = 2;
+                            ev.vneg.as_mut_slice()[x] = false;
+                            ev.vmag.as_mut_slice()[x] = if is_size then cx.lay.size.as_slice()[r as usize] else cx.lay.aln.as_slice()[r as usize];
+                            ret = cx.tab.usize_t() as u64;
+                            ev.nty.as_mut_slice()[x] = ret;
+                            entering = false;
+                            continue;
+                        }
+                    }
+                }
+                let (d, how) = path_decl(cx, tree, t, it, base, cur);
+                if how == 2 {
+                    // steps past a path (an index, a call): the head is evaluated first, so a
+                    // head const without a value fails the whole
+                    ev.fail(head_state(cx, tree, ds, it, base, cur));
+                    continue;
+                }
+                if how == 1 || d == NONE {
+                    ev.fail(CV_FAIL);
+                    continue;
+                }
+                let dk = ds.kind.as_slice()[d as usize];
+                if dk == decls.DK_CONST {
+                    let (st, ty, neg, mag) = const_value(cx, d);
+                    if st != CV_OK {
+                        ev.fail(if st == CV_UNSUP || st == CV_LAYOUT then st else CV_FAIL);
+                        continue;
+                    }
+                    if cx.tab.tag_of(ty) != types.TK_INT {
+                        ev.fail(CV_UNSUP);
+                        continue;
+                    }
+                    let x = cur - ev.lo;
+                    ev.lit.as_mut_slice()[x] = 2;
+                    ev.vneg.as_mut_slice()[x] = neg;
+                    ev.vmag.as_mut_slice()[x] = mag;
+                    ret = ty as u64;
+                    ev.nty.as_mut_slice()[x] = ret;
+                    entering = false;
+                    continue;
+                }
+                if dk == decls.DK_VARIANT {
+                    ev.fail(CV_UNSUP);
+                    continue;
+                }
+                ev.fail(CV_FAIL);
+                continue;
+            }
+            if k == K_MATCH {
+                ev.fail(CV_FAIL);
+                continue;
+            }
+            ev.fail(CV_UNSUP);
+            continue;
+        }
+        // return `ret` to the top frame
+        let top = fr.node.len();
+        if top == 0 { return ret; }
+        let f = top - 1;
+        let fnode = fr.node.as_slice()[f] as usize;
+        let fk = kind(tree, fnode);
+        let fks = tree.kids.row(fnode);
+        let fh = fr.hint.as_slice()[f];
+        let kk = fr.k.as_slice()[f] as usize;
+        if (is_chain(fk) || fk == K_CAST) && fks.len() == 1 {
+            ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+        } else if is_chain(fk) {
+            let acc = if kk == 1 then ret else ev.unify(&cx.tab, fr.acc.as_slice()[f], ret);
+            if ev.out != CV_OK { return NO_TY; }
+            if kk < fks.len() {
+                fr.acc.as_mut_slice()[f] = acc;
+                fr.k.as_mut_slice()[f] = (kk + 1) as% u32;
+                cur = base + fks[kk] as usize;
+                hint = ev.hint_of(acc, fh);
+                entering = true;
+                continue;
+            }
+            ev.nty.as_mut_slice()[fnode - ev.lo] = acc;
+            ret = acc;
+        } else if fk == K_UNARY || fk == K_PRIMARY {
+            ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+        } else if fk == K_CAST {
+            // the operand has no expected type; each step names an int type
+            let r = ev.resolve(ret);
+            if r & LIT != 0 {
+                ev.fail(CV_FAIL);
+                return NO_TY;
+            }
+            let mut src = r as% u32;
+            for j in 1..fks.len() {
+                let c = base + fks[j] as usize;
+                let op = tk(t, tree.tok.as_slice()[c] - 1);
+                let to = cast_target(cx, tree, t, nm, base, c);
+                if to == NONE || cx.tab.tag_of(src) != types.TK_INT || (op != T_KW_AS && op != T_AS_PERCENT && op != T_AS_PIPE) {
+                    ev.fail(CV_UNSUP);
+                    return NO_TY;
+                }
+                if op == T_KW_AS && src != to {
+                    let fs = cx.tab.is_signed(src);
+                    let ts = cx.tab.is_signed(to);
+                    let fb = cx.tab.int_bits(src);
+                    let tb = cx.tab.int_bits(to);
+                    if !((fs == ts && tb >= fb) || (!fs && ts && tb > fb)) {
+                        ev.fail(CV_FAIL);
+                        return NO_TY;
+                    }
+                }
+                ev.cast_to.as_mut_slice()[fnode - ev.lo] = to;
+                src = to;
+            }
+            ret = src as u64;
+            ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+        }
+        fr.node.truncate(f);
+        fr.hint.truncate(f);
+        fr.k.truncate(f);
+        fr.acc.truncate(f);
+    }
+}
+
+// Whether name S is `size_of` or `align_of`.
+fn is_layout_fn(nm: &intern.Interned, s: u32) -> bool {
+    if s == NONE || s as usize >= nm.tab.len() { return false; }
+    let b = nm.tab.text(s as usize);
+    return b.eq(std_bytes("size_of")) || b.eq(std_bytes("align_of"));
+}
+
+fn name_of(nm: &intern.Interned, tok: u32) -> u32 {
+    return nm.tok_str.as_slice()[tok as usize];
+}
+
+// The `Primary` under row c through parentheses, or NONE.
+fn down_to_primary(tree: &ast.Ast, t: &lex.Tokens, base: usize, c: usize) -> u32 {
+    let mut cur = c;
+    loop {
+        if kind(tree, cur) != K_PRIMARY { return NONE; }
+        let a = tree.tok.as_slice()[cur];
+        if tk(t, a) != T_L_PAREN { return cur as% u32; }
+        let ks = tree.kids.row(cur);
+        let close = tree.tok_end.as_slice()[cur] - 1;
+        if ks.len() != 1 || tk(t, close - 1) == T_COMMA { return NONE; }
+        cur = base + ks[0] as usize;
+    }
+}
+
+// A literal at token tok (node row g; `neg`: a folded unary minus).
+fn literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, ev: &mut Ev, g: usize, tok: u32, neg: bool, hint: u32) -> u64 {
+    let f = cut.file.as_slice()[ev.it as usize] as usize;
+    let (s, e) = lit_text(t, set, cut, ev.it, tok);
+    let (mag, big, suf) = parse_int(&set.file(f)[s..e]);
+    if suf == 255 {
+        ev.fail(CV_FAIL);
+        return NO_TY;
+    }
+    if suf == 100 {
+        ev.fail(CV_UNSUP);
+        return NO_TY;
+    }
+    let x = g - ev.lo;
+    ev.lit.as_mut_slice()[x] = 1;
+    ev.lneg.as_mut_slice()[x] = neg && mag != 0;
+    ev.lmag.as_mut_slice()[x] = mag;
+    ev.lbig.as_mut_slice()[x] = big;
+    let mut r: u64 = 0;
+    if suf != 0 {
+        r = suffix_ty(&mut cx.tab, suf) as u64;
+    } else {
+        let gid = ev.gpar.len() as% u32;
+        ev.gpar.push(gid);
+        ev.gfix.push(NONE);
+        if hint != NONE { let _ = ev.fix(&cx.tab, gid, hint); }
+        r = LIT | (gid as u64);
+    }
+    ev.nty.as_mut_slice()[x] = r;
+    return r;
+}
+
+// The value pass: every decided node of the subtree of g in node order.
+fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, ev: &mut Ev, g: usize) -> u8 {
+    let base = ev.base;
+    for row in ev.lo..g + 1 {
+        let x = row - ev.lo;
+        let ty = ev.nty.as_slice()[x];
+        if ty == NO_TY { continue; }
+        let l = ev.lit.as_slice()[x];
+        if l == 1 {
+            ev.vneg.as_mut_slice()[x] = ev.lneg.as_slice()[x];
+            ev.vmag.as_mut_slice()[x] = ev.lmag.as_slice()[x];
+            continue;
+        }
+        if l == 2 { continue; }
+        let k = kind(tree, row);
+        let ks = tree.kids.row(row);
+        let tt = ty as% u32;
+        if k == K_PRIMARY || (is_chain(k) && ks.len() == 1) || (k == K_CAST && ks.len() == 1) {
+            if ks.len() == 0 { continue; }
+            let c = base + ks[0] as usize - ev.lo;
+            let cn = ev.vneg.as_slice()[c];
+            let cm = ev.vmag.as_slice()[c];
+            ev.vneg.as_mut_slice()[x] = cn;
+            ev.vmag.as_mut_slice()[x] = cm;
+            continue;
+        }
+        if k == K_UNARY {
+            let c = base + ks[0] as usize - ev.lo;
+            let cn = ev.vneg.as_slice()[c];
+            let cm = ev.vmag.as_slice()[c];
+            if tk(t, tree.tok.as_slice()[row]) == T_MINUS {
+                let (_, lo, _) = range_of(&cx.tab, tt);
+                if cn && cm == lo { return CV_FAIL; }
+                ev.vneg.as_mut_slice()[x] = !cn && cm != 0;
+                ev.vmag.as_mut_slice()[x] = cm;
+            } else {
+                let (rn, rm) = wrap(~word(cn, cm), cx.tab.is_signed(tt), cx.tab.int_bits(tt));
+                ev.vneg.as_mut_slice()[x] = rn;
+                ev.vmag.as_mut_slice()[x] = rm;
+            }
+            continue;
+        }
+        if k == K_CAST {
+            let c = base + ks[0] as usize - ev.lo;
+            let to = ev.cast_to.as_slice()[x];
+            let op = tk(t, tree.tok.as_slice()[base + ks[1] as usize] - 1);
+            let cn = ev.vneg.as_slice()[c];
+            let cm = ev.vmag.as_slice()[c];
+            let (rn, rm) = if op == T_AS_PERCENT then wrap(word(cn, cm), cx.tab.is_signed(to), cx.tab.int_bits(to)) else clamp(&cx.tab, to, cn, cm, false);
+            ev.vneg.as_mut_slice()[x] = rn;
+            ev.vmag.as_mut_slice()[x] = rm;
+            continue;
+        }
+        if is_chain(k) {
+            let c0 = base + ks[0] as usize - ev.lo;
+            let mut an = ev.vneg.as_slice()[c0];
+            let mut am = ev.vmag.as_slice()[c0];
+            for j in 1..ks.len() {
+                let cr = base + ks[j] as usize;
+                let c = cr - ev.lo;
+                let op = tk(t, tree.tok.as_slice()[cr] - 1);
+                let (ok, rn, rm) = arith(&cx.tab, tt, op, an, am, ev.vneg.as_slice()[c], ev.vmag.as_slice()[c]);
+                if !ok { return CV_FAIL; }
+                an = rn;
+                am = rm;
+            }
+            ev.vneg.as_mut_slice()[x] = an;
+            ev.vmag.as_mut_slice()[x] = am;
+            continue;
+        }
+    }
+    return CV_OK;
+}
+
+// (neg, mag) saturated into type t; `exact_over`: the exact value overflowed 64 bits.
+fn clamp(tab: &types.Table, t: u32, neg: bool, mag: u64, exact_over: bool) -> (bool, u64) {
+    let (_, lo, hi) = range_of(tab, t);
+    if neg {
+        if !tab.is_signed(t) { return (false, 0); }
+        if exact_over || mag > lo { return (true, lo); }
+        return (true, mag);
+    }
+    if exact_over || mag > hi { return (false, hi); }
+    return (false, mag);
+}
+
+// One integer operation in type t: (ok, neg, mag).
+fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64) -> (bool, bool, u64) {
+    let signed = tab.is_signed(t);
+    let bits = tab.int_bits(t);
+    if op == T_PLUS || op == T_MINUS || op == T_PLUS_PIPE || op == T_MINUS_PIPE {
+        let sub = op == T_MINUS || op == T_MINUS_PIPE;
+        let (rn, rm, over) = add_exact(an, am, if sub then !bn && bm != 0 else bn, bm);
+        if op == T_PLUS_PIPE || op == T_MINUS_PIPE {
+            let (cn, cm) = clamp(tab, t, rn, rm, over);
+            return (true, cn, cm);
+        }
+        if over || !in_range(tab, t, rn, rm) { return (false, false, 0); }
+        return (true, rn, rm);
+    }
+    if op == T_STAR || op == T_STAR_PIPE {
+        let over = am.mul_hi(bm) != 0;
+        let rm = am *% bm;
+        let rn = (an != bn) && rm != 0;
+        if op == T_STAR_PIPE {
+            let (cn, cm) = clamp(tab, t, an != bn, rm, over);
+            return (true, cn, cm);
+        }
+        if over || !in_range(tab, t, rn, rm) { return (false, false, 0); }
+        return (true, rn, rm);
+    }
+    if op == T_SLASH || op == T_PERCENT {
+        let (_, lo, _) = range_of(tab, t);
+        if bm == 0 || (signed && an && am == lo && bn && bm == 1) { return (false, false, 0); }
+        if op == T_SLASH {
+            let q = am / bm;
+            return (true, (an != bn) && q != 0, q);
+        }
+        let r = am % bm;
+        return (true, an && r != 0, r);
+    }
+    if op == T_PLUS_PERCENT || op == T_MINUS_PERCENT || op == T_STAR_PERCENT {
+        let x = word(an, am);
+        let y = word(bn, bm);
+        let w = if op == T_PLUS_PERCENT then x +% y else if op == T_MINUS_PERCENT then x -% y else x *% y;
+        let (rn, rm) = wrap(w, signed, bits);
+        return (true, rn, rm);
+    }
+    if op == T_AMP || op == T_PIPE || op == T_CARET {
+        let x = word(an, am);
+        let y = word(bn, bm);
+        let w = if op == T_AMP then x & y else if op == T_PIPE then x | y else x ^ y;
+        let (rn, rm) = wrap(w, signed, bits);
+        return (true, rn, rm);
+    }
+    if op == T_LT_LT || op == T_LT_LT_PERCENT || op == T_GT_GT {
+        let mut amt_neg = bn && bm != 0;
+        let mut amt = bm;
+        if op == T_LT_LT_PERCENT {
+            amt = word(bn, bm) & (bits as u64 - 1);
+            amt_neg = false;
+        }
+        if amt_neg || amt >= bits as u64 { return (false, false, 0); }
+        let x = word(an, am);
+        if op == T_GT_GT {
+            if signed {
+                let (vn, vm) = wrap(x, true, bits);
+                if vn {
+                    // arithmetic shift of a negative value: -((m - 1) >> amt) - 1
+                    let q = (vm - 1) >> amt;
+                    return (true, true, q + 1);
+                }
+                return (true, false, vm >> amt);
+            }
+            let (_, vm) = wrap(x, false, bits);
+            return (true, false, vm >> amt);
+        }
+        let (rn, rm) = wrap(x << amt, signed, bits);
+        return (true, rn, rm);
+    }
+    return (false, false, 0);
+}
+
+// An array length or const generic argument: the const parameter it names, or its value as a
+// `u64`, as generic-argument words (kind, x, y). A bare const generic param names itself; any
+// other expression is evaluated as type `want`.
+pub fn eval_u64(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32, sc: Scope) -> (u32, u32, u32) {
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    if kind(tree, g) == K_PRIMARY && tk(t, tree.tok.as_slice()[g]) == T_IDENT && tree.tok_end.as_slice()[g] == tree.tok.as_slice()[g] + 1 {
+        let (lo, hi) = cx.uses.range(it, (g - base) as% u32);
+        if lo < hi && cx.uses.tag.as_slice()[lo] == resolve.TAG_LOCAL {
+            let gp = base + cx.uses.target.as_slice()[lo] as usize;
+            if kind(tree, gp) == K_GENERIC_PARAM && tk(t, tree.tok.as_slice()[gp]) == T_KW_CONST {
+                let (idx, _, _) = generic_index(cx, tree, t, ds, it, gp, sc);
+                return const_param_arg(cx, idx, want, sc);
+            }
+        }
+    }
+    cx.sc = sc;
+    let (st, _, neg, mag) = eval(cx, tree, t, nm, set, cut, ds, it, g, want);
+    if st == CV_OK {
+        if neg { return (types.GA_ERROR, 0, 0); }
+        return (types.GA_VALUE, (mag >> 32) as% u32, mag as% u32);
+    }
+    if st == CV_UNSUP { cx.note_skip(st); }
+    if st == CV_LAYOUT { cx.hits = cx.hits + 1; }
+    return (types.GA_ERROR, 0, 0);
+}
+
+// Const param idx given where a const of type `want` is required: itself, or an error when its
+// declared type differs (E0201).
+pub fn const_param_arg(cx: &Cx, idx: u32, want: u32, sc: Scope) -> (u32, u32, u32) {
+    let r = sc.row(idx);
+    if r == NONE || want == NONE { return (types.GA_PARAM, idx, 0); }
+    if !cx.gens.is_const.as_slice()[r as usize] { return (types.GA_PARAM, idx, 0); }
+    let ct = cx.gens.cty.as_slice()[r as usize];
+    if ct == want || ct == types.ERR || want == types.ERR { return (types.GA_PARAM, idx, 0); }
+    return (types.GA_ERROR, 0, 0);
+}

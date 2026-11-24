@@ -105,46 +105,132 @@ pub fn type_bytes<E: LayoutEnv + ?Sized>(env: &mut E, t: TypeId) -> Result<(u64,
 /// A layout or why there is none ([`type_bytes`]).
 type Bytes = Result<(u64, u64), NoLayout>;
 
+/// [`type_bytes`] of `t` reached `depth` parts below the type asked about (past the type depth
+/// limit: [`NoLayout::Unknown`]), memoized by type and depth. The parts are laid out in order
+/// (variants, fields, elements), a field substituted when its turn comes, the first part
+/// without a layout deciding, by an explicit stack of [`Lay`] frames: a type nested to the limit
+/// takes no stack in proportion to it.
 fn bytes_memo<E: LayoutEnv + ?Sized>(
     env: &mut E,
     t: TypeId,
     depth: u32,
     memo: &mut FxHashMap<(TypeId, u32), Bytes>,
 ) -> Bytes {
+    let mut frames = match lay_enter(env, t, depth, memo) {
+        Ok(r) => return r,
+        Err(f) => vec![f],
+    };
+    let mut done: Option<Bytes> = None;
+    loop {
+        if let Some(r) = done.take() {
+            let Some(top) = frames.last_mut() else { return r };
+            match r {
+                Ok(l) => top.got.push(l),
+                Err(e) => {
+                    // the first part without a layout is the holder's answer
+                    if let Some(f) = frames.pop() {
+                        memo.insert((f.t, f.depth), Err(e));
+                    }
+                    done = Some(Err(e));
+                    continue;
+                }
+            }
+        }
+        let Some(top) = frames.last_mut() else { return Err(NoLayout::Unknown) };
+        if let Some(&p) = top.parts.get(top.next) {
+            top.next += 1;
+            let p = match &top.adt {
+                Some((_, _, args)) => env.subst(p, args, None),
+                None => p,
+            };
+            let d = top.depth + 1;
+            match lay_enter(env, p, d, memo) {
+                Ok(r) => done = Some(r),
+                Err(f) => frames.push(f),
+            }
+            continue;
+        }
+        let Some(f) = frames.pop() else { return Err(NoLayout::Unknown) };
+        let mut got = f.got.iter().copied();
+        let r = match &f.adt {
+            Some((is_enum, lens, _)) => {
+                let vls: Vec<Vec<(u64, u64)>> =
+                    lens.iter().map(|&n| got.by_ref().take(n).collect()).collect();
+                adt_layout(*is_enum, &vls)
+            }
+            None => scalar_layout(&f.kind, &mut |_| got.next().ok_or(NoLayout::Unknown)),
+        };
+        memo.insert((f.t, f.depth), r);
+        done = Some(r);
+    }
+}
+
+/// One type of [`bytes_memo`] whose parts are being laid out.
+struct Lay {
+    t: TypeId,
+    depth: u32,
+    kind: TypeKind,
+    /// An ADT: whether it is an enum, its variants' field counts, and the args its fields are
+    /// substituted with.
+    adt: Option<(bool, Vec<usize>, Box<[GArg]>)>,
+    /// The parts in layout order: an ADT's fields (unsubstituted), else the components
+    /// [`scalar_layout`] asks for.
+    parts: Vec<TypeId>,
+    /// The layouts of the parts so far.
+    got: Vec<(u64, u64)>,
+    next: usize,
+}
+
+/// Starts laying out `t` at `depth`: its layout if known without its parts, else the frame that
+/// lays them out.
+fn lay_enter<E: LayoutEnv + ?Sized>(
+    env: &mut E,
+    t: TypeId,
+    depth: u32,
+    memo: &mut FxHashMap<(TypeId, u32), Bytes>,
+) -> Result<Bytes, Box<Lay>> {
     if depth >= crate::typedepth::MAX_TYPE_DEPTH {
-        return Err(NoLayout::Unknown);
+        return Ok(Err(NoLayout::Unknown));
     }
     if let Some(&l) = memo.get(&(t, depth)) {
-        return l;
+        return Ok(l);
     }
     let k = env.kind(t).clone();
-    let r = match k {
-        TypeKind::Adt { def, args } => match env.adt_shape(def) {
+    let r = match &k {
+        TypeKind::Adt { def, args } => match env.adt_shape(*def) {
             None => Err(NoLayout::Unknown),
-            Some((is_enum, variants)) => (|| {
-                let mut vls = Vec::with_capacity(variants.len());
-                for v in &variants {
-                    let mut fs = Vec::with_capacity(v.len());
-                    for &f in v {
-                        let ft = env.subst(f, &args, None);
-                        fs.push(bytes_memo(env, ft, depth + 1, memo)?);
-                    }
-                    vls.push(fs);
-                }
-                adt_layout(is_enum, &vls)
-            })(),
+            Some((is_enum, variants)) => {
+                let lens = variants.iter().map(Vec::len).collect();
+                let parts = variants.into_iter().flatten().collect();
+                let adt = Some((is_enum, lens, args.clone()));
+                return Err(Box::new(Lay { t, depth, kind: k, adt, parts, got: Vec::new(), next: 0 }));
+            }
         },
         TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
-            Ok(if matches!(env.kind(inner), TypeKind::Str | TypeKind::Slice { .. }) {
+            Ok(if matches!(env.kind(*inner), TypeKind::Str | TypeKind::Slice { .. }) {
                 (16, 8)
             } else {
                 (8, 8)
             })
         }
-        _ => scalar_layout(&k, &mut |x| bytes_memo(env, x, depth + 1, memo)),
+        _ => {
+            // the components `scalar_layout` asks `sub` for, in its order
+            let parts = match &k {
+                TypeKind::Array { elem, len: ConstArg::Value(_) } | TypeKind::Range { elem, .. } => {
+                    vec![*elem]
+                }
+                TypeKind::Vector { lane, n: crate::prim::Lanes::Fixed(_) } => vec![*lane],
+                TypeKind::Tuple(ts) => ts.to_vec(),
+                _ => Vec::new(),
+            };
+            if !parts.is_empty() {
+                return Err(Box::new(Lay { t, depth, kind: k, adt: None, parts, got: Vec::new(), next: 0 }));
+            }
+            scalar_layout(&k, &mut |_| Err(NoLayout::Unknown))
+        }
     };
     memo.insert((t, depth), r);
-    r
+    Ok(r)
 }
 
 /// Layout of a scalar or a type built from components (arrays, tuples, ranges, vectors, masks);
@@ -472,6 +558,17 @@ impl Query {
     fn any_kind() -> Query {
         Query { any_kind: true, ..Query::default() }
     }
+}
+
+/// Final trait answers kept from one top-level query to the next, for queries asked in one
+/// environment (the `env` of every call that passes it). A top-level query ends with nothing in
+/// progress, so what [`Query::settle`] memoized is final for that environment, local and generic
+/// types included (which [`QueryCache`] does not hold). A caller that asks about the parts of a
+/// type before the type itself (fields, type arguments, elements, pointees, deepest first) keeps
+/// each query a few goals deep: the goals one step down are answered here.
+#[derive(Default)]
+pub struct Answers {
+    q: Query,
 }
 
 /// Final answers of trait queries about concrete types of the global type table, shared by
@@ -842,6 +939,18 @@ impl<'a> World<'a> {
         env: &[GenericParam],
     ) -> bool {
         self.implements_q(cx, t, tr, env, &mut Query::default())
+    }
+
+    /// [`World::implements`] with the answers of earlier queries in `env` ([`Answers`]).
+    pub fn implements_kept<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        t: TypeId,
+        tr: &TraitRef,
+        env: &[GenericParam],
+        kept: &mut Answers,
+    ) -> bool {
+        self.implements_q(cx, t, tr, env, &mut kept.q)
     }
 
     fn implements_q<I: Interner + ?Sized>(
@@ -1245,6 +1354,18 @@ impl<'a> World<'a> {
         self.find_impl_q(cx, t, tr, env, &mut Query::default())
     }
 
+    /// [`World::find_impl`] with the answers of earlier queries in `env` ([`Answers`]).
+    pub fn find_impl_kept<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        t: TypeId,
+        tr: &TraitRef,
+        env: &[GenericParam],
+        kept: &mut Answers,
+    ) -> Option<(DeclId, Vec<GArg>)> {
+        self.find_impl_q(cx, t, tr, env, &mut kept.q)
+    }
+
     fn find_impl_q<I: Interner + ?Sized>(
         &self,
         cx: &mut I,
@@ -1294,6 +1415,18 @@ impl<'a> World<'a> {
         env: &[GenericParam],
     ) -> Option<Vec<GArg>> {
         self.impl_applies_q(cx, imp, t, env, &mut Query::default())
+    }
+
+    /// [`World::impl_applies`] with the answers of earlier queries in `env` ([`Answers`]).
+    pub fn impl_applies_kept<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        imp: &ImplDef,
+        t: TypeId,
+        env: &[GenericParam],
+        kept: &mut Answers,
+    ) -> Option<Vec<GArg>> {
+        self.impl_applies_q(cx, imp, t, env, &mut kept.q)
     }
 
     /// [`World::impl_applies`] without the view-kind rule: the impl a view was refused by, for
@@ -1410,6 +1543,17 @@ impl<'a> World<'a> {
 
     pub fn is_copy<I: Interner + ?Sized>(&self, cx: &mut I, t: TypeId, env: &[GenericParam]) -> bool {
         self.is_copy_q(cx, t, env, &mut Query::default())
+    }
+
+    /// [`World::is_copy`] with the answers of earlier queries in `env` ([`Answers`]).
+    pub fn is_copy_kept<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        t: TypeId,
+        env: &[GenericParam],
+        kept: &mut Answers,
+    ) -> bool {
+        self.is_copy_q(cx, t, env, &mut kept.q)
     }
 
     fn is_copy_q<I: Interner + ?Sized>(
