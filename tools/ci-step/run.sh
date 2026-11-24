@@ -36,7 +36,7 @@ case "$step" in
   gen)     cargo run -q --locked -p ll1gen
            cargo run -q --locked -p diaggen
            cargo run -q --locked -p gen-tables ;;
-  # stage1 `tokens` dumps against stage0's on the conformance corpus and stage1 itself.
+  # stage1 dumps (tokens, items, ast, strings) against stage0's on the conformance corpus and stage1 itself.
   stage1-gate) sh tools/ci-step/stage1-gate.sh ;;
   lang-budget)
            cargo run -q --locked -p lang-budget -- LANG.md --limit 15000 ;;

@@ -1,0 +1,412 @@
+// Tests of `intern`: the table is checked against its definition (every candidate's id names its
+// text, the strings by id ascend strictly in (hash, bytes)) instead of against a second
+// implementation of the algorithm.
+import files;
+import intern;
+import lex;
+import prims.col;
+import prims.xxhash;
+import source;
+import text;
+import std.debug;
+import std.idx;
+import std.mem;
+import std.string;
+import std.vec;
+
+// Two different identifiers with one xxHash32 (seed 0), found by a search over random lowercase
+// words of 8 letters.
+const COLLIDE_A: &str = "gnzqvgsv";
+const COLLIDE_B: &str = "phffgesg";
+const COLLIDE_HASH: u32 = 0x0b6f24fb;
+
+fn push_str(c: &mut intern.Cands, s: &str) {
+    c.push(mem.str_bytes(s));
+}
+
+fn push_run(c: &mut intern.Cands, b: u8, n: usize) {
+    let mut v = vec.Vec::<u8>.with_capacity(n);
+    for _ in 0..n {
+        v.push(b);
+    }
+    c.push(v.as_slice());
+}
+
+// A fixed-seed generator (xorshift64*).
+struct Rng {
+    s: u64,
+}
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.s;
+        x = x ^ (x >> 12);
+        x = x ^ (x << 25);
+        x = x ^ (x >> 27);
+        self.s = x;
+        return x *% 0x2545F4914F6CDD1D;
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        return (self.next() >> 11) % n;
+    }
+}
+
+fn before(ha: u32, a: &[u8], hb: u32, b: &[u8]) -> bool {
+    if ha != hb { return ha < hb; }
+    return text.cmp(a, b) < 0;
+}
+
+// Ranks `c` and checks the table: sizes, ids in range, each id's text equals its candidates'
+// text, hashes are xxHash32 of the text, every id is used, ids ascend strictly by (hash, bytes).
+fn check(c: &intern.Cands) -> intern.Table {
+    let t = intern.rank(c);
+    let n = c.len();
+    let u = t.len();
+    debug.assert(t.str_off.len() == u + 1, "str_off has one entry per string and the end");
+    debug.assert(t.str_off.as_slice()[0] == 0, "str_off starts at 0");
+    debug.assert(t.str_off.as_slice()[u] as usize == t.str_bytes.len(), "str_off ends at the byte count");
+    debug.assert(t.cand_str.len() == n, "cand_str has one entry per candidate");
+    let mut used = col.filled(u, false);
+    for k in 0..n {
+        let s = t.cand_str.as_slice()[k] as usize;
+        debug.assert(s < u, "id in range");
+        debug.assert(t.text(s).eq(c.text(k)), "the id names the candidate's text");
+        debug.assert(t.str_hash.as_slice()[s] == xxhash.hash32(c.text(k), 0), "hash is xxHash32 seed 0");
+        used.as_mut_slice()[s] = true;
+    }
+    for s in 0..u {
+        debug.assert(used.as_slice()[s], "every string has a candidate");
+        if s > 0 {
+            debug.assert(before(t.str_hash.as_slice()[s - 1], t.text(s - 1), t.str_hash.as_slice()[s], t.text(s)), "ids ascend by (hash, bytes)");
+        }
+    }
+    return t;
+}
+
+fn same_table(a: &intern.Table, b: &intern.Table) {
+    debug.assert(a.str_off.as_slice().eq(b.str_off.as_slice()), "same offsets");
+    debug.assert(a.str_hash.as_slice().eq(b.str_hash.as_slice()), "same hashes");
+    debug.assert(a.str_bytes.as_slice().eq(b.str_bytes.as_slice()), "same bytes");
+}
+
+test fn empty_input() {
+    let c = intern.Cands.new();
+    let t = check(&c);
+    debug.assert(t.len() == 0, "no strings");
+    debug.assert(t.cand_str.len() == 0, "no candidates");
+    debug.assert(t.str_off.len() == 1, "offsets of no strings");
+}
+
+test fn one_string() {
+    let mut c = intern.Cands.new();
+    push_str(&mut c, "main");
+    let t = check(&c);
+    debug.assert(t.len() == 1, "one string");
+    debug.assert(t.cand_str.as_slice()[0] == 0, "id 0");
+    debug.assert(t.text(0).eq(mem.str_bytes("main")), "its text");
+    debug.assert(t.str_hash.as_slice()[0] == xxhash.hash32(mem.str_bytes("main"), 0), "its hash");
+}
+
+test fn empty_string_among_others() {
+    let mut c = intern.Cands.new();
+    push_str(&mut c, "a");
+    push_str(&mut c, "");
+    push_str(&mut c, "a");
+    push_str(&mut c, "");
+    let t = check(&c);
+    debug.assert(t.len() == 2, "the empty string and a");
+    debug.assert(t.cand_str.as_slice()[1] == t.cand_str.as_slice()[3], "empty strings share an id");
+}
+
+test fn all_equal() {
+    let mut c = intern.Cands.new();
+    for _ in 0..1000usize {
+        push_str(&mut c, "same");
+    }
+    let t = check(&c);
+    debug.assert(t.len() == 1, "one string");
+    for k in 0..1000usize {
+        debug.assert(t.cand_str.as_slice()[k] == 0, "every candidate has id 0");
+    }
+}
+
+test fn all_distinct() {
+    let mut c = intern.Cands.new();
+    for k in 0..500u32 {
+        let mut b = vec.Vec::<u8>.new();
+        b.push(110);
+        text.push_u32(&mut b, k);
+        c.push(b.as_slice());
+    }
+    let t = check(&c);
+    debug.assert(t.len() == 500, "500 strings");
+}
+
+test fn collision_pair() {
+    let a = mem.str_bytes(COLLIDE_A);
+    let b = mem.str_bytes(COLLIDE_B);
+    debug.assert(!a.eq(b), "different strings");
+    debug.assert(xxhash.hash32(a, 0) == COLLIDE_HASH, "first hash");
+    debug.assert(xxhash.hash32(b, 0) == COLLIDE_HASH, "second hash");
+    // each order, alone and with other strings around and repeats of both
+    for round in 0..4usize {
+        let mut c = intern.Cands.new();
+        push_str(&mut c, "zz");
+        for k in 0..50usize {
+            if round == 0 || (round == 2 && k % 2 == 0) {
+                push_str(&mut c, COLLIDE_A);
+                push_str(&mut c, COLLIDE_B);
+            } else if round == 1 || round == 2 {
+                push_str(&mut c, COLLIDE_B);
+                push_str(&mut c, COLLIDE_A);
+                push_str(&mut c, COLLIDE_B);
+            } else {
+                push_str(&mut c, COLLIDE_B);
+            }
+        }
+        push_str(&mut c, "aa");
+        let t = check(&c);
+        if round == 3 {
+            debug.assert(t.len() == 3, "the collision partner was never seen");
+        } else {
+            debug.assert(t.len() == 4, "both strings, zz, aa");
+            let s1 = t.cand_str.as_slice()[1] as usize;
+            let s2 = t.cand_str.as_slice()[2] as usize;
+            let (lo, hi) = if round == 1 then (s2, s1) else (s1, s2);
+            debug.assert(hi == lo + 1, "the pair is adjacent");
+            debug.assert(t.text(lo).eq(a) && t.text(hi).eq(b), "the pair is in byte order");
+        }
+    }
+}
+
+test fn collision_pair_order_free() {
+    let mut x = intern.Cands.new();
+    push_str(&mut x, COLLIDE_A);
+    push_str(&mut x, COLLIDE_B);
+    push_str(&mut x, "q");
+    let mut y = intern.Cands.new();
+    push_str(&mut y, "q");
+    push_str(&mut y, COLLIDE_B);
+    push_str(&mut y, COLLIDE_A);
+    let tx = check(&x);
+    let ty = check(&y);
+    same_table(&tx, &ty);
+    debug.assert(tx.cand_str.as_slice()[0] == ty.cand_str.as_slice()[2], "A has one id");
+    debug.assert(tx.cand_str.as_slice()[1] == ty.cand_str.as_slice()[1], "B has one id");
+}
+
+// Three different strings with one hash (found like the pair), in byte order: two collision
+// partners inside a run are told apart and ordered by comparing bytes, not by first appearance.
+fn triple(i: usize) -> &str {
+    if i == 0 { return "hfxkvjss"; }
+    if i == 1 { return "kederfsb"; }
+    return "newahlbr";
+}
+
+test fn collision_triple() {
+    for i in 0..3usize {
+        debug.assert(xxhash.hash32(mem.str_bytes(triple(i)), 0) == 0x866b33ce, "one hash");
+    }
+    let orders = [[0usize, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+    for o in 0..6usize {
+        let mut c = intern.Cands.new();
+        for _ in 0..3usize {
+            for k in 0..3usize {
+                push_str(&mut c, triple(orders[o][k]));
+            }
+        }
+        let t = check(&c);
+        debug.assert(t.len() == 3, "three strings");
+        for k in 0..3usize {
+            let id = t.cand_str.as_slice()[k] as usize;
+            debug.assert(t.text(id).eq(mem.str_bytes(triple(orders[o][k]))), "text of each id");
+            debug.assert(id == orders[o][k], "ids follow byte order");
+        }
+    }
+}
+
+test fn differ_in_last_byte() {
+    let mut c = intern.Cands.new();
+    for len in 1..40usize {
+        for last in 0..3u8 {
+            let mut b = vec.Vec::<u8>.new();
+            for _ in 0..len - 1 {
+                b.push(120);
+            }
+            b.push(48 + last);
+            c.push(b.as_slice());
+        }
+    }
+    let t = check(&c);
+    debug.assert(t.len() == 39 * 3, "117 strings");
+}
+
+test fn prefixes() {
+    let mut c = intern.Cands.new();
+    for len in 0..60usize {
+        push_run(&mut c, 97, len);
+        push_run(&mut c, 97, len);
+    }
+    let t = check(&c);
+    debug.assert(t.len() == 60, "one string per length");
+}
+
+test fn one_mebibyte_identifier() {
+    let n: usize = 1048576;
+    let mut c = intern.Cands.new();
+    push_run(&mut c, 97, n);
+    push_run(&mut c, 97, n);
+    let mut last = vec.Vec::<u8>.new();
+    for _ in 0..n - 1 {
+        last.push(97);
+    }
+    last.push(98);
+    c.push(last.as_slice());
+    let mut first = vec.Vec::<u8>.new();
+    first.push(98);
+    for _ in 0..n - 1 {
+        first.push(97);
+    }
+    c.push(first.as_slice());
+    push_run(&mut c, 97, n);
+    let t = check(&c);
+    debug.assert(t.len() == 3, "three distinct strings");
+    debug.assert(t.cand_str.as_slice()[0] == t.cand_str.as_slice()[1], "equal long strings share an id");
+    debug.assert(t.cand_str.as_slice()[0] == t.cand_str.as_slice()[4], "also after other strings");
+    debug.assert(t.str_bytes.len() == 3 * n, "each string stored once");
+}
+
+test fn non_ascii_bytes() {
+    let mut c = intern.Cands.new();
+    for k in 0..256usize {
+        let mut b = vec.Vec::<u8>.new();
+        b.push(k as% u8);
+        b.push(255);
+        c.push(b.as_slice());
+        c.push(&b.as_slice()[0..1]);
+    }
+    push_str(&mut c, "café ☃");
+    push_str(&mut c, "café ☃");
+    let t = check(&c);
+    debug.assert(t.len() == 513, "256 pairs, 256 single bytes, one text");
+}
+
+test fn random_and_shuffled() {
+    let mut r = Rng.{ s: 12345 };
+    let mut c = intern.Cands.new();
+    let mut words = vec.Vec::<vec.Vec<u8>>.new();
+    for k in 0..6000usize {
+        let alphabet: u64 = if k < 3000 then 2 else 26;
+        let len = r.below(7) as usize;
+        let mut b = vec.Vec::<u8>.new();
+        for _ in 0..len {
+            b.push(97 + (r.below(alphabet) as% u8));
+        }
+        c.push(b.as_slice());
+        words.push(b);
+    }
+    let t = check(&c);
+    let mut rev = intern.Cands.new();
+    for k in 0..words.len() {
+        rev.push(words.get_ref(words.len() - 1 - k).as_slice());
+    }
+    let tr = check(&rev);
+    same_table(&t, &tr);
+    for k in 0..words.len() {
+        debug.assert(t.cand_str.as_slice()[k] == tr.cand_str.as_slice()[words.len() - 1 - k], "ids do not depend on the order");
+    }
+}
+
+fn one_file(src: &[u8], pkg: &str, rel: &str, module: &str) -> (source.SourceSet, files.FileList) {
+    let mut s = source.SourceSet.{ bytes: vec.Vec::<u8>.new(), file_off: vec.Vec::<u64>.new(), read_ok: vec.Vec::<bool>.new() };
+    s.file_off.push(0);
+    s.bytes.extend_from_slice(src);
+    s.file_off.push(src.len() as u64);
+    s.read_ok.push(true);
+    let mut fl = files.FileList.{ package: vec.Vec::<string.String>.new(), rel_path: vec.Vec::<string.String>.new(), abs_path: vec.Vec::<string.String>.new(), module: vec.Vec::<string.String>.new(), pkg_name: vec.Vec::<string.String>.new() };
+    fl.package.push(string.String.from_str(pkg));
+    fl.rel_path.push(string.String.from_str(rel));
+    fl.abs_path.push(string.String.from_str(rel));
+    fl.module.push(string.String.from_str(module));
+    fl.pkg_name.push(string.String.from_str(pkg));
+    return (s, fl);
+}
+
+fn text_of(t: &intern.Table, id: u32) -> &[u8] from t {
+    return t.text(id as usize);
+}
+
+test fn names_of_a_file() {
+    let src = "fn main() { let s = \"café ☃ zz\"; let t = f\"é☃{aa}{bb.cc}{self.dd}x\\n\"; let u = qq; }";
+    let (set, fl) = one_file(mem.str_bytes(src), "main", "src/a/main.stv", "a/main");
+    let lx = lex.Lexer.new();
+    let mut toks = lex.Tokens.new();
+    lx.lex_file(set.file(0), &mut toks);
+    let names = intern.build(&set, &toks, &fl);
+    let t = &names.tab;
+    // main s t u qq, holes aa bb cc dd, the package name main (as the identifier), module segment a
+    debug.assert(t.len() == 10, "10 strings");
+    for s in 0..t.len() {
+        for k in 0..t.text(s).len() {
+            debug.assert(t.text(s)[k] < 128, "a string literal's bytes are not interned");
+        }
+    }
+    debug.assert(names.hole_str.len() == 4, "four hole segments, self is none");
+    debug.assert(text_of(t, names.hole_str.as_slice()[0]).eq(mem.str_bytes("aa")), "first hole");
+    debug.assert(text_of(t, names.hole_str.as_slice()[3]).eq(mem.str_bytes("dd")), "last hole");
+    debug.assert(names.pkg_str.len() == 1, "one package");
+    debug.assert(text_of(t, names.pkg_str.as_slice()[0]).eq(mem.str_bytes("main")), "package name");
+    debug.assert(names.file_seg.as_slice()[1] == 2, "two module segments");
+    debug.assert(text_of(t, names.seg_str.as_slice()[0]).eq(mem.str_bytes("a")), "first segment");
+    debug.assert(names.seg_str.as_slice()[1] == names.pkg_str.as_slice()[0], "the segment main is the package name");
+    let mut idents: usize = 0;
+    for i in 0..toks.kind.len() {
+        if names.tok_str.as_slice()[i] != idx.NONE { idents = idents + 1; }
+    }
+    debug.assert(idents == 5, "five identifier tokens");
+}
+
+test fn holes_that_are_not_names() {
+    // a `\` hides the next byte: `\{zz}` is no hole, `\\{ww}` is one; `self` is no name
+    let src = "fn main() { let a = f\"{n}\\{zz}{p.q}\\\\{ww}\"; let b = f\"{self}{self.r}\"; }";
+    let (set, fl) = one_file(mem.str_bytes(src), "p", "main.stv", "main");
+    let lx = lex.Lexer.new();
+    let mut toks = lex.Tokens.new();
+    lx.lex_file(set.file(0), &mut toks);
+    let names = intern.build(&set, &toks, &fl);
+    let t = &names.tab;
+    let mut hole_text = vec.Vec::<u8>.new();
+    for h in 0..names.hole_str.len() {
+        hole_text.extend_from_slice(text_of(t, names.hole_str.as_slice()[h]));
+        hole_text.push(44);
+    }
+    debug.assert(hole_text.as_slice().eq(mem.str_bytes("n,p,q,ww,r,")), "hole segments in order");
+}
+
+test fn one_mebibyte_identifier_in_source() {
+    let n: usize = 1048576;
+    let mut src = vec.Vec::<u8>.new();
+    src.extend_from_slice(mem.str_bytes("fn f() { let "));
+    for _ in 0..n {
+        src.push(120);
+    }
+    src.extend_from_slice(mem.str_bytes(": u8 = 1; return "));
+    for _ in 0..n {
+        src.push(120);
+    }
+    src.extend_from_slice(mem.str_bytes("; }"));
+    let (set, fl) = one_file(src.as_slice(), "p", "main.stv", "main");
+    let lx = lex.Lexer.new();
+    let mut toks = lex.Tokens.new();
+    lx.lex_file(set.file(0), &mut toks);
+    let names = intern.build(&set, &toks, &fl);
+    let mut ids = vec.Vec::<u32>.new();
+    for i in 0..toks.kind.len() {
+        if names.tok_str.as_slice()[i] != idx.NONE { ids.push(names.tok_str.as_slice()[i]); }
+    }
+    // f, the name, u8, the name
+    debug.assert(ids.len() == 4, "four identifier tokens");
+    debug.assert(ids.as_slice()[1] == ids.as_slice()[3], "one id for both");
+    debug.assert(names.tab.text(ids.as_slice()[1] as usize).len() == n, "the whole name");
+}

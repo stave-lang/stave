@@ -7,8 +7,13 @@
 //
 // `ast`: one line `I N KIND a b` per node of every item not dropped, by (I, N): KIND is the rule
 // name, `a` the node's first token as an index into its file's tokens, `b` its subtree size.
+//
+// `strings`: one line `S hash32 "escaped-bytes"` per interned string, by S: the hash as 8
+// lowercase hex digits, the bytes 0x20..0x7E as themselves except `\` and `"` (backslash
+// escaped), `\n`, `\t`, and `\xHH` for every other byte.
 import ast;
 import generated.ll1_table;
+import intern;
 import items;
 import lex;
 import text;
@@ -86,6 +91,50 @@ pub fn ast_txt(it: &items.Items, tree: &ast.Ast, t: &lex.Tokens) -> vec.Vec<u8> 
             text.push_u32(&mut buf, size[g]);
             buf.push(10);
         }
+    }
+    return buf;
+}
+
+fn push_escaped(buf: &mut vec.Vec<u8>, b: &[u8]) {
+    let hex = mem.str_bytes("0123456789abcdef");
+    for i in 0..b.len() {
+        let c = b[i];
+        if c == 92 || c == 34 {
+            buf.push(92);
+            buf.push(c);
+        } else if c == 10 {
+            buf.push(92);
+            buf.push(110);
+        } else if c == 9 {
+            buf.push(92);
+            buf.push(116);
+        } else if c >= 32 && c <= 126 {
+            buf.push(c);
+        } else {
+            buf.push(92);
+            buf.push(120);
+            buf.push(hex[(c >> 4) as usize]);
+            buf.push(hex[(c & 15) as usize]);
+        }
+    }
+}
+
+pub fn strings_txt(tab: &intern.Table) -> vec.Vec<u8> {
+    let n = tab.len();
+    let mut buf = vec.Vec::<u8>.with_capacity(tab.str_bytes.len() + n * 20);
+    let hex = mem.str_bytes("0123456789abcdef");
+    for s in 0..n {
+        text.push_u32(&mut buf, s as% u32);
+        buf.push(32);
+        let h = tab.str_hash.as_slice()[s];
+        for k in 0..8u32 {
+            buf.push(hex[((h >> ((7 - k) * 4)) & 15) as usize]);
+        }
+        buf.push(32);
+        buf.push(34);
+        push_escaped(&mut buf, tab.text(s));
+        buf.push(34);
+        buf.push(10);
     }
     return buf;
 }

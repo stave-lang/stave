@@ -35,6 +35,10 @@ pub struct FileList {
     pub package: vec.Vec<string.String>,
     pub rel_path: vec.Vec<string.String>,
     pub abs_path: vec.Vec<string.String>,
+    // the module path of each file, `/`-separated (`a/b` is `a.b`)
+    pub module: vec.Vec<string.String>,
+    // the name of every package of the build, files or not, in package rank order
+    pub pkg_name: vec.Vec<string.String>,
 }
 
 struct Loader {
@@ -47,6 +51,7 @@ struct Loader {
     f_pkg: vec.Vec<u32>,
     f_rel: vec.Vec<string.String>,
     f_abs: vec.Vec<string.String>,
+    f_mod: vec.Vec<string.String>,
 }
 
 pub fn is_file(p: &str) -> bool {
@@ -151,6 +156,13 @@ fn builtin_files(dir: &str) -> vec.Vec<string.String> {
     return out;
 }
 
+// The module path of the file `rel` (relative to its source directory): without `.stv`.
+fn module_of(rel: &str) -> string.String {
+    let b = mem.str_bytes(rel);
+    let ext = mem.str_bytes(".stv");
+    return text.string_of(if text.ends_with(b, ext) then &b[0..b.len() - ext.len()] else b);
+}
+
 impl Loader {
     fn new() -> Loader {
         return Loader.{
@@ -162,6 +174,7 @@ impl Loader {
             f_pkg: vec.Vec::<u32>.new(),
             f_rel: vec.Vec::<string.String>.new(),
             f_abs: vec.Vec::<string.String>.new(),
+            f_mod: vec.Vec::<string.String>.new(),
         };
     }
 
@@ -198,6 +211,7 @@ impl Loader {
                 self.f_pkg.push(id);
                 self.f_abs.push(paths.join(dir, rel.as_str()));
                 self.f_rel.push(dup(rel));
+                self.f_mod.push(module_of(rel.as_str()));
             }
             return id;
         }
@@ -210,6 +224,7 @@ impl Loader {
             self.f_pkg.push(id);
             self.f_abs.push(paths.join(src.as_str(), rel.as_str()));
             self.f_rel.push(r);
+            self.f_mod.push(module_of(rel.as_str()));
         }
         return id;
     }
@@ -244,6 +259,7 @@ pub fn discover(root: &str, std_dir: &str, runtime_dir: &str, t: &Target) -> Fil
         };
         l.f_rel.push(fname);
         l.f_abs.push(string.String.from_str(root));
+        l.f_mod.push(string.String.from_str("main"));
     } else {
         queue.push(l.add_package(root, false, t));
     }
@@ -305,13 +321,17 @@ fn ordered(l: &Loader) -> FileList {
         if r != 0 { return r < 0; }
         return rank.as_slice()[px] < rank.as_slice()[py];
     });
-    let mut out = FileList.{ package: vec.Vec::<string.String>.new(), rel_path: vec.Vec::<string.String>.new(), abs_path: vec.Vec::<string.String>.new() };
+    let mut out = FileList.{ package: vec.Vec::<string.String>.new(), rel_path: vec.Vec::<string.String>.new(), abs_path: vec.Vec::<string.String>.new(), module: vec.Vec::<string.String>.new(), pkg_name: vec.Vec::<string.String>.new() };
+    for k in 0..porder.len() {
+        out.pkg_name.push(dup(l.name.get_ref(porder.as_slice()[k] as usize)));
+    }
     for k in 0..forder.len() {
         let f = forder.as_slice()[k] as usize;
         let p = l.f_pkg.as_slice()[f] as usize;
         out.package.push(dup(l.name.get_ref(p)));
         out.rel_path.push(dup(l.f_rel.get_ref(f)));
         out.abs_path.push(dup(l.f_abs.get_ref(f)));
+        out.module.push(dup(l.f_mod.get_ref(f)));
     }
     return out;
 }

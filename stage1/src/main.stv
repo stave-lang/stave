@@ -2,15 +2,16 @@
 // data is flat columns of ids and offsets, and each stage is a pass over whole arrays, the shape
 // it keeps on the GPU.
 //
-// Command line (a subset of stage0's): `stage1 build|check [PATH] --dump=tokens,items,ast --dump-dir DIR
+// Command line (a subset of stage0's): `stage1 build|check [PATH] --dump=tokens,items,ast,strings --dump-dir DIR
 // [--target T] [-o OUT]`. PATH (default `.`) is a `.stv` file or a package directory; the build
 // covers it, its path dependencies, and the shipped `std` and `runtime` from the library
 // directory (`$STAVE_STD_DIR`, else next to the binary as for stage0). It writes the requested
-// dumps of `tokens`, `items`, `ast` as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for byte
+// dumps of `tokens`, `items`, `ast`, `strings` as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for byte
 // stage0's. `-o` is accepted and
 // unused: no code is generated yet. Exit codes: 0 done, 2 usage.
 import dump;
 import files;
+import intern;
 import items;
 import lex;
 import parse;
@@ -39,6 +40,7 @@ struct Cli {
     want_tokens: bool,
     want_items: bool,
     want_ast: bool,
+    want_strings: bool,
 }
 
 fn arg(i: usize) -> string.String {
@@ -59,7 +61,7 @@ fn split_flag(a: &string.String) -> (string.String, Option<string.String>) {
 
 fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
     let n = env.count();
-    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] --dump=tokens,items,ast --dump-dir DIR")); }
+    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] --dump=tokens,items,ast,strings --dump-dir DIR")); }
     let cmd = arg(1);
     if !text.eq_str(cmd.as_bytes(), "build") && !text.eq_str(cmd.as_bytes(), "check") {
         return Result.Err(f"unknown command `{cmd}` (stage1 runs build and check)");
@@ -98,7 +100,7 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
             cli.target = value;
         }
     }
-    if cli.dump.len() == 0 || cli.dump_dir.len() == 0 { return Result.Err(string.String.from_str("stage1 needs --dump=tokens,items,ast and --dump-dir DIR")); }
+    if cli.dump.len() == 0 || cli.dump_dir.len() == 0 { return Result.Err(string.String.from_str("stage1 needs --dump=tokens,items,ast,strings and --dump-dir DIR")); }
     let d = cli.dump.as_bytes();
     let mut lo: usize = 0;
     for k in 0..d.len() + 1 {
@@ -110,6 +112,8 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
                 cli.want_items = true;
             } else if text.eq_str(st.as_bytes(), "ast") {
                 cli.want_ast = true;
+            } else if text.eq_str(st.as_bytes(), "strings") {
+                cli.want_strings = true;
             } else {
                 return Result.Err(f"dump `{st}` is not implemented in stage1");
             }
@@ -196,7 +200,7 @@ fn write_dump(dir: &str, name: &str, bytes: &[u8]) -> i32 {
 }
 
 fn main() -> i32 {
-    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), want_tokens: false, want_items: false, want_ast: false };
+    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), want_tokens: false, want_items: false, want_ast: false, want_strings: false };
     match parse_args(&mut cli) {
         Result.Ok(_) => {}
         Result.Err(m) => { return usage(m.as_str()); }
@@ -237,6 +241,12 @@ fn main() -> i32 {
     if cli.want_tokens {
         let out = dump.tokens(&lx, &toks);
         let code = write_dump(cli.dump_dir.as_str(), "tokens.txt", out.as_slice());
+        if code != EXIT_OK { return code; }
+    }
+    if cli.want_strings {
+        let names = intern.build(&set, &toks, &fl);
+        let out = dump.strings_txt(&names.tab);
+        let code = write_dump(cli.dump_dir.as_str(), "strings.txt", out.as_slice());
         if code != EXIT_OK { return code; }
     }
     if cli.want_items || cli.want_ast {

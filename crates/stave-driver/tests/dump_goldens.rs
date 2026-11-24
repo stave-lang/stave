@@ -22,7 +22,7 @@ use stave_driver::dump::{DumpStage, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
 
-const CASES: [&str; 4] = ["valid_small", "dropped_item", "unbalanced", "multi_file"];
+const CASES: [&str; 5] = ["valid_small", "dropped_item", "unbalanced", "multi_file", "intern_collision"];
 /// The `ir_` cases that also have a golden of the release lowering.
 const RELEASE_CASES: [&str; 3] = ["ir_bounds_kept", "ir_bounds_removed", "ir_roots"];
 const COMPARED: [DumpStage; 7] = [
@@ -165,7 +165,7 @@ fn golden_properties() {
                 assert!(read(&dir.join("diags.txt")).contains("\"code\":\"E0016\""));
             }
             "dropped_item" => assert_eq!(items.lines().filter(|l| l.ends_with(" dropped")).count(), 1),
-            "valid_small" => assert!(read(&dir.join("diags.txt")).is_empty()),
+            "valid_small" | "intern_collision" => assert!(read(&dir.join("diags.txt")).is_empty()),
             "multi_file" => {
                 // F = rank of (package, path): multi_file's src/main.stv, src/util.stv,
                 // src/util/math.stv, then runtime's empty.stv (no tokens), std's core.stv, io.stv,
