@@ -445,8 +445,16 @@ pub struct Traits {
     // queries: whether an impl's self type matched with no view refused, and its bound goals
     pub q_ok: vec.Vec<bool>,
     pub q_mem: ragged.Ragged<u32>,
-    // scratch: a goal key
+    // scratch: a goal key; the lists of `each`, `impl_clauses`, and `applies`, kept between
+    // calls (taken out while in use)
     w: vec.Vec<u32>,
+    s_each: vec.Vec<u32>,
+    s_cands: vec.Vec<u32>,
+    s_mem: vec.Vec<u32>,
+    s_args: vec.Vec<u32>,
+    s_sub: vec.Vec<u32>,
+    s_stack: vec.Vec<u32>,
+    s_bargs: vec.Vec<u32>,
 }
 
 pub fn new(sg: &sigs.Sigs, tab: &types.Table, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned) -> Traits {
@@ -469,6 +477,13 @@ pub fn new(sg: &sigs.Sigs, tab: &types.Table, ds: &decls.Decls, fl: &files.FileL
         q_ok: vec.Vec::<bool>.new(),
         q_mem: ragged.Ragged::<u32>.new(),
         w: vec.Vec::<u32>.new(),
+        s_each: vec.Vec::<u32>.new(),
+        s_cands: vec.Vec::<u32>.new(),
+        s_mem: vec.Vec::<u32>.new(),
+        s_args: vec.Vec::<u32>.new(),
+        s_sub: vec.Vec::<u32>.new(),
+        s_stack: vec.Vec::<u32>.new(),
+        s_bargs: vec.Vec::<u32>.new(),
     };
 }
 
@@ -630,9 +645,7 @@ impl Traits {
         self.w.push(t);
         self.w.push(tr);
         if tr != self.lang.copy_tr { self.w.extend_from_slice(args); }
-        let mut row = vec.Vec::<u32>.new();
-        row.extend_from_slice(self.w.as_slice());
-        let (g, fresh) = self.keys.id(row.as_slice());
+        let (g, fresh) = self.keys.id(self.w.as_slice());
         if fresh {
             self.co.push(self.is_co(tr));
             self.cl_lo.push(0);
@@ -643,9 +656,18 @@ impl Traits {
     }
 
     // Whether impl i applies to t: its self type matches and no param without `view` takes a
-    // view. The goals of its params' bounds into mem, its generic args into args (an unbound
+    // view. The goals of its params' bounds into ms, its generic args into args (an unbound
     // param: the error type, or `_`).
-    fn applies(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, i: u32, t: u32, mem: &mut vec.Vec<u32>, args: &mut vec.Vec<u32>) -> bool {
+    fn applies(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, i: u32, t: u32, ms: &mut vec.Vec<u32>, args: &mut vec.Vec<u32>) -> bool {
+        let mut stack = mem.replace(&mut self.s_stack, vec.Vec::<u32>.new());
+        let mut bargs = mem.replace(&mut self.s_bargs, vec.Vec::<u32>.new());
+        let ok = self.applies_in(tab, sg, i, t, ms, args, &mut stack, &mut bargs);
+        self.s_stack = stack;
+        self.s_bargs = bargs;
+        return ok;
+    }
+
+    fn applies_in(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, i: u32, t: u32, ms: &mut vec.Vec<u32>, args: &mut vec.Vec<u32>, stack: &mut vec.Vec<u32>, bargs: &mut vec.Vec<u32>) -> bool {
         args.clear();
         let st = sg.cx.ty.as_slice()[i as usize];
         if !real(st) { return false; }
@@ -657,8 +679,7 @@ impl Traits {
             args.push(0);
         }
         self.comp.ensure(tab, self.adt_view.as_slice());
-        let mut stack = vec.Vec::<u32>.new();
-        if !match_ty(tab, &self.comp, st, t, args, &mut stack) { return false; }
+        if !match_ty(tab, &self.comp, st, t, args, stack) { return false; }
         for k in 0..hi - lo {
             if args.as_slice()[3 * k] == NONE {
                 let c = sg.cx.gens.is_const.as_slice()[lo + k];
@@ -671,7 +692,6 @@ impl Traits {
             let a = args.as_slice()[3 * k + 1];
             if real(a) && !sg.cx.gens.is_view.as_slice()[lo + k] && self.comp.is_view.as_slice()[a as usize] { return false; }
         }
-        let mut bargs = vec.Vec::<u32>.new();
         for k in 0..hi - lo {
             if args.as_slice()[3 * k] != types.GA_TYPE { continue; }
             let a = args.as_slice()[3 * k + 1];
@@ -679,9 +699,9 @@ impl Traits {
             for j in 0..bs.len() {
                 let r = bs[j] as usize;
                 bargs.clear();
-                subst_args(tab, sg.b_args.row(r), args.as_slice(), &mut bargs);
+                subst_args(tab, sg.b_args.row(r), args.as_slice(), bargs);
                 let g = self.goal(a, sg.b_trait.as_slice()[r], bargs.as_slice());
-                if g != NONE { mem.push(g); }
+                if g != NONE { ms.push(g); }
             }
         }
         return true;
@@ -747,33 +767,39 @@ impl Traits {
 
     // The clauses of the impls of tr that apply to t with trait args `targs`.
     fn impl_clauses(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, t: u32, tr: u32, targs: &[u32]) {
-        let mut cands = vec.Vec::<u32>.new();
+        let mut cands = mem.replace(&mut self.s_cands, vec.Vec::<u32>.new());
+        let mut ms = mem.replace(&mut self.s_mem, vec.Vec::<u32>.new());
+        let mut args = mem.replace(&mut self.s_args, vec.Vec::<u32>.new());
+        let mut sub = mem.replace(&mut self.s_sub, vec.Vec::<u32>.new());
         self.candidates(tab, self.im.trait_pos(tr), t, &mut cands);
-        let mut mem = vec.Vec::<u32>.new();
-        let mut args = vec.Vec::<u32>.new();
-        let mut sub = vec.Vec::<u32>.new();
         for j in 0..cands.len() {
             let i = cands.as_slice()[j];
-            mem.clear();
-            if !self.applies(tab, sg, i, t, &mut mem, &mut args) { continue; }
+            ms.clear();
+            if !self.applies(tab, sg, i, t, &mut ms, &mut args) { continue; }
             // the trait args must match after substitution
             let r = sg.trait_ref.as_slice()[i as usize];
             if r == NONE { continue; }
             sub.clear();
             if tr != self.lang.copy_tr { subst_args(tab, sg.b_args.row(r as usize), args.as_slice(), &mut sub); }
             if !sub.as_slice().eq(targs) { continue; }
-            self.clause(mem.as_slice());
+            self.clause(ms.as_slice());
         }
+        self.s_cands = cands;
+        self.s_mem = ms;
+        self.s_args = args;
+        self.s_sub = sub;
     }
 
     // A clause of one goal per type of ts (a type without a goal holds).
     fn each(&mut self, ts: &[u32], tr: u32, targs: &[u32]) {
-        let mut mem = vec.Vec::<u32>.new();
+        let mut ms = mem.replace(&mut self.s_each, vec.Vec::<u32>.new());
+        ms.clear();
         for k in 0..ts.len() {
             let g = self.goal(ts[k], tr, targs);
-            if g != NONE { mem.push(g); }
+            if g != NONE { ms.push(g); }
         }
-        self.clause(mem.as_slice());
+        self.clause(ms.as_slice());
+        self.s_each = ms;
     }
 
     // The clause of the structural rule of Flat (`frozen` false) or Frozen over t; none when t
