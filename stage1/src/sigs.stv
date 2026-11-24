@@ -68,6 +68,18 @@ const T_KW_COPY: u8 = terminals.T_KW_COPY as% u8;
 const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
 const T_KW_VIEW: u8 = terminals.T_KW_VIEW as% u8;
 const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
+const T_KW_PUB: u8 = terminals.T_KW_PUB as% u8;
+const T_LT: u8 = terminals.T_LT as% u8;
+const T_GT: u8 = terminals.T_GT as% u8;
+const T_GT_EQ: u8 = terminals.T_GT_EQ as% u8;
+const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
+const T_GT_GT_EQ: u8 = terminals.T_GT_GT_EQ as% u8;
+const T_EOF: u8 = terminals.T_EOF as% u8;
+const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
+const T_R_BRACKET: u8 = terminals.T_R_BRACKET as% u8;
+const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
+const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
+const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
 
 const K_TYPE: u8 = node_kinds.KIND_TYPE;
 const K_TYPE_BASE: u8 = node_kinds.KIND_TYPE_BASE;
@@ -90,6 +102,9 @@ const K_PARAM_FROM: u8 = node_kinds.KIND_PARAM_FROM;
 const K_EXTERN_FN: u8 = node_kinds.KIND_EXTERN_FN;
 const K_EXTERN_ITEM: u8 = node_kinds.KIND_EXTERN_ITEM;
 const K_KERNEL_DECL: u8 = node_kinds.KIND_KERNEL_DECL;
+const K_DISP_ARM: u8 = node_kinds.KIND_DISP_ARM;
+const K_FEATURE: u8 = node_kinds.KIND_FEATURE;
+const K_PRIMARY: u8 = node_kinds.KIND_PRIMARY;
 
 // Lowering frame ops.
 const OP_TY: u8 = 0;
@@ -262,6 +277,146 @@ pub fn scalar_ty(tab: &mut types.Table, s: u32) -> u32 {
     return tab.key(types.TK_STR, 0, 0);
 }
 
+// Diagnostic codes signature building raises (code numbers).
+pub const D_E0410: u16 = 410;
+pub const D_E0514: u16 = 514;
+pub const D_E0515: u16 = 515;
+pub const D_E0520: u16 = 520;
+pub const D_E0521: u16 = 521;
+pub const D_E0708: u16 = 708;
+pub const D_E0709: u16 = 709;
+pub const D_E1404: u16 = 1404;
+
+// E0709 `what`: the kinds of fn that may not declare `needs`.
+pub const W_MAIN: u32 = 0;
+pub const W_TRAIT_METHOD: u32 = 1;
+pub const W_EXPORT: u32 = 2;
+pub const W_TEST: u32 = 3;
+pub const W_ALLOCATOR: u32 = 4;
+
+// The diagnostics of signature building, as rows: the code, the item, the first and last global
+// token of the primary span, and by code:
+// - E0410: a = the field's name token (NONE: a tuple payload element, `_`), b = the struct or
+//   enum, `ty` its type;
+// - E0514 E0515: a = the token of the parameter name the message names;
+// - E0520 E0521: a = the written origin name's token, `ty` that parameter's type;
+// - E0708 E1404: the span is the name;
+// - E0709: a = `W_*`, b = 1 for a `test fn` (case `test`).
+// A type hole names generic params from `scope` (4 words: par_lo, par_hi, own_lo, own_hi).
+pub struct Rows {
+    pub code: vec.Vec<u16>,
+    pub item: vec.Vec<u32>,
+    pub lo: vec.Vec<u32>,
+    pub hi: vec.Vec<u32>,
+    pub a: vec.Vec<u32>,
+    pub b: vec.Vec<u32>,
+    pub ty: vec.Vec<u32>,
+    pub gscope: vec.Vec<u32>,
+}
+
+impl Rows {
+    pub fn len(&self) -> usize {
+        return self.code.len();
+    }
+
+    fn add(&mut self, code: u16, it: u32, lo: u32, hi: u32, a: u32, b: u32, ty: u32, sc: consteval.Scope) {
+        self.code.push(code);
+        self.item.push(it);
+        self.lo.push(lo);
+        self.hi.push(hi);
+        self.a.push(a);
+        self.b.push(b);
+        self.ty.push(ty);
+        self.gscope.push(sc.par_lo);
+        self.gscope.push(sc.par_hi);
+        self.gscope.push(sc.own_lo);
+        self.gscope.push(sc.own_hi);
+    }
+}
+
+// The first and last token of row g's span, as stage0's `node_span` takes them: a node ends
+// at the end of its last child (a node without one: at its first token), except a bracketed
+// array type, a parenthesized or fn type, a type path with its generic arguments, and a
+// generic argument list, which end at their closing token.
+fn span_of(tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, g: usize) -> (u32, u32) {
+    let a0 = tree.tok.as_slice()[g];
+    let base = item_base(tree, g);
+    let mut n = g;
+    loop {
+        let a = tree.tok.as_slice()[n];
+        let k = kind(tree, n);
+        if k == K_TYPE {
+            if tk(t, a) == T_L_BRACKET { return (a0, close_of(cut, a)); }
+            let c = first_child(tree, base, n);
+            if c == NONE { return (a0, a); }
+            n = c as usize;
+            continue;
+        }
+        if k == K_TYPE_BASE {
+            let ta = tk(t, a);
+            if ta == T_L_PAREN { return (a0, close_of(cut, a)); }
+            if ta == T_KW_FN {
+                let close = close_of(cut, a + 1);
+                let wd = child(tree, base, n, K_WITHOUT);
+                if wd != NONE { return (a0, close_of(cut, tree.tok.as_slice()[wd as usize] + 1)); }
+                let nd = child(tree, base, n, K_NEEDS);
+                if nd != NONE { return (a0, close_of(cut, tree.tok.as_slice()[nd as usize] + 1)); }
+                if tk(t, close + 1) == T_MINUS_GT {
+                    let ks = tree.kids.row(n);
+                    if ks.len() == 0 { return (a0, close); }
+                    n = base + ks[ks.len() - 1] as usize;
+                    continue;
+                }
+                return (a0, close);
+            }
+            if ta == T_IDENT {
+                let mut e = a;
+                while tk(t, e + 1) == T_DOT && tk(t, e + 2) == T_IDENT {
+                    e = e + 2;
+                }
+                if tk(t, e + 1) == T_LT { return (a0, angle_end(t, e + 1) - 1); }
+                return (a0, e);
+            }
+            if ta == T_KW_SELF_TYPE { return (a0, a); }
+        }
+        if k == K_GENERIC_ARGS { return (a0, angle_end(t, a) - 1); }
+        let ks = tree.kids.row(n);
+        if ks.len() == 0 { return (a0, a); }
+        n = base + ks[ks.len() - 1] as usize;
+    }
+}
+
+// The base row of the item holding row g.
+fn item_base(tree: &ast.Ast, g: usize) -> usize {
+    let inode = tree.item_node.as_slice();
+    let k = search.upper_bound(inode, g as% u32);
+    return inode[k - 1] as usize;
+}
+
+// The token after the generic argument list opening at token lt (a `<`): brackets nest, the
+// closers of a `>>`, `>=`, or `>>=` count one each.
+fn angle_end(t: &lex.Tokens, lt: u32) -> u32 {
+    let mut angle: i64 = 0;
+    let mut bracket: i64 = 0;
+    let mut i = lt;
+    while (i as usize) < t.kind.len() {
+        let k = tk(t, i);
+        if k == T_EOF { return i; }
+        if k == T_L_PAREN || k == T_L_BRACKET || k == T_L_BRACE || k == T_DOT_L_BRACE {
+            bracket = bracket + 1;
+        } else if k == T_R_PAREN || k == T_R_BRACKET || k == T_R_BRACE {
+            bracket = bracket - 1;
+            if bracket < 0 { return i; }
+        } else if bracket == 0 {
+            let delta: i64 = if k == T_LT then 1 else if k == T_GT || k == T_GT_EQ then -1 else if k == T_GT_GT || k == T_GT_GT_EQ then -2 else 0;
+            angle = angle + delta;
+            if delta < 0 && angle <= 0 { return i + 1; }
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
 // The signature facts, per decl D (the columns a decl kind does not have stay empty).
 pub struct Sigs {
     pub cx: consteval.Cx,
@@ -281,6 +436,7 @@ pub struct Sigs {
     // trait refs: the trait decl, its arguments (3 words each)
     pub b_trait: vec.Vec<u32>,
     pub b_args: ragged.Ragged<u32>,
+    pub rows: Rows,
 }
 
 // The lowering's stacks: frames (op, row, x, y), the types and generic arguments made.
@@ -720,6 +876,27 @@ fn array_of(cx: &mut consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.I
     }
     if elem == ERR { return ERR; }
     return cx.tab.key(types.TK_SLICE, elem, al);
+}
+
+// E0708 for each unknown name of `Needs` row nd, E1404 for each of `Without` row wd (NONE: none).
+fn unknown_names(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, it: u32, base: usize, nd: u32, wd: u32) {
+    if nd != NONE {
+        let ks = tree.kids.row(nd as usize);
+        for j in 0..ks.len() {
+            let tok = tree.tok.as_slice()[base + ks[j] as usize];
+            let (ok, _) = feature_of(sym_text(nm, tok));
+            if !ok { sg.rows.add(D_E0708, it, tok, tok, NONE, NONE, ERR, consteval.no_scope()); }
+        }
+    }
+    if wd != NONE {
+        let ks = tree.kids.row(wd as usize);
+        for j in 0..ks.len() {
+            let tok = tree.tok.as_slice()[base + ks[j] as usize];
+            let name = if tk(t, tok) == T_IDENT then sym_text(nm, tok) else mem.str_bytes("unsafe");
+            let (ok, _) = effect_of(name);
+            if !ok { sg.rows.add(D_E1404, it, tok, tok, NONE, NONE, ERR, consteval.no_scope()); }
+        }
+    }
 }
 
 // The feature bits of a `Needs` row.
@@ -1239,8 +1416,9 @@ fn param_index(tree: &ast.Ast, base: usize, ps: &[u32], b: usize) -> u32 {
 }
 
 // The `Origin` entries of a `From` row: (param index, copy) as `index | copy << 8`.
-fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: usize, ps: &[u32], out: &mut vec.Vec<u32>) {
+fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: usize, ps: &[u32], out: &mut vec.Vec<u32>, at: &mut vec.Vec<u32>) {
     out.clear();
+    at.clear();
     let ks = tree.kids.row(f);
     for j in 0..ks.len() {
         let o = base + ks[j] as usize;
@@ -1252,6 +1430,7 @@ fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: u
             for k in 0..ps.len() {
                 if child(tree, base, ps[k] as usize, K_SELF_PARAM) != NONE {
                     out.push((if k > 255 then 255u32 else k as% u32) | (if cp then 256u32 else 0u32));
+                    at.push(o as% u32);
                     break;
                 }
             }
@@ -1261,7 +1440,10 @@ fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: u
         if lo == hi || sg.cx.uses.tag.as_slice()[lo] != resolve.TAG_LOCAL { continue; }
         let b = base + sg.cx.uses.target.as_slice()[lo] as usize;
         let i = param_index(tree, base, ps, b);
-        if i != NONE { out.push(i | (if cp then 256u32 else 0u32)); }
+        if i != NONE {
+            out.push(i | (if cp then 256u32 else 0u32));
+            at.push(o as% u32);
+        }
     }
 }
 
@@ -1286,21 +1468,22 @@ fn is_intrinsic(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, set: &source.SourceSe
 
 // Whether fn d may not declare `needs` (E0709): a trait method, a trait impl's method, or an
 // entry point (a `test fn`, an export, the root package's `main`, an allocator fn).
-fn needs_forbidden(sg: &Sigs, fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, d: u32) -> bool {
+fn needs_forbidden(sg: &Sigs, fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, d: u32) -> u32 {
     let k = ds.kind.as_slice()[d as usize];
-    if k == decls.DK_TRAIT_METHOD { return true; }
+    if k == decls.DK_TRAIT_METHOD { return W_TRAIT_METHOD; }
     if k == decls.DK_METHOD {
         let p = ds.parent.as_slice()[d as usize];
-        if p != NONE && sg.trait_ref.as_slice()[p as usize] != NONE { return true; }
+        if p != NONE && sg.trait_ref.as_slice()[p as usize] != NONE { return W_TRAIT_METHOD; }
     }
-    if k != decls.DK_FN && k != decls.DK_METHOD { return false; }
+    if k != decls.DK_FN && k != decls.DK_METHOD { return NONE; }
     let df = ds.flags.as_slice()[d as usize];
-    if df & (decls.F_TEST | decls.F_EXTERN_EXPORT) != 0 { return true; }
+    if df & decls.F_TEST != 0 { return W_TEST; }
+    if df & decls.F_EXTERN_EXPORT != 0 { return W_EXPORT; }
     let main = modules.lookup(&nm.tab, mem.str_bytes("main"));
     for p in 0..fl.pkg_root.len() {
         if fl.pkg_root.as_slice()[p] && p < md.pkg_root_mod.len() {
             let m = md.pkg_root_mod.as_slice()[p];
-            if m != NONE && main != NONE && ds.module_item(m, main) == d { return true; }
+            if m != NONE && main != NONE && ds.module_item(m, main) == d { return W_MAIN; }
         }
     }
     let names = ["alloc", "free", "realloc"];
@@ -1312,10 +1495,17 @@ fn needs_forbidden(sg: &Sigs, fl: &files.FileList, md: &modules.Modules, ds: &de
         if m == NONE { continue; }
         for j in 0..3usize {
             let s = modules.lookup(&nm.tab, mem.str_bytes(names[j]));
-            if s != NONE && ds.module_item(m, s) == d { return true; }
+            if s != NONE && ds.module_item(m, s) == d { return W_ALLOCATOR; }
         }
     }
-    return false;
+    return NONE;
+}
+
+// The `self` token of `SelfParam` row sp.
+fn self_token(tree: &ast.Ast, t: &lex.Tokens, sp: usize) -> u32 {
+    let a = tree.tok.as_slice()[sp];
+    let e = tree.tok_end.as_slice()[sp];
+    return if e > a then e - 1 else a;
 }
 
 // The signature of fn, method, or trait method d.
@@ -1371,11 +1561,21 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
     }
     let ret = if ret_n == NONE then sg.cx.tab.unit() else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, ret_n as usize, true, sc);
     let mut ro = vec.Vec::<u32>.new();
-    if from_n != NONE { origins(sg, tree, t, it, base, from_n as usize, ps.as_slice(), &mut ro); }
+    let mut ro_at = vec.Vec::<u32>.new();
+    if from_n != NONE { origins(sg, tree, t, it, base, from_n as usize, ps.as_slice(), &mut ro, &mut ro_at); }
     let nd = child(tree, base, g, K_NEEDS);
-    let mut feats = if nd == NONE then 0u64 else needs_bits(tree, t, nm, base, nd as usize);
-    if nd != NONE && needs_forbidden(sg, fl, md, ds, nm, d) { feats = 0; }
     let wd = child(tree, base, g, K_WITHOUT);
+    unknown_names(sg, tree, t, nm, it, base, nd, wd);
+    let mut feats = if nd == NONE then 0u64 else needs_bits(tree, t, nm, base, nd as usize);
+    if nd != NONE {
+        let what = needs_forbidden(sg, fl, md, ds, nm, d);
+        if what != NONE {
+            let (lo, hi) = span_of(tree, t, cut, nd as usize);
+            let is_test = if ds.flags.as_slice()[d as usize] & decls.F_TEST != 0 then 1u32 else 0u32;
+            sg.rows.add(D_E0709, it, lo, hi, what, is_test, ERR, sc);
+            feats = 0;
+        }
+    }
     let deny = if wd == NONE then 0u8 else deny_bits(tree, t, nm, set, cut, it, base, wd as usize);
     let df = ds.flags.as_slice()[d as usize];
     if df & decls.F_UNSAFE != 0 { flags = flags | SF_UNSAFE; }
@@ -1386,10 +1586,24 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
         flags = flags | SF_ABI_C;
     }
     if variadic { flags = flags | SF_VARIADIC; }
+    // E0520 E0521: a return `from` entry outside the origin table
+    if stave_abi {
+        for j in 0..ro.len() {
+            let src = ro.as_slice()[j] & 255;
+            let cp = ro.as_slice()[j] >> 8 == 1;
+            let pt = tys.as_slice()[src as usize];
+            if valid(classify(&sg.cx, ds, pt, sc), cp) { continue; }
+            let o = ro_at.as_slice()[j] as usize;
+            let (lo, hi) = span_of(tree, t, cut, o);
+            let a = tree.tok.as_slice()[o];
+            sg.rows.add(if cp then D_E0521 else D_E0520, it, lo, hi, if cp then a + 1 else a, NONE, pt, sc);
+        }
+    }
     // the parameters' `from` clauses: legal only on a `&mut` param of a view (any `&mut` in a
     // trait impl's method) of a Stave-ABI fn that is no kernel
     let mut po = vec.Vec::<u32>.new();
     let mut ent = vec.Vec::<u32>.new();
+    let mut ent_at = vec.Vec::<u32>.new();
     let par = ds.parent.as_slice()[d as usize];
     let mirrors = ds.kind.as_slice()[d as usize] == decls.DK_METHOD && par != NONE && sg.trait_ref.as_slice()[par as usize] != NONE;
     for j in 0..ps.len() {
@@ -1400,14 +1614,32 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
         let class = classify(&sg.cx, ds, tt, sc);
         let is_mut = tt != ERR && sg.cx.tab.tag_of(tt) == types.TK_REF && sg.cx.tab.a_of(tt) == 1;
         let legal = stave_abi && k != K_KERNEL_DECL && (class == 0 || (is_mut && (mirrors || class == 2)));
-        if !legal || class == 0 { continue; }
+        // the name of the clause's parameter: `self`, or its first token
+        let sp = child(tree, base, p, K_SELF_PARAM);
+        let pname = if sp == NONE then tree.tok.as_slice()[p] else self_token(tree, t, sp as usize);
+        if !legal {
+            let (lo, hi) = span_of(tree, t, cut, pf as usize);
+            sg.rows.add(D_E0514, it, lo, hi, pname, NONE, ERR, sc);
+            continue;
+        }
+        if class == 0 { continue; }
         let fr = child(tree, base, pf as usize, K_FROM);
-        origins(sg, tree, t, it, base, if fr == NONE then pf as usize else fr as usize, ps.as_slice(), &mut ent);
+        origins(sg, tree, t, it, base, if fr == NONE then pf as usize else fr as usize, ps.as_slice(), &mut ent, &mut ent_at);
         for e in 0..ent.len() {
             let src = ent.as_slice()[e] & 255;
             let cp = ent.as_slice()[e] >> 8 == 1;
-            if src == j as% u32 { continue; }
-            if !mirrors && !valid(classify(&sg.cx, ds, tys.as_slice()[src as usize], sc), cp) { continue; }
+            let o = ent_at.as_slice()[e] as usize;
+            let (lo, hi) = span_of(tree, t, cut, o);
+            if src == j as% u32 {
+                sg.rows.add(D_E0515, it, lo, hi, pname, NONE, ERR, sc);
+                continue;
+            }
+            let st2 = tys.as_slice()[src as usize];
+            if !mirrors && !valid(classify(&sg.cx, ds, st2, sc), cp) {
+                let a = tree.tok.as_slice()[o];
+                sg.rows.add(if cp then D_E0521 else D_E0520, it, lo, hi, if cp then a + 1 else a, NONE, st2, sc);
+                continue;
+            }
             po.push(((j as% u32) << 16) | (src << 8) | (if cp then 1u32 else 0u32));
         }
     }
@@ -1457,6 +1689,7 @@ pub fn build(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &i
         gp_bounds: ragged.Ragged::<u32>.new(),
         b_trait: vec.Vec::<u32>.new(),
         b_args: ragged.Ragged::<u32>.new(),
+        rows: Rows.{ code: vec.Vec::<u16>.new(), item: vec.Vec::<u32>.new(), lo: vec.Vec::<u32>.new(), hi: vec.Vec::<u32>.new(), a: vec.Vec::<u32>.new(), b: vec.Vec::<u32>.new(), ty: vec.Vec::<u32>.new(), gscope: vec.Vec::<u32>.new() },
     };
     let mut lw = Lw.new();
     // 1. generic params
@@ -1605,12 +1838,23 @@ pub fn build(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &i
                 let ty = if tn == NONE then ERR else lower(&mut sg.cx, &mut lw, tree, t, nm, set, cut, ds, it, tn as usize, false, sc);
                 sg.cx.ty.as_mut_slice()[d] = ty;
                 sg.sflags.as_mut_slice()[d] = SF_BUILT;
+                if adt != NONE && ds.flags.as_slice()[adt as usize] & decls.F_VIEW == 0 && ty != ERR && is_view_in(&sg.cx, ds, ty, consteval.no_scope()) {
+                    let a = tree.tok.as_slice()[g as usize];
+                    let nt = if tk(t, a) == T_KW_PUB then a + 1 else a;
+                    sg.rows.add(D_E0410, it, nt, nt, nt, adt, ty, sc);
+                }
             } else if ds.flags.as_slice()[d] & decls.F_TUPLE != 0 {
                 let mut pl = vec.Vec::<u32>.new();
                 let ks = tree.kids.row(g as usize);
                 for j in 0..ks.len() {
                     let c = base + ks[j] as usize;
-                    if kind(tree, c) == K_TYPE { pl.push(lower(&mut sg.cx, &mut lw, tree, t, nm, set, cut, ds, it, c, false, sc)); }
+                    if kind(tree, c) != K_TYPE { continue; }
+                    let ty = lower(&mut sg.cx, &mut lw, tree, t, nm, set, cut, ds, it, c, false, sc);
+                    pl.push(ty);
+                    if adt != NONE && ds.flags.as_slice()[adt as usize] & decls.F_VIEW == 0 && ty != ERR && is_view_in(&sg.cx, ds, ty, consteval.no_scope()) {
+                        let (lo, hi) = span_of(tree, t, cut, c);
+                        sg.rows.add(D_E0410, it, lo, hi, NONE, adt, ty, sc);
+                    }
                 }
                 sg.sflags.as_mut_slice()[d] = SF_BUILT;
                 sg.params.push_row(pl.as_slice());
@@ -1623,7 +1867,46 @@ pub fn build(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &i
         sg.rfrom.push_row(empty.as_slice());
         sg.pfrom.push_row(empty.as_slice());
     }
+    // 7. names in fn types and dispatch arms, `from` clauses of closure params
+    syntactic(&mut sg, tree, t, nm, cut, ds);
     return sg;
+}
+
+// E0708 E1404 for the `needs` and `without` names of every written fn type, E0708 for the
+// feature names of every dispatch arm, E0514 for the `from` clause of every closure parameter.
+fn syntactic(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, cut: &items.Items, ds: &decls.Decls) {
+    let inode = tree.item_node.as_slice();
+    for i in 0..tree.items() {
+        let base = inode[i] as usize;
+        for g in base..inode[i + 1] as usize {
+            let k = kind(tree, g);
+            let a = tree.tok.as_slice()[g];
+            if k == K_TYPE_BASE && tk(t, a) == T_KW_FN {
+                unknown_names(sg, tree, t, nm, i as% u32, base, child(tree, base, g, K_NEEDS), child(tree, base, g, K_WITHOUT));
+            } else if k == K_DISP_ARM {
+                let ks = tree.kids.row(g);
+                for j in 0..ks.len() {
+                    let f = base + ks[j] as usize;
+                    if kind(tree, f) != K_FEATURE { continue; }
+                    let tok = tree.tok.as_slice()[f];
+                    let (ok, _) = feature_of(sym_text(nm, tok));
+                    if !ok { sg.rows.add(D_E0708, i as% u32, tok, tok, NONE, NONE, ERR, consteval.no_scope()); }
+                }
+            } else if k == K_PRIMARY && tk(t, a) == T_KW_FN {
+                let pn = child(tree, base, g, K_PARAMS);
+                if pn == NONE { continue; }
+                let ks = tree.kids.row(pn as usize);
+                for j in 0..ks.len() {
+                    let p = base + ks[j] as usize;
+                    let pf = child(tree, base, p, K_PARAM_FROM);
+                    if kind(tree, p) != K_PARAM || pf == NONE { continue; }
+                    let (lo, hi) = span_of(tree, t, cut, pf as usize);
+                    sg.rows.add(D_E0514, i as% u32, lo, hi, tree.tok.as_slice()[p], NONE, ERR, consteval.no_scope());
+                }
+            }
+        }
+    }
+    let _ = ds;
 }
 
 // Whether every alias and const that item it's uses name is done.

@@ -17,6 +17,7 @@ import decls;
 import diag;
 import diag_lex;
 import diag_names;
+import diag_sigs;
 import diag_out;
 import diag_syn;
 import dump;
@@ -283,6 +284,8 @@ fn main() -> i32 {
     let ds = decls.build(&md, &nm, &lx, &set, &toks, &cut, &tree, &mut rows);
     let res = resolve.build(&md, &ds, &nm, &lx, &set, &toks, &cut, &tree, &mut rows);
     diag_names.names(&mut d, &rows, &md, &ds, &nm, &set);
+    let sg = sigs.build(&fl, &md, &ds, &nm, &set, &toks, &cut, &tree, &res);
+    diag_sigs.sigs_diags(&mut d, &sg, &ds, &nm, &lx, &set, &toks, &cut);
     let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
     let rows = d.order(ft.rank.as_slice());
     let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);
@@ -325,7 +328,6 @@ fn main() -> i32 {
             if code != EXIT_OK { return code; }
         }
         if cli.want_sigs {
-            let sg = sigs.build(&fl, &md, &ds, &nm, &set, &toks, &cut, &tree, &res);
             if sg.cx.skip == consteval.CV_LAYOUT {
                 io.eprint("stage1: sigs.txt not written: a signature needs a type layout\n");
             } else if sg.cx.skip != consteval.CV_NONE {
