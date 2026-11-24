@@ -802,6 +802,49 @@ fn intrinsic_table() {
     has(&one("cpuid", Some(usize_t), 2), "intrinsic.cpuid: wrong result type");
 }
 
+/// The one name parser: exactly the table's spellings, and every stage reads the same answer.
+#[test]
+fn intrinsic_names_have_one_spelling() {
+    use stave_ir::intrinsics::{AtomicOp, Kind, kind, lookup};
+    assert_eq!(kind("syscall0"), Some(Kind::Syscall(0)));
+    assert_eq!(kind("syscall6"), Some(Kind::Syscall(6)));
+    assert_eq!(kind("ccall12"), Some(Kind::Ccall(12)));
+    assert_eq!(kind("atomic_cas_u64"), Some(Kind::Atomic { op: AtomicOp::Cas, wide: true }));
+    assert_eq!(kind("static_addr"), Some(Kind::StaticAddr));
+    assert!(lookup("static_addr").is_none(), "no declaration may use the lowering-only name");
+    for bad in [
+        "syscall03",
+        "syscall+3",
+        "syscall-0",
+        "syscall 3",
+        "syscall7",
+        "syscall256",
+        "syscall99999999999999999999999",
+        "syscall",
+        "ccall013",
+        "ccall13",
+        "ccall+1",
+        "Syscall3",
+        "atomic_load_u16",
+        "atomic_sub_u32",
+        "atomic__u32",
+        "atomic_load",
+        "atomic_",
+        "",
+        "nope",
+    ] {
+        assert_eq!(kind(bad), None, "{bad}");
+        assert!(lookup(bad).is_none(), "{bad}");
+    }
+    // The name of each kind parses back to it.
+    for name in ["syscall4", "ccall0", "cpuid", "set_thread_block", "atomic_add_u32", "copy_bytes", "tid_x"] {
+        let k = kind(name).unwrap();
+        if k != Kind::Ptx {
+            assert_eq!(k.to_string(), name);
+        }
+    }
+}
+
 /// `static_addr <i>`: one int constant naming an existing static, and a raw-pointer result to
 /// its type.
 #[test]

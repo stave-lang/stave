@@ -3,6 +3,7 @@
 //! struct and variant literals, closures, f-strings (`String.new`, `push_str`,
 //! `Display.fmt`), value `if`, ranges, and the implicit coercions typeck recorded.
 
+use stave_ir::intrinsics::Kind as IntrKind;
 use stave_ir::{CastKind, Op, Operand, PanicKind};
 use stave_syntax::{NodeKind, Term};
 
@@ -1691,6 +1692,9 @@ impl<'a> FnCx<'a> {
             }
             Some(Target::Intrinsic { decl }) => {
                 let name = self.g.prog.decl(decl).map_or("", |d| self.g.prog.strings.get(d.name)).to_string();
+                let Some(kind) = stave_ir::intrinsics::kind(&name) else {
+                    return self.fail_at(Some(ctok), "intrinsic");
+                };
                 let Some(sig) = self.g.sigs.fn_sig(decl) else {
                     return self.fail_at(Some(ctok), "intrinsic");
                 };
@@ -1699,12 +1703,12 @@ impl<'a> FnCx<'a> {
                 let target = self.g.prog.target;
                 // A compile-time constant: the target baseline as a feature word (closed under
                 // implication, like the runtime's word).
-                if name == "cpu_baseline" {
+                if kind == IntrKind::CpuBaseline {
                     return E::V(self.int(i128::from(target.baseline().bits())), ret);
                 }
                 // Start code must check the CPU against a baseline above the arch's lowest one,
                 // even in a program that never reads the feature word.
-                if name == "cpu_init"
+                if kind == IntrKind::CpuInit
                     && target.baseline() != target.arch_base().baseline()
                     && let Some(init) = self.g.lang.cpu_init
                 {
@@ -1715,13 +1719,13 @@ impl<'a> FnCx<'a> {
                 let r = self.f.b.intrinsic(id, rt.map(FnCx::ir), &vs);
                 // A started thread runs `runtime.thread.entry` from the backend's start stub, which
                 // no IR call reaches.
-                if matches!(name.as_str(), "thread_clone" | "thread_start_addr")
+                if matches!(kind, IntrKind::ThreadClone | IntrKind::ThreadStartAddr)
                     && let Some(e) = self.g.lang.thread_entry
                 {
                     self.req(Req::Inst(InstKey { decl: e, args: Vec::new() }));
                 }
                 // Native code runs the copy as a call of `std.slice.copy_raw`, which no IR calls.
-                if name == "copy_bytes"
+                if kind == IntrKind::CopyBytes
                     && let Some(c) = self.g.lang.copy_raw
                 {
                     self.req(Req::Inst(InstKey { decl: c, args: Vec::new() }));

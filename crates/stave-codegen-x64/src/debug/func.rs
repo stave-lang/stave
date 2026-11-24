@@ -344,7 +344,7 @@ pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<(FuncCode, StackUse)> {
         .insts
         .op
         .iter()
-        .any(|op| matches!(op, Op::Intrinsic(id) if cx.m.intrinsic_name(*id) == Some("cpuid")));
+        .any(|op| matches!(op, Op::Intrinsic(id) if cx.m.intrinsic_kind(*id) == Some(stave_ir::intrinsics::Kind::Cpuid)));
     if cx.release && !cpuid {
         match compile_with(cx, fid, true) {
             // An instruction that needs more temporaries than the cache keeps next to the owned

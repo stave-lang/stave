@@ -13,7 +13,7 @@ use std::fmt;
 mod simd;
 
 use crate::arith::{self, CastTy, IntTy};
-use crate::intrinsics::{self, ITy, STATIC_ADDR};
+use crate::intrinsics::{self, ITy, Kind};
 use crate::ir::{
     Block, Body, CastKind, Const, Func, FuncId, Module, Op, Operand, Site, Target, Term, Value, ValueDef,
 };
@@ -1257,7 +1257,7 @@ impl<'a> FnVerifier<'a> {
             .ok_or_else(|| "field index out of range".into())
     }
 
-    /// `intrinsic.<name>` against its entry of [`crate::intrinsics`], or [`STATIC_ADDR`] against
+    /// `intrinsic.<name>` against its entry of [`crate::intrinsics`], or [`Kind::StaticAddr`] against
     /// the module's statics. A name the table lacks, or one without a checked signature, is
     /// rejected: no back end builds it.
     fn check_intrinsic(
@@ -1268,29 +1268,51 @@ impl<'a> FnVerifier<'a> {
         ty: Option<TypeId>,
     ) -> Result<(), String> {
         let t = &self.m.types;
-        if name == STATIC_ADDR {
-            let [k] = args else {
-                return Err(format!("intrinsic.{name}: {} operands, expected 1", args.len()));
-            };
-            let k = b
-                .int_const(*k)
-                .ok_or_else(|| format!("intrinsic.{name}: the index must be an int constant"))?;
-            let st = usize::try_from(k)
-                .ok()
-                .and_then(|k| self.m.statics.get(k))
-                .ok_or_else(|| format!("intrinsic.{name}: static {k} out of range"))?;
-            return match ty.and_then(|r| t.key(r)) {
-                Some(TypeKey::RawPtr { inner, .. }) if *inner == st.ty => Ok(()),
-                _ => Err(format!("intrinsic.{name}: the result must be a raw pointer to t{}", st.ty.0)),
-            };
+        let kind = intrinsics::kind(name).ok_or_else(|| format!("unknown intrinsic `{name}`"))?;
+        match kind {
+            Kind::StaticAddr => {
+                let [k] = args else {
+                    return Err(format!("intrinsic.{name}: {} operands, expected 1", args.len()));
+                };
+                let k = b
+                    .int_const(*k)
+                    .ok_or_else(|| format!("intrinsic.{name}: the index must be an int constant"))?;
+                let st = usize::try_from(k)
+                    .ok()
+                    .and_then(|k| self.m.statics.get(k))
+                    .ok_or_else(|| format!("intrinsic.{name}: static {k} out of range"))?;
+                return match ty.and_then(|r| t.key(r)) {
+                    Some(TypeKey::RawPtr { inner, .. }) if *inner == st.ty => Ok(()),
+                    _ => Err(format!("intrinsic.{name}: the result must be a raw pointer to t{}", st.ty.0)),
+                };
+            }
+            Kind::CpuBaseline => {
+                return Err(format!("intrinsic.{name}: lowering replaces it by a constant"));
+            }
+            Kind::Ptx => {
+                return Err(format!("intrinsic.{name}: no checked signature (the {:?} set)", kind.arch()));
+            }
+            Kind::Syscall(_)
+            | Kind::Ccall(_)
+            | Kind::Cpuid
+            | Kind::Xgetbv
+            | Kind::ThreadStartAddr
+            | Kind::MainAddr
+            | Kind::SignalHandlerAddr
+            | Kind::SiteTable
+            | Kind::PcTable
+            | Kind::StackTable
+            | Kind::ThreadBlock
+            | Kind::SetThreadBlock
+            | Kind::CallOnStack
+            | Kind::CpuInit
+            | Kind::ThreadClone
+            | Kind::Atomic { .. }
+            | Kind::CopyBytes => {}
         }
-        let entry = intrinsics::lookup(name).ok_or_else(|| format!("unknown intrinsic `{name}`"))?;
-        let Some((params, ret)) = entry.sig else {
-            return Err(format!("intrinsic.{name}: no checked signature (the {:?} set)", entry.arch));
+        let Some((params, ret)) = kind.sig() else {
+            return Err(format!("intrinsic.{name}: no checked signature"));
         };
-        if name == "cpu_baseline" {
-            return Err(format!("intrinsic.{name}: lowering replaces it by a constant"));
-        }
         let resolve =
             |x: ITy| ity_type(t, x).ok_or_else(|| format!("intrinsic.{name}: {x:?} is not in the module"));
         match (ret, ty) {

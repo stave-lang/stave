@@ -283,7 +283,9 @@ impl Cg<'_, '_> {
             }
             Op::Intrinsic(id) => {
                 let name = self.cx.m.intrinsic_name(id).ok_or_else(|| bad("intrinsic id out of range"))?;
-                self.intrinsic(name, args, ty, res)
+                let kind = stave_ir::intrinsics::kind(name)
+                    .ok_or_else(|| unsup(format!("intrinsic.{name} is not in the intrinsic table")))?;
+                self.intrinsic(kind, args, ty, res)
             }
             Op::Vec(v) => self.vec_op(v, args, ty, res),
             Op::Panic(k) => self.trap_now(k),

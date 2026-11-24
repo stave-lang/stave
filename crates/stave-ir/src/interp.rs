@@ -26,6 +26,7 @@ mod simd;
 use crate::arith::{self, IntTy};
 use crate::borrowtrack::{Ev, Kind, NO_EV, ROOT, Report, Tag, Tracker};
 use crate::host::{Host, SysResult};
+use crate::intrinsics::{AtomicOp, Kind as IntrKind};
 use crate::ir::{
     Block, Body, CastKind, Const, EventKind, FuncId, Module, Op, Operand, PanicKind, Site, Target, Term,
     Value, ValueDef,
@@ -1510,30 +1511,24 @@ impl<'m, H: Host> Interp<'m, H> {
     /// operand: a read, and a write when it stores (a `cas` that fails stores nothing).
     fn track_atomic(
         &mut self,
-        name: &str,
+        kind: IntrKind,
         regs: &[Val],
         args: &[Operand],
         vals: &[Val],
         f: FuncId,
         i: u32,
     ) -> R<()> {
-        let Some((op, size)) = name.strip_prefix("atomic_").and_then(|r| r.rsplit_once('_')) else {
-            return Ok(());
-        };
-        let size = match size {
-            "u32" => 4u64,
-            "u64" => 8,
-            _ => return Ok(()),
-        };
+        let IntrKind::Atomic { op, wide } = kind else { return Ok(()) };
+        let size = if wide { 8u64 } else { 4 };
         let (Some(&o), Some(p)) = (args.first(), vals.first().and_then(Val::bits)) else { return Ok(()) };
         let mask = if size == 8 { u64::MAX } else { u64::from(u32::MAX) };
         let write = match op {
-            "load" => false,
-            "cas" => match (self.mem.read_uint(p, size), vals.get(1).and_then(Val::bits)) {
+            AtomicOp::Load => false,
+            AtomicOp::Cas => match (self.mem.read_uint(p, size), vals.get(1).and_then(Val::bits)) {
                 (Ok(old), Some(want)) => old == want & mask,
                 _ => false,
             },
-            _ => true,
+            AtomicOp::Xchg | AtomicOp::Add => true,
         };
         self.track(Self::tag_of(regs, o), p, size, write, f, i)
     }
@@ -2168,12 +2163,12 @@ impl<'m, H: Host> Interp<'m, H> {
                 }
             }
             Op::Intrinsic(id) => {
-                let name = m.intrinsic_name(id).ok_or(malformed("intrinsic"))?;
+                let kind = m.intrinsic_kind(id).ok_or(malformed("intrinsic"))?;
                 let mut vals = Vec::with_capacity(args.len());
                 for &a in args {
                     vals.push(self.eval(body, regs, a)?.untagged());
                 }
-                if name == "call_on_stack" {
+                if kind == IntrKind::CallOnStack {
                     // `call_on_stack(f, arg, top)`: calls fn value `f` with `arg` (the stack switch
                     // is not modelled: interpreter frames have no machine stack).
                     let x = vals.first().and_then(|v| v.bits()).ok_or(malformed("call_on_stack callee"))?;
@@ -2185,20 +2180,20 @@ impl<'m, H: Host> Interp<'m, H> {
                     let dest = body.insts.result.get(iu).copied().flatten();
                     return Ok(Step::Call(FuncId(idx), vec![a], dest));
                 }
-                if name == "copy_bytes" {
+                if kind == IntrKind::CopyBytes {
                     let u = |k: usize| vals.get(k).and_then(Val::bits).ok_or(malformed("copy_bytes operand"));
                     let (dst, src, n) = (u(0)?, u(1)?, u(2)?);
                     self.copy_bytes(regs, args, dst, src, n, fid, i, site)?;
                     return Ok(Step::Next);
                 }
-                if name == "static_addr" {
+                if kind == IntrKind::StaticAddr {
                     let k = vals.first().and_then(|v| v.bits()).ok_or(malformed("static_addr index"))?;
                     let a = self.statics.get(k as usize).copied().ok_or(malformed("static_addr index"))?;
                     Self::set(regs, body, i, Val::S(a));
                     return Ok(Step::Next);
                 }
-                let res = if let Some(k) = name.strip_prefix("syscall").and_then(|d| d.parse::<usize>().ok())
-                {
+                let res = if let IntrKind::Syscall(k) = kind {
+                    let k = usize::from(k);
                     let mut a6 = [0u64; 6];
                     for (slot, v) in a6.iter_mut().zip(vals.iter().skip(1)).take(k) {
                         *slot = v.bits().unwrap_or(0);
@@ -2210,9 +2205,9 @@ impl<'m, H: Host> Interp<'m, H> {
                     }
                 } else {
                     if self.bt.is_some() {
-                        self.track_atomic(name, regs, args, &vals, fid, i)?;
+                        self.track_atomic(kind, regs, args, &vals, fid, i)?;
                     }
-                    self.host.intrinsic(name, &vals, &mut self.mem).map_err(InterpError::Host)?
+                    self.host.intrinsic(kind, &vals, &mut self.mem).map_err(InterpError::Host)?
                 };
                 // a host access that failed a check (the host may have answered `EFAULT`)
                 if self.mem.has_report() {

@@ -3493,7 +3493,7 @@ impl<'a> Ck<'a> {
             let f = match arch {
                 builtins::IArch::X86 => "x86_64",
                 builtins::IArch::A64 => "aarch64",
-                _ => "ptx",
+                builtins::IArch::Ptx | builtins::IArch::Both => "ptx",
             };
             let roles: Vec<(&str, Span)> =
                 self.prog.decl(decl).map(|d| ("callee", d.name_span)).into_iter().collect();

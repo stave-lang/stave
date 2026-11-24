@@ -2,6 +2,7 @@
 //! machine intrinsics of contracts/intrinsics.md.
 
 use crate::interp::Val;
+use crate::intrinsics::{AtomicOp, Kind};
 use crate::mem::Memory;
 
 /// Result of a system call.
@@ -18,11 +19,12 @@ pub trait Host {
     /// `syscallN(nr, a1..aN)`; unused args are 0.
     fn syscall(&mut self, nr: u64, args: [u64; 6], mem: &mut Memory) -> SysResult;
 
-    /// Any intrinsic other than `syscall0..6`. `Ok(None)` for no result. `Err` aborts the run
+    /// Any intrinsic other than `syscall0..6`, and than the ones the interpreter runs itself
+    /// (`call_on_stack`, `copy_bytes`, `static_addr`). `Ok(None)` for no result. `Err` aborts the run
     /// with `InterpError::Host`.
-    fn intrinsic(&mut self, name: &str, args: &[Val], mem: &mut Memory) -> Result<Option<Val>, String> {
+    fn intrinsic(&mut self, kind: Kind, args: &[Val], mem: &mut Memory) -> Result<Option<Val>, String> {
         let _ = (args, mem);
-        Err(format!("intrinsic.{name} is not supported by this host"))
+        Err(format!("intrinsic.{kind} is not supported by this host"))
     }
 }
 
@@ -113,8 +115,9 @@ const ARCH_SET_FS: u64 = 0x1002;
 /// which `thread_block` returns (one thread: one word). Other system calls return `-ENOSYS`.
 /// `cpuid` and `xgetbv` return zeros (no optional features);
 /// `thread_start_addr` and `stack_table` return 0 (no stack table: the runtime defaults apply);
-/// `cpu_init` does nothing (the feature word stays 0, so a `dispatch` takes its `_` arm); any
-/// other intrinsic without arguments returns its entry of `values` (`main_addr`, `site_table`, `pc_table`, `signal_handler_addr`), if set.
+/// `cpu_init` does nothing (the feature word stays 0, so a `dispatch` takes its `_` arm);
+/// `main_addr`, `signal_handler_addr`, `site_table`, and `pc_table` return their entry of `values`,
+/// if set.
 #[derive(Clone, Debug)]
 pub struct BufferHost {
     pub abi: SyscallAbi,
@@ -123,8 +126,8 @@ pub struct BufferHost {
     pub stdin: Vec<u8>,
     /// The in-memory file system: path bytes → contents.
     pub files: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
-    /// Results of argument-less intrinsics by name.
-    pub values: std::collections::BTreeMap<String, u64>,
+    /// Results of the address intrinsics (`main_addr`, `signal_handler_addr`, `site_table`, `pc_table`).
+    pub values: std::collections::BTreeMap<Kind, u64>,
     /// Every system call made: (nr, args, result).
     pub log: Vec<(u64, [u64; 6], SysResult)>,
     /// The thread pointer (`thread_block`); 0 until the program sets it.
@@ -266,54 +269,55 @@ impl Host for BufferHost {
         r
     }
 
-    fn intrinsic(&mut self, name: &str, args: &[Val], mem: &mut Memory) -> Result<Option<Val>, String> {
-        if let Some(r) = atomic(name, args, mem)? {
-            return Ok(Some(r));
-        }
-        match name {
-            "cpuid" => Ok(Some(Val::agg(vec![Val::S(0), Val::S(0), Val::S(0), Val::S(0)]))),
-            "xgetbv" | "thread_start_addr" | "stack_table" => Ok(Some(Val::S(0))),
-            "cpu_init" => Ok(None),
-            "thread_block" => Ok(Some(Val::S(self.thread_block))),
-            "set_thread_block" => {
+    fn intrinsic(&mut self, kind: Kind, args: &[Val], mem: &mut Memory) -> Result<Option<Val>, String> {
+        match kind {
+            Kind::Atomic { op, wide } => atomic(kind, op, wide, args, mem).map(Some),
+            Kind::Cpuid => Ok(Some(Val::agg(vec![Val::S(0), Val::S(0), Val::S(0), Val::S(0)]))),
+            Kind::Xgetbv | Kind::ThreadStartAddr | Kind::StackTable => Ok(Some(Val::S(0))),
+            Kind::CpuInit => Ok(None),
+            Kind::ThreadBlock => Ok(Some(Val::S(self.thread_block))),
+            Kind::SetThreadBlock => {
                 self.thread_block =
                     args.first().and_then(|v| v.bits()).ok_or("intrinsic.set_thread_block: operand 0")?;
                 Ok(None)
             }
             // one thread only: thread creation fails like an unsupported system call
-            "thread_clone" => Ok(Some(Val::S(ENOSYS))),
-            _ => match self.values.get(name) {
-                Some(&v) if args.is_empty() => Ok(Some(Val::S(v))),
-                _ => Err(format!("intrinsic.{name} is not supported by BufferHost")),
-            },
+            Kind::ThreadClone => Ok(Some(Val::S(ENOSYS))),
+            Kind::MainAddr | Kind::SignalHandlerAddr | Kind::SiteTable | Kind::PcTable => {
+                match self.values.get(&kind) {
+                    Some(&v) if args.is_empty() => Ok(Some(Val::S(v))),
+                    _ => Err(format!("intrinsic.{kind} is not supported by BufferHost")),
+                }
+            }
+            Kind::Syscall(_)
+            | Kind::Ccall(_)
+            | Kind::CallOnStack
+            | Kind::CpuBaseline
+            | Kind::CopyBytes
+            | Kind::StaticAddr
+            | Kind::Ptx => Err(format!("intrinsic.{kind} is not supported by BufferHost")),
         }
     }
 }
 
-/// The CPU atomic intrinsics (contracts/intrinsics.md) on the interpreter's memory: one thread,
-/// so each is a plain read-modify-write. `None`: not an atomic intrinsic.
-pub fn atomic(name: &str, args: &[Val], mem: &mut Memory) -> Result<Option<Val>, String> {
-    let Some(rest) = name.strip_prefix("atomic_") else { return Ok(None) };
-    let (op, size) = match rest.rsplit_once('_') {
-        Some((op, "u32")) => (op, 4u64),
-        Some((op, "u64")) => (op, 8u64),
-        _ => return Ok(None),
-    };
+/// The CPU atomic intrinsic `kind` (`atomic_<op>_u32/u64`, contracts/intrinsics.md) on the
+/// interpreter's memory: one thread, so each is a plain read-modify-write.
+pub fn atomic(kind: Kind, op: AtomicOp, wide: bool, args: &[Val], mem: &mut Memory) -> Result<Val, String> {
+    let size = if wide { 8u64 } else { 4 };
     let a =
-        |k: usize| args.get(k).and_then(|v| v.bits()).ok_or_else(|| format!("intrinsic.{name}: operand {k}"));
+        |k: usize| args.get(k).and_then(|v| v.bits()).ok_or_else(|| format!("intrinsic.{kind}: operand {k}"));
     let p = a(0)?;
-    let fault = |_| format!("intrinsic.{name}: fault at {p:#x}");
+    let fault = |_| format!("intrinsic.{kind}: fault at {p:#x}");
     let mask = if size == 8 { u64::MAX } else { u64::from(u32::MAX) };
     let old = mem.read_uint(p, size).map_err(fault)?;
     let new = match op {
-        "load" => None,
-        "xchg" => Some(a(1)?),
-        "add" => Some(old.wrapping_add(a(1)?)),
-        "cas" => (old == a(1)? & mask).then_some(a(2)?),
-        _ => return Ok(None),
+        AtomicOp::Load => None,
+        AtomicOp::Xchg => Some(a(1)?),
+        AtomicOp::Add => Some(old.wrapping_add(a(1)?)),
+        AtomicOp::Cas => (old == a(1)? & mask).then_some(a(2)?),
     };
     if let Some(n) = new {
         mem.write_uint(p, size, n & mask).map_err(fault)?;
     }
-    Ok(Some(Val::S(old)))
+    Ok(Val::S(old))
 }
