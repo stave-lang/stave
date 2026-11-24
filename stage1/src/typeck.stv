@@ -98,6 +98,9 @@ const S_ERR: u8 = 3;
 
 // The chain step waiting for the child being checked: none, generic arguments, a call's arguments,
 // an index, a struct literal.
+// A callee: the built-in `len` of an array, slice, or `str`.
+const M_LEN: u32 = 4294967290;
+
 const P_NONE: u8 = 0;
 const P_TARGS: u8 = 1;
 const P_CALL: u8 = 2;
@@ -208,6 +211,8 @@ pub struct Typeck {
     args: vec.Vec<u32>,
     // the names of the methods of impls with no struct or enum head, sorted
     headless: vec.Vec<u32>,
+    // the string `len`
+    s_len: u32,
     t_bool: u32,
     t_char: u32,
     t_unit: u32,
@@ -427,6 +432,7 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &in
         soa_mod: md.soa_mod,
         args: vec.Vec::<u32>.new(),
         headless: headless_names(ds),
+        s_len: modules.lookup(&nm.tab, mem.str_bytes("len")),
         t_bool: t_bool,
         t_char: t_char,
         t_unit: t_unit,
@@ -748,6 +754,19 @@ impl Typeck {
             let ks = tree.kids.row(r);
             let l = self.resolve_at(self.base + ks[0] as usize);
             self.set_hint(c, if is_lit(l) then NONE else l);
+            return true;
+        }
+        if pk == K_IF_EXPR {
+            if k == 0 {
+                self.set_hint_bool(c);
+            } else if k == 1 {
+                self.set_hint(c, h);
+            } else {
+                let ks = tree.kids.row(r);
+                let at = self.resolve_at(self.base + ks[1] as usize);
+                let bh = if at == UNK then UNK else if is_lit(at) || at == NONE || at == self.t_never then h else at;
+                self.set_hint(c, bh);
+            }
             return true;
         }
         if pk == K_AND || pk == K_OR {
@@ -1085,7 +1104,8 @@ impl Typeck {
             let _ = self.chain_steps(sg, ds, nm, set, t, cut, tree, r, NONE);
             return self.chain_value(r);
         }
-        if k == K_IF_EXPR || k == K_MATCH { return self.unknown(tree, r); }
+        if k == K_IF_EXPR { return self.if_value(sg, tree, r); }
+        if k == K_MATCH { return self.unknown(tree, r); }
         return self.unknown(tree, r);
     }
 
@@ -1387,6 +1407,30 @@ impl Typeck {
     fn err(&mut self) -> u32 {
         self.bad = true;
         return UNK;
+    }
+
+    // A value `if c then a else b`: stage0's `arms_unify` of the arms under the context type.
+    fn if_value(&mut self, sg: &mut sigs.Sigs, tree: &ast.Ast, r: usize) -> u32 {
+        let ks = tree.kids.row(r);
+        let h = self.hint.as_slice()[r];
+        self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
+        let at = self.resolve_at(self.base + ks[1] as usize);
+        let bt = self.resolve_at(self.base + ks[2] as usize);
+        if at == UNK || bt == UNK {
+            self.poison(at);
+            self.poison(bt);
+            return UNK;
+        }
+        if at == self.t_never { return bt; }
+        if bt == self.t_never { return at; }
+        let both = !is_lit(at) && !is_lit(bt) && at != bt;
+        if both && h == UNK { return UNK; }
+        if both && h != NONE {
+            let tab = &sg.cx.tab;
+            if (at == h || self.coercible(tab, at, h)) && (bt == h || self.coercible(tab, bt, h)) { return h; }
+        }
+        if both && at != NONE && bt != NONE && sg.cx.tab.tag_of(at) == types.TK_FN && sg.cx.tab.tag_of(bt) == types.TK_FN { return UNK; }
+        return self.unify(&sg.cx.tab, at, bt);
     }
 
     fn compare(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
@@ -1750,6 +1794,10 @@ impl Typeck {
             if args != NONE { self.poison_kids(tree, args as usize); }
             return UNK;
         }
+        if callee == M_LEN {
+            if args != NONE { return self.err(); }
+            return sg.cx.tab.usize_t();
+        }
         let skip: usize = if ds.kind.as_slice()[callee as usize] == decls.DK_METHOD then 1 else 0;
         let ps_len = sg.params.row(callee as usize).len() - skip;
         let variadic = sg.sflags.as_slice()[callee as usize] & sigs.SF_VARIADIC != 0;
@@ -1788,7 +1836,7 @@ impl Typeck {
     // `acc`, the type instantiating it in `pos`.
     fn arg_hint(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, r: usize, j: usize) -> u32 {
         let callee = self.acc.as_slice()[r];
-        if callee == NONE || callee == UNK { return UNK; }
+        if callee == NONE || callee == UNK || callee == M_LEN { return UNK; }
         let skip: usize = if ds.kind.as_slice()[callee as usize] == decls.DK_METHOD then 1 else 0;
         if j + skip < sg.params.row(callee as usize).len() {
             let inst = self.pos.as_slice()[r];
@@ -1802,7 +1850,8 @@ impl Typeck {
     // struct or enum (through references) and the method is in its one inherent impl that
     // applies to every instance (`impl<A, B> S<A, B>` without bounds, or `impl S` of a type
     // without generics), takes `self`, and has no generics of its own: (method, the type
-    // instantiating it). Every other lookup is not checked yet: (NONE, NONE).
+    // instantiating it); the built-in `len` of an array, slice, or `str` no impl shadows. Every
+    // other lookup is not checked yet: (NONE, NONE).
     fn method_of(&mut self, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, recv: u32, seg: u32) -> (u32, u32) {
         let tab = &sg.cx.tab;
         let s = nm.tok_str.as_slice()[seg as usize];
@@ -1813,7 +1862,13 @@ impl Typeck {
             if self.headless_has(s) { return (NONE, NONE); }
             c = tab.b_of(c);
         }
-        if tab.tag_of(c) != types.TK_ADT { return (NONE, NONE); }
+        let ct = tab.tag_of(c);
+        if ct == types.TK_SLICE || ct == types.TK_ARRAY || ct == types.TK_STR {
+            // an impl for the built-in type, else its built-in `len`
+            if self.headless_has(s) || s != self.s_len { return (NONE, NONE); }
+            return (M_LEN, NONE);
+        }
+        if ct != types.TK_ADT { return (NONE, NONE); }
         let d = tab.a_of(c);
         let key = search.pair(d, s);
         let k = search.lower_bound(ds.inh_key.as_slice(), key);
