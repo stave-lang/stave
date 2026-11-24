@@ -282,6 +282,19 @@ impl Table {
         return out;
     }
 
+    // The id of key (tag, a, b, xs) in an indexed table, or NONE (lookup only).
+    pub fn find(&self, tag: u8, a: u32, b: u32, xs: &[u32]) -> u32 {
+        let hash = Table.hash_of(tag, a, b, xs);
+        let mask = self.slots.len() - 1;
+        let mut at = (hash as usize) & mask;
+        loop {
+            let s = self.slots.as_slice()[at];
+            if s == NONE { return NONE; }
+            if self.hashes.as_slice()[s as usize] == hash && self.same(s, tag, a, b, xs) { return s; }
+            at = (at + 1) & mask;
+        }
+    }
+
     // A key without extra words.
     pub fn key(&mut self, tag: u8, a: u32, b: u32) -> u32 {
         self.pend.clear();

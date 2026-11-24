@@ -1,0 +1,533 @@
+// What the verifier knows about types: classes for op typing, record and enum shapes, vector
+// and mask shapes, memory operands, casts, layouts, and int constant ranges (stave-ir `verify`,
+// `layout`, `simd`, `arith`). Every function takes any type id and any key, in range or not.
+import model;
+import types;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+
+// Classes of a type.
+pub const K_INT: u8 = 0;
+pub const K_BOOL: u8 = 1;
+pub const K_CHAR: u8 = 2;
+pub const K_FLOAT: u8 = 3;
+pub const K_PTR: u8 = 4;
+pub const K_FAT: u8 = 5;
+pub const K_FN: u8 = 6;
+pub const K_AGG: u8 = 7;
+pub const K_OTHER: u8 = 8;
+// An int constant: typed only by its context.
+pub const K_CONST: u8 = 9;
+
+// Float formats (the FLOAT key's `a`).
+pub const F16: u32 = 0;
+pub const F32: u32 = 1;
+pub const F64: u32 = 2;
+pub const BF16: u32 = 3;
+
+pub struct Cls {
+    pub k: u8,
+    pub bits: u32,
+    pub signed: bool,
+    pub fmt: u32,
+}
+
+impl Copy for Cls {}
+
+pub fn cls_of(k: u8) -> Cls {
+    return Cls.{ k: k, bits: 0, signed: false, fmt: 0 };
+}
+
+pub fn same_cls(x: Cls, y: Cls) -> bool {
+    return x.k == y.k && x.bits == y.bits && x.signed == y.signed && x.fmt == y.fmt;
+}
+
+pub fn float_width(f: u32) -> u32 {
+    return if f == F32 then 32u32 else if f == F64 then 64u32 else 16u32;
+}
+
+fn int_width(w: u32) -> u32 {
+    return if w == types.W_8 then 8u32 else if w == types.W_16 then 16u32 else if w == types.W_32 then 32u32 else 64u32;
+}
+
+pub fn in_range(m: &model.Module, t: u32) -> bool {
+    return (t as usize) < m.types.len();
+}
+
+pub fn is_unsized_pointee(m: &model.Module, t: u32) -> bool {
+    let tag = m.types.tag_of(t);
+    return tag == types.TK_STR || tag == types.TK_SLICE;
+}
+
+pub fn classify(m: &model.Module, t: u32) -> Cls {
+    let tag = m.types.tag_of(t);
+    if tag == types.TK_INT { return Cls.{ k: K_INT, bits: int_width(m.types.b_of(t)), signed: m.types.a_of(t) == 1, fmt: 0 }; }
+    if tag == types.TK_BOOL { return cls_of(K_BOOL); }
+    if tag == types.TK_CHAR { return cls_of(K_CHAR); }
+    if tag == types.TK_FLOAT { return Cls.{ k: K_FLOAT, bits: 0, signed: false, fmt: m.types.a_of(t) }; }
+    if tag == types.TK_REF || tag == types.TK_PTR { return cls_of(if is_unsized_pointee(m, m.types.b_of(t)) then K_FAT else K_PTR); }
+    if tag == types.TK_FN { return cls_of(K_FN); }
+    if tag == types.TK_TUPLE || tag == types.TK_ARRAY || tag == types.TK_ADT { return cls_of(K_AGG); }
+    return cls_of(K_OTHER);
+}
+
+pub fn is_int(t: u8) -> bool {
+    return t == types.TK_INT;
+}
+
+// The pointee of a ref or raw pointer type, or NONE.
+pub fn pointee(m: &model.Module, t: u32) -> u32 {
+    let tag = m.types.tag_of(t);
+    if tag == types.TK_REF || tag == types.TK_PTR { return m.types.b_of(t); }
+    return NONE;
+}
+
+pub fn is_key(m: &model.Module, t: u32, tag: u8, a: u32, b: u32) -> bool {
+    return m.types.tag_of(t) == tag && m.types.a_of(t) == a && m.types.b_of(t) == b && m.types.x(t).len() == 0;
+}
+
+pub fn is_unit(m: &model.Module, t: u32) -> bool {
+    return m.types.tag_of(t) == types.TK_TUPLE && m.types.x(t).len() == 0;
+}
+
+pub fn is_usize(m: &model.Module, t: u32) -> bool {
+    return is_key(m, t, types.TK_INT, 0, types.W_SIZE);
+}
+
+pub fn is_bool(m: &model.Module, t: u32) -> bool {
+    return m.types.tag_of(t) == types.TK_BOOL;
+}
+
+// The shape row of each type (NONE: no shape).
+pub fn shape_rows(m: &model.Module) -> vec.Vec<u32> {
+    let mut out = vec.Vec::<u32>.with_capacity(m.types.len());
+    for _ in 0..m.types.len() {
+        out.push(NONE);
+    }
+    for s in 0..m.shape_ty.len() {
+        let t = m.shape_ty.as_slice()[s] as usize;
+        if t < out.len() { out.as_mut_slice()[t] = s as% u32; }
+    }
+    return out;
+}
+
+// The fields of a tuple or struct type into out; false for any other type.
+pub fn record_fields(m: &model.Module, sh: &[u32], t: u32, out: &mut vec.Vec<u32>) -> bool {
+    out.clear();
+    let tag = m.types.tag_of(t);
+    if tag == types.TK_TUPLE {
+        out.extend_from_slice(m.types.x(t));
+        return true;
+    }
+    if tag == types.TK_ADT {
+        let s = sh[t as usize];
+        if s == NONE || m.shape_kind.as_slice()[s as usize] != model.KIND_STRUCT { return false; }
+        let vars = m.shape_vars.row(s as usize);
+        if vars.len() > 0 { out.extend_from_slice(m.var_fields.row(vars[0] as usize)); }
+        return true;
+    }
+    return false;
+}
+
+// The variant rows (of `var_fields`) of an enum type, or none.
+pub fn enum_variants(m: &model.Module, sh: &[u32], t: u32) -> (bool, &[u32]) from m {
+    if (t as usize) >= sh.len() { return (false, &m.shape_ty.as_slice()[0..0]); }
+    let s = sh[t as usize];
+    if s == NONE || m.shape_kind.as_slice()[s as usize] != model.KIND_ENUM { return (false, &m.shape_ty.as_slice()[0..0]); }
+    return (true, m.shape_vars.row(s as usize));
+}
+
+// An `Option`-shaped enum (one empty variant and one with one field): its payload type, or NONE.
+pub fn option_payload(m: &model.Module, sh: &[u32], t: u32) -> u32 {
+    let (ok, vars) = enum_variants(m, sh, t);
+    if !ok || vars.len() != 2 { return NONE; }
+    let a = m.var_fields.row(vars[0] as usize);
+    let b = m.var_fields.row(vars[1] as usize);
+    if a.len() == 0 && b.len() == 1 { return b[0]; }
+    if a.len() == 1 && b.len() == 0 { return a[0]; }
+    return NONE;
+}
+
+// The lane type of a vector lane: an int (not `size`) or a float.
+pub fn lane_cls(m: &model.Module, lane: u32) -> (bool, Cls) {
+    let tag = m.types.tag_of(lane);
+    if tag == types.TK_INT && m.types.b_of(lane) != types.W_SIZE { return (true, classify(m, lane)); }
+    if tag == types.TK_FLOAT { return (true, classify(m, lane)); }
+    return (false, cls_of(K_OTHER));
+}
+
+pub fn lane_bits(c: Cls) -> u32 {
+    return if c.k == K_INT then c.bits else float_width(c.fmt);
+}
+
+pub fn valid_lanes(n: u32) -> bool {
+    return n >= 2 && n <= 64 && (n & (n - 1)) == 0;
+}
+
+// A fixed-size vector type: (lane type, lane class, count); ok false otherwise.
+pub fn vec_shape(m: &model.Module, t: u32) -> (bool, u32, Cls, u32) {
+    if m.types.tag_of(t) != types.TK_VECTOR { return (false, NONE, cls_of(K_OTHER), 0); }
+    let n = m.types.b_of(t);
+    if !valid_lanes(n) { return (false, NONE, cls_of(K_OTHER), 0); }
+    let lane = m.types.a_of(t);
+    let (ok, c) = lane_cls(m, lane);
+    return (ok, lane, c, n);
+}
+
+// A fixed-size mask type: (width, count).
+pub fn mask_shape(m: &model.Module, t: u32) -> (bool, u32, u32) {
+    if m.types.tag_of(t) != types.TK_MASK { return (false, 0, 0); }
+    let w = m.types.a_of(t);
+    let n = m.types.b_of(t);
+    if !valid_lanes(n) || (w != 8 && w != 16 && w != 32 && w != 64) { return (false, 0, 0); }
+    return (true, w, n);
+}
+
+// A slice or array memory operand: (ok, element type, mutable, has alignment, alignment).
+pub fn mem_operand(m: &model.Module, t: u32) -> (bool, u32, bool, bool, u32) {
+    let tag = m.types.tag_of(t);
+    if tag != types.TK_REF && tag != types.TK_PTR { return (false, NONE, false, false, 0); }
+    let mutable = m.types.a_of(t) == 1;
+    let inner = m.types.b_of(t);
+    let it = m.types.tag_of(inner);
+    if it == types.TK_SLICE {
+        let al = m.types.b_of(inner);
+        let has = al != 0 || m.types.x(inner).len() > 0;
+        return (true, m.types.a_of(inner), mutable, has, al);
+    }
+    if it == types.TK_ARRAY { return (true, m.types.a_of(inner), mutable, false, 0); }
+    return (false, NONE, false, false, 0);
+}
+
+// A raw pointer to one element (not to a slice or array): (ok, element, mutable).
+pub fn elem_ptr_operand(m: &model.Module, t: u32) -> (bool, u32, bool) {
+    if m.types.tag_of(t) != types.TK_PTR { return (false, NONE, false); }
+    let inner = m.types.b_of(t);
+    if !in_range(m, inner) { return (false, NONE, false); }
+    let it = m.types.tag_of(inner);
+    if it == types.TK_SLICE || it == types.TK_ARRAY { return (false, NONE, false); }
+    return (true, inner, m.types.a_of(t) == 1);
+}
+
+// The double-width lane of a lane class, if any.
+pub fn wide_lane(c: Cls) -> (bool, Cls) {
+    if c.k == K_INT && c.bits < 64 { return (true, Cls.{ k: K_INT, bits: c.bits * 2, signed: c.signed, fmt: 0 }); }
+    if c.k == K_FLOAT && (c.fmt == F16 || c.fmt == BF16) { return (true, Cls.{ k: K_FLOAT, bits: 0, signed: false, fmt: F32 }); }
+    if c.k == K_FLOAT && c.fmt == F32 { return (true, Cls.{ k: K_FLOAT, bits: 0, signed: false, fmt: F64 }); }
+    return (false, c);
+}
+
+pub fn to_bits_width(n: u32) -> u32 {
+    return if n <= 8 then 8u32 else if n <= 16 then 16u32 else if n <= 32 then 32u32 else 64u32;
+}
+
+// --- i128 values as two's-complement (hi, lo) ---
+
+pub fn is_neg(hi: u64) -> bool {
+    return (hi >> 63) == 1;
+}
+
+// Whether (hi, lo) lies in the range of an int of `bits` bits.
+pub fn fits(signed: bool, bits: u32, hi: u64, lo: u64) -> bool {
+    if !signed {
+        if hi != 0 { return false; }
+        return bits >= 64 || lo <= ((1u64 << bits as u64) - 1);
+    }
+    let half: u64 = 1u64 << ((bits - 1) as u64);
+    if hi == 0 { return lo <= half - 1; }
+    if hi == 18446744073709551615 { return lo >= (0u64 -% half); }
+    return false;
+}
+
+// Within i64::MIN ..= u64::MAX: a constant one 64-bit word holds.
+pub fn fits_word(hi: u64, lo: u64) -> bool {
+    return hi == 0 || (hi == 18446744073709551615 && is_neg(lo));
+}
+
+pub fn is_char(hi: u64, lo: u64) -> bool {
+    return hi == 0 && lo <= 1114111 && !(lo >= 55296 && lo <= 57343);
+}
+
+// --- casts (stave-ir `arith::cast_allowed`) ---
+
+pub const C_EXACT: u8 = 0;
+pub const C_WRAP: u8 = 1;
+pub const C_SAT: u8 = 2;
+pub const C_ROUND: u8 = 3;
+pub const C_TRY: u8 = 4;
+
+// The significand digits of a float format.
+fn digits(f: u32) -> u32 {
+    return if f == F16 then 11u32 else if f == BF16 then 8u32 else if f == F32 then 24u32 else 53u32;
+}
+
+// Whether a cast class: int, bool, char, float, or a thin pointer.
+pub fn castable(c: Cls) -> bool {
+    return c.k == K_INT || c.k == K_BOOL || c.k == K_CHAR || c.k == K_FLOAT || c.k == K_PTR;
+}
+
+pub fn cast_allowed(kind: u8, src: Cls, to: Cls) -> bool {
+    let fi = src.k == K_INT;
+    let ti = to.k == K_INT;
+    if kind == C_EXACT {
+        if same_cls(src, to) { return true; }
+        if fi && ti { return (src.signed == to.signed && to.bits >= src.bits) || (!src.signed && to.signed && to.bits > src.bits); }
+        if src.k == K_BOOL && ti { return true; }
+        if src.k == K_CHAR && ti { return to.bits >= 32 && (!to.signed || to.bits > 32); }
+        if fi && to.k == K_CHAR { return !src.signed && src.bits <= 8; }
+        if fi && to.k == K_FLOAT { return src.bits - (if src.signed then 1u32 else 0u32) <= digits(to.fmt); }
+        if src.k == K_FLOAT && to.k == K_FLOAT {
+            let a = src.fmt;
+            let b = to.fmt;
+            return ((a == F16 || a == BF16 || a == F32) && b == F64) || ((a == F16 || a == BF16) && b == F32);
+        }
+        if src.k == K_PTR && to.k == K_PTR { return true; }
+        if (src.k == K_PTR && ti) || (fi && to.k == K_PTR) { return (if ti then to.bits else src.bits) == 64; }
+        return false;
+    }
+    if kind == C_WRAP { return (fi || src.k == K_BOOL || src.k == K_CHAR || src.k == K_PTR) && ti; }
+    if kind == C_SAT { return (fi || src.k == K_CHAR || src.k == K_FLOAT) && ti; }
+    if kind == C_ROUND { return (fi || src.k == K_FLOAT) && to.k == K_FLOAT; }
+    return ((fi || src.k == K_CHAR || src.k == K_FLOAT) && ti) || (fi && (to.k == K_CHAR || to.k == K_FLOAT)) || (src.k == K_FLOAT && to.k == K_FLOAT);
+}
+
+// Whether int constant (hi, lo) (in i64::MIN ..= u64::MAX) converts exactly to class `to`.
+pub fn const_converts(hi: u64, lo: u64, to: Cls) -> bool {
+    if to.k == K_INT { return fits(to.signed, to.bits, hi, lo); }
+    if to.k == K_PTR { return true; }
+    if to.k == K_CHAR { return is_char(hi, lo); }
+    if to.k == K_FLOAT {
+        let mag = if is_neg(hi) then 0u64 -% lo else lo;
+        if mag == 0 { return true; }
+        let width = 64 - mag.clz() - mag.ctz();
+        if width > digits(to.fmt) as u64 { return false; }
+        if to.fmt == F16 && mag > 65504 { return false; }
+        return true;
+    }
+    return false;
+}
+
+// --- layouts (stave-ir `layout`): per type a size and alignment, or an error ---
+
+pub const L_OK: u8 = 0;
+pub const L_UNSIZED: u8 = 1;
+pub const L_NO_SHAPE: u8 = 2;
+pub const L_INFINITE: u8 = 3;
+pub const L_OVERFLOW: u8 = 4;
+pub const L_TOO_DEEP: u8 = 5;
+
+pub const MAX_DEPTH: u32 = 1000;
+
+pub fn layout_msg(e: u8) -> &str {
+    return if e == L_UNSIZED then "unsized type has no layout" else if e == L_NO_SHAPE then "ADT type has no shape" else if e == L_INFINITE then "type contains itself without indirection" else if e == L_OVERFLOW then "size overflows u64" else "type nesting too deep";
+}
+
+pub struct Layouts {
+    pub size: vec.Vec<u64>,
+    pub aln: vec.Vec<u64>,
+    pub err: vec.Vec<u8>,
+}
+
+const ST_NEW: u8 = 0;
+const ST_BUSY: u8 = 1;
+const ST_DONE: u8 = 2;
+
+fn add_ok(a: u64, b: u64) -> (bool, u64) {
+    let s = a +% b;
+    return (s >= a, s);
+}
+
+fn mul_ok(a: u64, b: u64) -> (bool, u64) {
+    let (h, l) = a.mul_wide(b);
+    return (h == 0, l);
+}
+
+fn align_up(x: u64, a: u64) -> (bool, u64) {
+    let al = if a == 0 then 1u64 else a;
+    let (ok, y) = add_ok(x, al - 1);
+    return (ok, y / al * al);
+}
+
+// The by-value components of t: what its layout is made of.
+fn components(m: &model.Module, sh: &[u32], t: u32, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let tag = m.types.tag_of(t);
+    if tag == types.TK_ARRAY || tag == types.TK_VECTOR {
+        out.push(m.types.a_of(t));
+    } else if tag == types.TK_TUPLE {
+        out.extend_from_slice(m.types.x(t));
+    } else if tag == types.TK_ADT {
+        let s = sh[t as usize];
+        if s == NONE { return; }
+        let vars = m.shape_vars.row(s as usize);
+        for v in 0..vars.len() {
+            out.extend_from_slice(m.var_fields.row(vars[v] as usize));
+        }
+    }
+}
+
+impl Layouts {
+    // Every type's layout; the table must be well formed. A component still being laid out is
+    // a type containing itself; one past the depth bound is too deep.
+    pub fn compute(m: &model.Module, sh: &[u32]) -> Layouts {
+        let n = m.types.len();
+        let mut l = Layouts.{ size: vec.Vec::<u64>.with_capacity(n), aln: vec.Vec::<u64>.with_capacity(n), err: vec.Vec::<u8>.with_capacity(n) };
+        let mut st = vec.Vec::<u8>.with_capacity(n);
+        for _ in 0..n {
+            l.size.push(0);
+            l.aln.push(0);
+            l.err.push(L_INFINITE);
+            st.push(ST_NEW);
+        }
+        let mut stk_t = vec.Vec::<u32>.new();
+        let mut stk_d = vec.Vec::<u32>.new();
+        let mut stk_x = vec.Vec::<bool>.new();
+        let mut parts = vec.Vec::<u32>.new();
+        for i in 0..n {
+            stk_t.push(i as% u32);
+            stk_d.push(0);
+            stk_x.push(false);
+            while stk_t.len() > 0 {
+                let top = stk_t.len() - 1;
+                let t = stk_t.as_slice()[top];
+                let depth = stk_d.as_slice()[top];
+                if !stk_x.as_slice()[top] {
+                    if st.as_slice()[t as usize] != ST_NEW || depth > MAX_DEPTH {
+                        stk_t.truncate(top);
+                        stk_d.truncate(top);
+                        stk_x.truncate(top);
+                        continue;
+                    }
+                    st.as_mut_slice()[t as usize] = ST_BUSY;
+                    stk_x.as_mut_slice()[top] = true;
+                    components(m, sh, t, &mut parts);
+                    let mut k = parts.len();
+                    while k > 0 {
+                        k = k - 1;
+                        let c = parts.as_slice()[k];
+                        if (c as usize) < n && st.as_slice()[c as usize] == ST_NEW {
+                            stk_t.push(c);
+                            stk_d.push(depth + 1);
+                            stk_x.push(false);
+                        }
+                    }
+                    continue;
+                }
+                stk_t.truncate(top);
+                stk_d.truncate(top);
+                stk_x.truncate(top);
+                let (e, size, al) = l.calc(m, sh, st.as_slice(), t, depth + 1, &mut parts);
+                l.err.as_mut_slice()[t as usize] = e;
+                l.size.as_mut_slice()[t as usize] = size;
+                l.aln.as_mut_slice()[t as usize] = al;
+                st.as_mut_slice()[t as usize] = ST_DONE;
+            }
+        }
+        return l;
+    }
+
+    // The layout of component c seen from a type at depth `depth`.
+    fn get(&self, st: &[u8], c: u32, depth: u32) -> (u8, u64, u64) {
+        if (c as usize) >= st.len() { return (L_INFINITE, 0, 0); }
+        let s = st[c as usize];
+        if s == ST_DONE { return (self.err.as_slice()[c as usize], self.size.as_slice()[c as usize], self.aln.as_slice()[c as usize]); }
+        if s == ST_BUSY { return (L_INFINITE, 0, 0); }
+        return (if depth > MAX_DEPTH then L_TOO_DEEP else L_INFINITE, 0, 0);
+    }
+
+    // Fields fs laid out from offset `start`: (error, end, alignment).
+    fn record(&self, st: &[u8], fs: &[u32], start: u64, depth: u32) -> (u8, u64, u64) {
+        let mut off = start;
+        let mut al: u64 = 1;
+        for k in 0..fs.len() {
+            let (e, size, fa) = self.get(st, fs[k], depth);
+            if e != L_OK { return (e, 0, 0); }
+            let (ok, o2) = align_up(off, fa);
+            if !ok { return (L_OVERFLOW, 0, 0); }
+            let (ok2, o3) = add_ok(o2, size);
+            if !ok2 { return (L_OVERFLOW, 0, 0); }
+            off = o3;
+            if fa > al { al = fa; }
+        }
+        return (L_OK, off, al);
+    }
+
+    fn calc(&self, m: &model.Module, sh: &[u32], st: &[u8], t: u32, depth: u32, tmp: &mut vec.Vec<u32>) -> (u8, u64, u64) {
+        let tag = m.types.tag_of(t);
+        let a = m.types.a_of(t);
+        let b = m.types.b_of(t);
+        if tag == types.TK_INT {
+            let s: u64 = if b == types.W_SIZE then 8 else (int_width(b) / 8) as u64;
+            return (L_OK, s, s);
+        }
+        if tag == types.TK_FLOAT {
+            let s = (float_width(a) / 8) as u64;
+            return (L_OK, s, s);
+        }
+        if tag == types.TK_BOOL { return (L_OK, 1, 1); }
+        if tag == types.TK_CHAR { return (L_OK, 4, 4); }
+        if tag == types.TK_STR || tag == types.TK_SLICE { return (L_UNSIZED, 0, 0); }
+        if tag == types.TK_REF || tag == types.TK_PTR {
+            if is_unsized_pointee(m, b) { return (L_OK, 16, 8); }
+            return (L_OK, 8, 8);
+        }
+        if tag == types.TK_FN { return (L_OK, 16, 8); }
+        if tag == types.TK_ARRAY {
+            let (e, es, ea) = self.get(st, a, depth);
+            if e != L_OK { return (e, 0, 0); }
+            let xs = m.types.x(t);
+            let len = ((xs[1] as u64) << 32) | (xs[2] as u64);
+            let (ok, size) = mul_ok(es, len);
+            if !ok { return (L_OVERFLOW, 0, 0); }
+            return (L_OK, size, ea);
+        }
+        if tag == types.TK_TUPLE {
+            let (e, end, al) = self.record(st, m.types.x(t), 0, depth);
+            if e != L_OK { return (e, 0, 0); }
+            let (ok, size) = align_up(end, al);
+            if !ok { return (L_OVERFLOW, 0, 0); }
+            return (L_OK, size, al);
+        }
+        if tag == types.TK_ADT {
+            let s = sh[t as usize];
+            if s == NONE { return (L_NO_SHAPE, 0, 0); }
+            let vars = m.shape_vars.row(s as usize);
+            if m.shape_kind.as_slice()[s as usize] == model.KIND_STRUCT {
+                tmp.clear();
+                if vars.len() > 0 { tmp.extend_from_slice(m.var_fields.row(vars[0] as usize)); }
+                let (e, end, al) = self.record(st, tmp.as_slice(), 0, depth);
+                if e != L_OK { return (e, 0, 0); }
+                let (ok, size) = align_up(end, al);
+                if !ok { return (L_OVERFLOW, 0, 0); }
+                return (L_OK, size, al);
+            }
+            let mut al: u64 = 4;
+            let mut end: u64 = 4;
+            for v in 0..vars.len() {
+                let (e, ve, va) = self.record(st, m.var_fields.row(vars[v] as usize), 4, depth);
+                if e != L_OK { return (e, 0, 0); }
+                if va > al { al = va; }
+                if ve > end { end = ve; }
+            }
+            let (ok, size) = align_up(end, al);
+            if !ok { return (L_OVERFLOW, 0, 0); }
+            return (L_OK, size, al);
+        }
+        if tag == types.TK_VECTOR {
+            if b == types.LANES_N { return (L_UNSIZED, 0, 0); }
+            let (e, ls, _) = self.get(st, a, depth);
+            if e != L_OK { return (e, 0, 0); }
+            let (ok, size) = mul_ok(ls, b as u64);
+            if !ok { return (L_OVERFLOW, 0, 0); }
+            return (L_OK, size, if size == 0 then 1u64 else size);
+        }
+        if tag == types.TK_MASK {
+            if b == types.LANES_N { return (L_UNSIZED, 0, 0); }
+            let w = (a / 8) as u64;
+            let size = (if w == 0 then 1u64 else w) * (b as u64);
+            return (L_OK, size, if size == 0 then 1u64 else size);
+        }
+        return (L_UNSIZED, 0, 0);
+    }
+}

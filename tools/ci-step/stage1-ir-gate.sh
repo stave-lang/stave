@@ -7,7 +7,8 @@
 # stage1 with it, then per root of the corpus and per target (x86_64-linux, aarch64-linux) runs
 # `stave check --dump=lir,ir` and `stave check --release --dump=lir,ir,opt`, and `stage1 ir fmt`
 # on every text written (a root with error diagnostics writes none): its output must be the input.
-# Counts per target, mode, and level.
+# Counts per target, mode, and level. An empty file is no text: stage0 writes one for a program
+# whose lowering it does not implement; such files are counted apart.
 #
 # Mutants: STAVE_IR_MUTANTS (default 4000) mutants of the round trip's texts of at most 64 KiB,
 # written with stage0's verdicts by the ignored stave-ir test `ir_text_mutants` (the reader fuzz
@@ -44,6 +45,10 @@ if [ "${1:-}" = "--one" ]; then
       for lv in lir ir opt; do
         f="$d/$t-$m/$lv.txt"
         [ -f "$f" ] || continue
+        if [ ! -s "$f" ]; then
+          echo "EMPTY $t $m $lv $f"
+          continue
+        fi
         if "$S1" ir fmt "$f" > "$f.s1" 2> "$f.err"; then
           if cmp -s "$f" "$f.s1"; then
             echo "SAME $t $m $lv $(wc -c < "$f") $f"
@@ -87,19 +92,20 @@ runs=$(wc -l < "$LIST")
 for t in x86_64-linux aarch64-linux; do
   for m in debug release; do
     for lv in lir ir opt; do
-      n=$(awk -v t="$t" -v m="$m" -v l="$lv" '$2 == t && $3 == m && $4 == l' "$OUT/result.txt" | wc -l)
+      n=$(awk -v t="$t" -v m="$m" -v l="$lv" '$1 != "EMPTY" && $2 == t && $3 == m && $4 == l' "$OUT/result.txt" | wc -l)
       [ "$n" -gt 0 ] || continue
       s=$(awk -v t="$t" -v m="$m" -v l="$lv" '$1 == "SAME" && $2 == t && $3 == m && $4 == l' "$OUT/result.txt" | wc -l)
       echo "stage1-ir-gate: $t $m $lv: $s / $n texts equal"
     done
   done
 done
-total=$(wc -l < "$OUT/result.txt")
+total=$(grep -vc '^EMPTY' "$OUT/result.txt" || true)
+empty=$(grep -c '^EMPTY' "$OUT/result.txt" || true)
 same=$(grep -c '^SAME' "$OUT/result.txt" || true)
 bytes=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
-echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots, $((end - start)) s"
+echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots, $((end - start)) s; $empty empty files stage0 wrote (no text)"
 fail=0
-if grep -v '^SAME' "$OUT/result.txt"; then fail=1; fi
+if grep -v '^SAME\|^EMPTY' "$OUT/result.txt"; then fail=1; fi
 
 # the largest text: stage1 read + print against stage0's
 big=$(awk '$1 == "SAME" { print $5, $6 }' "$OUT/result.txt" | sort -n | tail -1 | cut -d' ' -f2)

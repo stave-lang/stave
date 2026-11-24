@@ -1,3 +1,4 @@
+//~ CHECK-ONLY
 // ir: the type table and the checked IR of stage1 (contracts/checked-ir.md). It imports no part of
 // the front end, so the back end and the prover use it alone.
 //
@@ -11,6 +12,8 @@
 //   drive      the LL(1) driver of one line, with the syntax messages
 //   stage      step 1: each line into staged rows
 //   read       step 2 and the module build; `read.read` runs steps 1 and 2
+//   verify     step 3: the verifier of untrusted modules (`vtypes`: what it knows of types)
+//   load       steps 1 to 3
 //   print      the printer
 //   known      the compiler-known items (`generated.known_items`)
 //   errs       the faults of an input and their rendering

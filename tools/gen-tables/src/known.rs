@@ -171,7 +171,17 @@ pub fn emit_stave(items: &[Item]) -> Result<String, String> {
     for (k, (name, _)) in ITYS.iter().enumerate() {
         let _ = writeln!(o, "pub const ITY_{}: u8 = {k};", name.to_ascii_uppercase());
     }
-    o += "pub const ITY_NONE: u8 = 255;\n\n";
+    o += "pub const ITY_NONE: u8 = 255;\n";
+    o += "// ABI type i in messages (stave-ir `ITy`): ITY_NAME[ITY_NAME_OFF[i]..ITY_NAME_OFF[i + 1]].\n";
+    let mut noff = vec!["0".to_string()];
+    let mut nbytes = Vec::new();
+    for (_, rust) in ITYS {
+        nbytes.extend(rust.bytes().map(|b| b.to_string()));
+        noff.push(nbytes.len().to_string());
+    }
+    array(&mut o, "ITY_NAME_OFF", "u32", &noff);
+    array(&mut o, "ITY_NAME", "u8", &nbytes);
+    o += "\n";
     let mut off = vec![0u32];
     let mut bytes = Vec::new();
     let mut aoff = vec![0u32];

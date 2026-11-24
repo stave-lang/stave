@@ -15,6 +15,15 @@ pub const ITY_MUT_PTR_U8: u8 = 6;
 pub const ITY_CONST_PTR_U8: u8 = 7;
 pub const ITY_CONST_PTR_USIZE: u8 = 8;
 pub const ITY_NONE: u8 = 255;
+// ABI type i in messages (stave-ir `ITy`): ITY_NAME[ITY_NAME_OFF[i]..ITY_NAME_OFF[i + 1]].
+pub const ITY_NAME_OFF: [u32; 10] = [
+    0, 5, 10, 13, 16, 20, 25, 33, 43, 56,
+];
+pub const ITY_NAME: [u8; 56] = [
+    85, 115, 105, 122, 101, 73, 115, 105, 122, 101, 85, 51, 50, 85, 54, 52, 85, 110, 105, 116, 85,
+    51, 50, 120, 52, 77, 117, 116, 80, 116, 114, 85, 56, 67, 111, 110, 115, 116, 80, 116, 114, 85,
+    56, 67, 111, 110, 115, 116, 80, 116, 114, 85, 115, 105, 122, 101,
+];
 
 pub const KNOWN_PATH_OFF: [u32; 95] = [
     0, 15, 30, 43, 56, 69, 82, 97, 110, 126, 140, 152, 168, 183, 195, 211, 226, 238, 254, 269, 281,

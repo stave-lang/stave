@@ -1,0 +1,169 @@
+// The IR text library: loading (lines, structure, verification), printing, and the faults of
+// untrusted input.
+import bytes;
+import errs;
+import load;
+import print;
+import read;
+import std.debug;
+import std.mem;
+import std.vec;
+
+// The lines joined, each with its `\n`.
+fn text(lines: &[&str]) -> vec.Vec<u8> {
+    let mut v = vec.Vec::<u8>.new();
+    for i in 0..lines.len() {
+        v.extend_from_slice(mem.str_bytes(lines[i]));
+        v.push(10);
+    }
+    return v;
+}
+
+// Whether the first fault's message contains s.
+fn first_has(ld: &read.Loaded, s: &str) -> bool {
+    if ld.errs.len() == 0 { return false; }
+    let m = ld.errs.msg.row(0);
+    let p = mem.str_bytes(s);
+    if p.len() > m.len() { return false; }
+    for i in 0..m.len() - p.len() + 1 {
+        if m[i..i + p.len()].eq(p) { return true; }
+    }
+    return false;
+}
+
+fn example() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int s 32", "type t1 bool", "site 0 \"src/app.stv\" 1 4 app.max", "fn @0 app.max(t0, t0) -> t0 site 0 {", "b0(%0: t0, %1: t0):", "  %2 = gt t1 %0 %1", "  cbr %2 b1() b2()", "b1():", "  ret %0", "b2():", "  ret %1", "}"];
+    return text(&lines);
+}
+
+test fn the_contract_example_loads_and_prints_back() {
+    let src = example();
+    let ld = load.load(src.as_slice());
+    debug.assert(ld.ok(), "loads");
+    debug.assert(ld.m.fns() == 1 && ld.m.types.len() == 2, "one fn, two types");
+    let out = print.print(&ld.m);
+    debug.assert(out.as_slice().eq(src.as_slice()), "prints the same bytes");
+}
+
+test fn spacing_comments_and_numbering_are_free() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked  # header", "", "type t0 int s 32", "type\tt1 bool", "site 0 \"src/app.stv\" 1 4 app.max", "fn @0 app.max(t0, t0) -> t0 site 0 {", "b7(%5: t0, %9: t0):", "  %3 = gt t1 %5 %9", "  cbr %3 b4() b2()", "b4():", "  ret %5", "b2():", "  ret %9", "}"];
+    let ld = load.load(text(&lines).as_slice());
+    debug.assert(!ld.ok() && first_has(&ld, "begins with block b0"), "the entry block is b0");
+    let lines2 = ["stave.ir 4 \"x86_64-linux-v2\" debug checked  # header", "", "type t0 int s 32", "type\tt1 bool", "site 0 \"src/app.stv\" 1 4 app.max", "fn @0 app.max(t0, t0) -> t0 site 0 {", "b0(%5: t0, %9: t0):", "  %3 = gt t1 %5 %9", "  cbr %3 b4() b2()", "b4():", "  ret %5", "b2():", "  ret %9", "}"];
+    let ld2 = load.load(text(&lines2).as_slice());
+    debug.assert(ld2.ok(), "any value and block numbers");
+    let out = print.print(&ld2.m);
+    debug.assert(out.as_slice().eq(example().as_slice()), "printed canonical");
+}
+
+test fn fns_are_ranked_by_instance_id() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int s 32", "fn @0.u a.f(t0)", "fn @1 a.g(t0)", "fn @0.0 a.f(t0)", "fn @0 a.f(t0)"];
+    let ld = load.load(text(&lines).as_slice());
+    debug.assert(ld.ok(), "loads");
+    let out = print.print(&ld.m);
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int s 32", "fn @0 a.f(t0)", "fn @0.0 a.f(t0)", "fn @0.u a.f(t0)", "fn @1 a.g(t0)"];
+    debug.assert(out.as_slice().eq(text(&want).as_slice()), "@0, @0.0, @0.u, @1");
+}
+
+test fn faults_of_lines() {
+    let cases = ["stave.ir 3 \"x86_64-linux-v2\" debug checked", "stave.ir 4 \"x86_64-linux\" debug checked", "stave.ir 4 \"x86_64-linux-v2\" debug opt", "nope 1 2", "stave.ir 4 \"x86_64-linux-v2\" debug checked extra", "type t0 int s 7", "str s0 \"\\x41\"", "str s0 \"abc", "type t0 int s -0"];
+    let words = ["version 3", "canonical name", "only with mode", "unknown line kind", "after a complete line", "int width", "shorter form", "unterminated", "`-0`"];
+    for k in 0..cases.len() {
+        let one = [cases[k]];
+        let ld = load.load(text(&one).as_slice());
+        debug.assert(!ld.ok() && ld.errs.kind.as_slice()[0] == errs.K_SYNTAX, "a syntax fault");
+        debug.assert(first_has(&ld, words[k]), "the fault's words");
+    }
+}
+
+test fn faults_of_structure() {
+    let hdr = "stave.ir 4 \"x86_64-linux-v2\" debug checked";
+    let a = [hdr, "type t1 bool"];
+    debug.assert(first_has(&load.load(text(&a).as_slice()), "out of order"), "types are dense");
+    let b = [hdr, "type t0 bool", "type t1 bool"];
+    debug.assert(first_has(&load.load(text(&b).as_slice()), "has the key of t0"), "no equal keys");
+    let c = [hdr, "type t0 ref t5"];
+    debug.assert(first_has(&load.load(text(&c).as_slice()), "t5 names no type line"), "ids name lines");
+    let d = [hdr, "type t0 bool", "fn @0 a.f() {", "b0():", "  ret %4", "}"];
+    debug.assert(first_has(&load.load(text(&d).as_slice()), "is not a value"), "values are defined");
+    let e = [hdr, "type t0 bool", "fn @0 a.f() {", "b0():", "  ret", "b1():", "  ret", "}"];
+    debug.assert(first_has(&load.load(text(&e).as_slice()), "unreachable from b0"), "every block is reachable");
+    let f = [hdr, "type t0 bool", "fn @0 a.f() known"];
+    debug.assert(first_has(&load.load(text(&f).as_slice()), "no compiler-known item"), "known names a known path");
+    let g = ["type t0 bool", hdr];
+    debug.assert(first_has(&load.load(text(&g).as_slice()), "begins with the `stave.ir` header"), "header first");
+    let h = [hdr, "type t0 bool", "fn @0 a.f() {", "b0():", "  ret", "}", "claim @0 post zero <= result 0", "fn @0 a.f()"];
+    debug.assert(first_has(&load.load(text(&h).as_slice()), "defined twice"), "one fn per instance");
+}
+
+test fn faults_of_verification() {
+    let hdr = "stave.ir 4 \"x86_64-linux-v2\" debug checked";
+    let a = [hdr, "type t0 int s 32", "type t1 bool", "fn @0 a.f(t0) -> t0 {", "b0(%0: t0):", "  %1 = add t1 %0 %0", "  ret %0", "}"];
+    let la = load.load(text(&a).as_slice());
+    debug.assert(!la.ok() && la.errs.kind.as_slice()[0] == errs.K_VERIFY && la.errs.line.as_slice()[0] == 6, "arithmetic on bool, at its line");
+    let b = [hdr, "type t0 bool", "fn @0 a.f(t0) {", "b0(%0: t0):", "  br b0(%0)", "}"];
+    debug.assert(first_has(&load.load(text(&b).as_slice()), "b0 (entry) cannot be a branch target"), "no branch to b0");
+    let c = [hdr, "type t0 int s 32", "type t1 bool", "fn @0 a.f(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b1() b2()", "b1():", "  %2 = add t0 %1 1", "  br b3()", "b2():", "  br b3()", "b3():", "  ret %2", "}"];
+    debug.assert(first_has(&load.load(text(&c).as_slice()), "not dominated"), "uses are dominated");
+    let d = [hdr, "type t0 int u size", "fn @0 a.f() -> t0 {", "b0():", "  %0 = intrinsic.nope t0", "  ret %0", "}"];
+    debug.assert(first_has(&load.load(text(&d).as_slice()), "unknown intrinsic"), "intrinsics from the table");
+    let e = [hdr, "type t0 int u size", "fn @0 a.f() -> t0 {", "b0():", "  %0 = intrinsic.main_addr t0", "  ret %0", "}"];
+    debug.assert(load.load(text(&e).as_slice()).ok(), "a table intrinsic with its signature");
+    let f = [hdr, "type t0 ref t0"];
+    debug.assert(first_has(&load.load(text(&f).as_slice()), "component of itself"), "no type cycle");
+    let g = [hdr, "type t0 int u 8", "static 0 t0 a.S", "data 0 3 x01"];
+    debug.assert(first_has(&load.load(text(&g).as_slice()), "lie past its size"), "data inside its static");
+}
+
+test fn a_deep_type_chain_is_a_fault_not_a_deep_stack() {
+    let mut v = vec.Vec::<u8>.new();
+    bytes.push_str(&mut v, "stave.ir 4 \"x86_64-linux-v2\" debug checked\ntype t0 bool\n");
+    for k in 1..1500u32 {
+        bytes.push_str(&mut v, "type t");
+        bytes.push_u32(&mut v, k);
+        bytes.push_str(&mut v, " ref t");
+        bytes.push_u32(&mut v, k - 1);
+        v.push(10);
+    }
+    let ld = load.load(v.as_slice());
+    debug.assert(!ld.ok() && first_has(&ld, "nested deeper than 1000"), "too deep");
+}
+
+test fn any_bytes_load_or_fault() {
+    let mut x: u64 = 88172645463325252;
+    let base = example();
+    for _ in 0..300u32 {
+        let mut v = vec.Vec::<u8>.new();
+        v.extend_from_slice(base.as_slice());
+        for _ in 0..3u32 {
+            x = x ^ (x << 13);
+            x = x ^ (x >> 7);
+            x = x ^ (x << 17);
+            let at = (x % (v.len() as u64)) as usize;
+            v.as_mut_slice()[at] = (x >> 32) as% u8;
+        }
+        let ld = load.load(v.as_slice());
+        if ld.ok() {
+            let out = print.print(&ld.m);
+            let again = load.load(out.as_slice());
+            debug.assert(again.ok(), "an accepted text prints a loadable one");
+        } else {
+            debug.assert(ld.errs.len() <= errs.MAX, "at most 100 faults");
+        }
+    }
+}
+
+test fn i128_text() {
+    let mut v = vec.Vec::<u8>.new();
+    bytes.push_i128(&mut v, 9223372036854775808, 0);
+    debug.assert(v.as_slice().eq(mem.str_bytes("-170141183460469231731687303715884105728")), "i128 min");
+    v.clear();
+    bytes.push_i128(&mut v, 9223372036854775807, 18446744073709551615);
+    debug.assert(v.as_slice().eq(mem.str_bytes("170141183460469231731687303715884105727")), "i128 max");
+    v.clear();
+    bytes.push_i128(&mut v, 18446744073709551615, 18446744073709551615);
+    debug.assert(v.as_slice().eq(mem.str_bytes("-1")), "-1");
+    v.clear();
+    bytes.quote(&mut v, mem.str_bytes("a\"\\\n\t"));
+    debug.assert(v.as_slice().eq(mem.str_bytes("\"a\\\"\\\\\\n\\t\"")), "the escape rule");
+}

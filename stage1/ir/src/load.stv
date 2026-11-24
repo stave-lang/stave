@@ -1,0 +1,11 @@
+// Loading IR text (contracts/checked-ir.md "Loading"), the steps this library has: lines and
+// structure (`read`), then verification (`verify`), each only when the one before had no fault.
+// Not here: the removal of proven checks at level `lowered` (step 4) and the bounds audit (step 5).
+import read;
+import verify;
+
+pub fn load(src: &[u8]) -> read.Loaded {
+    let mut ld = read.read(src);
+    if ld.ok() { verify.verify(&mut ld); }
+    return ld;
+}
