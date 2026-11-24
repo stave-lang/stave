@@ -13,7 +13,7 @@ error diagnostics; with errors, its file is not written.
 | Level | The module after | Dump |
 |---|---|---|
 | `lowered` | lowering and the IR verifier, before the removal of proven checks ("Bounds checks"), which reads this canonical module | `lir` |
-| `checked` | the removal of the checks that have a witness: the input of the interpreter and of both back ends | `ir` |
+| `checked` | the removal of the checks that have a witness, which keeps the module canonical, then the IR verifier: the input of the interpreter and of both back ends | `ir` |
 | `opt` | the release passes, then the IR verifier and the bounds audit on their output; release builds only | `opt` |
 
 Each level is printed from the canonical module of that point ("Canonical module"), so ids of
@@ -311,8 +311,9 @@ step stops before the next.
    `checked` or `opt`) or the computed ones (`lowered`); an unguarded access is reported as in
    step 3.
 
-After steps 3-5 the loaded module is renumbered canonically and verified again, and at level
-`lowered` the removal of step 4 is followed by the same numbering and verifier, as in a build.
+After steps 3-5 the loaded module is renumbered canonically. At level `lowered` the removal of
+step 4 follows, which keeps the module canonical, and then the IR verifier, as in a build; at the
+other levels the verifier runs on the renumbered module.
 
 What loading proves depends on the level:
 - Every level: the module is well formed (steps 1-3: types, shapes, statics, signatures,
