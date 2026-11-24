@@ -11,7 +11,9 @@
 //!   bounds audit (an element access without a check or proof is a compiler bug) and the proofs
 //!   of removable checks ([`stave_ir::bounds::analyze_func`]); the witness checker on every
 //!   proof ([`stave_ir::witness::check`]; a refused witness is a compiler bug); then the removal
-//!   of the accepted checks; then the canonical numbering again. The module it returns is the checked IR: what the `ir` dump prints, the
+//!   of the accepted checks; then the canonical numbering again. Each canonical numbering is
+//!   followed by the IR verifier in every compiler profile ([`canonical_verified`]); loading IR
+//!   text runs the same steps. The module it returns is the checked IR: what the `ir` dump prints, the
 //!   interpreter runs, and both code generators get.
 //! - [`codegen_link`]: release builds first run the IR passes of stave-opt and renumber their
 //!   result canonically, then the IR verifier
@@ -166,24 +168,51 @@ pub fn lower_keeping(
     // The removal reads the canonical module, level `lowered`: the proofs read a constant by its
     // pool entry, so they must see the pool the text carries (one entry per distinct constant),
     // or loading the `lowered` text would remove other checks than the build does.
-    let remap = canonical(&mut m);
-    stave_ir::canon::permute_by_func(&mut nodes_of_func, &remap);
+    canonical_verified(&mut m, Some(&mut nodes_of_func))?;
     let lowered = keep_lowered.then(|| m.clone());
-    let r = remove_proven_checks(&mut m, true)?;
-    extend_nodes(&mut nodes_of_func, &r.removal);
+    let (r, remap) = checked_module(&mut m, Some(&mut nodes_of_func))?;
     let mut removed: Vec<Proved> = r.proved.into_iter().filter(|p| !p.witness.removed.is_empty()).collect();
-    let remap = canonical(&mut m);
-    stave_ir::canon::permute_by_func(&mut nodes_of_func, &remap);
     for p in &mut removed {
         p.witness.func = remap.get(p.witness.func.index()).copied().unwrap_or(p.witness.func);
     }
     removed.sort_by_key(|p| p.witness.func);
-    // The renumbering keeps the module valid; builds with debug assertions verify it again.
-    if cfg!(debug_assertions) {
-        verified(&m, Stage::Lower)?;
+    Ok(Lowered { module: m, removed, nodes_of_func, lowered })
+}
+
+/// [`canonical`], then the IR verifier on its result, in every profile of the compiler; the rows
+/// of `nodes_of_func` move with their fns. A build and a load of IR text run this at the same
+/// points: on the module of level `lowered`, and in [`checked_module`].
+pub(crate) fn canonical_verified(
+    m: &mut Module,
+    nodes_of_func: Option<&mut Vec<Vec<u32>>>,
+) -> Result<Vec<FuncId>, Failure> {
+    let remap = canonical(m);
+    if let Some(n) = nodes_of_func {
+        stave_ir::canon::permute_by_func(n, &remap);
     }
     prof::mark("canonical");
-    Ok(Lowered { module: m, removed, nodes_of_func, lowered })
+    verified(m, Stage::Lower)?;
+    prof::mark("canonical-verify");
+    Ok(remap)
+}
+
+/// From the canonical, verified module of level `lowered` to the checked module, for a build and
+/// for a load of `lowered` text alike: the removal of proven checks ([`remove_proven_checks`] on
+/// the whole program), the unchecked entries' call-graph nodes, then [`canonical_verified`].
+/// Returns the removal's records (ids before the renumbering) and the renumbering.
+pub(crate) fn checked_module(
+    m: &mut Module,
+    nodes_of_func: Option<&mut Vec<Vec<u32>>>,
+) -> Result<(CheckRemoval, Vec<FuncId>), Failure> {
+    let r = remove_proven_checks(m, true)?;
+    let remap = match nodes_of_func {
+        Some(n) => {
+            extend_nodes(n, &r.removal);
+            canonical_verified(m, Some(n))?
+        }
+        None => canonical_verified(m, None)?,
+    };
+    Ok((r, remap))
 }
 
 /// [`stave_ir::canon::canonicalize`] with the bodies rewritten in parallel. Every module that is
