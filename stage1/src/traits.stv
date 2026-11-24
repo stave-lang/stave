@@ -14,7 +14,7 @@
 //
 // Passes:
 // 1. the impl table: one row per impl decl, sorted into line order (merge sort on the key);
-// 2. queries: the goals and impl-applies clauses the callers ask for (`want`, `applies_q`);
+// 2. queries: the goals and impl-applies clauses the callers ask for (`goal`, `applies_q`);
 // 3. expansion, in goal order: a goal's clauses from the rules (structural parts, the impls whose
 //    self type matches and whose params take no view), creating the goals they name;
 // 4. solving: strongly connected components of the goal graph (Tarjan, explicit stack), each
