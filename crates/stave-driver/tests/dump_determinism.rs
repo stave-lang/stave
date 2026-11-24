@@ -25,22 +25,28 @@ const STAGES: [DumpStage; 9] = [
     DumpStage::Lir,
 ];
 
+/// The generated package, made once for all tests of this file (they run in parallel: two
+/// generations into one directory race).
 fn corpus() -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("det10k");
-    // the `m2` tier (borrows, `from` returns, closures with `&`/`&mut` captures) is on: the `ir`
-    // dump covers closure bodies and `fn.make` environments
-    let mix = gen_corpus::Mix::default_mix().unwrap();
-    assert!(mix.tiers.m2 && mix.stmt.closure > 0, "the default mix has the m2 tier");
-    gen_corpus::generate(&gen_corpus::Options {
-        lines: 10_000,
-        seed: 1,
-        out: dir.clone(),
-        mix,
-        threads: 0,
-        force: true,
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("det10k");
+        // the `m2` tier (borrows, `from` returns, closures with `&`/`&mut` captures) is on: the
+        // `ir` dump covers closure bodies and `fn.make` environments
+        let mix = gen_corpus::Mix::default_mix().unwrap();
+        assert!(mix.tiers.m2 && mix.stmt.closure > 0, "the default mix has the m2 tier");
+        gen_corpus::generate(&gen_corpus::Options {
+            lines: 10_000,
+            seed: 1,
+            out: dir.clone(),
+            mix,
+            threads: 0,
+            force: true,
+        })
+        .unwrap();
+        dir
     })
-    .unwrap();
-    dir
+    .clone()
 }
 
 fn shipped() -> Library {
