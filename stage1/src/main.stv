@@ -17,6 +17,7 @@ import decls;
 import diag;
 import diag_lex;
 import diag_names;
+import diag_kinds;
 import diag_sigs;
 import diag_out;
 import diag_syn;
@@ -290,6 +291,7 @@ fn main() -> i32 {
     diag_names.names(&mut d, &rows, &md, &ds, &nm, &set);
     let mut sg = sigs.build(&fl, &md, &ds, &nm, &set, &toks, &cut, &tree, &res);
     diag_sigs.sigs_diags(&mut d, &sg, &ds, &nm, &lx, &set, &toks, &cut);
+    diag_kinds.impl_diags(&mut d, &mut sg, &ds, &md, &nm, &fl, &lx, &set, &toks, &tree);
     let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
     let rows = d.order(ft.rank.as_slice());
     let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);

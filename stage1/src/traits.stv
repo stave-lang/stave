@@ -85,7 +85,7 @@ pub fn lang_items(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, n
 }
 
 // Whether operator trait k (in `OPS` order) is built in for type t.
-fn builtin_op(tab: &types.Table, k: usize, t: u32) -> bool {
+pub fn builtin_op(tab: &types.Table, k: usize, t: u32) -> bool {
     let tag = tab.tag_of(t);
     let int = tag == types.TK_INT;
     let float = tag == types.TK_FLOAT;
