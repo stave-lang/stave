@@ -39,6 +39,7 @@ import source;
 import types;
 import prims.col;
 import prims.search;
+import prims.sort;
 import std.mem;
 import std.vec;
 
@@ -85,6 +86,7 @@ const K_TYPE: u8 = node_kinds.KIND_TYPE;
 const K_UNARY: u8 = node_kinds.KIND_UNARY;
 const K_GENERIC_PARAM: u8 = node_kinds.KIND_GENERIC_PARAM;
 const K_ARGS: u8 = node_kinds.KIND_ARGS;
+const K_FOR_STMT: u8 = node_kinds.KIND_FOR_STMT;
 const K_STRUCT_LIT: u8 = node_kinds.KIND_STRUCT_LIT;
 
 // Postfix chain states: a value (in `acc`), a fn without generics (its decl in `acc`), a module,
@@ -94,14 +96,13 @@ const S_FN: u8 = 1;
 const S_NOVAL: u8 = 2;
 const S_ERR: u8 = 3;
 
-// The chain step waiting for the child being checked: none, generic arguments, a call's or a
-// method call's arguments, an index, a struct literal.
+// The chain step waiting for the child being checked: none, generic arguments, a call's arguments,
+// an index, a struct literal.
 const P_NONE: u8 = 0;
 const P_TARGS: u8 = 1;
 const P_CALL: u8 = 2;
-const P_METHOD: u8 = 3;
-const P_INDEX: u8 = 4;
-const P_STRUCT: u8 = 5;
+const P_INDEX: u8 = 3;
+const P_STRUCT: u8 = 4;
 
 const T_IDENT: u8 = terminals.T_IDENT as% u8;
 const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
@@ -184,7 +185,8 @@ pub struct Typeck {
     // the return types of the enclosing fn, spawn bodies, and closures
     rets: vec.Vec<u32>,
     // per `Postfix` row: the chain's state (`S_*`, its value or decl in `acc`), the next token of
-    // the chain, the step waiting for the child being checked (`P_*`)
+    // the chain, the step waiting for the child being checked (`P_*`); per `Args` row: the callee
+    // in `acc` (NONE: not checked yet), the type whose generic arguments instantiate it in `pos`
     chain: vec.Vec<u8>,
     pos: vec.Vec<u32>,
     pend: vec.Vec<u8>,
@@ -204,6 +206,8 @@ pub struct Typeck {
     soa: u32,
     soa_mod: u32,
     args: vec.Vec<u32>,
+    // the names of the methods of impls with no struct or enum head, sorted
+    headless: vec.Vec<u32>,
     t_bool: u32,
     t_char: u32,
     t_unit: u32,
@@ -422,6 +426,7 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &in
         soa: soa,
         soa_mod: md.soa_mod,
         args: vec.Vec::<u32>.new(),
+        headless: headless_names(ds),
         t_bool: t_bool,
         t_char: t_char,
         t_unit: t_unit,
@@ -698,6 +703,7 @@ impl Typeck {
             }
             return true;
         }
+        if pk == K_FOR_STMT { return self.enter_for(sg, ds, nm, set, t, cut, tree, r, c); }
         if pk == K_IF_STMT {
             if k == 0 {
                 self.set_hint_bool(c);
@@ -774,7 +780,7 @@ impl Typeck {
             return self.chain_steps(sg, ds, nm, set, t, cut, tree, r, c as% u32);
         }
         if pk == K_ARGS {
-            let ah = self.arg_hint(sg, r, k);
+            let ah = self.arg_hint(sg, ds, r, k);
             self.set_hint(c, ah);
             return true;
         }
@@ -898,7 +904,7 @@ impl Typeck {
 
     fn finish(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) {
         let k = kind(tree, r);
-        if k == K_FN_DECL || k == K_BLOCK { return; }
+        if k == K_FN_DECL || k == K_BLOCK || k == K_FOR_STMT { return; }
         if k == K_IF_STMT {
             let ks = tree.kids.row(r);
             self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
@@ -1441,6 +1447,64 @@ impl Typeck {
         }
         return acc;
     }
+    // ---------- `for` loops ----------
+
+    // Before child c of `ForStmt` row r: the annotation (kept in `acc`; a vector or reference
+    // annotation, a chunk loop, is not checked yet), the source with the annotation's range as
+    // its context, the binding before the body.
+    fn enter_for(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, c: usize) -> bool {
+        let ck = kind(tree, c);
+        if ck == K_PATTERN { return false; }
+        if ck == K_TYPE {
+            let ty = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, c, false, self.sc);
+            let b = self.known(ty);
+            let tag = if b == UNK then types.TK_NEVER else sg.cx.tab.tag_of(b);
+            self.acc.as_mut_slice()[r] = if tag == types.TK_VECTOR || tag == types.TK_REF then UNK else b;
+            return false;
+        }
+        if is_expr(ck) {
+            let b = self.acc.as_slice()[r];
+            let h = if b == NONE then NONE else if b == UNK then UNK else sg.cx.tab.key(types.TK_RANGE, b, 0);
+            self.set_hint(c, h);
+            return true;
+        }
+        if ck == K_BLOCK {
+            let it = self.expr_kid(tree, r);
+            let src = if it == NONE then UNK else self.force_at(it as usize);
+            let b = self.acc.as_slice()[r];
+            let e = self.element(&mut sg.cx.tab, src);
+            let bind = if b == NONE then e else b;
+            if b != NONE && b != UNK && e != UNK && e != b { self.bad = true; }
+            let pat = self.base + tree.kids.row(r)[0] as usize;
+            if self.binds_one(t, tree, pat) { self.loc.as_mut_slice()[pat] = bind; }
+            return true;
+        }
+        self.set_hint(c, UNK);
+        return true;
+    }
+
+    // The element a `for` loop over a source of type src binds: an int range's int, an array's
+    // element, `&T` / `&mut T` over a referenced array or slice; an iterator is not checked yet.
+    fn element(&mut self, tab: &mut types.Table, src: u32) -> u32 {
+        if src == UNK { return UNK; }
+        if src == NONE { return self.err(); }
+        let tag = tab.tag_of(src);
+        if tag == types.TK_RANGE {
+            if tab.tag_of(tab.a_of(src)) == types.TK_INT { return tab.a_of(src); }
+            return self.err();
+        }
+        if tag == types.TK_ARRAY { return tab.a_of(src); }
+        if tag == types.TK_REF {
+            let inner = tab.b_of(src);
+            let it = tab.tag_of(inner);
+            if it == types.TK_ARRAY || it == types.TK_SLICE { return tab.mk_ref(tab.a_of(src) == 1, tab.a_of(inner)); }
+            if it == types.TK_ADT || it == types.TK_PARAM { return UNK; }
+            return self.err();
+        }
+        if tag == types.TK_ADT || tag == types.TK_PARAM { return UNK; }
+        return self.err();
+    }
+
     // ---------- postfix chains ----------
     //
     // A chain `head . step ...` is checked step by step, as stage0 does, in token order: the
@@ -1546,17 +1610,21 @@ impl Typeck {
                 let st = self.chain.as_slice()[r];
                 if tk(t, q) == T_L_PAREN {
                     let close = close_of(cut, q);
-                    let recv = self.chain_value(r);
-                    let _ = recv;
+                    let recv0 = if st == S_VAL then self.acc.as_slice()[r] else UNK;
+                    let recv = self.force(recv0);
+                    let (m, inst) = self.method_of(sg, ds, nm, recv, seg);
                     self.set_chain(r, S_VAL, UNK);
                     if close == q + 1 {
+                        let v = self.call_value(sg, ds, tree, m, inst, NONE);
+                        self.set_chain(r, S_VAL, v);
                         p = close + 1;
                         continue;
                     }
                     if c == NONE || kind(tree, c as usize) != K_ARGS { return self.chain_lost(r); }
                     self.pos.as_mut_slice()[r] = close + 1;
-                    self.pend.as_mut_slice()[r] = P_METHOD;
-                    if c != NONE { self.set_hint(c as usize, UNK); }
+                    self.pend.as_mut_slice()[r] = P_CALL;
+                    self.acc.as_mut_slice()[c as usize] = m;
+                    self.pos.as_mut_slice()[c as usize] = inst;
                     return true;
                 }
                 if st != S_VAL {
@@ -1592,8 +1660,9 @@ impl Typeck {
                 let close = close_of(cut, p);
                 let st = self.chain.as_slice()[r];
                 let callee = if st == S_FN then self.acc.as_slice()[r] else NONE;
+                if st == S_NOVAL { return self.chain_lost(r); }
                 if close == p + 1 {
-                    let v = self.call_value(sg, ds, tree, r, callee, NONE);
+                    let v = self.call_value(sg, ds, tree, callee, NONE, NONE);
                     self.set_chain(r, S_VAL, v);
                     p = close + 1;
                     continue;
@@ -1601,7 +1670,8 @@ impl Typeck {
                 if c == NONE || kind(tree, c as usize) != K_ARGS { return self.chain_lost(r); }
                 self.pos.as_mut_slice()[r] = close + 1;
                 self.pend.as_mut_slice()[r] = P_CALL;
-                if c != NONE { self.acc.as_mut_slice()[c as usize] = callee; }
+                self.acc.as_mut_slice()[c as usize] = callee;
+                self.pos.as_mut_slice()[c as usize] = NONE;
                 return true;
             }
             if ty == T_L_BRACKET {
@@ -1641,9 +1711,9 @@ impl Typeck {
         let p = self.pend.as_slice()[r];
         self.pend.as_mut_slice()[r] = P_NONE;
         if p == P_CALL {
-            let st = self.chain.as_slice()[r];
-            let callee = if st == S_FN then self.acc.as_slice()[r] else NONE;
-            let v = self.call_value(sg, ds, tree, r, callee, c as% u32);
+            let callee = self.acc.as_slice()[c];
+            let inst = self.pos.as_slice()[c];
+            let v = self.call_value(sg, ds, tree, callee, inst, c as% u32);
             self.set_chain(r, S_VAL, v);
             return;
         }
@@ -1653,10 +1723,6 @@ impl Typeck {
             self.coerce(&sg.cx.tab, c, want);
             let v = self.index_value(&mut sg.cx.tab, tree, base, c);
             self.set_chain(r, S_VAL, v);
-            return;
-        }
-        if p == P_METHOD {
-            self.poison_kids(tree, c);
             return;
         }
         if p == P_STRUCT {
@@ -1675,41 +1741,111 @@ impl Typeck {
         return NONE;
     }
 
-    // A call of `callee` (a fn without generics; NONE: a callee not checked yet) with the
-    // arguments of `Args` row args (NONE: none): each argument is checked against its parameter.
-    fn call_value(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, r: usize, callee: u32, args: u32) -> u32 {
-        let st = self.chain.as_slice()[r];
+    // A call of `callee` (a fn or method without generics of its own; NONE: a callee not checked
+    // yet) with the arguments of `Args` row args (NONE: none), each checked against its
+    // parameter. A method's `self` is the receiver; `inst` (NONE: none) is the type whose
+    // generic arguments are the method's impl parameters.
+    fn call_value(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, callee: u32, inst: u32, args: u32) -> u32 {
         if callee == NONE {
             if args != NONE { self.poison_kids(tree, args as usize); }
-            if st == S_NOVAL { return self.err(); }
             return UNK;
         }
-        let ps_len = sg.params.row(callee as usize).len();
+        let skip: usize = if ds.kind.as_slice()[callee as usize] == decls.DK_METHOD then 1 else 0;
+        let ps_len = sg.params.row(callee as usize).len() - skip;
         let variadic = sg.sflags.as_slice()[callee as usize] & sigs.SF_VARIADIC != 0;
         let n = if args == NONE then 0usize else tree.kids.row(args as usize).len();
         if n < ps_len || (n > ps_len && !variadic) { return self.err(); }
         for j in 0..n {
             let a = self.base + tree.kids.row(args as usize)[j] as usize;
             if j < ps_len {
-                let p = sg.params.row(callee as usize)[j];
-                if p == ERR { return self.err(); }
+                let p = self.param_of(sg, callee, inst, j + skip);
+                if p == ERR || p == NONE { return self.err(); }
                 self.coerce(&sg.cx.tab, a, p);
             } else {
                 let _ = self.force_at(a);
             }
         }
         let ret = sg.cx.ty.as_slice()[callee as usize];
-        let _ = ds;
-        return self.known(ret);
+        let rt = self.inst_of(sg, ret, inst);
+        return self.known(rt);
     }
 
-    // The context of argument j (child c of `Args` row r): its parameter's type.
-    fn arg_hint(&self, sg: &sigs.Sigs, r: usize, j: usize) -> u32 {
+    // Parameter j of callee with the arguments of inst.
+    fn param_of(&mut self, sg: &mut sigs.Sigs, callee: u32, inst: u32, j: usize) -> u32 {
+        let p = sg.params.row(callee as usize)[j];
+        return self.inst_of(sg, p, inst);
+    }
+
+    // Type ty with the generic arguments of type inst (NONE: ty as is).
+    fn inst_of(&mut self, sg: &mut sigs.Sigs, ty: u32, inst: u32) -> u32 {
+        if inst == NONE || ty == ERR || ty == NONE { return ty; }
+        self.args.clear();
+        self.args.extend_from_slice(sg.cx.tab.x(inst));
+        return sg.cx.tab.subst(ty, self.args.as_slice());
+    }
+
+    // The context of argument j (child of `Args` row r): its parameter's type. The callee is in
+    // `acc`, the type instantiating it in `pos`.
+    fn arg_hint(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, r: usize, j: usize) -> u32 {
         let callee = self.acc.as_slice()[r];
         if callee == NONE || callee == UNK { return UNK; }
-        let ps = sg.params.row(callee as usize);
-        if j < ps.len() { return ps[j]; }
+        let skip: usize = if ds.kind.as_slice()[callee as usize] == decls.DK_METHOD then 1 else 0;
+        if j + skip < sg.params.row(callee as usize).len() {
+            let inst = self.pos.as_slice()[r];
+            let p = self.param_of(sg, callee, inst, j + skip);
+            return if p == ERR then UNK else p;
+        }
         return NONE;
+    }
+
+    // Method `seg` on a receiver of type recv, as stage0's lookup finds it when the receiver is a
+    // struct or enum (through references) and the method is in its one inherent impl that
+    // applies to every instance (`impl<A, B> S<A, B>` without bounds, or `impl S` of a type
+    // without generics), takes `self`, and has no generics of its own: (method, the type
+    // instantiating it). Every other lookup is not checked yet: (NONE, NONE).
+    fn method_of(&mut self, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, recv: u32, seg: u32) -> (u32, u32) {
+        let tab = &sg.cx.tab;
+        let s = nm.tok_str.as_slice()[seg as usize];
+        if s == NONE || recv == UNK || recv == NONE { return (NONE, NONE); }
+        let mut c = recv;
+        while tab.tag_of(c) == types.TK_REF {
+            // a method of an impl for references or for any type could apply here
+            if self.headless_has(s) { return (NONE, NONE); }
+            c = tab.b_of(c);
+        }
+        if tab.tag_of(c) != types.TK_ADT { return (NONE, NONE); }
+        let d = tab.a_of(c);
+        let key = search.pair(d, s);
+        let k = search.lower_bound(ds.inh_key.as_slice(), key);
+        if k >= ds.inh_key.len() || ds.inh_key.as_slice()[k] != key { return (NONE, NONE); }
+        if k + 1 < ds.inh_key.len() && ds.inh_key.as_slice()[k + 1] == key { return (NONE, NONE); }
+        let m = ds.inh_decl.as_slice()[k];
+        let imp = ds.parent.as_slice()[m as usize];
+        if sg.sflags.as_slice()[m as usize] & sigs.SF_SELF_MASK == 0 { return (NONE, NONE); }
+        let gl = sg.cx.gens.lo.as_slice();
+        if gl[m as usize + 1] != gl[m as usize] { return (NONE, NONE); }
+        let lo = gl[imp as usize] as usize;
+        let hi = gl[imp as usize + 1] as usize;
+        let st = sg.cx.ty.as_slice()[imp as usize];
+        if lo == hi { return if st == c then (m, NONE) else (NONE, NONE); }
+        if tab.tag_of(st) != types.TK_ADT || tab.a_of(st) != d { return (NONE, NONE); }
+        let xs = tab.x(st);
+        if xs.len() != 3 * (hi - lo) { return (NONE, NONE); }
+        for i in 0..hi - lo {
+            if sg.gp_bounds.row(lo + i).len() != 0 { return (NONE, NONE); }
+            let k0 = xs[3 * i];
+            let x = xs[3 * i + 1];
+            let is_param = (k0 == types.GA_TYPE && tab.tag_of(x) == types.TK_PARAM && tab.a_of(x) == i as% u32) || (k0 == types.GA_PARAM && x == i as% u32);
+            if !is_param { return (NONE, NONE); }
+        }
+        return (m, c);
+    }
+
+    // Whether a method named s is in an impl with no struct or enum head (an impl for a built-in
+    // type, a reference, or a generic param).
+    fn headless_has(&self, s: u32) -> bool {
+        let k = search.lower_bound(self.headless.as_slice(), s);
+        return k < self.headless.len() && self.headless.as_slice()[k] == s;
     }
 
     // The context of an index (row e): `usize`, or `Range<usize>` for a range written there.
@@ -1768,6 +1904,23 @@ impl Typeck {
         if i >= xs.len() { return self.err(); }
         return xs[i];
     }
+}
+
+// The names of the methods of impls with no struct or enum head, sorted.
+fn headless_names(ds: &decls.Decls) -> vec.Vec<u32> {
+    let mut xs = vec.Vec::<u32>.new();
+    for m in 0..ds.decls() {
+        if ds.kind.as_slice()[m] != decls.DK_METHOD { continue; }
+        let p = ds.parent.as_slice()[m];
+        if p == NONE || ds.kind.as_slice()[p as usize] != decls.DK_IMPL || ds.impl_head.as_slice()[p as usize] != NONE { continue; }
+        xs.push(ds.name.as_slice()[m]);
+    }
+    let perm = sort.sort_perm(xs.as_slice());
+    let mut out = vec.Vec::<u32>.with_capacity(xs.len());
+    for k in 0..perm.len() {
+        out.push(xs.as_slice()[perm.as_slice()[k] as usize]);
+    }
+    return out;
 }
 
 // A type with its references peeled.
