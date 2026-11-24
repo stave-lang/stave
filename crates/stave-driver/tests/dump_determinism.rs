@@ -1,6 +1,6 @@
 //! Dump determinism: a 10k-line gen-corpus package, built with the
-//! shipped std and runtime, dumped with `tokens,items,ast,strings,names,sigs,types,diags,ir` (`ir`:
-//! the checked IR of a debug lowering, `Options::lower`) under 1, 2, and 12 worker
+//! shipped std and runtime, dumped with `tokens,items,ast,strings,names,sigs,types,diags,ir,lir` (`ir`
+//! and `lir`: the IR text of a debug lowering, `Options::lower`) under 1, 2, and 12 worker
 //! threads and under the shuffle knob (`STAVE_SEMA_SHUFFLE=<seed>`, here
 //! `Options::shuffle_seed`: it permutes stave-sema's internal interning and decl creation order)
 //! gives byte-identical dumps; 100 repeated runs are identical. The corpus uses the default mix,
@@ -13,7 +13,7 @@ use stave_driver::dump::{DumpStage, render_to_vec};
 use stave_driver::pipeline::{self, Goal, Options};
 use stave_driver::shipped::Library;
 
-const STAGES: [DumpStage; 9] = [
+const STAGES: [DumpStage; 10] = [
     DumpStage::Tokens,
     DumpStage::Items,
     DumpStage::Ast,
