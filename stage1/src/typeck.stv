@@ -111,6 +111,8 @@ const T_COMMA: u8 = terminals.T_COMMA as% u8;
 const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
 const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
 const T_SEMI: u8 = terminals.T_SEMI as% u8;
+const T_KW_MASKED: u8 = terminals.T_KW_MASKED as% u8;
+const T_KW_SCALAR: u8 = terminals.T_KW_SCALAR as% u8;
 const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
 const T_DOT_DOT_EQ: u8 = terminals.T_DOT_DOT_EQ as% u8;
 const T_KW_TRUE: u8 = terminals.T_KW_TRUE as% u8;
@@ -479,7 +481,6 @@ impl tc_rows.Typeck {
         if ck == K_BLOCK { self.rets.push(UNK); }
         return true;
     }
-
 
     // Before element c (the k-th) of array literal row r, stage0's `array_lit`: a repeat's value
     // has the context's element type as its context, its count `usize`. A list's element type so
@@ -1147,38 +1148,75 @@ impl tc_rows.Typeck {
         return acc;
     }
 
-    // Before child c of `ForStmt` row r: the annotation (kept in `acc`; a vector or reference
-    // annotation, a chunk loop, is not checked yet), the source with the annotation's range as
-    // its context, the binding before the body.
+    // Before child c of `ForStmt` row r: the annotation (kept in `acc`), the source with the
+    // annotation's range as its context, the binding before the body, the tail clause's bindings.
     fn enter_for(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, c: usize) -> bool {
         let ck = kind(tree, c);
         if ck == K_PATTERN { return false; }
         if ck == K_TYPE {
             let ty = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, c, false, self.sc);
             let b = self.known(ty);
-            let tag = if b == UNK then types.TK_NEVER else sg.cx.tab.tag_of(b);
-            self.acc.as_mut_slice()[r] = if tag == types.TK_VECTOR || tag == types.TK_REF then UNK else b;
+            self.acc.as_mut_slice()[r] = b;
             return false;
         }
         if is_expr(ck) {
             let b = self.acc.as_slice()[r];
-            let h = if b == NONE then NONE else if b == UNK then UNK else sg.cx.tab.key(types.TK_RANGE, b, 0);
+            let tag = if b == NONE || b == UNK then types.TK_NEVER else sg.cx.tab.tag_of(b);
+            // a vector or reference binding gives its source no context
+            let h = if b == UNK then UNK else if b == NONE || tag == types.TK_VECTOR || tag == types.TK_REF then NONE else sg.cx.tab.key(types.TK_RANGE, b, 0);
             self.set_hint(c, h);
             return true;
         }
         if ck == K_BLOCK {
             let it = self.expr_kid(tree, r);
             let src = if it == NONE then UNK else self.force_at(it as usize);
-            let b = self.acc.as_slice()[r];
-            let e = self.element(&mut sg.cx.tab, src);
-            let bind = if b == NONE then e else b;
-            if b != NONE && b != UNK && e != UNK && e != b { self.bad = true; }
+            let mut b = self.acc.as_slice()[r];
+            // a chunk loop binds its vector annotation whatever the source's element
+            if chunk_vec(&sg.cx.tab, b) == NONE {
+                let e = self.element(&mut sg.cx.tab, src);
+                if b != NONE && b != UNK && e != UNK && e != b { self.bad = true; }
+                if b == NONE { b = e; }
+            }
             let pat = self.base + tree.kids.row(r)[0] as usize;
-            self.bind_pattern(sg, ds, nm, t, tree, pat, bind);
+            self.bind_pattern(sg, ds, nm, t, tree, pat, b);
+            return true;
+        }
+        if ck == node_kinds.KIND_TAIL_CLAUSE {
+            self.bind_tail(&mut sg.cx.tab, t, tree, r, c);
             return true;
         }
         self.set_hint(c, UNK);
         return true;
+    }
+
+    // Tail clause c of `for` row r (stage0 `tail_clause`): `masked (v, m)` binds v as the loop's
+    // binding and m as the mask of its vector's shape, `scalar (x)` binds x as a lane. An element
+    // loop has no tail (E0601).
+    fn bind_tail(&mut self, tab: &mut types.Table, t: &lex.Tokens, tree: &ast.Ast, r: usize, c: usize) {
+        let b = self.acc.as_slice()[r];
+        if b == UNK { return; }
+        let v = chunk_vec(tab, b);
+        if v == NONE {
+            self.bad = true;
+            return;
+        }
+        let lane = tab.a_of(v);
+        let mode = tk(t, first_tok(tree, c) + 1);
+        let mask = tab.key(types.TK_MASK, lane_bits(tab, lane), tab.b_of(v));
+        let ks = tree.kids.row(c);
+        let mut i: usize = 0;
+        for j in 0..ks.len() {
+            let x = self.base + ks[j] as usize;
+            if kind(tree, x) != node_kinds.KIND_TAIL_BIND { continue; }
+            let mut ty = UNK;
+            if mode == T_KW_MASKED {
+                ty = if i == 0 then b else if i == 1 then mask else UNK;
+            } else if mode == T_KW_SCALAR && i == 0 {
+                ty = lane;
+            }
+            self.loc.as_mut_slice()[x] = ty;
+            i = i + 1;
+        }
     }
 
     // The element a `for` loop over a source of type src binds: an int range's int, an array's
@@ -1231,6 +1269,13 @@ fn tuple_elem_hint(tab: &types.Table, h: u32, n: usize, k: usize) -> u32 {
     if h == NONE || tab.tag_of(h) != types.TK_TUPLE { return NONE; }
     let xs = tab.x(h);
     return if xs.len() == n then xs[k] else NONE;
+}
+
+// The vector of a chunk loop's binding type b (a vector or a reference to one), else NONE.
+fn chunk_vec(tab: &types.Table, b: u32) -> u32 {
+    if b == NONE || b == UNK { return NONE; }
+    let v = if tab.tag_of(b) == types.TK_REF then tab.b_of(b) else b;
+    return if tab.tag_of(v) == types.TK_VECTOR then v else NONE;
 }
 
 // Whether array literal row r is a repeat `[e; n]`.
