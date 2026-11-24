@@ -87,8 +87,8 @@ pub enum Target {
     SoaRow { op: crate::prim::Builtin, ty: TypeId },
     /// A const or `static mut` use.
     Global { decl: DeclId },
-    /// `size_of::<T>()` / `align_of::<T>()`.
-    SizeOf { ty: TypeId, align: bool },
+    /// A type query on `ty`: `size_of::<T>()`, `align_of::<T>()`, `needs_drop::<T>()` (`op`).
+    TypeQuery { ty: TypeId, op: crate::prim::Builtin },
     /// `fence_stream()`.
     FenceStream,
     /// An `extern "stave-intrinsic"` call (checked IR `intrinsic.<name>`).
@@ -942,12 +942,12 @@ fn instance_sizes(
 }
 
 /// The types whose layout lowering reads without holding a value of them: the type of each
-/// `size_of` / `align_of` and the row type of each `std.soa` row built-in (std-only, its row
-/// type a param). One with a param is checked per instance ([`instance_sizes`]), a concrete
-/// `size_of` / `align_of` type at the call.
+/// type query (`size_of` / `align_of` / `needs_drop`) and the row type of each `std.soa` row
+/// built-in (std-only, its row type a param). One with a param is checked per instance
+/// ([`instance_sizes`]), a concrete type query's type at the call.
 fn layout_queries(b: &TypedBody) -> impl Iterator<Item = TypeId> + '_ {
     b.targets.iter().filter_map(|(_, t)| match t {
-        Target::SizeOf { ty, .. } | Target::SoaRow { ty, .. } => Some(*ty),
+        Target::TypeQuery { ty, .. } | Target::SoaRow { ty, .. } => Some(*ty),
         _ => None,
     })
 }
@@ -1035,7 +1035,7 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
                 *recv = f(*recv);
                 *ret = f(*ret);
             }
-            Target::SizeOf { ty, .. }
+            Target::TypeQuery { ty, .. }
             | Target::FnValue { ty }
             | Target::SoaRow { ty, .. }
             | Target::Variant { ty, .. }

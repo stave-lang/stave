@@ -3,7 +3,7 @@
 //! `len`, `bool` and mask `select`, SIMD vector and mask operations), the type-relative fns of
 //! vector and mask types (`f32x4.splat`, `u8x16.load`), and the `extern "stave-intrinsic"` table
 //! of contracts/intrinsics.md (E0805; E0704 when called on another arch). `size_of` / `align_of`
-//! / `fence_stream` are typed by the body checker.
+//! / `needs_drop` / `fence_stream` are typed by the body checker.
 //!
 //! `mul_wide` exists on `i32`, `i64`, `u32` and `u64` only, `mul_hi` on the fixed-width ints:
 //! on any other type the lookup fails and the checker reports E0208.

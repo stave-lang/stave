@@ -3762,7 +3762,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 };
                 self.call_result(Rvalue::call(ops, flows, paren), ret, n, span)
             }
-            Some(Target::SizeOf { .. }) => V::Const,
+            Some(Target::TypeQuery { .. }) => V::Const,
             Some(Target::Old) => match self.olds.get(&paren) {
                 Some(&l) => V::P(Place::local(l, self.body.locals[l as usize].ty)),
                 None => {

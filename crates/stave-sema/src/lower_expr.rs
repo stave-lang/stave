@@ -539,6 +539,10 @@ impl<'a> FnCx<'a> {
         if t == Term::Bang as u8 {
             let bt = self.t_bool();
             let Some(v) = self.val(c, Some(bt)) else { return E::Never };
+            // a constant stays one, so an `if` on `!needs_drop::<T>()` branches to one arm
+            if let Some(k) = self.kval(v) {
+                return E::V(self.int((k == 0) as i128), bt);
+            }
             return E::V(self.op1(Op::Not, bt, v), bt);
         }
         if t == Term::Tilde as u8 {
@@ -742,7 +746,11 @@ impl<'a> FnCx<'a> {
         let j = self.join(n, &[vt]);
         let bt = self.t_bool();
         let Some(cv) = self.val(c, Some(bt)) else { return E::Never };
-        self.f.b.cbr(cv, then, &[], els, &[]);
+        // a constant condition branches to its arm only, as in `if_stmt`
+        match self.kval(cv) {
+            Some(k) => self.f.b.br(if k != 0 { then } else { els }, &[]),
+            None => self.f.b.cbr(cv, then, &[], els, &[]),
+        }
         let snap = self.f.env.clone();
         // each branch is a statement of its own: its temporaries end before the join
         self.f.b.switch_to(then);
@@ -1803,11 +1811,16 @@ impl<'a> FnCx<'a> {
                 let row = self.sub(ty);
                 self.soa_row(op, row, args, ctok)
             }
-            Some(Target::SizeOf { ty, align }) => {
+            Some(Target::TypeQuery { ty, op }) => {
                 let t = self.sub(ty);
+                if op == crate::prim::Builtin::NeedsDrop {
+                    let d = self.needs_drop(t);
+                    let bt = self.t_bool();
+                    return E::V(self.int(d as i128), bt);
+                }
                 let Some((s, a)) = self.layout(t) else { return self.fail_at(Some(ctok), "layout") };
                 let us = self.t_usize();
-                E::V(self.int(if align { a } else { s } as i128), us)
+                E::V(self.int(if op == crate::prim::Builtin::AlignOf { a } else { s } as i128), us)
             }
             Some(_) => self.vector_unsupported(Some(ctok), "vector built-in"),
             // A type-relative built-in (`f32x4.splat(x)`) has its target at the name token.

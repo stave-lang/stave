@@ -231,8 +231,11 @@ b2():
   local index (the first alternative's bindings are the locals), and is pruned like a join's: a
   bound name that is not used has no param. Locals in a `slot` are stored by each test block. The
   guard and the body are lowered once; a false guard continues with the next arm.
-- No other block params. No folding (except literal `-`), copy propagation, or dead-code
-  removal beyond unreachable blocks.
+- No other block params. No folding, copy propagation, or dead-code removal beyond unreachable
+  blocks, except: a literal `-` is folded; `size_of` / `align_of` / `needs_drop::<T>()` are the
+  instance's constant; `!` of a constant `bool` is the constant; an `if` (statement or
+  expression) whose condition is a constant ends in `br` to the taken arm (or the join), and the
+  other arm, unreachable, is deleted (lang-details.md, "§1 Type queries").
 - **Slots**: every `slot` is in `b0`, before any other instruction of `b0`, one per address-taken
   local in declaration order (fn params first, then `let`s in source order).
 - **Panics**: an unconditional trap (`unwrap` on `None`, a failed `std.debug.assert`, ...) is

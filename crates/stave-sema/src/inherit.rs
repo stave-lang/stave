@@ -276,7 +276,7 @@ fn held_values<I: Interner + ?Sized>(
             | Target::Slice { .. }
             | Target::Global { .. }
             | Target::SoaRow { .. }
-            | Target::SizeOf { .. }
+            | Target::TypeQuery { .. }
             | Target::FenceStream
             | Target::Old => [TypeId::NONE; 2],
         };

@@ -3100,7 +3100,8 @@ impl<'a> Ck<'a> {
                         return Ty::ERR;
                     }
                 };
-                // A concrete type must have a layout here: lowering has no other answer.
+                // A concrete type must have a layout here: lowering has no other answer. Every
+                // type query asks it, `needs_drop` too: it answers for sized types only.
                 if !self.tys.has_params(t)
                     && !self.tys.has_error(t)
                     && crate::traits::layout_of(&mut self.tys, self.sigs, t).is_none()
@@ -3110,8 +3111,8 @@ impl<'a> Ck<'a> {
                     self.report(d);
                     return Ty::ERR;
                 }
-                self.target(paren, Target::SizeOf { ty: t, align: b == Builtin::AlignOf });
-                Ty::T(ids::USIZE)
+                self.target(paren, Target::TypeQuery { ty: t, op: b });
+                Ty::T(if b == Builtin::NeedsDrop { ids::BOOL } else { ids::USIZE })
             }
             St::TypeAssoc { ty, name, tok } => {
                 let text = self.prog.strings.get(name);

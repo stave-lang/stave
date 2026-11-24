@@ -616,7 +616,7 @@ impl<'a> FnCx<'a> {
                     | Target::Index { .. }
                     | Target::Slice { .. }
                     | Target::Global { .. }
-                    | Target::SizeOf { .. }
+                    | Target::TypeQuery { .. }
                     | Target::Old
                     | Target::Builtin { .. }
             )
@@ -1316,9 +1316,24 @@ impl<'a> FnCx<'a> {
         self.end_temps();
         let Some(cv) = cv else { return };
         let snap = self.f.env.clone();
-        match eb {
-            Some(eb) => self.f.b.cbr(cv, then, &[], eb, &[]),
-            None => {
+        // A constant condition (a literal, `needs_drop::<T>()` of this instance) branches to its
+        // arm only: the other is lowered as usual but nothing reaches it, so the post-pass
+        // deletes it and no build, debug included, emits it.
+        match (self.kval(cv), eb) {
+            (Some(k), None) if k != 0 => {
+                self.f.b.br(then, &[]);
+                // The false edge still enters the join, from a block nothing reaches: the code
+                // after the `if` is lowered as code that can run (its drops decided as the
+                // schedule has them), as after a known trap, even when the arm never ends.
+                let dead = self.f.b.create_block();
+                self.f.b.switch_to(dead);
+                self.br_join(j, &[]);
+            }
+            (Some(k), Some(_)) if k != 0 => self.f.b.br(then, &[]),
+            (Some(_), Some(eb)) => self.f.b.br(eb, &[]),
+            (Some(_), None) => self.br_join(j, &[]),
+            (None, Some(eb)) => self.f.b.cbr(cv, then, &[], eb, &[]),
+            (None, None) => {
                 let args = self.edge(j, &[]);
                 let jb = self.f.joins[j].block;
                 self.f.b.cbr(cv, then, &[], jb, &args);

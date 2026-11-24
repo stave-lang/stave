@@ -214,11 +214,17 @@ impl<T: view> Vec<T> {
     }
 
     // Drops the elements from n on, the last first; nothing if n >= len. Keeps the buffer.
+    // An element type without drop glue only shortens len: O(1), no loop in any build (an `if`
+    // on `needs_drop` compiles the taken arm only).
     pub fn truncate(&mut self, n: usize) {
-        while self.len > n {
-            self.len = self.len - 1;
-            let slot = mem.add(self.ptr as *const T, self.len);
-            let dead = unsafe("slot was initialized; len no longer covers it") slot.read();
+        if needs_drop::<T>() {
+            while self.len > n {
+                self.len = self.len - 1;
+                let slot = mem.add(self.ptr as *const T, self.len);
+                let dead = unsafe("slot was initialized; len no longer covers it") slot.read();
+            }
+        } else if self.len > n {
+            self.len = n;
         }
     }
 

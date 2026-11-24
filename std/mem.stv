@@ -4,6 +4,8 @@
 // lists them):
 //   size_of / align_of: the built-in generic fns `size_of::<T>()` and `align_of::<T>()`
 //       (const-evaluable, usable in generic code after monomorphization).
+//   needs_drop: the built-in `needs_drop::<T>()`, whether dropping a T runs code; a constant
+//       per instance, and an `if` on it compiles the taken arm only (not a const-expr).
 //   Raw pointers: `*p = v` is a place assignment, so it drops the old pointee first
 //       (only for an initialized slot); `p.write(v)` (unsafe) stores v without dropping
 //       anything (uninitialized slots); `p.read()` (unsafe) moves the pointee out by a bitwise
