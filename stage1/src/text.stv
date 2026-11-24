@@ -1,0 +1,143 @@
+// Byte strings: comparison, UTF-8 validation, decimal text, and a stable index sort. Names and
+// paths are compared as bytes, like stage0's `String` and `PathBuf` orders.
+import std.mem;
+import std.string;
+import std.vec;
+
+pub fn eq(a: &[u8], b: &[u8]) -> bool {
+    return a.eq(b);
+}
+
+pub fn eq_str(a: &[u8], b: &str) -> bool {
+    return a.eq(mem.str_bytes(b));
+}
+
+pub fn starts_with(a: &[u8], p: &[u8]) -> bool {
+    return p.len() <= a.len() && a[0..p.len()].eq(p);
+}
+
+pub fn ends_with(a: &[u8], p: &[u8]) -> bool {
+    return p.len() <= a.len() && a[a.len() - p.len()..a.len()].eq(p);
+}
+
+// Byte order: negative if a < b, 0 if equal, positive if a > b.
+pub fn cmp(a: &[u8], b: &[u8]) -> i32 {
+    let n = if a.len() < b.len() then a.len() else b.len();
+    for i in 0..n {
+        if a[i] != b[i] { return if a[i] < b[i] then -1 else 1; }
+    }
+    if a.len() == b.len() { return 0; }
+    return if a.len() < b.len() then -1 else 1;
+}
+
+// An owned copy of bytes known to be UTF-8 (from a `&str` or validated input).
+pub fn string_of(b: &[u8]) -> string.String {
+    let mut v = vec.Vec::<u8>.with_capacity(b.len());
+    v.extend_from_slice(b);
+    return match string.String.from_utf8(v) {
+        Result.Ok(s) => s,
+        Result.Err(_) => string.String.new(),
+    };
+}
+
+pub fn push_bytes(s: &mut string.String, b: &[u8]) {
+    let t = string_of(b);
+    s.push_str(t.as_str());
+}
+
+// Appends the decimal form of n.
+pub fn push_u32(buf: &mut vec.Vec<u8>, n: u32) {
+    let mut tmp = [0u8; 10];
+    let mut i: usize = 10;
+    let mut v = n;
+    loop {
+        i = i - 1;
+        tmp[i] = 48 + ((v % 10) as% u8);
+        v = v / 10;
+        if v == 0 { break; }
+    }
+    buf.extend_from_slice(&tmp[i..10]);
+}
+
+// Appends the decimal form of n.
+pub fn push_u64(buf: &mut vec.Vec<u8>, n: u64) {
+    let mut tmp = [0u8; 20];
+    let mut i: usize = 20;
+    let mut v = n;
+    loop {
+        i = i - 1;
+        tmp[i] = 48 + ((v % 10) as% u8);
+        v = v / 10;
+        if v == 0 { break; }
+    }
+    buf.extend_from_slice(&tmp[i..20]);
+}
+
+// The UTF-8 check of `std::str::from_utf8`: (offset of the first invalid sequence or b.len(),
+// length of that sequence; 0 when valid, the rest of the input when it is cut short).
+pub fn utf8_valid_up_to(b: &[u8]) -> (usize, usize) {
+    let n = b.len();
+    let mut i: usize = 0;
+    while i < n {
+        let c = b[i];
+        if c < 128 {
+            i = i + 1;
+            continue;
+        }
+        let w: usize = if c >= 194 && c <= 223 then 2 else if c >= 224 && c <= 239 then 3 else if c >= 240 && c <= 244 then 4 else 0;
+        if w == 0 { return (i, 1); }
+        if i + 1 >= n { return (i, n - i); }
+        let c1 = b[i + 1];
+        let ok1 = if w == 2 then c1 >= 128 && c1 <= 191 else if c == 224 then c1 >= 160 && c1 <= 191 else if c == 237 then c1 >= 128 && c1 <= 159 else if c == 240 then c1 >= 144 && c1 <= 191 else if c == 244 then c1 >= 128 && c1 <= 143 else c1 >= 128 && c1 <= 191;
+        if !ok1 { return (i, 1); }
+        for k in 2..w {
+            if i + k >= n { return (i, n - i); }
+            let ck = b[i + k];
+            if ck < 128 || ck > 191 { return (i, k); }
+        }
+        i = i + w;
+    }
+    return (n, 0);
+}
+
+// Stable merge sort of the indices 0..n by `less`.
+pub fn sorted(n: usize, less: fn(u32, u32) -> bool) -> vec.Vec<u32> {
+    let mut a = vec.Vec::<u32>.with_capacity(n);
+    let mut b = vec.Vec::<u32>.with_capacity(n);
+    for i in 0..n {
+        a.push(i as% u32);
+        b.push(0);
+    }
+    let mut w: usize = 1;
+    while w < n {
+        merge_pass(a.as_slice(), b.as_mut_slice(), w, less);
+        mem.swap(&mut a, &mut b);
+        w = w * 2;
+    }
+    return a;
+}
+
+fn merge_pass(src: &[u32], dst: &mut [u32], w: usize, less: fn(u32, u32) -> bool) {
+    let n = src.len();
+    let mut lo: usize = 0;
+    while lo < n {
+        let mid = if n - lo < w then n else lo + w;
+        let hi = if n - mid < w then n else mid + w;
+        let mut x = lo;
+        let mut y = mid;
+        let mut k = lo;
+        while k < hi {
+            // the right run's head goes first only if strictly less: equal keys keep their order
+            let take_y = y < hi && (x >= mid || less(src[y], src[x]));
+            if take_y {
+                dst[k] = src[y];
+                y = y + 1;
+            } else {
+                dst[k] = src[x];
+                x = x + 1;
+            }
+            k = k + 1;
+        }
+        lo = hi;
+    }
+}

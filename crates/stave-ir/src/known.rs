@@ -5,6 +5,8 @@
 //! their entry ([`crate::Func::known`]); later stages ask for an entry, never for a path. A user
 //! item spelled like one is an ordinary item everywhere.
 
+use crate::intrinsics::ITy;
+
 macro_rules! known_items {
     ($($v:ident = $module:literal $name:literal $(. $method:literal)?;)*) => {
         /// A compiler-known item.
@@ -191,6 +193,111 @@ pub fn reports_on_alt_stack(k: Known) -> bool {
             | Known::RequiresFailed
             | Known::EnsuresFailed
     )
+}
+
+/// The signature (params, result) of a known item that code generation or the interpreter calls
+/// or enters with an argument list of its own (the start stub, the trap and signal reports, the
+/// thread stubs, `cpu_init`, `copy_bytes`, the checked allocator); `None` for the others, which
+/// are only ever called by IR calls. A result of `()` is no result; `-> never` is none either.
+pub fn abi_signature(k: Known) -> Option<(&'static [ITy], ITy)> {
+    use ITy::*;
+    Some(match k {
+        Known::StartEntry => (&[ConstPtrUsize], Unit),
+        Known::Trap => (&[U32, U32], Unit),
+        Known::OnSignal => (&[Usize, Usize, Usize], Unit),
+        Known::ThreadEntry => (&[Usize], Usize),
+        Known::CpuInit => (&[], Unit),
+        Known::CopyRaw => (&[MutPtrU8, ConstPtrU8, Usize], Unit),
+        Known::TryAlloc => (&[Usize, Usize], MutPtrU8),
+        Known::Free => (&[MutPtrU8, Usize, Usize], Unit),
+        Known::TryRealloc => (&[MutPtrU8, Usize, Usize, Usize], MutPtrU8),
+        // Called by IR calls only.
+        Known::Option
+        | Known::Result
+        | Known::Copy
+        | Known::Send
+        | Known::Sync
+        | Known::Flat
+        | Known::Frozen
+        | Known::Drop
+        | Known::Display
+        | Known::Write
+        | Known::OpAdd
+        | Known::OpWrapAdd
+        | Known::OpSatAdd
+        | Known::OpSub
+        | Known::OpWrapSub
+        | Known::OpSatSub
+        | Known::OpMul
+        | Known::OpWrapMul
+        | Known::OpSatMul
+        | Known::OpDiv
+        | Known::OpRem
+        | Known::OpShl
+        | Known::OpWrapShl
+        | Known::OpShr
+        | Known::OpBitAnd
+        | Known::OpBitOr
+        | Known::OpBitXor
+        | Known::OpNeg
+        | Known::OpNot
+        | Known::String
+        | Known::StringNew
+        | Known::StringPushStr
+        | Known::StringAsStr
+        | Known::UnsafeCell
+        | Known::UnsafeCellNew
+        | Known::Soa
+        | Known::AtomicU32New
+        | Known::AtomicU64New
+        | Known::AtomicUsizeNew
+        | Known::AtomicBoolNew
+        | Known::Mutex
+        | Known::MutexNew
+        | Known::MutexLock
+        | Known::MutexGuard
+        | Known::Once
+        | Known::OnceNew
+        | Known::OnceGetOrInit
+        | Known::LockPair
+        | Known::MemForget
+        | Known::ThreadJoin
+        | Known::ParFor
+        | Known::ParForMut
+        | Known::TrapMsg
+        | Known::TrapErr
+        | Known::Abort
+        | Known::PanicBegin
+        | Known::RequiresFailed
+        | Known::EnsuresFailed
+        | Known::SetUserSite
+        | Known::TestInput
+        | Known::TestSkip
+        | Known::ErrtracePush
+        | Known::ErrtraceRestart
+        | Known::ErrtraceSave
+        | Known::ErrtraceRestore
+        | Known::ThreadStart
+        | Known::RtThreadJoin
+        | Known::ScopeSpawn
+        | Known::ScopeJoin
+        | Known::RunQueued
+        | Known::CpuFeatures
+        | Known::CpuWord
+        | Known::CpuTrace
+        | Known::Alloc
+        | Known::Realloc
+        | Known::AtomicLock
+        | Known::AtomicTryLock
+        | Known::AtomicUnlock
+        | Known::Futex
+        | Known::OsRead
+        | Known::OsWrite
+        | Known::OsPread64
+        | Known::OsPwrite64
+        | Known::OsOpenat
+        | Known::OsFlock => return None,
+    })
 }
 
 /// Whether `f` is the fn a failed `requires` check calls.

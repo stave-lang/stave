@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// A diagnostic names the source text of a type or path; a name that spans lines is shown on one
+// line (whitespace runs become one space), never an internal error. The primary span starts on
+// the line before the annotation (`//~^`).
+struct S {
+    a: u32,
+}
+
+fn f() -> u32 {
+    return 1;
+}
+
+fn not_a_type(x: f<
+    u32>) { //~^ ERROR E0101
+}
+
+fn not_a_type_argument(x: Option<{
+    3 }>) { //~^ ERROR E0101
+}
+
+impl f<
+    u32> for S { //~^ ERROR E0101
+}
+
+fn generic_size<T>() -> usize {
+    let a = [0u8; size_of::<Option<
+        T>>()]; //~^ ERROR E0904
+    return 0;
+}

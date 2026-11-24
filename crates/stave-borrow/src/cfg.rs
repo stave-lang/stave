@@ -1661,7 +1661,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             let lv = self.expr(lhs);
             if !self.assign_root(&lv) {
                 let span = self.span(lhs);
-                self.body.temp_writes.push((span, icx.node_text(lhs).to_string()));
+                self.body.temp_writes.push((span, stave_diag::spelled(icx.node_text(lhs))));
             }
             if self.in_guard > 0
                 && let V::P(p) = &lv

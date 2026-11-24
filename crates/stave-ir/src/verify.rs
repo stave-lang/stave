@@ -1,15 +1,23 @@
 //! IR verifier: structure (spans, value definitions), SSA dominance, block
 //! param arity and types, terminators, and per-op operand / result typing. Returns every error
 //! found; never panics, whatever the input.
+//!
+//! It is the gate for modules the compiler did not build: a module that verifies must not panic
+//! a back end, the release passes, or the interpreter. So every id is in range and of its kind
+//! (sites included), every intrinsic is an entry of [`crate::intrinsics`] used with its
+//! signature, every known item the stages call on their own has the signature they assume, and
+//! every type has a shape the stages can size. A form the verifier does not know is an error.
 
 use std::fmt;
 
 mod simd;
 
 use crate::arith::{self, CastTy, IntTy};
+use crate::intrinsics::{self, ITy, Kind};
 use crate::ir::{
-    Block, Body, CastKind, Const, Func, FuncId, Module, Op, Operand, Target, Term, Value, ValueDef,
+    Block, Body, CastKind, Const, Func, FuncId, Module, Op, Operand, Site, Target, Term, Value, ValueDef,
 };
+use crate::known;
 use crate::types::{AdtKind, FloatBits, GenericArg, IntBits, TypeId, TypeKey, TypeTable};
 
 /// One verifier finding, located as precisely as known.
@@ -76,20 +84,56 @@ pub fn verify_types(m: &Module) -> Result<Vec<VerifyError>, Vec<VerifyError>> {
     }
     errs.extend(verify_static_refs(m).into_iter().map(module_err));
     if types_ok {
-        errs.extend(verify_static_layout(m).into_iter().map(module_err));
+        errs.extend(verify_lanes(&m.types).into_iter().map(module_err));
+        let layouts = crate::layout::Layouts::compute(&m.types);
+        errs.extend(verify_layouts(&m.types, &layouts).into_iter().map(module_err));
+        errs.extend(verify_static_layout(m, &layouts).into_iter().map(module_err));
     }
     if types_ok { Ok(errs) } else { Err(errs) }
+}
+
+/// A vector type has a lane type ([`crate::simd::lane_ty`]) and a lane count of
+/// [`crate::simd::valid_lanes`] or the native one; a mask type a lane width of 8, 16, 32, or 64
+/// bits and such a count.
+fn verify_lanes(types: &TypeTable) -> Vec<String> {
+    use crate::types::Lanes;
+    let count_ok = |n: &Lanes| match n {
+        Lanes::Fixed(n) => crate::simd::valid_lanes(u32::from(*n)),
+        Lanes::Native => true,
+    };
+    let mut errs = Vec::new();
+    for i in 0..types.len() {
+        let ok = match types.key(TypeId(i as u32)) {
+            Some(TypeKey::Vec { lane, n }) => crate::simd::lane_ty(types, *lane).is_some() && count_ok(n),
+            Some(TypeKey::Mask { width, n }) => matches!(width, 8 | 16 | 32 | 64) && count_ok(n),
+            _ => true,
+        };
+        if !ok {
+            errs.push(format!("t{i}: not a vector or mask shape ({})", types.key_text(TypeId(i as u32))));
+        }
+    }
+    errs
+}
+
+/// No type contains itself by value, nests deeper than the layout bound, or has a size beyond
+/// `u64`: every stage that sizes values computes these layouts. A type may still have no layout
+/// for being unsized, generic, or shapeless; only values need one, and the stages report that.
+fn verify_layouts(types: &TypeTable, layouts: &crate::layout::Layouts) -> Vec<String> {
+    use crate::layout::LayoutError as E;
+    let mut errs = Vec::new();
+    for i in 0..types.len() {
+        if let Err(e @ (E::Infinite | E::TooDeep | E::Overflow)) = layouts.get_layout(TypeId(i as u32)) {
+            errs.push(format!("t{i}: {e}"));
+        }
+    }
+    errs
 }
 
 /// Every static's `init` holds exactly its type's size, and a static with address words has a
 /// type aligned to a multiple of 8: each word is 8-aligned within the static, and the back ends
 /// place a static at its type's alignment, so only then is the word 8-aligned in memory.
-fn verify_static_layout(m: &Module) -> Vec<String> {
+fn verify_static_layout(m: &Module, layouts: &crate::layout::Layouts) -> Vec<String> {
     let mut errs = Vec::new();
-    if m.statics.is_empty() {
-        return errs;
-    }
-    let layouts = crate::layout::Layouts::compute(&m.types);
     for (i, st) in m.statics.iter().enumerate() {
         let l = match layouts.get_layout(st.ty) {
             Ok(l) => l,
@@ -251,8 +295,6 @@ pub(crate) fn option_shape(types: &TypeTable, t: TypeId) -> Option<(u32, u32, Ty
     types.option_shape(t)
 }
 
-const KNOWN_INTRINSICS: &str = "syscall0..6, ccall0..12, cpuid, xgetbv, thread_start_addr, copy_bytes";
-
 struct FnVerifier<'a> {
     m: &'a Module,
     f: &'a Func,
@@ -294,6 +336,10 @@ impl<'a> FnVerifier<'a> {
                 return;
             }
         }
+        if !self.site_ok(f.name_site) {
+            self.err(None, None, format!("name site {} out of range", f.name_site.0));
+        }
+        self.known_signature();
         let Some(body) = &f.body else { return };
         self.body = Some(body);
         if !self.structure(body) {
@@ -302,6 +348,34 @@ impl<'a> FnVerifier<'a> {
         let dom = Dominators::compute(body);
         self.dominance(body, &dom);
         self.typing(body);
+    }
+
+    /// `Site::NONE` or a row of the site table.
+    fn site_ok(&self, s: Site) -> bool {
+        s == Site::NONE || s.index() < self.m.sites.len()
+    }
+
+    /// A known item's signature is the one the stages that call it themselves assume
+    /// ([`known::abi_signature`]), and only a panic report entry runs on the alternate stack. A
+    /// report entry that does not is no error: its code runs on the stack it was called on.
+    fn known_signature(&mut self) {
+        let f = self.f;
+        if f.alt_stack && !f.known.is_some_and(known::reports_on_alt_stack) {
+            let k = f.known.map_or("no known item".to_string(), |k| format!("`{k}`"));
+            self.err(None, None, format!("alt_stack is {} for {k}", f.alt_stack));
+        }
+        let Some(k) = f.known else { return };
+        let Some((params, ret)) = known::abi_signature(k) else { return };
+        let ty = |x: ITy| ity_type(&self.m.types, x);
+        let ps_ok =
+            params.len() == f.params.len() && params.iter().zip(&f.params).all(|(&p, &t)| ty(p) == Some(t));
+        let ret_ok = match ret {
+            ITy::Unit => f.ret.is_none(),
+            r => f.ret.is_some() && ty(r) == f.ret,
+        };
+        if !ps_ok || !ret_ok || f.variadic {
+            self.err(None, None, format!("`{k}` must have the signature {params:?} -> {ret:?}"));
+        }
     }
 
     /// Spans, ids, and definitions. Returns false if later passes cannot run safely.
@@ -328,6 +402,20 @@ impl<'a> FnVerifier<'a> {
         }
         // Block spans: params in range, insts consecutive and covering all instructions.
         let mut next = 0u32;
+        // Each operand and switch case belongs to one span at most: the passes that rewrite
+        // operands in place rewrite each span on its own.
+        let mut operand_owned = vec![false; b.operands.len()];
+        let mut case_owned = vec![false; b.cases.len()];
+        let claim = |owned: &mut [bool], s: crate::ir::Span| {
+            let mut ok = true;
+            for k in s.indices() {
+                if let Some(o) = owned.get_mut(k as usize) {
+                    ok &= !*o;
+                    *o = true;
+                }
+            }
+            ok
+        };
         let mut defined = vec![false; nv];
         let mut define =
             |s: &mut Self, v: Value, blk: Block, inst: Option<u32>| match defined.get_mut(v.index()) {
@@ -358,6 +446,12 @@ impl<'a> FnVerifier<'a> {
                 let a = b.insts.args[i as usize];
                 if !a.in_range(b.operands.len()) {
                     self.err(Some(blk), Some(i), "operand span out of range");
+                } else if !claim(&mut operand_owned, a) {
+                    self.err(Some(blk), Some(i), "operand span shared with another instruction or target");
+                }
+                let s = b.insts.site[i as usize];
+                if !self.site_ok(s) {
+                    self.err(Some(blk), Some(i), format!("site {} out of range", s.0));
                 }
                 match (b.insts.result[i as usize], b.insts.ty[i as usize]) {
                     (Some(v), Some(t)) => {
@@ -382,14 +476,18 @@ impl<'a> FnVerifier<'a> {
                 }
             }
             let targets: Vec<Target> = b.successors(blk);
-            if let Term::Switch { cases, .. } = bd.term
-                && !cases.in_range(b.cases.len())
-            {
-                self.err(Some(blk), None, "switch case span out of range");
+            if let Term::Switch { cases, .. } = bd.term {
+                if !cases.in_range(b.cases.len()) {
+                    self.err(Some(blk), None, "switch case span out of range");
+                } else if !claim(&mut case_owned, cases) {
+                    self.err(Some(blk), None, "switch case span shared with another switch");
+                }
             }
             for t in targets {
                 if !t.args.in_range(b.operands.len()) {
                     self.err(Some(blk), None, "target arg span out of range");
+                } else if !claim(&mut operand_owned, t.args) {
+                    self.err(Some(blk), None, "target arg span shared with another instruction or target");
                 }
                 if t.block.index() >= b.blocks.len() {
                     self.err(Some(blk), None, format!("target b{} out of range", t.block.0));
@@ -966,8 +1064,9 @@ impl<'a> FnVerifier<'a> {
                     _ => return Err(format!("addr.elem of {}", tn(pt))),
                 };
                 match (b.int_const(args[1]), self.operand_cls(b, args[1])) {
-                    (Some(_), _) | (None, Some(Cls::Int(_))) => {}
-                    _ => return Err("element index must be an int".into()),
+                    (Some(k), _) if fits_word(k) => {}
+                    (None, Some(Cls::Int(_))) => {}
+                    _ => return Err("element index must be an int (a constant in 64 bits)".into()),
                 }
                 if pointee(types, t) != Some(et) {
                     Err("addr.elem result must point to the element type".into())
@@ -1038,9 +1137,13 @@ impl<'a> FnVerifier<'a> {
                 no_res()?;
                 for &a in args {
                     match (b.int_const(a), self.operand_cls(b, a)) {
-                        (Some(k), _) if k >= 0 => {}
+                        (Some(k), _) if (0..=u64::MAX as i128).contains(&k) => {}
                         (None, Some(Cls::Int(it))) if !it.signed => {}
-                        _ => return Err("check.bounds operands must be unsigned ints".into()),
+                        _ => {
+                            return Err(
+                                "check.bounds operands must be unsigned ints (constants below 2^64)".into()
+                            );
+                        }
                     }
                 }
                 Ok(())
@@ -1053,8 +1156,9 @@ impl<'a> FnVerifier<'a> {
                     return Err("prefetch address must be a thin pointer".into());
                 }
                 match (b.int_const(args[1]), self.operand_cls(b, args[1])) {
-                    (Some(_), _) | (None, Some(Cls::Int(_))) => Ok(()),
-                    _ => Err("prefetch index must be an int".into()),
+                    (Some(k), _) if fits_word(k) => Ok(()),
+                    (None, Some(Cls::Int(_))) => Ok(()),
+                    _ => Err("prefetch index must be an int (a constant in 64 bits)".into()),
                 }
             }
             Op::StoreStream => {
@@ -1153,6 +1257,9 @@ impl<'a> FnVerifier<'a> {
             .ok_or_else(|| "field index out of range".into())
     }
 
+    /// `intrinsic.<name>` against its entry of [`crate::intrinsics`], or [`Kind::StaticAddr`] against
+    /// the module's statics. A name the table lacks, or one without a checked signature, is
+    /// rejected: no back end builds it.
     fn check_intrinsic(
         &self,
         b: &Body,
@@ -1161,52 +1268,85 @@ impl<'a> FnVerifier<'a> {
         ty: Option<TypeId>,
     ) -> Result<(), String> {
         let t = &self.m.types;
-        let find = |k: TypeKey| t.find(&k);
-        let usize_t = find(TypeKey::Int { signed: false, bits: IntBits::Size });
-        let isize_t = find(TypeKey::Int { signed: true, bits: IntBits::Size });
-        let u32_t = find(TypeKey::Int { signed: false, bits: IntBits::B32 });
-        let u64_t = find(TypeKey::Int { signed: false, bits: IntBits::B64 });
-        let sig = |params: Vec<Option<TypeId>>, ret: Option<TypeId>| -> Result<(), String> {
-            let ps: Option<Vec<TypeId>> = params.into_iter().collect();
-            let ps = ps.ok_or_else(|| format!("intrinsic.{name}: parameter type not in the module"))?;
-            if ty != ret || ret.is_none() {
-                return Err(format!("intrinsic.{name}: wrong result type"));
+        let kind = intrinsics::kind(name).ok_or_else(|| format!("unknown intrinsic `{name}`"))?;
+        match kind {
+            Kind::StaticAddr => {
+                let [k] = args else {
+                    return Err(format!("intrinsic.{name}: {} operands, expected 1", args.len()));
+                };
+                let k = b
+                    .int_const(*k)
+                    .ok_or_else(|| format!("intrinsic.{name}: the index must be an int constant"))?;
+                let st = usize::try_from(k)
+                    .ok()
+                    .and_then(|k| self.m.statics.get(k))
+                    .ok_or_else(|| format!("intrinsic.{name}: static {k} out of range"))?;
+                return match ty.and_then(|r| t.key(r)) {
+                    Some(TypeKey::RawPtr { inner, .. }) if *inner == st.ty => Ok(()),
+                    _ => Err(format!("intrinsic.{name}: the result must be a raw pointer to t{}", st.ty.0)),
+                };
             }
-            self.check_args(b, args, &ps).map_err(|e| format!("intrinsic.{name}: {e}"))
+            Kind::CpuBaseline => {
+                return Err(format!("intrinsic.{name}: lowering replaces it by a constant"));
+            }
+            Kind::Ptx => {
+                return Err(format!("intrinsic.{name}: no checked signature (the {:?} set)", kind.arch()));
+            }
+            Kind::Syscall(_)
+            | Kind::Ccall(_)
+            | Kind::Cpuid
+            | Kind::Xgetbv
+            | Kind::ThreadStartAddr
+            | Kind::MainAddr
+            | Kind::SignalHandlerAddr
+            | Kind::SiteTable
+            | Kind::PcTable
+            | Kind::StackTable
+            | Kind::ThreadBlock
+            | Kind::SetThreadBlock
+            | Kind::CallOnStack
+            | Kind::CpuInit
+            | Kind::ThreadClone
+            | Kind::Atomic { .. }
+            | Kind::CopyBytes => {}
+        }
+        let Some((params, ret)) = kind.sig() else {
+            return Err(format!("intrinsic.{name}: no checked signature"));
         };
-        if name.starts_with("vec.") || name.starts_with("mask.") {
-            return Err(format!("intrinsic.{name}: reserved for vector and mask ops"));
+        let resolve =
+            |x: ITy| ity_type(t, x).ok_or_else(|| format!("intrinsic.{name}: {x:?} is not in the module"));
+        match (ret, ty) {
+            (ITy::Unit, None) => {}
+            (ITy::Unit, Some(_)) => return Err(format!("intrinsic.{name}: must have no result")),
+            (r, Some(rt)) if resolve(r)? == rt => {}
+            _ => return Err(format!("intrinsic.{name}: wrong result type")),
         }
-        let numbered = |prefix: &str, max: usize| -> Option<usize> {
-            name.strip_prefix(prefix).and_then(|d| d.parse::<usize>().ok()).filter(|&k| k <= max)
-        };
-        if let Some(k) = numbered("syscall", 6) {
-            return sig(vec![usize_t; k + 1], isize_t);
-        }
-        if let Some(k) = numbered("ccall", 12) {
-            return sig(vec![usize_t; k + 1], usize_t);
-        }
-        match name {
-            "cpuid" => {
-                let r = u32_t.and_then(|u| find(TypeKey::Tuple(vec![u; 4])));
-                sig(vec![u32_t, u32_t], r)
-            }
-            "xgetbv" => sig(vec![u32_t], u64_t),
-            "thread_start_addr" => sig(vec![], usize_t),
-            "copy_bytes" => {
-                let u8_t = find(TypeKey::Int { signed: false, bits: IntBits::B8 });
-                let ptr = |mutable| u8_t.and_then(|inner| find(TypeKey::RawPtr { mutable, inner }));
-                let ps: Option<Vec<TypeId>> = [ptr(true), ptr(false), usize_t].into_iter().collect();
-                let ps = ps.ok_or_else(|| format!("intrinsic.{name}: parameter type not in the module"))?;
-                if ty.is_some_and(|r| t.key(r) != Some(&TypeKey::Tuple(Vec::new()))) {
-                    return Err(format!("intrinsic.{name}: wrong result type"));
-                }
-                self.check_args(b, args, &ps).map_err(|e| format!("intrinsic.{name}: {e}"))
-            }
-            _ if name.is_empty() => Err(format!("empty intrinsic name (known: {KNOWN_INTRINSICS})")),
-            // PTX and later intrinsics: typed by the front end's table; only ids are checked here.
-            _ => Ok(()),
-        }
+        let ps = params.iter().map(|&p| resolve(p)).collect::<Result<Vec<_>, _>>()?;
+        self.check_args(b, args, &ps).map_err(|e| format!("intrinsic.{name}: {e}"))
+    }
+}
+
+/// Whether an int constant typed only by context fits a 64-bit int of either signedness.
+fn fits_word(k: i128) -> bool {
+    (i64::MIN as i128..=u64::MAX as i128).contains(&k)
+}
+
+/// The id of intrinsic table type `x` in `types`; `None` for `()` or a type the table lacks.
+fn ity_type(types: &TypeTable, x: ITy) -> Option<TypeId> {
+    let int = |signed, bits| types.find(&TypeKey::Int { signed, bits });
+    let ptr_to =
+        |mutable, bits| int(false, bits).and_then(|inner| types.find(&TypeKey::RawPtr { mutable, inner }));
+    let ptr = |mutable| ptr_to(mutable, IntBits::B8);
+    match x {
+        ITy::ConstPtrUsize => ptr_to(false, IntBits::Size),
+        ITy::Usize => int(false, IntBits::Size),
+        ITy::Isize => int(true, IntBits::Size),
+        ITy::U32 => int(false, IntBits::B32),
+        ITy::U64 => int(false, IntBits::B64),
+        ITy::Unit => None,
+        ITy::U32x4 => int(false, IntBits::B32).and_then(|u| types.find(&TypeKey::Tuple(vec![u; 4]))),
+        ITy::MutPtrU8 => ptr(true),
+        ITy::ConstPtrU8 => ptr(false),
     }
 }
 

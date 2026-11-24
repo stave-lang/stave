@@ -3481,7 +3481,7 @@ impl<'a> Ck<'a> {
 
     fn intrinsic_arch(&mut self, at: Span, decl: DeclId) {
         let name = self.prog.decl(decl).map_or("", |d| self.prog.strings.get(d.name));
-        let Some((arch, _, _)) = builtins::intrinsic(name) else { return };
+        let Some(builtins::Intrinsic { arch, .. }) = builtins::intrinsic(name) else { return };
         let ok = match arch {
             builtins::IArch::Both => true,
             builtins::IArch::X86 => self.prog.target.arch() == stave_target::Arch::X86_64,
@@ -3493,7 +3493,7 @@ impl<'a> Ck<'a> {
             let f = match arch {
                 builtins::IArch::X86 => "x86_64",
                 builtins::IArch::A64 => "aarch64",
-                _ => "ptx",
+                builtins::IArch::Ptx | builtins::IArch::Both => "ptx",
             };
             let roles: Vec<(&str, Span)> =
                 self.prog.decl(decl).map(|d| ("callee", d.name_span)).into_iter().collect();
@@ -4259,7 +4259,7 @@ impl<'a> Ck<'a> {
             self.chunk_loops.push(f);
         }
         {
-            let text = icx.node_text(iter).to_string();
+            let text = icx.node_spelled(iter);
             let at = icx.node_span(iter);
             let case = match src {
                 // the loop would read (and write) the place while the body may change it: a
@@ -4327,7 +4327,7 @@ impl<'a> Ck<'a> {
                 }
                 if matches!(self.tys.kind(b), TypeKind::Ref { mutable: true, .. }) && it != ids::ERROR {
                     // a `&mut` chunk binding writes its sequence in place: it needs a `&mut` one
-                    let text = icx.node_text(iter).to_string();
+                    let text = icx.node_spelled(iter);
                     let at = icx.node_span(iter);
                     match src {
                         ForSource::Seq { mutable: false, .. } => {
@@ -4436,7 +4436,7 @@ impl<'a> Ck<'a> {
                 let shapes = [0, 1].map(|i| self.w.for_next_elem(&mut self.tys, &refs[i]));
                 if let Some(pick) = shapes.iter().position(|s| s.is_ok()) {
                     let at = self.icx.node_span(iter);
-                    let text = self.icx.node_text(iter).to_string();
+                    let text = self.icx.node_spelled(iter);
                     let by_mut = matches!(src, ForSource::IterMut { .. });
                     self.e0908_at("next", at, recv, traits, methods, &refs, Some((&text, by_mut, pick)));
                     return ids::ERROR;
@@ -4479,7 +4479,7 @@ impl<'a> Ck<'a> {
             return ids::ERROR;
         }
         // no `next(&mut self) -> Option<X>`: no iterator (for a generic source, no bound gives one)
-        let text = self.icx.node_text(iter).to_string();
+        let text = self.icx.node_spelled(iter);
         let at = self.icx.node_span(iter);
         let d = match bad_next.and_then(|(m, why)| Some((self.prog.decl(m)?.name_span, why))) {
             Some((decl, why)) => mk(

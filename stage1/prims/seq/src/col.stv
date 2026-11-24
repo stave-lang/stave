@@ -1,0 +1,28 @@
+// Columns: construction and the length rule shared by the other modules.
+import std.debug;
+import std.vec;
+
+// A column of n copies of x.
+pub fn filled<T: Copy>(n: usize, x: T) -> vec.Vec<T> {
+    let mut v = vec.Vec::<T>.with_capacity(n);
+    for _ in 0..n {
+        v.push(x);
+    }
+    return v;
+}
+
+// The ids 0..n in order.
+pub fn iota(n: usize) -> vec.Vec<u32> {
+    let end = ids(n);
+    let mut v = vec.Vec::<u32>.with_capacity(n);
+    for i in 0..end {
+        v.push(i);
+    }
+    return v;
+}
+
+// n as an id or offset: traps `Assert` unless n <= u32::MAX.
+pub fn ids(n: usize) -> u32 {
+    debug.assert(n <= 4294967295, "length does not fit a u32 id");
+    return n as% u32;
+}

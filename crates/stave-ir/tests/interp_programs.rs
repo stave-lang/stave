@@ -56,6 +56,7 @@ fn trap_reports_site_and_fn() {
     let r = b.call(callee, Some(i32t), &[k]).unwrap();
     b.ret(Some(r.into()));
     m.define(main, b.finish().unwrap());
+    site_rows(&mut m, 43);
     assert_eq!(
         run(&m, main, vec![]),
         Outcome::Trap(Trap { kind: PanicKind::Overflow, site: Site(41), func: callee })
@@ -75,6 +76,7 @@ fn explicit_panic_kinds() {
             b.panic(kind);
             b.unreachable();
         });
+        site_rows(&mut m, 4);
         assert_eq!(run(&m, f, vec![]), Outcome::Trap(Trap { kind, site: Site(3), func: f }));
     }
 }
@@ -90,6 +92,7 @@ fn stack_overflow_by_depth_and_by_slots() {
     let r = b.call(f, Some(u64t), &[x.into()]).unwrap();
     b.ret(Some(r.into()));
     m.define(f, b.finish().unwrap());
+    site_rows(&mut m, 10);
     let cfg = Config { max_depth: 1000, ..Config::default() };
     let (o, _) = interp::run(&m, f, vec![Val::S(0)], host(), cfg);
     assert_eq!(o.unwrap(), Outcome::Trap(Trap { kind: PanicKind::StackOverflow, site: Site(9), func: f }));

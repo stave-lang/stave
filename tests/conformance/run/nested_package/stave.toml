@@ -1,0 +1,5 @@
+name = "nested_package"
+kind = "bin"
+
+[dependencies]
+prims = { path = "prims" }

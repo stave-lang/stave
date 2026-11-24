@@ -8,13 +8,13 @@ use stave_ir::{CastKind, Const, Op, Operand, PanicKind, Site, TypeId, TypeKey, V
 use super::abi::Ret;
 use super::analysis::Vk;
 use super::emit::{Gen, S15, S16, S17, SP, W, X, ZR, xr};
-use super::support::Intr;
 use super::ty::{self, Sc, Ty};
 use super::{R, bad, unsupported};
 use crate::enc::{
     AddSub, Addr, Arr, Cond, Ext, Fp, FpBin, FpUn, Label, Logic, MemSize, PrefKind, PrefLevel, Prefetch, Reg,
     Shift, VLogic, VReg, encode_logical,
 };
+use stave_ir::intrinsics::{AtomicOp, Kind as Intr};
 
 /// Words of an aggregate `select` emitted straight-line; longer values use a counted loop.
 const SELECT_UNROLL: i64 = 64;
@@ -1552,10 +1552,12 @@ impl<'a, 'm> Gen<'a, 'm> {
     fn intrinsic(&mut self, id: stave_ir::IntrinsicId, i: u32) -> R<()> {
         let args = self.b.args(i);
         let res = self.b.insts.result.get(i as usize).copied().flatten();
-        let kind = self.cg.intr.get(id.index()).copied().unwrap_or(Intr::Unknown);
         let syms = self.cg.syms;
         let m = self.cg.m;
         let name = || m.intrinsic_name(id).unwrap_or("?").to_string();
+        let Some(kind) = self.cg.intr.get(id.index()).copied().flatten() else {
+            return Err(unsupported(format!("intrinsic.{}", name())));
+        };
         let addr_of = |g: &mut Self, sym: Option<stave_obj::SymbolId>, what: &str| -> R<()> {
             let sym = sym.ok_or_else(|| unsupported(format!("{what} is not emitted for this program")))?;
             let v = res.ok_or_else(|| bad("intrinsic result"))?;
@@ -1609,8 +1611,8 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.result_regs(Ret::X0, res)
             }
             Intr::MainAddr => addr_of(self, syms.main_stub, "__stave_main"),
-            Intr::SignalAddr => addr_of(self, syms.signal_stub, "__stave_signal"),
-            Intr::ThreadAddr => addr_of(self, syms.thread_stub, "__stave_thread_start"),
+            Intr::SignalHandlerAddr => addr_of(self, syms.signal_stub, "__stave_signal"),
+            Intr::ThreadStartAddr => addr_of(self, syms.thread_stub, "__stave_thread_start"),
             Intr::SiteTable => addr_of(self, Some(syms.site_table), "__stave_site_table"),
             Intr::PcTable => addr_of(self, Some(syms.pc_table), "__stave_pc_table"),
             Intr::StackTable => addr_of(self, Some(syms.stack_table), "__stave_stack_table"),
@@ -1687,7 +1689,11 @@ impl<'a, 'm> Gen<'a, 'm> {
                 // x1 = p, x2 = value / new, x3 = expected; result x0 (sequentially consistent:
                 // ldar, or an ldaxr/stlxr loop)
                 self.flush_all()?;
-                let n = [1usize, 2, 2, 3][usize::from(op)];
+                let n = match op {
+                    AtomicOp::Load => 1,
+                    AtomicOp::Xchg | AtomicOp::Add => 2,
+                    AtomicOp::Cas => 3,
+                };
                 if args.len() != n {
                     return Err(bad("atomic argument count"));
                 }
@@ -1705,7 +1711,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 const LDAXR: u32 = 0x085F_FC00;
                 const STLXR: u32 = 0x0800_FC00;
                 let rn1 = 1 << 5;
-                if op == 0 {
+                if op == AtomicOp::Load {
                     self.a.word(sz | LDAR | rn1);
                     return self.result_regs(Ret::X0, res);
                 }
@@ -1715,12 +1721,12 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.a.bind(top)?;
                 self.a.word(sz | LDAXR | rn1); // ldaxr r0, [x1]
                 let src = match op {
-                    1 => 2,
-                    2 => {
+                    AtomicOp::Load | AtomicOp::Xchg => 2,
+                    AtomicOp::Add => {
                         self.a.add(w, xr(5), xr(0), xr(2))?;
                         5
                     }
-                    _ => {
+                    AtomicOp::Cas => {
                         self.a.cmp(w, xr(0), xr(3))?;
                         self.a.b_cond(crate::enc::Cond::Ne, fail)?;
                         2
@@ -1734,8 +1740,8 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.a.bind(done)?;
                 self.result_regs(Ret::X0, res)
             }
-            Intr::X86Only => Err(unsupported(format!("intrinsic.{} is x86-64 only", name()))),
-            Intr::Unknown => Err(unsupported(format!("intrinsic.{}", name()))),
+            Intr::Cpuid | Intr::Xgetbv => Err(unsupported(format!("intrinsic.{} is x86-64 only", name()))),
+            Intr::CpuBaseline | Intr::Ptx => Err(unsupported(format!("intrinsic.{}", name()))),
         }
     }
 }

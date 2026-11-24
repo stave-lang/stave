@@ -1,0 +1,75 @@
+// gather / scatter / invert / is_perm.
+import col;
+import perm;
+import sort;
+import test_util;
+import std.debug;
+import std.idx;
+import std.vec;
+
+test fn gather_picks_and_repeats() {
+    let src = [10u64, 20, 30, 40];
+    let idx = [3u32, 0, 0, 2, 1, 3];
+    debug.assert(perm.gather(&src, &idx).as_slice().eq(&[40u64, 10, 10, 30, 20, 40]), "gather");
+    let none = [0u32; 0];
+    debug.assert(perm.gather(&src, &none).len() == 0, "no indices");
+    let e = [0u64; 0];
+    debug.assert(perm.gather(&e, &none).len() == 0, "empty source");
+}
+
+test fn scatter_places_values() {
+    let mut dst = [0u32; 6];
+    let idx = [5u32, 0, 3];
+    let vals = [50u32, 10, 30];
+    perm.scatter(&mut dst, &idx, &vals);
+    let got = &dst[0..6];
+    debug.assert(got.eq(&[10u32, 0, 0, 30, 0, 50]), "scatter");
+    let mut e = [7u32; 3];
+    let none = [0u32; 0];
+    perm.scatter(&mut e, &none, &none);
+    let kept = &e[0..3];
+    debug.assert(kept.eq(&[7u32, 7, 7]), "no indices changes nothing");
+}
+
+test fn scatter_duplicates_highest_position_wins() {
+    let mut dst = [0u32; 4];
+    let idx = [2u32, 1, 2, 2, 1];
+    let vals = [10u32, 20, 30, 40, 50];
+    perm.scatter(&mut dst, &idx, &vals);
+    let got = &dst[0..4];
+    debug.assert(got.eq(&[0u32, 50, 40, 0]), "last writer wins");
+}
+
+test fn invert_is_the_rank() {
+    let mut r = test_util.Rng.new(9);
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        let keys = test_util.keys_u32(&mut r, n, 20);
+        let p = sort.sort_perm(keys.as_slice());
+        debug.assert(perm.is_perm(p.as_slice()), "sort_perm is a permutation");
+        let rank = perm.invert(p.as_slice());
+        let back = perm.invert(rank.as_slice());
+        debug.assert(back.as_slice().eq(p.as_slice()), "inverse of the inverse");
+        for i in 0..n {
+            debug.assert(p.as_slice()[rank.as_slice()[i] as usize] as usize == i, "p[rank[i]] == i");
+        }
+    }
+}
+
+test fn invert_of_non_permutations() {
+    let holes = [2u32, 2, 0];
+    let got = perm.invert(&holes);
+    debug.assert(got.as_slice().eq(&[2u32, idx.NONE, 1]), "a slot nobody names is NONE, a doubled one holds the highest");
+    debug.assert(!perm.is_perm(&holes), "doubled");
+    debug.assert(!perm.is_perm(&[0u32, 3]), "out of range");
+    debug.assert(perm.is_perm(&[1u32, 0, 2]), "a permutation");
+    let none = [0u32; 0];
+    debug.assert(perm.is_perm(&none) && perm.invert(&none).len() == 0, "empty");
+}
+
+test fn filled_and_iota() {
+    debug.assert(col.filled(3, 9u8).as_slice().eq(&[9u8, 9, 9]), "filled");
+    debug.assert(col.filled(0, 9u8).len() == 0, "filled zero");
+    debug.assert(col.iota(4).as_slice().eq(&[0u32, 1, 2, 3]), "iota");
+    debug.assert(col.iota(0).len() == 0, "iota zero");
+}

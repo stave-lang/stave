@@ -283,7 +283,9 @@ impl Cg<'_, '_> {
             }
             Op::Intrinsic(id) => {
                 let name = self.cx.m.intrinsic_name(id).ok_or_else(|| bad("intrinsic id out of range"))?;
-                self.intrinsic(name, args, ty, res)
+                let kind = stave_ir::intrinsics::kind(name)
+                    .ok_or_else(|| unsup(format!("intrinsic.{name} is not in the intrinsic table")))?;
+                self.intrinsic(kind, args, ty, res)
             }
             Op::Vec(v) => self.vec_op(v, args, ty, res),
             Op::Panic(k) => self.trap_now(k),
@@ -1329,7 +1331,11 @@ impl Cg<'_, '_> {
                     if k < 0 || k as u128 >= u128::from(*len) {
                         return Err(bad("get: constant index out of range"));
                     }
-                    return self.part(v, e, k as i64 * *stride as i64, *elem);
+                    let off = i64::try_from(*stride)
+                        .ok()
+                        .and_then(|s| s.checked_mul(i64::try_from(k).ok()?))
+                        .ok_or_else(|| bad("get: element offset overflows"))?;
+                    return self.part(v, e, off, *elem);
                 }
                 let base = self.hmem(e)?;
                 let m = self.elem_ptr(base, idx, *stride, *len)?;

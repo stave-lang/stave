@@ -692,7 +692,8 @@ impl Program {
             } else {
                 scan::tok_span(f.id, &f.bytes, &f.parsed.tokens, 0)
             };
-            let holes = [("module", m.path_text.as_str()), ("package", rp.name.as_str()), ("name", name)];
+            let (package, name) = (modules::segment_text(&rp.name), modules::segment_text(name));
+            let holes = [("module", m.path_text.as_str()), ("package", &package), ("name", &name)];
             diags.extend(mk("E0107", Some(case), &holes, at, &[]));
         }
         let mut morder: Vec<usize> = (0..mods.len()).collect();
@@ -1385,7 +1386,8 @@ fn parse_cut(
 
 /// E0107: the first import segment is both a dependency and a module of the package.
 fn e0107(name: &str, package: &str, at: Span) -> Option<Diagnostic> {
-    mk("E0107", None, &[("name", name), ("package", package)], at, &[])
+    let (name, package) = (modules::segment_text(name), modules::segment_text(package));
+    mk("E0107", None, &[("name", &name), ("package", &package)], at, &[])
 }
 
 /// E1003 reason text of a read error.

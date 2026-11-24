@@ -1,0 +1,300 @@
+// stage1, the Stave compiler written in Stave. It runs on the CPU (built by stage0) for now; its
+// data is flat columns of ids and offsets, and each stage is a pass over whole arrays, the shape
+// it keeps on the GPU.
+//
+// Command line (a subset of stage0's): `stage1 build|check [PATH] [--dump=tokens,items,ast,diags
+// --dump-dir DIR] [--diagnostics human|json] [--target T] [-o OUT]`. PATH (default `.`) is a
+// `.stv` file or a package directory; the build covers it, its path dependencies, and the shipped
+// `std` and `runtime` from the library directory (`$STAVE_STD_DIR`, else next to the binary as for
+// stage0). It writes the requested dumps as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for
+// byte stage0's for the stages stage1 has, and prints its diagnostics to stderr in stage0's text
+// (or JSON lines). `-o` is accepted and unused: no code is generated yet. Exit codes: 0 done,
+// 1 diagnostics, 2 usage, 3 internal error (a diagnostic the registry cannot build).
+import diag;
+import diag_lex;
+import diag_out;
+import diag_syn;
+import dump;
+import files;
+import items;
+import lex;
+import parse;
+import paths;
+import source;
+import text;
+import std.env;
+import std.io;
+import std.mem;
+import std.string;
+import std.vec;
+
+const EXIT_OK: i32 = 0;
+const EXIT_USER: i32 = 1;
+const EXIT_USAGE: i32 = 2;
+const EXIT_BUG: i32 = 3;
+
+fn usage(msg: &str) -> i32 {
+    io.eprint(f"stage1: {msg}\n");
+    return EXIT_USAGE;
+}
+
+struct Cli {
+    root: string.String,
+    dump: string.String,
+    dump_dir: string.String,
+    target: string.String,
+    json: bool,
+    want_tokens: bool,
+    want_items: bool,
+    want_ast: bool,
+    want_diags: bool,
+}
+
+fn arg(i: usize) -> string.String {
+    return match env.arg(i) {
+        Option.Some(s) => s,
+        Option.None => string.String.new(),
+    };
+}
+
+// Splits `--flag=value` into the flag and Some(value).
+fn split_flag(a: &string.String) -> (string.String, Option<string.String>) {
+    let b = a.as_bytes();
+    for k in 0..b.len() {
+        if b[k] == 61 { return (text.string_of(&b[0..k]), Option.Some(text.string_of(&b[k + 1..b.len()]))); }
+    }
+    return (text.string_of(b), Option.None);
+}
+
+fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
+    let n = env.count();
+    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] [--dump=tokens,items,ast,diags --dump-dir DIR]")); }
+    let cmd = arg(1);
+    if !text.eq_str(cmd.as_bytes(), "build") && !text.eq_str(cmd.as_bytes(), "check") {
+        return Result.Err(f"unknown command `{cmd}` (stage1 runs build and check)");
+    }
+    let mut root_set = false;
+    let mut i: usize = 2;
+    while i < n {
+        let a = arg(i);
+        i = i + 1;
+        let ab = a.as_bytes();
+        if ab.len() == 0 || ab[0] != 45 || ab.len() == 1 {
+            if root_set { return Result.Err(f"unexpected argument `{a}`"); }
+            cli.root = a;
+            root_set = true;
+            continue;
+        }
+        let (flag, inline) = split_flag(&a);
+        let fb = flag.as_bytes();
+        let known = text.eq_str(fb, "--dump") || text.eq_str(fb, "--dump-dir") || text.eq_str(fb, "--target") || text.eq_str(fb, "-o") || text.eq_str(fb, "--diagnostics");
+        if !known { return Result.Err(f"unknown or unsupported flag `{flag}`"); }
+        let mut value = string.String.new();
+        match inline {
+            Option.Some(v) => { value = v; }
+            Option.None => {
+                if i >= n { return Result.Err(f"{flag} needs a value"); }
+                value = arg(i);
+                i = i + 1;
+            }
+        }
+        if value.len() == 0 { return Result.Err(f"{flag} needs a non-empty value"); }
+        if text.eq_str(fb, "--dump") {
+            cli.dump = value;
+        } else if text.eq_str(fb, "--dump-dir") {
+            cli.dump_dir = value;
+        } else if text.eq_str(fb, "--target") {
+            cli.target = value;
+        } else if text.eq_str(fb, "--diagnostics") {
+            if text.eq_str(value.as_bytes(), "json") {
+                cli.json = true;
+            } else if !text.eq_str(value.as_bytes(), "human") {
+                return Result.Err(f"--diagnostics takes human or json, not `{value}`");
+            }
+        }
+    }
+    if cli.dump.len() > 0 && cli.dump_dir.len() == 0 { return Result.Err(string.String.from_str("--dump needs --dump-dir DIR")); }
+    if cli.dump.len() == 0 && cli.dump_dir.len() > 0 { return Result.Err(string.String.from_str("--dump-dir needs --dump=STAGE,...")); }
+    let d = cli.dump.as_bytes();
+    let mut lo: usize = 0;
+    for k in 0..d.len() + 1 {
+        if k == d.len() || d[k] == 44 {
+            let st = text.string_of(&d[lo..k]);
+            if text.eq_str(st.as_bytes(), "tokens") {
+                cli.want_tokens = true;
+            } else if text.eq_str(st.as_bytes(), "items") {
+                cli.want_items = true;
+            } else if text.eq_str(st.as_bytes(), "ast") {
+                cli.want_ast = true;
+            } else if text.eq_str(st.as_bytes(), "diags") {
+                cli.want_diags = true;
+            } else if d.len() > 0 {
+                return Result.Err(f"dump `{st}` is not implemented in stage1");
+            }
+            lo = k + 1;
+        }
+    }
+    return Result.Ok(());
+}
+
+// The target's name and arch table, or None if stage1 cannot build it.
+fn target_of(t: &str) -> Option<files.Target> {
+    let b = mem.str_bytes(t);
+    let x86 = "x86_64-linux";
+    let a64 = "aarch64-linux";
+    let name = if text.eq_str(b, "x86_64-linux") || text.eq_str(b, "x86_64-linux-v2") then "x86_64-linux-v2" else if text.eq_str(b, "x86_64-linux-v3") then "x86_64-linux-v3" else if text.eq_str(b, "x86_64-linux-v4") then "x86_64-linux-v4" else if text.eq_str(b, "aarch64-linux") then "aarch64-linux" else if text.eq_str(b, "aarch64-linux+sve") then "aarch64-linux+sve" else if text.eq_str(b, "aarch64-linux+sve2") then "aarch64-linux+sve2" else "";
+    let nb = mem.str_bytes(name);
+    if nb.len() == 0 { return Option.None; }
+    let alias = if nb[0] == 120 then x86 else a64;
+    return Option.Some(files.Target.{ name: string.String.from_str(name), alias: string.String.from_str(alias) });
+}
+
+fn is_library_dir(d: &str) -> bool {
+    let s = paths.join(d, "std");
+    let core = paths.join(s.as_str(), "core.stv");
+    let rt = paths.join(d, "runtime");
+    return files.is_file(core.as_str()) && files.is_dir(rt.as_str());
+}
+
+// The library directory: `$STAVE_STD_DIR` when set and not empty, else `<prefix>/lib/stave`
+// for a binary in `<prefix>/bin`, else the nearest ancestor of the binary's directory that holds
+// a `Cargo.toml` and is a library directory.
+fn library_dir() -> Result<string.String, string.String> {
+    match env.var("STAVE_STD_DIR") {
+        Option.Some(v) => {
+            if v.len() > 0 {
+                if is_library_dir(v.as_str()) { return Result.Ok(v); }
+                return Result.Err(f"STAVE_STD_DIR={v}: not a Stave library directory (needs std/core.stv and runtime/)");
+            }
+        }
+        Option.None => {}
+    }
+    let exe = arg(0);
+    let exe_dir = paths.parent(exe.as_str());
+    if exe_dir.len() > 0 {
+        let prefix = paths.parent(exe_dir.as_str());
+        let lib = paths.join(prefix.as_str(), "lib");
+        let d = paths.join(lib.as_str(), "stave");
+        if is_library_dir(d.as_str()) { return Result.Ok(d); }
+    }
+    let mut a = exe_dir;
+    loop {
+        let cargo = paths.join(a.as_str(), "Cargo.toml");
+        if files.is_file(cargo.as_str()) && is_library_dir(a.as_str()) { return Result.Ok(a); }
+        let ab = a.as_bytes();
+        if ab.len() == 0 || (ab.len() == 1 && ab[0] == 47) { break; }
+        a = paths.parent(a.as_str());
+    }
+    return Result.Err(string.String.from_str("cannot find the shipped std and runtime (set STAVE_STD_DIR=DIR with DIR/std and DIR/runtime)"));
+}
+
+// stage0's root rule: a `.stv` file, or a directory with a `stave.toml`.
+fn check_root(root: &str) -> Result<(), string.String> {
+    match io.kind(root) {
+        Result.Ok(k) => {
+            if k.is_file() {
+                if paths.has_extension(root, "stv") { return Result.Ok(()); }
+                return Result.Err(f"{root}: not a .stv file");
+            }
+            let m = paths.join(root, "stave.toml");
+            if files.is_file(m.as_str()) { return Result.Ok(()); }
+            return Result.Err(f"{root}: not a package (no stave.toml)");
+        }
+        Result.Err(e) => { return Result.Err(f"{root}: {e}"); }
+    }
+}
+
+fn write_dump(dir: &str, name: &str, bytes: &[u8]) -> i32 {
+    let path = paths.join(dir, name);
+    match io.write_file(path.as_str(), bytes) {
+        Result.Ok(_) => {}
+        Result.Err(e) => { return usage(f"cannot write {path}: {e}"); }
+    }
+    return EXIT_OK;
+}
+
+// The directory diagnostic paths are relative to: the root package's, or the parent of a root
+// `.stv` file.
+fn root_dir(root: &str) -> string.String {
+    if paths.has_extension(root, "stv") && files.is_file(root) { return paths.parent(root); }
+    return string.String.from_str(root);
+}
+
+fn main() -> i32 {
+    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), json: false, want_tokens: false, want_items: false, want_ast: false, want_diags: false };
+    match parse_args(&mut cli) {
+        Result.Ok(_) => {}
+        Result.Err(m) => { return usage(m.as_str()); }
+    }
+    let mut target = files.Target.{ name: string.String.new(), alias: string.String.new() };
+    match target_of(cli.target.as_str()) {
+        Option.Some(t) => { target = t; }
+        Option.None => {
+            let t = cli.target.as_str();
+            return usage(f"target {t} is not supported by stage1");
+        }
+    }
+    match check_root(cli.root.as_str()) {
+        Result.Ok(_) => {}
+        Result.Err(m) => { return usage(m.as_str()); }
+    }
+    let mut lib = string.String.new();
+    match library_dir() {
+        Result.Ok(d) => { lib = d; }
+        Result.Err(m) => { return usage(m.as_str()); }
+    }
+    let std_dir = paths.join(lib.as_str(), "std");
+    let runtime_dir = paths.join(lib.as_str(), "runtime");
+    let fl = files.discover(cli.root.as_str(), std_dir.as_str(), runtime_dir.as_str(), &target);
+    let set = source.read_all(&fl);
+    let lx = lex.Lexer.new();
+    let mut toks = lex.Tokens.new();
+    for f in 0..set.files() {
+        lx.lex_file(set.file(f), &mut toks);
+    }
+    let mut d = diag.Diags.new();
+    diag_lex.unreadable(&mut d, &set);
+    diag_lex.lexical(&mut d, &toks, &set);
+    let cut = items.build(&lx, &set, &toks);
+    let tree = parse.build(&set, &toks, &cut);
+    diag_syn.syntactic(&mut d, &lx, &set, &toks, &cut, &tree);
+    let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
+    let rows = d.order(ft.rank.as_slice());
+    let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);
+    if d.bad.get() {
+        io.eprint("stage1: internal compiler error: a diagnostic could not be built from its registry template\n");
+        return EXIT_BUG;
+    }
+    let _ = io.write_all(2, shown.as_slice());
+    if cli.dump_dir.len() > 0 {
+        match io.create_dir_all(cli.dump_dir.as_str()) {
+            Result.Ok(_) => {}
+            Result.Err(e) => {
+                let dir = cli.dump_dir.as_str();
+                return usage(f"cannot create {dir}: {e}");
+            }
+        }
+        if cli.want_tokens {
+            let out = dump.tokens(&lx, &toks);
+            let code = write_dump(cli.dump_dir.as_str(), "tokens.txt", out.as_slice());
+            if code != EXIT_OK { return code; }
+        }
+        if cli.want_items {
+            let out = dump.items_txt(&cut, &tree);
+            let code = write_dump(cli.dump_dir.as_str(), "items.txt", out.as_slice());
+            if code != EXIT_OK { return code; }
+        }
+        if cli.want_ast {
+            let out = dump.ast_txt(&cut, &tree, &toks);
+            let code = write_dump(cli.dump_dir.as_str(), "ast.txt", out.as_slice());
+            if code != EXIT_OK { return code; }
+        }
+        if cli.want_diags {
+            let out = dump.diags(&d, rows.as_slice(), &ft, &set);
+            let code = write_dump(cli.dump_dir.as_str(), "diags.txt", out.as_slice());
+            if code != EXIT_OK { return code; }
+        }
+    }
+    if d.has_errors(rows.as_slice()) { return EXIT_USER; }
+    return EXIT_OK;
+}

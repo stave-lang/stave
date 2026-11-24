@@ -410,7 +410,7 @@ pub fn add_caller(
         return Err(format!("`{}`: not a `test fn` with the domain's parameters", f.path));
     }
     let lay = Layouts::compute(&m.types);
-    let sa = m.intrinsic("static_addr");
+    let sa = m.intrinsic(stave_ir::intrinsics::STATIC_ADDR);
     let mut cx = Caller { m, lay, sa, tag, statics: HashMap::new() };
     let mut b = FuncBuilder::new(&[]);
     for input in inputs {

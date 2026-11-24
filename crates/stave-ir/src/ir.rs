@@ -818,6 +818,9 @@ pub struct Module {
     /// unknown): the bytes of a value of such a type are not read-only behind a `&`. The
     /// bounds pass reads a field behind a `&` parameter as one value only when this is known.
     pub cell: Option<crate::types::DeclId>,
+    /// Path and kind of every declaration the module refers to: the `def` of each `Adt` type
+    /// key in `types`, and `cell`. Ascending by id, one entry per id; none is unreferenced.
+    pub decls: Vec<crate::types::DeclInfo>,
     /// Per `static`, in a module lowered with the borrow side table: it is not `static mut`,
     /// so nothing writes its bytes outside an `UnsafeCell`.
     pub frozen: Vec<bool>,
@@ -913,6 +916,12 @@ impl Module {
 
     pub fn intrinsic_name(&self, i: IntrinsicId) -> Option<&str> {
         self.intrinsics.get(i.index()).map(|s| s.as_str())
+    }
+
+    /// The family of an intrinsic ([`crate::intrinsics::kind`]); `None`: the id is out of range or
+    /// the name is not in the table.
+    pub fn intrinsic_kind(&self, i: IntrinsicId) -> Option<crate::intrinsics::Kind> {
+        self.intrinsic_name(i).and_then(crate::intrinsics::kind)
     }
 
     /// Renumbers the type table canonically ([`TypeTable::canonicalize`]) and rewrites every type

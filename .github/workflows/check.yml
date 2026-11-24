@@ -8,18 +8,21 @@ permissions:
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
+env:
+  CI: "1"
+  # A native test leg that cannot run here (CPU feature, qemu-aarch64) fails instead of skipping.
+  STAVE_REQUIRE_LEGS: v2,v3,aarch64
 jobs:
-  check:
+  # A pull request that changes only *.md files skips the build and test jobs. Any other diff,
+  # a push, an empty diff, or a diff that cannot be computed runs everything.
+  # LANG.md and contracts/ are read by tests and generators, so they count as code.
+  scope:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    env:
-      CI: "1"
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v4
-      # A pull request that changes only *.md files skips the build and test steps; the job
-      # still runs and succeeds, because the required status check is this job. Any other
-      # diff, a push, an empty diff, or a diff that cannot be computed runs everything.
-      # LANG.md and contracts/ are read by tests and generators, so they count as code.
       - id: scope
         if: github.event_name == 'pull_request'
         env:
@@ -31,11 +34,45 @@ jobs:
             ! printf '%s\n' "$files" | grep -qE '^(LANG\.md$|contracts/)'; then
             echo docs_only=true >> "$GITHUB_OUTPUT"
           fi
+  # The two halves of `run.sh check` run side by side: together they are longer than one job
+  # may take on a slow runner.
+  test:
+    needs: scope
+    if: needs.scope.outputs.docs_only != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
       # AArch64 programs built by the tests run under user-mode emulation.
-      - if: steps.scope.outputs.docs_only != 'true'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user binutils-aarch64-linux-gnu
-      # A native test leg that cannot run here (CPU feature, qemu-aarch64) fails instead of skipping.
-      - if: steps.scope.outputs.docs_only != 'true'
-        run: sh tools/ci-step/run.sh check
-        env:
-          STAVE_REQUIRE_LEGS: v2,v3,aarch64
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user binutils-aarch64-linux-gnu
+      - run: sh tools/ci-step/run.sh check-test
+  gates:
+    needs: scope
+    if: needs.scope.outputs.docs_only != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user binutils-aarch64-linux-gnu
+      - run: sh tools/ci-step/run.sh check-gates
+  # The required status check is this job: it runs on every event and succeeds only when the
+  # scope is known and each half either passed or was left out for a markdown-only diff.
+  check:
+    needs: [scope, test, gates]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          SCOPE: ${{ needs.scope.result }}
+          DOCS_ONLY: ${{ needs.scope.outputs.docs_only }}
+          TEST: ${{ needs.test.result }}
+          GATES: ${{ needs.gates.result }}
+        run: |
+          echo "scope=$SCOPE docs_only=$DOCS_ONLY test=$TEST gates=$GATES"
+          [ "$SCOPE" = success ] || exit 1
+          if [ "$DOCS_ONLY" = true ]; then
+            [ "$TEST" = skipped ] && [ "$GATES" = skipped ]
+          else
+            [ "$TEST" = success ] && [ "$GATES" = success ]
+          fi

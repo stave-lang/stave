@@ -859,7 +859,7 @@ impl<'a> FnCx<'a> {
                 self.req(Req::Inst(InstKey { decl: init, args: Vec::new() }));
             }
             let pt = self.t_ptr(false, u64t);
-            let sa = self.intrinsic("static_addr");
+            let sa = self.intrinsic(stave_ir::intrinsics::STATIC_ADDR);
             let i = self.int(i128::from(idx));
             let p = self.f.b.op(Op::Intrinsic(sa), FnCx::ir(pt), &[i]);
             let w = Operand::Value(self.f.b.load(FnCx::ir(u64t), p));

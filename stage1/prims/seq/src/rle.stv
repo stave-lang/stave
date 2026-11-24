@@ -1,0 +1,56 @@
+// Run-length encoding: maximal runs of equal neighbours. A position starts a run iff it is the
+// first or differs from its predecessor; the runs are the compaction of those flags.
+import col;
+import word;
+import std.vec;
+
+// Run r holds `value[r]` at positions start[r]..start[r + 1]. `start` has one entry more than
+// `value` (the last is the length of the input), so it is a row-offset column: empty input is
+// no runs and start = [0].
+pub struct Runs<T> {
+    pub value: vec.Vec<T>,
+    pub start: vec.Vec<u32>,
+}
+
+impl<T> Runs<T> {
+    pub fn len(&self) -> usize {
+        return self.value.len();
+    }
+
+    // The number of positions of run r.
+    pub fn run_len(&self, r: usize) -> usize {
+        let s = self.start.as_slice();
+        return (s[r + 1] - s[r]) as usize;
+    }
+}
+
+impl<T: Copy> Runs<T> {
+    // The input again: each value repeated for its run.
+    pub fn decode(&self) -> vec.Vec<T> {
+        let s = self.start.as_slice();
+        let vs = self.value.as_slice();
+        let mut out = vec.Vec::<T>.with_capacity(s[vs.len()] as usize);
+        for r in 0..vs.len() {
+            let x = vs[r];
+            for _ in 0..self.run_len(r) {
+                out.push(x);
+            }
+        }
+        return out;
+    }
+}
+
+pub fn encode<T: word.Word + Copy>(xs: &[T]) -> Runs<T> {
+    let n = xs.len();
+    let end = col.ids(n);
+    let mut value = vec.Vec::<T>.new();
+    let mut start = vec.Vec::<u32>.new();
+    for i in 0..n {
+        if i == 0 || !xs[i].same(xs[i - 1]) {
+            value.push(xs[i]);
+            start.push(i as% u32);
+        }
+    }
+    start.push(end);
+    return Runs.{ value: value, start: start };
+}

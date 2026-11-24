@@ -676,7 +676,7 @@ impl Cx<'_> {
         // ta.node + ta.k <= tb.node + tb.k + w
         let Some(folded) = tb.k.checked_add(w).and_then(|s| s.checked_sub(ta.k)) else { return };
         // as written: a's node + ka <= b's node + kb + w
-        let wop = kb + w - ka;
+        let Some(wop) = kb.checked_add(w).and_then(|s| s.checked_sub(ka)) else { return };
         g.facts.push(Fact { from: ta.node, to: tb.node, w: folded, at, eq, src, a, b, wop });
     }
 

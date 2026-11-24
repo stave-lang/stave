@@ -34,7 +34,8 @@ use stave_target::Triple;
 
 pub use annot::{Annot, AnnotAt, AnnotError, Code, Directive, Severity, Syntax, scan};
 pub use spec::{
-    ExpectedDiag, TestCase, TestKind, TestSpec, codes_from_registry, discover, load_spec, rel_key,
+    ExpectedDiag, PackageFile, TestCase, TestKind, TestSpec, codes_from_registry, discover, load_spec,
+    package_files, rel_key,
 };
 
 /// A diagnostic as the runner sees it.

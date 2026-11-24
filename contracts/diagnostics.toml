@@ -65,6 +65,11 @@
 # included) becomes one space, and leading and trailing whitespace is removed. Any other hole value
 # with a newline there is a render error. Edit replacements take hole values unchanged (they may
 # span lines).
+# A value of a `name`, `path`, `place`, `type`, or `pattern` hole that the compiler takes from
+# source text (the expression a `for` loop iterates, a type or path written over several lines) is
+# written the same way before it is given: whitespace runs become one space, the ends are
+# trimmed (`stave_diag::spelled`). A line feed in a file, directory, or package name that is part
+# of a module path is written `\n` in the path text.
 
 [[diag]]
 code = "E0001"

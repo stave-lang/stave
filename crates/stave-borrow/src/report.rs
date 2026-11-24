@@ -47,7 +47,7 @@ fn place_key(p: &Place) -> (u32, Vec<(u8, u32, u32)>) {
 }
 
 /// The name of a local: its identifier; a temporary's is the source text of its expression
-/// (whitespace runs collapsed, at most 60 bytes).
+/// (`stave_diag::spelled`, at most 60 bytes; `_` if empty).
 pub fn local_name(body: &Body, tys: &Tys<'_>, l: u32) -> String {
     let Some(loc) = body.locals.get(l as usize) else { return String::from("_") };
     if !loc.name.is_empty() {
@@ -58,8 +58,11 @@ pub fn local_name(body: &Body, tys: &Tys<'_>, l: u32) -> String {
         .prog
         .file(sp.file)
         .and_then(|f| f.bytes.get(sp.offset as usize..(sp.offset + sp.len) as usize))
-        .map(|b| String::from_utf8_lossy(b).split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|b| stave_diag::spelled(&String::from_utf8_lossy(b)))
         .unwrap_or_default();
+    if text.is_empty() {
+        return String::from("_");
+    }
     if text.len() > 60 {
         let mut cut = 57;
         while !text.is_char_boundary(cut) {

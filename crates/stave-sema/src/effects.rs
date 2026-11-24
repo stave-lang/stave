@@ -543,11 +543,29 @@ fn body_ops(prog: &Program, b: &TypedBody) -> BodyOps {
 /// its call runs (`std.slice.copy_raw`) only moves bytes within the ranges its caller vouches for.
 fn intrinsic(prog: &Program, d: DeclId) -> Option<(Effects, OpKind)> {
     let name = prog.strings.get(prog.decl(d)?.name);
-    Some(match name {
-        "thread_clone" => (Effects::IO, OpKind::Syscall),
-        n if n.starts_with("syscall") => (Effects::IO, OpKind::Syscall),
-        "call_on_stack" | "cpu_init" => (Effects::ALL, OpKind::Unseen),
-        _ => (Effects::NONE, OpKind::Unseen),
+    use stave_ir::intrinsics::Kind;
+    Some(match stave_ir::intrinsics::kind(name) {
+        Some(Kind::ThreadClone | Kind::Syscall(_)) => (Effects::IO, OpKind::Syscall),
+        // a name outside the table (E0805 rejects it) is assumed to do anything
+        Some(Kind::CallOnStack | Kind::CpuInit) | None => (Effects::ALL, OpKind::Unseen),
+        Some(
+            Kind::Ccall(_)
+            | Kind::Cpuid
+            | Kind::Xgetbv
+            | Kind::ThreadStartAddr
+            | Kind::MainAddr
+            | Kind::SignalHandlerAddr
+            | Kind::SiteTable
+            | Kind::PcTable
+            | Kind::StackTable
+            | Kind::ThreadBlock
+            | Kind::SetThreadBlock
+            | Kind::CpuBaseline
+            | Kind::Atomic { .. }
+            | Kind::CopyBytes
+            | Kind::StaticAddr
+            | Kind::Ptx,
+        ) => (Effects::NONE, OpKind::Unseen),
     })
 }
 
