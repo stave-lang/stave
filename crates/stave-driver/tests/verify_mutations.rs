@@ -528,13 +528,6 @@ fn verified_mutants_do_not_panic() {
     let per: usize = std::env::var("STAVE_MUTANTS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
     let mut panics = Vec::new();
     for (ti, target) in TARGETS.iter().enumerate() {
-        let (mut accepted, mut total) = (0usize, 0usize);
-        let mut classes = [
-            ("jump target", 0usize, 0usize),
-            ("case", 0, 0),
-            ("else target", 0, 0),
-            ("branch operand", 0, 0),
-        ];
         for (pi, file) in PROGRAMS.iter().enumerate() {
             let (m, main) = lowered(file, target);
             assert!(verifies(&m), "{file} for {target}: the unmutated module must verify");
@@ -548,11 +541,6 @@ fn verified_mutants_do_not_panic() {
             for k in 0..per {
                 let mut x = m.clone();
                 let what = mutate(&mut x, &mut r);
-                total += 1;
-                let class = classes.iter().position(|c| what.contains(c.0));
-                if let Some(c) = class {
-                    classes[c].1 += 1;
-                }
                 let ok = match catch_unwind(AssertUnwindSafe(|| verifies(&x))) {
                     Ok(ok) => ok,
                     Err(_) => {
@@ -563,10 +551,6 @@ fn verified_mutants_do_not_panic() {
                 if !ok {
                     continue;
                 }
-                accepted += 1;
-                if let Some(c) = class {
-                    classes[c].2 += 1;
-                }
                 let release = k % 2 == 1;
                 if catch_unwind(AssertUnwindSafe(|| downstream(&x, main, target, release))).is_err() {
                     panics.push(format!(
@@ -575,7 +559,6 @@ fn verified_mutants_do_not_panic() {
                 }
             }
         }
-        eprintln!("verify mutants for {target}: {accepted} of {total} accepted; new classes {classes:?}");
     }
     assert!(panics.is_empty(), "{} panics:\n{}", panics.len(), panics.join("\n"));
 }
