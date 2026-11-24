@@ -1,0 +1,162 @@
+//~ ARGS --release
+//~ STDOUT local_part_stores.stdout
+// `local_part_stores.stv` in a release build.
+import std.io;
+import std.mem;
+
+struct In {
+    pub xs: [u32; 4],
+    pub k: u32,
+}
+
+struct Out {
+    pub n: u64,
+    pub inner: In,
+    pub grid: [[u16; 3]; 2],
+}
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        io.print(f"drop {self.id}\n");
+    }
+}
+
+struct Pair {
+    pub d: D,
+    pub n: u32,
+}
+
+fn show(tag: &str, xs: &[u64]) {
+    io.print(tag);
+    for i in 0..xs.len() {
+        let x = xs[i];
+        io.print(f" {x}");
+    }
+    io.print("\n");
+}
+
+fn sum(xs: &[u32]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..xs.len() {
+        s = s + xs[i] as u64;
+    }
+    return s;
+}
+
+fn bump(a: &mut [u32; 64], i: usize) {
+    a[i] += 100;
+}
+
+// the by-value array is the callee's own: its stores do not reach the caller's
+fn twice(a: [u32; 64]) -> [u32; 64] {
+    let mut b = a;
+    for i in 0usize..64 {
+        b[i] = b[i] *% 2;
+    }
+    return b;
+}
+
+fn first_of(a: [u32; 64]) -> u32 {
+    return a[0];
+}
+
+fn filled(k: u32) -> [u32; 64] {
+    let mut a = [0u32; 64];
+    a[(k % 64) as usize] = k;
+    a[0] = 1;
+    return a;
+}
+
+fn main() -> i32 {
+    // stores and reads in a loop, compound assignment, an index from data
+    let mut a = [0u32; 64];
+    for i in 0usize..64 {
+        a[i] = i as% u32;
+    }
+    let mut r: u32 = 7;
+    for _ in 0u32..1000 {
+        r = r *% 1103515245 +% 12345;
+        let d = ((r >> 8) % 64) as usize;
+        a[d] += 1;
+        a[(d + 1) % 64] = a[d] +% a[(d + 1) % 64];
+    }
+    (a)[63] = 5;
+    show("loop", &[sum(&a), a[0] as u64, a[63] as u64]);
+
+    // a copy of the whole value keeps it; later stores do not reach the copy
+    let b = a;
+    a[0] = 99;
+    let mut c = a;
+    a[1] = 98;
+    c[2] = 97;
+    let same = (a[2] == b[2]) as u64;
+    show("copies", &[b[0] as u64, a[0] as u64, c[0] as u64, a[1] as u64, c[1] as u64, c[2] as u64, same]);
+
+    // a later borrow sees the stores before it, and the local sees the stores through it
+    a[3] = 11;
+    bump(&mut a, 3);
+    {
+        let r = &mut a;
+        r[4] = 44;
+    }
+    a[5] = a[4] + a[3];
+    show("borrow", &[a[3] as u64, a[4] as u64, a[5] as u64]);
+
+    // by value: in and out; the callee's stores stay in the callee
+    let t = twice(a);
+    let first = first_of(a);
+    a[0] = 777;
+    show("value", &[t[3] as u64, a[3] as u64, first as u64, a[0] as u64, filled(70)[6] as u64, filled(3)[0] as u64]);
+
+    // nested arrays, an array in a struct in a struct, tuple fields
+    let mut o = Out.{ n: 1, inner: In.{ xs: [1, 2, 3, 4], k: 0 }, grid: [[0u16; 3]; 2] };
+    for i in 0usize..4 {
+        o.inner.xs[i] *= 10;
+        o.inner.k += o.inner.xs[i];
+        o.grid[i % 2][i % 3] = (i * 7) as% u16;
+    }
+    o.n = o.n + o.inner.k as u64;
+    let mut tu = (0u8, [0u64; 8], 1u32);
+    for i in 0usize..8 {
+        tu.1[i] = (i * i) as u64;
+        tu.0 += 1;
+    }
+    tu.1[2] = tu.2 as u64 + 40;
+    tu.2 = 0;
+    show("nested", &[o.n, o.inner.xs[3] as u64, o.grid[1][0] as u64, o.grid[0][2] as u64]);
+    show("tuple", &[tu.0 as u64, tu.1[7], tu.1[2], tu.2 as u64]);
+
+    // vectors as elements
+    let mut vs = [u32x4.splat(1); 4];
+    vs[2] = vs[1] +% u32x4.splat(5);
+    show("vectors", &[vs[2].reduce_add_wrap() as u64, vs[3].reduce_add_wrap() as u64]);
+
+    // droppable elements: the replaced one is dropped at the store, the rest at scope end
+    {
+        let mut ds = [D.{ id: 1 }, D.{ id: 2 }, D.{ id: 3 }];
+        ds[1] = D.{ id: 20 };
+        io.print("replaced 2\n");
+        ds[1].id = 21;
+        ds[0] = D.{ id: 10 };
+        io.print("replaced 1\n");
+    }
+    // a local with a drop flag: moved on one path, its parts stored on the other
+    for k in 0u32..2 {
+        let mut p = Pair.{ d: D.{ id: 30 + k }, n: 0 };
+        if k == 0 {
+            mem.drop(p);
+            io.print("moved\n");
+        } else {
+            p.n = 5;
+            p.d = D.{ id: 40 + p.n };
+            let n = p.n;
+            io.print(f"stored {n}\n");
+        }
+    }
+    io.print("end\n");
+    return 0;
+}

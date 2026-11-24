@@ -354,6 +354,9 @@ impl<'a, 'm> Gen<'a, 'm> {
             Op::Slot => Ok(()),
             Op::Load => {
                 let v = self.res(i)?;
+                if self.an.in_place.get(v.index()).copied().unwrap_or(false) {
+                    return Ok(());
+                }
                 let t = ty.ok_or_else(|| bad("load type"))?;
                 let rp = self.use_g(arg(0)?)?;
                 let t = self.cg.ty(t);
