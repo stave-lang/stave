@@ -36,10 +36,10 @@ case "$step" in
   gen)     cargo run -q --locked -p ll1gen
            cargo run -q --locked -p diaggen
            cargo run -q --locked -p gen-tables ;;
-  # stage1 `tokens` dumps against stage0's on the conformance corpus and stage1 itself.
+  # stage1 dumps and diagnostics against stage0's on the conformance corpus and stage1 itself.
   stage1-gate) sh tools/ci-step/stage1-gate.sh ;;
-  # The unit tests of the stage1 library packages.
-  stage1-test) cargo run -q --locked -p stave-cli -- test stage1/prims/seq ;;
+  # The unit tests of the stage1 library packages and of stage1 itself.
+  stage1-test) cargo run -q --locked -p stave-cli -- test stage1/prims/seq && cargo run -q --locked -p stave-cli -- test stage1 ;;
   lang-budget)
            cargo run -q --locked -p lang-budget -- LANG.md --limit 15000 ;;
   # `check` in two halves that need nothing from each other, so they can run on two machines.

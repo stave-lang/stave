@@ -1,0 +1,138 @@
+// Tests of `modules`: module paths and ids, the trie, import paths, cycles. Checked against the
+// rules (module path text order, what each import names), not against a second implementation.
+import modules;
+import resdiag;
+import test_kit;
+import text;
+import std.debug;
+
+const NONE: u32 = 4294967295;
+
+// Root package `app`, dependency `geo` (a library), built-in `std`; package ranks by name.
+fn graph(main_src: &str, a_src: &str, ab_src: &str) -> test_kit.Out {
+    let mut k = test_kit.kit();
+    let app = k.package("app", false, true, false);
+    let geo = k.package("geo", false, false, true);
+    let s = k.package("std", true, false, false);
+    k.dep(app, "geo", geo);
+    k.dep(app, "std", s);
+    k.dep(geo, "std", s);
+    k.file(app, "a", a_src);
+    k.file(app, "a/b", ab_src);
+    k.file(app, "d/e", "pub fn de() {}\n");
+    k.file(app, "main", main_src);
+    k.file(geo, "lib", "pub fn g() {}\n");
+    k.file(geo, "shapes", "pub struct Sq { pub w: u32 }\n");
+    k.file(s, "core", "pub enum Option<T> { Some(T), None }\n");
+    k.file(s, "io", "pub fn print(s: &str) {}\n");
+    return k.run();
+}
+
+test fn module_paths_and_ids() {
+    let o = graph("fn main() {}\n", "pub fn x() {}\n", "pub fn bf() {}\n");
+    let want = ["a", "a.b", "d.e", "geo", "geo.shapes", "main", "std.core", "std.io"];
+    debug.assert(o.md.modules() == want.len(), "one module per file");
+    for m in 0..want.len() {
+        debug.assert(text.eq_str(o.md.text(m), want[m]), "modules ranked by path text");
+    }
+    debug.assert(o.md.pkg_root_mod.as_slice()[0] == o.module("main"), "a bin package's root is main");
+    debug.assert(o.md.pkg_root_mod.as_slice()[1] == o.module("geo"), "a library's root is lib, named by the package");
+    debug.assert(o.md.pkg_root_mod.as_slice()[2] == NONE, "a built-in package has no root module");
+    debug.assert(o.md.core_mod == o.module("std.core"), "the prelude module");
+    for m in 0..o.md.modules() {
+        debug.assert(o.md.prelude_ok.as_slice()[m], "every package here sees the prelude");
+        let f = o.md.mod_file.as_slice()[m];
+        debug.assert(o.md.file_mod.as_slice()[f as usize] == m as% u32, "file and module ids invert");
+    }
+    let path = o.md.path(o.module("geo.shapes") as usize);
+    debug.assert(path.len() == 2 && path[0] == o.sym("geo") && path[1] == o.sym("shapes"), "a dependency's path starts with its name");
+}
+
+test fn trie_nodes() {
+    let o = graph("fn main() {}\n", "pub fn x() {}\n", "pub fn bf() {}\n");
+    let a = o.md.child(0, o.sym("a"));
+    debug.assert(a != NONE && o.md.node_mod.as_slice()[a as usize] == o.module("a"), "a is a module and a directory");
+    let ab = o.md.child(a, o.sym("b"));
+    debug.assert(o.md.node_mod.as_slice()[ab as usize] == o.module("a.b"), "a.b");
+    let d = o.md.child(0, o.sym("d"));
+    debug.assert(d != NONE && o.md.node_mod.as_slice()[d as usize] == NONE, "d is a directory only");
+    debug.assert(o.md.child(0, o.sym("shapes")) == NONE, "shapes is geo's, not app's");
+    debug.assert(o.md.child(1, o.sym("shapes")) != NONE, "geo.shapes");
+}
+
+test fn import_paths() {
+    let src = "import geo;\nimport geo.shapes;\nimport a.b;\nimport std.io as out;\nimport app.a;\nimport a.zz;\nimport d;\nimport nope;\nfn main() {}\n";
+    let o = graph(src, "pub fn x() {}\n", "pub fn bf() {}\n");
+    let t = o.md.imp_target.as_slice();
+    debug.assert(o.md.imp_item.len() == 8, "eight imports");
+    debug.assert(t[0] == o.module("geo"), "a dependency name alone is its root module");
+    debug.assert(t[1] == o.module("geo.shapes"), "a path in a dependency");
+    debug.assert(t[2] == o.module("a.b"), "a path in the own package");
+    debug.assert(t[3] == o.module("std.io") && o.md.imp_bound.as_slice()[3] == o.sym("out"), "`as` binds its name");
+    debug.assert(t[4] == o.module("a"), "the own package's name");
+    debug.assert(t[5] == NONE && t[6] == NONE && t[7] == NONE, "a.zz, the directory d, nope name no module");
+    debug.assert(o.md.imp_bound.as_slice()[2] == o.sym("b"), "an import binds its last segment");
+    let s = o.md.seg_off.as_slice()[2] as usize;
+    debug.assert(o.md.seg_mod.as_slice()[s] == o.module("a") && o.md.seg_mod.as_slice()[s + 1] == o.module("a.b"), "each prefix that names a module");
+    debug.assert(o.rows.count(resdiag.E0101) == 3, "E0101 at zz, d, nope");
+    let f: usize = 3;
+    let zz = o.at(f, "zz", 0);
+    let mut hit = false;
+    for r in 0..o.rows.len() {
+        if o.rows.code.as_slice()[r] == resdiag.E0101 && o.rows.off.as_slice()[r] == zz && o.rows.a.as_slice()[r] == o.sym("zz") { hit = true; }
+    }
+    debug.assert(hit, "E0101 names the failing segment");
+    debug.assert(o.md.cycle_comp.as_slice()[o.module("main") as usize] == NONE, "no cycle");
+}
+
+test fn ambiguous_first_segment() {
+    let mut k = test_kit.kit();
+    let app = k.package("app", false, true, false);
+    let geo = k.package("geo", false, false, true);
+    k.dep(app, "a", geo);
+    k.file(app, "a", "pub fn x() {}\n");
+    k.file(app, "main", "import a;\nimport app.a;\nfn main() {}\n");
+    k.file(geo, "lib", "pub fn g() {}\n");
+    let o = k.run();
+    debug.assert(o.md.imp_target.as_slice()[0] == NONE, "a dependency and a module of one name: nothing");
+    debug.assert(o.md.seg_mod.as_slice()[0] == NONE, "no segment names a module");
+    debug.assert(o.md.imp_target.as_slice()[1] == o.module("a"), "the package name selects the module");
+    debug.assert(o.rows.count(resdiag.E0107) == 1 && o.rows.count(resdiag.E0101) == 0, "E0107, not E0101");
+    debug.assert(o.md.prelude_ok.as_slice()[0] == false, "no std, no prelude");
+}
+
+test fn import_cycles() {
+    let o = graph("import a;\nfn main() {}\n", "import a.b;\npub fn x() {}\n", "import a;\nimport a.b;\npub fn bf() {}\n");
+    let ca = o.md.cycle_comp.as_slice()[o.module("a") as usize];
+    debug.assert(ca != NONE && ca == o.md.cycle_comp.as_slice()[o.module("a.b") as usize], "a and a.b form one component");
+    debug.assert(o.md.cycle_comp.as_slice()[o.module("main") as usize] == NONE, "main imports into it but is outside");
+    debug.assert(o.rows.count(resdiag.E0102) == 1, "one E0102 per component");
+    for r in 0..o.rows.len() {
+        if o.rows.code.as_slice()[r] != resdiag.E0102 { continue; }
+        debug.assert(o.rows.a.as_slice()[r] == o.module("a"), "named by the smallest module path");
+        debug.assert(o.rows.off.as_slice()[r] == 0, "a's import of a.b");
+        debug.assert(o.rows.rel.row_len(r) == 3, "one related import: a.b's import of a");
+    }
+    for k in 0..o.md.imp_item.len() {
+        debug.assert(o.md.imp_target.as_slice()[k] != NONE, "cyclic imports keep their targets");
+    }
+}
+
+test fn self_import_is_a_cycle() {
+    let o = graph("fn main() {}\n", "import a;\npub fn x() {}\n", "pub fn bf() {}\n");
+    debug.assert(o.md.cycle_comp.as_slice()[o.module("a") as usize] != NONE, "a self-import");
+    debug.assert(o.rows.count(resdiag.E0102) == 1, "one E0102");
+}
+
+test fn dotted_module_path() {
+    let mut k = test_kit.kit();
+    let app = k.package("app", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(app, "std", s);
+    k.file(app, "a.b", "pub fn x() {}\n");
+    k.file(app, "main", "fn main() {}\n");
+    k.file(app, "std/cell", "pub fn y() {}\n");
+    k.file(s, "core", "pub trait Copy {}\n");
+    let o = k.run();
+    debug.assert(o.rows.count(resdiag.E0107) == 2, "a dotted file name and a module spelled like a built-in package");
+}

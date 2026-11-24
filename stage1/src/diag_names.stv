@@ -1,0 +1,209 @@
+// The diagnostics of `modules`, `decls`, and `resolve` as rows of `diag.Diags`: each `resdiag` row
+// (code, span, ids, related spans) with the template holes rebuilt from the string table and the
+// module and decl tables. Hole text follows stage0:
+// - a module path is the path text with a line feed written `\n`; a package is its name;
+// - E0105's scope is the module path, then the names down to the declaration scope: a type or
+//   trait is `module.Name`, a variant `module.Enum.Variant`; the methods of an impl head
+//   `module.Head` (a built-in head its name, a head naming no type the module path of the impl);
+//   the locals of an item the module path, the type the item is an impl or trait of, and the fn
+//   the binding is in, each present name joined by `.`;
+// - E0811's `abi` is the ABI string as written, `"C"` or `"stave-intrinsic"` for the forms the
+//   span does not cover.
+import decls;
+import diag;
+import intern;
+import modules;
+import resdiag;
+import source;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+// Appends bytes with a line feed written `\n`.
+fn push_escaped(out: &mut vec.Vec<u8>, b: &[u8]) {
+    for i in 0..b.len() {
+        if b[i] == 10 {
+            out.push(92);
+            out.push(110);
+        } else {
+            out.push(b[i]);
+        }
+    }
+}
+
+fn string_text(nm: &intern.Interned, s: u32) -> vec.Vec<u8> {
+    let mut out = vec.Vec::<u8>.new();
+    if s != NONE { push_escaped(&mut out, nm.tab.text(s as usize)); }
+    return out;
+}
+
+fn module_text(md: &modules.Modules, m: u32) -> vec.Vec<u8> {
+    let mut out = vec.Vec::<u8>.new();
+    push_escaped(&mut out, md.text(m as usize));
+    return out;
+}
+
+fn package_text(md: &modules.Modules, nm: &intern.Interned, p: u32) -> vec.Vec<u8> {
+    return string_text(nm, md.pkg_sym.as_slice()[p as usize]);
+}
+
+// Appends `name`, after a `.` unless `out` is empty.
+fn join(out: &mut vec.Vec<u8>, name: &[u8]) {
+    if out.len() > 0 { out.push(46); }
+    push_escaped(out, name);
+}
+
+// The scope text of decl d: its module path, then the names of d and its parents, outermost first.
+fn decl_scope(ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, d: u32) -> vec.Vec<u8> {
+    let mut chain = vec.Vec::<u32>.new();
+    let mut x = d;
+    while x != NONE {
+        chain.push(x);
+        x = ds.parent.as_slice()[x as usize];
+    }
+    let mut out = module_text(md, ds.module.as_slice()[d as usize]);
+    let mut k = chain.len();
+    while k > 0 {
+        k = k - 1;
+        join(&mut out, nm.tab.text(ds.name.as_slice()[chain.as_slice()[k] as usize] as usize));
+    }
+    return out;
+}
+
+// The scope text of the methods of the impl decl i's head.
+fn impl_scope(ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, i: u32) -> vec.Vec<u8> {
+    let h = ds.impl_head.as_slice()[i as usize];
+    if h != NONE { return decl_scope(ds, md, nm, h); }
+    let p = ds.impl_prim.as_slice()[i as usize];
+    if p != NONE { return string_text(nm, p); }
+    return module_text(md, ds.module.as_slice()[i as usize]);
+}
+
+// The scope text of the locals of item `item` (in file `file`) inside the fn named `fname`.
+fn item_scope(ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, file: u32, item: u32, fname: u32) -> vec.Vec<u8> {
+    let mut out = module_text(md, md.file_mod.as_slice()[file as usize]);
+    let d = ds.item_decl.as_slice()[item as usize];
+    if d != NONE {
+        let k = ds.kind.as_slice()[d as usize];
+        let mut owner = NONE;
+        if k == decls.DK_IMPL {
+            let h = ds.impl_head.as_slice()[d as usize];
+            if h != NONE { owner = ds.name.as_slice()[h as usize]; }
+        } else if k == decls.DK_TRAIT {
+            owner = ds.name.as_slice()[d as usize];
+        }
+        if owner != NONE { join(&mut out, nm.tab.text(owner as usize)); }
+    }
+    if fname != NONE { join(&mut out, nm.tab.text(fname as usize)); }
+    return out;
+}
+
+// The span `[off, off + len)` of file `f` as text.
+fn source_text(set: &source.SourceSet, f: u32, off: u32, len: u32) -> &[u8] from set {
+    return &set.file(f as usize)[off as usize..(off + len) as usize];
+}
+
+// The related spans of row r, as roles named `role`.
+fn roles(d: &mut diag.Diags, rows: &resdiag.Rows, r: usize, role: &str) {
+    let rel = rows.rel.row(r);
+    let mut k: usize = 0;
+    while k + 2 < rel.len() {
+        d.role(role, rel[k], rel[k + 1], rel[k + 2]);
+        k = k + 3;
+    }
+}
+
+fn not_found(d: &mut diag.Diags, rows: &resdiag.Rows, nm: &intern.Interned, r: usize) {
+    let b = rows.b.as_slice()[r];
+    let s = rows.a.as_slice()[r];
+    d.begin(101, "");
+    if b == 1 {
+        d.arg("name", mem.str_bytes("self"));
+    } else if b == 2 {
+        d.arg("name", mem.str_bytes("Self"));
+    } else {
+        let t = string_text(nm, s);
+        if t.len() == 0 {
+            d.arg("name", mem.str_bytes("_"));
+        } else {
+            d.arg("name", t.as_slice());
+        }
+    }
+}
+
+fn module_path(d: &mut diag.Diags, rows: &resdiag.Rows, md: &modules.Modules, nm: &intern.Interned, r: usize) {
+    let a = rows.a.as_slice()[r];
+    let c = rows.c.as_slice()[r];
+    let case = rows.b.as_slice()[r];
+    d.begin(107, if case == resdiag.CASE_DOTTED then "dotted" else if case == resdiag.CASE_BUILTIN then "builtin" else "");
+    d.arg("name", string_text(nm, a).as_slice());
+    if case == resdiag.CASE_AMBIGUOUS {
+        d.arg("package", package_text(md, nm, c).as_slice());
+    } else {
+        d.arg("package", package_text(md, nm, md.mod_pkg.as_slice()[c as usize]).as_slice());
+        d.arg("module", module_text(md, c).as_slice());
+    }
+}
+
+fn duplicate(d: &mut diag.Diags, rows: &resdiag.Rows, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, r: usize) {
+    let kind = rows.b.as_slice()[r];
+    let c = rows.c.as_slice()[r];
+    d.begin(105, "");
+    d.arg("name", string_text(nm, rows.a.as_slice()[r]).as_slice());
+    let place = if kind == resdiag.SCOPE_MODULE then module_text(md, c) else if kind == resdiag.SCOPE_DECL then decl_scope(ds, md, nm, c) else if kind == resdiag.SCOPE_IMPL then impl_scope(ds, md, nm, c) else item_scope(ds, md, nm, rows.file.as_slice()[r], c, rows.d.as_slice()[r]);
+    d.arg("scope", place.as_slice());
+    roles(d, rows, r, "first");
+}
+
+fn extern_abi(d: &mut diag.Diags, rows: &resdiag.Rows, set: &source.SourceSet, r: usize) {
+    let case = rows.a.as_slice()[r];
+    if case == resdiag.ABI_OBLIGATION {
+        d.begin(811, "obligation");
+        d.arg("abi", mem.str_bytes("\"C\""));
+    } else if case == resdiag.ABI_INTRINSIC {
+        d.begin(811, "intrinsic");
+        d.arg("abi", mem.str_bytes("\"stave-intrinsic\""));
+    } else {
+        d.begin(811, "");
+        d.arg("abi", source_text(set, rows.file.as_slice()[r], rows.off.as_slice()[r], rows.len.as_slice()[r]));
+    }
+}
+
+// One diagnostic row for every row of `rows`.
+pub fn names(d: &mut diag.Diags, rows: &resdiag.Rows, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet) {
+    for r in 0..rows.len() {
+        let code = rows.code.as_slice()[r];
+        let a = rows.a.as_slice()[r];
+        if code == resdiag.E0101 {
+            not_found(d, rows, nm, r);
+        } else if code == resdiag.E0102 {
+            d.begin(102, "");
+            d.arg("module", module_text(md, a).as_slice());
+            roles(d, rows, r, "import");
+        } else if code == resdiag.E0103 {
+            d.begin(103, "");
+            d.arg("name", string_text(nm, a).as_slice());
+            d.arg("enum", string_text(nm, ds.name.as_slice()[rows.b.as_slice()[r] as usize]).as_slice());
+        } else if code == resdiag.E0104 {
+            d.begin(104, "");
+            roles(d, rows, r, "first");
+        } else if code == resdiag.E0105 {
+            duplicate(d, rows, md, ds, nm, r);
+        } else if code == resdiag.E0106 {
+            let owner = rows.b.as_slice()[r];
+            d.begin(106, "");
+            d.arg("name", string_text(nm, a).as_slice());
+            d.arg("module", module_text(md, ds.module.as_slice()[owner as usize]).as_slice());
+            roles(d, rows, r, "decl");
+        } else if code == resdiag.E0107 {
+            module_path(d, rows, md, nm, r);
+        } else if code == resdiag.E0811 {
+            extern_abi(d, rows, set, r);
+        } else {
+            debug.assert(false, "a name-stage row with no diagnostic");
+        }
+        d.end(rows.file.as_slice()[r], rows.off.as_slice()[r], rows.len.as_slice()[r]);
+    }
+}

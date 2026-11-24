@@ -1,0 +1,149 @@
+// Tests of `decls`: the canonical order checked against the key's definition, module scopes
+// (first wins, error decls), members, impl heads, method tables, flags.
+import decls;
+import resdiag;
+import test_kit;
+import std.debug;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+// The key of decl d as its definition states it: the module path (a module decl: without its
+// last segment), then per step from the top-level decl down (name, kind, tiebreak, offset).
+fn key(o: &test_kit.Out, d: u32, out: &mut vec.Vec<u64>) {
+    out.clear();
+    let ds = &o.ds;
+    let m = ds.module.as_slice()[d as usize] as usize;
+    let path = o.md.path(m);
+    let mut chain = vec.Vec::<u32>.new();
+    let mut x = d;
+    while x != NONE {
+        chain.push(x);
+        x = ds.parent.as_slice()[x as usize];
+    }
+    let top = chain.as_slice()[chain.len() - 1];
+    let n = if ds.kind.as_slice()[top as usize] == decls.DK_MODULE then path.len() - 1 else path.len();
+    // the path, each segment marked present so that a prefix sorts first
+    for k in 0..n {
+        out.push((1u64 << 40) | (path[k] as u64));
+    }
+    out.push(0);
+    let mut k = chain.len();
+    while k > 0 {
+        k = k - 1;
+        let s = chain.as_slice()[k] as usize;
+        let tie = if ds.kind.as_slice()[s] == decls.DK_MODULE then o.md.mod_pkg.as_slice()[m] else if ds.parent.as_slice()[s] == NONE then ds.item.as_slice()[s] else ds.index.as_slice()[s];
+        out.push((1u64 << 40) | ((ds.name.as_slice()[s] as u64) << 8) | (ds.kind.as_slice()[s] as u64));
+        out.push(((tie as u64) << 32) | (ds.off.as_slice()[s] as u64));
+    }
+}
+
+fn less(a: &[u64], b: &[u64]) -> bool {
+    let n = if a.len() < b.len() then a.len() else b.len();
+    for k in 0..n {
+        if a[k] != b[k] { return a[k] < b[k]; }
+    }
+    return a.len() < b.len();
+}
+
+const SRC: &str = "import std.io;\npub struct S { pub a: u32, b: u32 }\nview enum E { A(u32), B { x: u32 }, C }\nimpl S {\n    pub fn new() -> S { return S.{ a: 1, b: 2 }; }\n    fn get(&self) -> u32 { return self.a; }\n}\ntrait T { fn t(&self) -> u32; unsafe(\"x\") fn u(); }\ntrait U { fn t(&self) -> u32; }\nimpl T for S { fn t(&self) -> u32 { return 1; } unsafe(\"x\") fn u() {} }\nimpl U for S { fn t(&self) -> u32 { return 2; } }\nconst K: u32 = 3;\nstatic mut G: u32 = 4;\ntype A = S;\ntest fn tt() {}\nrec fn r() { r(); }\nfn main() {}\n";
+
+fn program() -> test_kit.Out {
+    let mut k = test_kit.kit();
+    let app = k.package("app", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(app, "std", s);
+    k.file(app, "main", SRC);
+    k.file(app, "z/y", "pub fn zy() {}\n");
+    k.file(s, "core", "pub enum Option<T> { Some(T), None }\n");
+    k.file(s, "io", "pub fn print(s: &str) {}\n");
+    return k.run();
+}
+
+test fn canonical_order_is_the_key_order() {
+    let o = program();
+    let mut a = vec.Vec::<u64>.new();
+    let mut b = vec.Vec::<u64>.new();
+    debug.assert(o.ds.decls() > 30, "the program's decls");
+    for d in 1..o.ds.decls() {
+        key(&o, (d - 1) as% u32, &mut a);
+        key(&o, d as% u32, &mut b);
+        debug.assert(less(a.as_slice(), b.as_slice()), "decl ids ascend strictly by key");
+    }
+    for d in 0..o.ds.decls() {
+        let p = o.ds.parent.as_slice()[d];
+        debug.assert(p == NONE || p < d as% u32, "a member follows its parent");
+    }
+}
+
+test fn items_members_flags() {
+    let o = program();
+    let m = o.module("main");
+    let s = o.item(m, "S");
+    let e = o.item(m, "E");
+    debug.assert(o.ds.kind.as_slice()[s as usize] == decls.DK_STRUCT && o.ds.flags.as_slice()[s as usize] & decls.F_PUB != 0, "pub struct");
+    debug.assert(o.ds.kind.as_slice()[e as usize] == decls.DK_ENUM && o.ds.flags.as_slice()[e as usize] & decls.F_VIEW != 0, "view enum");
+    let va = o.ds.step_member(e, o.sym("A"));
+    let vb = o.ds.step_member(e, o.sym("B"));
+    debug.assert(va != NONE && o.ds.flags.as_slice()[va as usize] & decls.F_TUPLE != 0, "tuple variant");
+    debug.assert(vb != NONE && o.ds.flags.as_slice()[vb as usize] & decls.F_RECORD != 0, "record variant");
+    debug.assert(o.ds.step_member(s, o.sym("a")) == NONE, "a field is no path step");
+    let g = o.item(m, "G");
+    debug.assert(o.ds.kind.as_slice()[g as usize] == decls.DK_STATIC && o.ds.flags.as_slice()[g as usize] & decls.F_MUT != 0, "static mut");
+    let tt = o.item(m, "tt");
+    debug.assert(o.ds.flags.as_slice()[tt as usize] & decls.F_TEST != 0, "test fn");
+    let r = o.item(m, "r");
+    debug.assert(o.ds.flags.as_slice()[r as usize] & decls.F_REC != 0, "rec fn");
+    debug.assert(o.ds.kind.as_slice()[o.item(m, "A") as usize] == decls.DK_TYPE_ALIAS, "type alias");
+    let t = o.item(m, "T");
+    let u = o.ds.step_member(t, o.sym("u"));
+    debug.assert(u != NONE && o.ds.flags.as_slice()[u as usize] & decls.F_UNSAFE != 0, "unsafe trait method");
+    let tm = o.ds.step_member(t, o.sym("t"));
+    debug.assert(o.ds.flags.as_slice()[tm as usize] & decls.F_HAS_SELF != 0, "trait method with self");
+}
+
+test fn impl_heads_and_methods() {
+    let o = program();
+    let m = o.module("main");
+    let s = o.item(m, "S");
+    let (new, amb) = o.ds.method(s, o.sym("new"));
+    debug.assert(new != NONE && !amb && o.ds.kind.as_slice()[new as usize] == decls.DK_METHOD, "inherent method");
+    debug.assert(o.ds.flags.as_slice()[new as usize] & decls.F_PUB != 0, "pub method");
+    let (get, _) = o.ds.method(s, o.sym("get"));
+    debug.assert(o.ds.flags.as_slice()[get as usize] & decls.F_PUB == 0 && o.ds.flags.as_slice()[get as usize] & decls.F_HAS_SELF != 0, "private method with self");
+    let (tm, amb2) = o.ds.method(s, o.sym("t"));
+    debug.assert(tm == NONE && amb2, "two trait impls give `t`: ambiguous");
+    let (um, _) = o.ds.method(s, o.sym("u"));
+    debug.assert(um != NONE && o.ds.flags.as_slice()[um as usize] & decls.F_TRAIT_IMPL != 0 && o.ds.flags.as_slice()[um as usize] & decls.F_UNSAFE != 0, "the one trait-impl `u`");
+    let imp = o.ds.parent.as_slice()[um as usize];
+    debug.assert(o.ds.impl_head.as_slice()[imp as usize] == s, "impl head");
+    debug.assert(o.ds.impl_trait.as_slice()[imp as usize] == o.item(m, "T"), "impl trait");
+    debug.assert(o.ds.impl_head.as_slice()[o.ds.parent.as_slice()[new as usize] as usize] == s && o.ds.impl_trait.as_slice()[o.ds.parent.as_slice()[new as usize] as usize] == NONE, "inherent impl");
+}
+
+test fn scope_first_wins_and_error_decls() {
+    let src = "import std.io;\nimport nope;\nfn io() {}\nfn f() {}\nstruct f {}\nfn bad(x: ) {}\nfn main() {}\n";
+    let o = test_kit.single(src);
+    let m = o.module("main");
+    let (io, imp) = o.ds.entry(m, o.sym("io"));
+    debug.assert(imp && o.ds.kind.as_slice()[io as usize] == decls.DK_ERROR, "std.io is not in this build: the import binds an error decl");
+    let f = o.item(m, "f");
+    debug.assert(o.ds.kind.as_slice()[f as usize] == decls.DK_FN, "the first `f` wins");
+    let (nope, nimp) = o.ds.entry(m, o.sym("nope"));
+    debug.assert(nimp && o.ds.kind.as_slice()[nope as usize] == decls.DK_ERROR, "a failed import binds an error decl");
+    debug.assert(o.ds.module_item(m, o.sym("nope")) == NONE, "an import is not reached through a path");
+    let bad = o.item(m, "bad");
+    debug.assert(bad != NONE && o.ds.kind.as_slice()[bad as usize] == decls.DK_ERROR, "a dropped item's name is an error decl");
+    debug.assert(o.ds.module_item(m, o.sym("bad")) == bad, "and is a module item");
+    // `io` twice (the import binds nothing here but still takes the name), `f` twice
+    debug.assert(o.rows.count(resdiag.E0105) == 2, "E0105 for each later name");
+}
+
+test fn duplicate_members_and_methods() {
+    let src = "struct S { a: u32, a: u32 }\nenum E { A, A }\nimpl S { fn m() {} }\nimpl S { fn m() {} }\nfn main() {}\n";
+    let o = test_kit.single(src);
+    debug.assert(o.rows.count(resdiag.E0105) == 3, "field, variant, method of one head");
+    let e = o.item(o.module("main"), "E");
+    let a = o.ds.step_member(e, o.sym("A"));
+    debug.assert(o.ds.index.as_slice()[a as usize] == 0, "the first variant of a name");
+}
