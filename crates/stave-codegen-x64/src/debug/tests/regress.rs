@@ -1,10 +1,10 @@
 //! Regressions: `bool` loads, wrapping `addr.elem` offsets, the probed stack-argument area, casts
-//! of fn values.
+//! of fn values, whole-slot loads read in place.
 
-use stave_ir::{CastKind, FuncBuilder, Op};
+use stave_ir::{CastKind, FuncBuilder, Op, Operand};
 
 use super::harness::*;
-use crate::debug::{Error, Options, bench_ctx, compile_func, compile_module};
+use crate::debug::{Error, Options, bench_ctx, compile_func, compile_func_stack, compile_module};
 
 /// A `bool` byte read from memory is 1 iff nonzero (interpreter and AArch64 agree).
 #[test]
@@ -114,4 +114,76 @@ fn cast_of_a_fn_value_is_malformed() {
     assert!(matches!(&e, Error::Malformed { func: Some(g), .. } if *g == f), "{e}");
     let e = compile_module(&p.m, &Options::default()).unwrap_err();
     assert!(matches!(&e, Error::Verify(_)), "{e}");
+}
+
+/// A `load` of a whole slot whose one use is the next store, call argument, or `ret` reads the
+/// slot in place (stave-opt `inplace`): the frame holds the slots and the `make`, and no home of
+/// its own for either such load. A load with a store to its slot before its use keeps a copy of
+/// the old bytes.
+#[test]
+fn whole_slot_load_is_read_in_place() {
+    let mut p = Prog::new();
+    let t = p.t;
+    let arr = p.m.types.array(t.u64, 512);
+    let parr = p.m.types.ref_(true, arr);
+    let pu64 = p.m.types.ref_(true, t.u64);
+    // fn pick(a: [u64; 512], i: usize) -> u64 { a[i] + a[511] }
+    let pick = p.decl("t.pick", &[arr, t.usize], Some(t.u64));
+    let mut b = FuncBuilder::new(&[arr, t.usize]);
+    let (a, i) = (b.param(0).unwrap(), b.param(1).unwrap());
+    let x = b.binary(Op::Get, t.u64, a, i);
+    let last = b.int(511);
+    let y = b.binary(Op::Get, t.u64, a, last);
+    let s = b.binary(Op::AddWrap, t.u64, x, y);
+    b.ret(Some(s.into()));
+    p.def(pick, b);
+    // fn made(k: u64) -> [u64; 512]: s1 = [0; 512], s1[0] = k, s1[511] = k + 1, s2 = s1,
+    // s1[0] = 9, return s2
+    let made = p.decl("t.made", &[t.u64], Some(arr));
+    let mut b = FuncBuilder::new(&[t.u64]);
+    let k = b.param(0).unwrap();
+    let (s1, s2) = (b.slot(parr), b.slot(parr));
+    let zs: Vec<Operand> = (0..512).map(|_| b.int(0)).collect();
+    let z = b.op(Op::Make, arr, &zs);
+    b.store(s1, z);
+    let (i0, i511) = (b.int(0), b.int(511));
+    let e0 = b.op(Op::ElemAddr, pu64, &[s1.into(), i0]);
+    b.store(e0, k);
+    let e511 = b.op(Op::ElemAddr, pu64, &[s1.into(), i511]);
+    let one = b.int(1);
+    let k1 = b.binary(Op::AddWrap, t.u64, k, one);
+    b.store(e511, k1);
+    let v = b.load(arr, s1);
+    b.store(s2, v);
+    let nine = b.int(9);
+    b.store(e0, nine);
+    let w = b.load(arr, s2);
+    b.ret(Some(w.into()));
+    p.def(made, b);
+    p.main(|p, b| {
+        let five = b.int(5);
+        let r = b.call(made, Some(arr), &[five]).unwrap();
+        let z = b.int(0);
+        let q = b.call(pick, Some(t.u64), &[r.into(), z]).unwrap();
+        p.print(b, q.into(), t.u64);
+        let s3 = b.slot(parr);
+        b.store(s3, r);
+        let old = b.load(arr, s3);
+        let i0 = b.int(0);
+        let e0 = b.op(Op::ElemAddr, pu64, &[s3.into(), i0]);
+        let one = b.int(1);
+        b.store(e0, one);
+        let z = b.int(0);
+        let q = b.call(pick, Some(t.u64), &[old.into(), z]).unwrap();
+        p.print(b, q.into(), t.u64);
+        let new = b.load(arr, s3);
+        let z = b.int(0);
+        let q = b.call(pick, Some(t.u64), &[new.into(), z]).unwrap();
+        p.print(b, q.into(), t.u64);
+    });
+    let r = check(&p, "in_place_load");
+    assert_eq!(r.stdout, b"000000000000000b\n000000000000000b\n0000000000000007\n");
+    let (_, made_use) = compile_func_stack(&bench_ctx(&p.m), made).unwrap();
+    // two slots and the `make`: 3 x 4 KiB; a home per load would add 8 KiB
+    assert!(made_use.frame < 13 * 1024, "{}", made_use.frame);
 }

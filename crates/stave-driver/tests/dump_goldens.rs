@@ -12,7 +12,11 @@
 //! has an error diagnostic has no `ir.txt`, and none may be written for it.
 //!
 //! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!).
+//!
+//! `ir_part_stores` is also checked by op count: an assignment to a part of a local writes it in
+//! place (no `set`), and the only whole-aggregate `load` is the copy its source writes.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[path = "../../../tests/support/checked_ir.rs"]
@@ -389,5 +393,45 @@ fn ir_dump_properties() {
                 .collect()
         };
         assert!(paths(&rel).is_subset(&paths(&a)), "{case}: release prints a fn debug does not");
+    }
+}
+
+/// `ir_part_stores` in debug and release: no `set` in any fn of the program; per fn the `load`s
+/// of a whole array, tuple, or struct (one, in `whole`, for `let b = a;`) and the slots (one per
+/// local stored into by part: the repeat in `whole` fills its local's slot, no temporary).
+#[test]
+fn part_stores_write_in_place() {
+    for release in [false, true] {
+        let (_, out) = run_ir_case("ir_part_stores", release, 1);
+        let m = out.module.as_ref().expect("module");
+        let mut counts = BTreeMap::new();
+        for f in m.funcs.iter().filter(|f| f.path.starts_with("main.")) {
+            let Some(b) = &f.body else { continue };
+            let (mut n, mut slots) = (0, 0);
+            for (&op, ty) in b.insts.op.iter().zip(&b.insts.ty) {
+                if op == stave_ir::Op::Slot {
+                    slots += 1;
+                }
+                assert_ne!(op, stave_ir::Op::Set, "{} (release {release}): a `set`", f.path);
+                let whole = matches!(
+                    ty.and_then(|t| m.types.key(t)),
+                    Some(
+                        stave_ir::TypeKey::Array { .. }
+                            | stave_ir::TypeKey::Tuple(_)
+                            | stave_ir::TypeKey::Adt { .. }
+                    )
+                );
+                if op == stave_ir::Op::Load && whole {
+                    n += 1;
+                }
+            }
+            counts.insert(f.path.clone(), (n, slots));
+        }
+        let want: BTreeMap<String, (usize, usize)> =
+            [("main.elems", (0, 1)), ("main.fields", (0, 2)), ("main.main", (0, 0)), ("main.whole", (1, 1))]
+                .into_iter()
+                .map(|(p, n)| (p.to_string(), n))
+                .collect();
+        assert_eq!(counts, want, "release {release}");
     }
 }

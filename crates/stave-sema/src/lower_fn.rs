@@ -320,6 +320,9 @@ pub(crate) struct FnState {
     /// Open `scope` statements: (scope depth of their block, the `&mut usize` thread-list
     /// handle); their spawns are joined when that scope ends or is left.
     pub scope_handles: Vec<(usize, Operand)>,
+    /// While a `let` initializer is lowered: (the initializer's node, the local the `let` binds,
+    /// which is in a slot); an array repeat at that node fills the local's slot in place.
+    pub fill_into: Option<(u32, usize)>,
     /// The fn has `ensures` clauses (never set for a closure): each return checks them, and the
     /// end of a unit body (this token, the body's `}`) does too.
     pub ensures_end: Option<u32>,
@@ -691,7 +694,7 @@ impl<'a> FnCx<'a> {
     }
 
     /// [`FnCx::event`] on the slot of local `l`, if it has one.
-    fn local_event(&mut self, kind: stave_ir::EventKind, l: usize) {
+    pub(crate) fn local_event(&mut self, kind: stave_ir::EventKind, l: usize) {
         if !self.g.borrows {
             return;
         }
@@ -2166,6 +2169,7 @@ impl FnState {
             kvals: Vec::new(),
             last_site: None,
             scope_handles: Vec::new(),
+            fill_into: None,
             write_backs: Vec::new(),
             borrows: Vec::new(),
             events: Vec::new(),

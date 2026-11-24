@@ -1,0 +1,115 @@
+type t0 int u 32
+type t1 int u size
+type t2 int s 32
+type t3 bool
+type t4 ref mut t0
+type t5 ref mut t11
+type t6 ref mut t12
+type t7 ref mut t13
+type t8 ref mut t14
+type t9 ref mut t15
+type t10 ref mut t16
+type t11 array t0 2
+type t12 array t0 4
+type t13 array t0 8
+type t14 array t0 20
+type t15 tuple t0 t11
+type t16 adt d22
+fn @0 main.fields {
+b0(%0: t0):
+  %1 = slot t10
+  %2 = slot t9
+  %3 = make t12 1 2 3 4
+  %4 = make t16 %3 0
+  store () %1 %4
+  %5 = addr.field t4 %1 1
+  store () %5 %0
+  %6 = addr.field t4 %1 1
+  %7 = load t0 %6
+  %8 = add t0 %7 1
+  %9 = addr.field t6 %1 0
+  %10 = addr.elem t4 %9 2
+  store () %10 %8
+  %11 = make t11 0 0
+  %12 = make t15 0 %11
+  store () %2 %12
+  %13 = addr.field t4 %2 0
+  store () %13 5
+  %14 = addr.field t4 %2 0
+  %15 = load t0 %14
+  %16 = addr.field t5 %2 1
+  %17 = addr.elem t4 %16 1
+  store () %17 %15
+  %18 = addr.field t6 %1 0
+  %19 = addr.elem t4 %18 2
+  %20 = load t0 %19
+  %21 = addr.field t5 %2 1
+  %22 = addr.elem t4 %21 1
+  %23 = load t0 %22
+  %24 = add t0 %20 %23
+  ret %24
+}
+fn @1 main.whole {
+b0(%0: t0):
+  %1 = slot t8
+  br b1(0)
+b1(%2: t1):
+  %3 = lt t3 %2 20
+  cbr %3 b2() b3()
+b2():
+  %4 = addr.elem t4 %1 %2
+  store () %4 %0
+  %5 = add.wrap t1 %2 1
+  br b1(%5)
+b3():
+  %6 = addr.elem t4 %1 0
+  store () %6 1
+  %7 = load t14 %1
+  %8 = addr.elem t4 %1 1
+  store () %8 2
+  ret %7
+}
+fn @2 main.elems {
+b0(%0: t1):
+  %1 = slot t7
+  %2 = make t13 0 0 0 0 0 0 0 0
+  store () %1 %2
+  br b1(0)
+b1(%3: t1):
+  %4 = lt t3 %3 8
+  cbr %4 b2() b3()
+b2():
+  %5 = cast.wrap t0 %3
+  %6 = addr.elem t4 %1 %3
+  store () %6 %5
+  %7 = add t1 %3 1
+  br b1(%7)
+b3():
+  %8 = rem t1 %0 8
+  %9 = addr.elem t4 %1 %8
+  %10 = load t0 %9
+  %11 = add t0 %10 1
+  %12 = addr.elem t4 %1 %8
+  store () %12 %11
+  %13 = rem t1 %0 8
+  %14 = addr.elem t4 %1 %13
+  %15 = load t0 %14
+  ret %15
+}
+fn @3 main.main {
+b0():
+  %0 = call t14 @1 3
+  %1 = call t0 @2 3
+  %2 = call t0 @0 1
+  %3 = add t0 %1 %2
+  %4 = get t0 %0 1
+  %5 = add t0 %3 %4
+  %6 = eq t3 %5 14
+  cbr %6 b1() b2()
+b1():
+  br b3(0)
+b2():
+  br b3(1)
+b3(%7: t2):
+  ret %7
+}

@@ -218,6 +218,8 @@ pub(crate) struct Cg<'a, 'm> {
     /// The value's home is never rewritten (not a non-entry block param), so `get`/`enum.get`
     /// results may alias into it.
     stable: Vec<bool>,
+    /// Per value: the slot a load reads in place (stave-opt `inplace`).
+    in_place: Vec<Option<Value>>,
     last_use: Vec<u32>,
     touched: Vec<u32>,
     gocc: [Occ; 16],
@@ -621,6 +623,13 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<(FuncCode, Stac
     a.set_vex_scalars(fx.avx && (release || !cx.baseline.contains(stave_target::Feature::Avx)));
     let epilogue = a.new_label();
     let labels = (0..b.blocks.len()).map(|_| a.new_label()).collect();
+    let in_place = stave_opt::inplace::in_place_loads(b);
+    for (v, s) in in_place.iter().enumerate() {
+        // its home is the slot's bytes, which later stores rewrite
+        if s.is_some() {
+            stable[v] = false;
+        }
+    }
     let cg = Cg {
         cx,
         f,
@@ -635,6 +644,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<(FuncCode, Stac
         has_home: vec![false; nv],
         is_slot: vec![false; nv],
         stable,
+        in_place,
         last_use: vec![NONE; nv],
         touched: Vec::new(),
         gocc: [Occ::Free; 16],
@@ -949,6 +959,21 @@ impl<'a, 'm> Cg<'a, 'm> {
         self.has_home[vi] = true;
         self.in_home[vi] = true;
         Ok(true)
+    }
+
+    /// Gives load result `v` the bytes of the slot it reads as its home, when its one use copies
+    /// it out before anything can write the slot (stave-opt `inplace`).
+    pub fn load_in_place(&mut self, v: Value, p: Operand) -> bool {
+        let i = v.index();
+        let Some(Some(s)) = self.in_place.get(i).copied() else { return false };
+        if p != Operand::Value(s) {
+            return false;
+        }
+        let Some(off) = self.slot_off(p) else { return false };
+        self.home[i] = off;
+        self.has_home[i] = true;
+        self.in_home[i] = true;
+        true
     }
 
     /// Marks `v` as a remateralizable frame address `rbp + off` (a `slot`, or a constant offset

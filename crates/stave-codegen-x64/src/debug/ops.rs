@@ -188,6 +188,9 @@ impl Cg<'_, '_> {
             Op::Load => {
                 let v = rv?;
                 let c = self.vcls(rt?)?;
+                if matches!(c, VCls::M { .. }) && self.load_in_place(v, arg(0)?) {
+                    return Ok(());
+                }
                 let m = self.ptr_mem(arg(0)?)?;
                 self.load_cls(v, c, m)
             }
