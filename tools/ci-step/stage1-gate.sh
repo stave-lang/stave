@@ -1,9 +1,9 @@
 #!/bin/sh
-# stage1 `tokens` equivalence gate (contracts/stage-gates.md): builds stage0 (the debug build
-# `test` leaves, or STAVE_GATE_PROFILE=release), builds stage1 with it, then runs both with
-# `build --dump=tokens` on every root of the corpus and compares the two `tokens.txt` byte for
-# byte. Every dump covers the whole program, so each
-# root also compares std, runtime, and the arch package.
+# stage1 `tokens` and `items` equivalence gate (contracts/stage-gates.md): builds stage0 (the
+# debug build `test` leaves, or STAVE_GATE_PROFILE=release), builds stage1 with it, then runs both
+# with `build --dump=tokens,items` on every root of the corpus (one run each) and compares the
+# two `tokens.txt` and the two `items.txt` byte for byte. Every dump covers the whole program, so
+# each root also compares std, runtime, and the arch package.
 #
 # Roots: every package directory (a `stave.toml`, not descending into it) and every other `.stv`
 # file below tests/conformance (fixtures and negative lexical cases included), the stage1 package
@@ -24,19 +24,21 @@ export STAVE_STD_DIR="$ROOT"
 if [ "${1:-}" = "--one" ]; then
   d="$OUT/w/$2"
   mkdir -p "$d"
-  rm -f "$d/0/tokens.txt" "$d/1/tokens.txt"
+  rm -f "$d/0/tokens.txt" "$d/1/tokens.txt" "$d/0/items.txt" "$d/1/items.txt"
   if [ -n "${4:-}" ]; then set -- "$2" "$3" --target "$4"; else set -- "$2" "$3"; fi
   root="$2"
   shift 2
-  "$S0" build "$root" "$@" -o "$d/exe" --dump=tokens --dump-dir "$d/0" >/dev/null 2>&1 || true
-  if ! "$S1" build "$root" "$@" --dump=tokens --dump-dir "$d/1" >"$d/stage1.err" 2>&1; then
+  "$S0" build "$root" "$@" -o "$d/exe" --dump=tokens,items --dump-dir "$d/0" >/dev/null 2>&1 || true
+  if ! "$S1" build "$root" "$@" --dump=tokens,items --dump-dir "$d/1" >"$d/stage1.err" 2>&1; then
     echo "FAIL stage1 exit: $root $* ($(head -c 200 "$d/stage1.err"))"
-  elif [ ! -f "$d/0/tokens.txt" ]; then
-    echo "FAIL no stage0 tokens.txt: $root $*"
+  elif [ ! -f "$d/0/tokens.txt" ] || [ ! -f "$d/0/items.txt" ]; then
+    echo "FAIL no stage0 dump: $root $*"
   elif ! cmp -s "$d/0/tokens.txt" "$d/1/tokens.txt"; then
-    echo "DIFF $root $* (first: $(cmp "$d/0/tokens.txt" "$d/1/tokens.txt" 2>&1 | head -1))"
+    echo "DIFF tokens $root $* (first: $(cmp "$d/0/tokens.txt" "$d/1/tokens.txt" 2>&1 | head -1))"
+  elif ! cmp -s "$d/0/items.txt" "$d/1/items.txt"; then
+    echo "DIFF items $root $* (first: $(cmp "$d/0/items.txt" "$d/1/items.txt" 2>&1 | head -1))"
   else
-    echo "SAME $(wc -l < "$d/0/tokens.txt")"
+    echo "SAME $(wc -l < "$d/0/tokens.txt") $(wc -l < "$d/0/items.txt")"
   fi
   exit 0
 fi
@@ -66,8 +68,9 @@ xargs -P "$(nproc)" -L 1 sh "$0" --one < "$LIST" > "$OUT/result.txt"
 end=$(date +%s)
 runs=$(wc -l < "$LIST")
 same=$(grep -c '^SAME' "$OUT/result.txt" || true)
-lines=$(awk '$1 == "SAME" { s += $2 } END { print s + 0 }' "$OUT/result.txt")
-echo "stage1-gate: $same of $runs roots equal ($lines token lines), $((end - start)) s"
+tlines=$(awk '$1 == "SAME" { s += $2 } END { print s + 0 }' "$OUT/result.txt")
+ilines=$(awk '$1 == "SAME" { s += $3 } END { print s + 0 }' "$OUT/result.txt")
+echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines), $((end - start)) s"
 if grep -v '^SAME' "$OUT/result.txt"; then
   echo "stage1-gate: FAILED" >&2
   exit 1
