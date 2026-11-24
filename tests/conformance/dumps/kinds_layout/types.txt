@@ -1,0 +1,28 @@
+t2 int u 32
+t3 int u 64
+t7 int s 32
+t11 float 32
+t16 str
+t19 ref t16
+t24 ref t51
+t30 ref mut t58
+t36 tuple
+t51 adt d50 t58
+t57 vec t11 8
+t58 param 0
+12 10 t3
+13 10 t3
+14 17 t3
+15 13 t24
+15 14 t2
+16 5 -
+16 15 t2
+17 22 t2
+18 22 t2
+19 33 t2
+20 25 t2
+21 9 t57
+22 3 t7
+34 16 t30
+34 17 t19
+34 19 t36

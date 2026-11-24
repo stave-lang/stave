@@ -1,16 +1,17 @@
-//! Dump goldens: `tests/conformance/dumps/<case>/input` is a package; the
-//! expected `tokens.txt items.txt ast.txt strings.txt names.txt sigs.txt types.txt diags.txt` sit
-//! next to it (formats: contracts/stage-gates.md). `stats.txt` must be written
-//! and is never compared. Dumps cover the whole program, so the cases build against the pinned
-//! stand-in library `tests/conformance/dumps/_lib` (`std/`, an empty `runtime/`; the CLI test
-//! uses it through `STAVE_STD_DIR`): the goldens do not move with the shipped std/.
+//! Dump goldens: `tests/conformance/dumps/<case>/input` is a package; the expected `tokens.txt
+//! items.txt ast.txt strings.txt names.txt sigs.txt kinds.txt types.txt diags.txt` sit next to it
+//! (formats: contracts/stage-gates.md). `stats.txt` must be written and is never compared. Dumps
+//! cover the whole program, so the cases build against the pinned stand-in library
+//! `tests/conformance/dumps/_lib` (`std/`, an empty `runtime/`; the CLI test uses it through
+//! `STAVE_STD_DIR`), the `kinds_` cases against `_lib_kinds` (`_lib` plus the marker traits,
+//! `std.cell`, and `std.sync`): the goldens do not move with the shipped std/.
 //!
 //! Checked-IR goldens (contracts/checked-ir.md): every `ir_<construct>/` case is a
 //! package `input` plus the expected `ir.txt` of a debug lowering (`stave check --dump=ir`) and, when
 //! present, `ir.release.txt` of a `--release` lowering (instance root sets; the `ir_bounds_*`
 //! cases: the bounds checks left in each mode, which must be the same ones). A case whose input
 //! has an error diagnostic has no `ir.txt`, and none may be written for it. Every `ir_` case also
-//! has the `sigs.txt` of a check.
+//! has the `sigs.txt` and `kinds.txt` of a check.
 //!
 //! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!).
 
@@ -23,17 +24,26 @@ use stave_driver::dump::{DumpStage, render_to_vec, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
 
-const CASES: [&str; 6] =
-    ["valid_small", "dropped_item", "unbalanced", "multi_file", "sigs_decls", "sigs_errors"];
+const CASES: [&str; 8] = [
+    "valid_small",
+    "dropped_item",
+    "unbalanced",
+    "multi_file",
+    "sigs_decls",
+    "sigs_errors",
+    "kinds_layout",
+    "kinds_errors",
+];
 /// The `ir_` cases that also have a golden of the release lowering.
 const RELEASE_CASES: [&str; 3] = ["ir_bounds_kept", "ir_bounds_removed", "ir_roots"];
-const COMPARED: [DumpStage; 8] = [
+const COMPARED: [DumpStage; 9] = [
     DumpStage::Tokens,
     DumpStage::Items,
     DumpStage::Ast,
     DumpStage::Strings,
     DumpStage::Names,
     DumpStage::Sigs,
+    DumpStage::Kinds,
     DumpStage::Types,
     DumpStage::Diags,
 ];
@@ -46,13 +56,15 @@ fn dumps_dir(case: &str) -> PathBuf {
     repo().join("tests/conformance/dumps").join(case)
 }
 
-fn golden_std() -> Library {
-    Library::in_dir(&repo().join("tests/conformance/dumps/_lib"))
+/// The pinned library of `case`: `_lib_kinds` for the `kinds_` cases, else `_lib`.
+fn golden_std(case: &str) -> Library {
+    let lib = if case.starts_with("kinds_") { "_lib_kinds" } else { "_lib" };
+    Library::in_dir(&repo().join("tests/conformance/dumps").join(lib))
 }
 
 fn output(case: &str, threads: usize) -> Output {
     let opts = Options::new(Goal::Check).threads(Some(threads));
-    pipeline::run(&dumps_dir(case).join("input"), &golden_std(), &opts).unwrap()
+    pipeline::run(&dumps_dir(case).join("input"), &golden_std(case), &opts).unwrap()
 }
 
 /// Writes every dump of `case` into a directory of its own per (`test`, case, threads): tests
@@ -168,10 +180,14 @@ fn golden_properties() {
                 assert!(read(&dir.join("diags.txt")).contains("\"code\":\"E0016\""));
             }
             "dropped_item" => assert_eq!(items.lines().filter(|l| l.ends_with(" dropped")).count(), 1),
-            "valid_small" | "sigs_decls" => assert!(read(&dir.join("diags.txt")).is_empty()),
+            "valid_small" | "sigs_decls" | "kinds_layout" => assert!(read(&dir.join("diags.txt")).is_empty()),
             "sigs_errors" => {
                 let d = read(&dir.join("diags.txt"));
                 assert!(d.contains("\"code\":\"E0101\"") && d.contains("\"code\":\"E0203\""), "{d}");
+            }
+            "kinds_errors" => {
+                let d = read(&dir.join("diags.txt"));
+                assert!(d.contains("\"code\":\"E0903\"") && d.contains("\"code\":\"E0421\""), "{d}");
             }
             "multi_file" => {
                 // F = rank of (package, path): multi_file's src/main.stv, src/util.stv,
@@ -399,23 +415,167 @@ fn sigs_table_is_a_renumbered_subset_of_types() {
     }
 }
 
-/// `sigs.txt` of every `ir_` case (a check, the pinned library).
+/// The kind flags of `kinds`, in order.
+const KIND_FLAGS: [&str; 10] =
+    ["copy", "view", "send", "sync", "sized", "flat", "frozen", "drop-impl", "drop", "lock"];
+
+/// `kinds` field rules against `sigs` of the same build, and its layouts against the back end's:
+/// one `t<T>` line per `sigs` table type, by T, then `impl` lines (one per impl decl), then
+/// `apply` lines by (T, trait); every `t<T>` / `d<D>` named exists; same bytes at 1 and 8
+/// threads. On every case without errors that lowers (each `ir_` case and `kinds_layout` must),
+/// each type both the `sigs` table and the IR type table hold (same expanded key) has the size,
+/// alignment, and field offsets stave-ir's layout gives it, and no layout where stave-ir has
+/// none.
 #[test]
-fn sigs_goldens_of_ir_cases() {
+fn kinds_lines_and_ir_layouts() {
+    let mut cases: Vec<String> = CASES.iter().map(|c| c.to_string()).collect();
+    cases.extend(ir_cases());
+    let mut compared = 0;
+    let mut compared_records = 0;
+    for case in &cases {
+        let out = output(case, 1);
+        let kinds = String::from_utf8(render_to_vec(DumpStage::Kinds, &out).unwrap()).unwrap();
+        let sigs = String::from_utf8(render_to_vec(DumpStage::Sigs, &out).unwrap()).unwrap();
+        let out8 = output(case, 8);
+        assert_eq!(
+            kinds.as_bytes(),
+            render_to_vec(DumpStage::Kinds, &out8).unwrap(),
+            "{case}: 1 vs 8 threads"
+        );
+        check_lines(&format!("{case}/kinds.txt"), &kinds);
+        let n_types = sigs.lines().take_while(|l| l.starts_with('t')).count();
+        let decls: Vec<&str> = sigs.lines().skip(n_types).collect();
+        let impl_decls: std::collections::BTreeSet<String> = decls
+            .iter()
+            .filter(|l| l.split(' ').nth(1) == Some("impl"))
+            .map(|l| l.split(' ').next().unwrap().to_string())
+            .collect();
+        let tlines: Vec<&str> = kinds.lines().take_while(|l| l.starts_with('t')).collect();
+        assert_eq!(tlines.len(), n_types, "{case}: one kinds line per sigs table type");
+        let mut sizes: Vec<String> = Vec::new();
+        for (k, l) in tlines.iter().enumerate() {
+            let f: Vec<&str> = l.split(' ').collect();
+            assert_eq!(f[0], format!("t{k}"), "{case}: not by T from t0: {l}");
+            if f[1] != "-" {
+                let flags: Vec<usize> =
+                    f[1].split(',').map(|x| KIND_FLAGS.iter().position(|k| *k == x).expect(l)).collect();
+                assert!(flags.windows(2).all(|w| w[0] < w[1]), "{case}: flag order: {l}");
+            }
+            assert_eq!(f[2], "depth", "{l}");
+            assert!(f[3] == "-" || f[3] == "over" || f[3].parse::<u32>().is_ok_and(|d| d >= 1), "{l}");
+            assert_eq!(f[4], "size", "{l}");
+            let rest = f[5..].join(" ");
+            assert!(
+                ["param", "unsized", "overflow", "none"].contains(&rest.as_str()) || f[6] == "align",
+                "{case}: size form: {l}"
+            );
+            sizes.push(rest);
+        }
+        let mut impls_seen = std::collections::BTreeSet::new();
+        let mut last_apply: Option<(u32, u32)> = None;
+        for l in kinds.lines().skip(n_types) {
+            let f: Vec<&str> = l.split(' ').collect();
+            match f[0] {
+                "impl" => {
+                    assert!(last_apply.is_none(), "{case}: impl line after apply lines: {l}");
+                    assert_eq!((f[2], f[4], f[6]), ("trait", "head", "gen"), "{l}");
+                    assert!(impl_decls.contains(f[1]), "{case}: {} is no impl decl: {l}", f[1]);
+                    assert!(impls_seen.insert(f[1].to_string()), "{case}: impl listed twice: {l}");
+                }
+                "apply" => {
+                    let key = (refs(f[1], 't')[0], refs(f[2], 'd')[0]);
+                    assert!(last_apply.is_none_or(|p| p < key), "{case}: apply lines not by (T, trait): {l}");
+                    last_apply = Some(key);
+                    for d in refs(f[3..].join(" ").as_str(), 'd') {
+                        assert!(impl_decls.contains(&format!("d{d}")), "{case}: d{d} is no impl: {l}");
+                    }
+                }
+                _ => panic!("{case}: bad kinds line {l}"),
+            }
+            for t in refs(l, 't') {
+                assert!((t as usize) < n_types, "{case}: t{t} not in the sigs table: {l}");
+            }
+            for d in refs(l, 'd') {
+                assert!((d as usize) < decls.len(), "{case}: d{d} is no decl: {l}");
+            }
+        }
+        assert_eq!(impls_seen, impl_decls, "{case}: every impl decl has one impl line");
+
+        if out.has_errors() {
+            continue;
+        }
+        let ir_out = lowered(case, false, 1);
+        let Some(m) = ir_out.module.as_ref() else {
+            let f = ir_out.failure.as_ref().map(|f| f.to_string());
+            assert!(!case.starts_with("ir_") && case != "kinds_layout", "{case}: no module ({f:?})");
+            continue;
+        };
+        let layouts = stave_ir::layout::Layouts::compute(&m.types);
+        let ir_table: String = (0..m.types.len())
+            .map(|i| format!("t{i} {}\n", m.types.key_text(stave_ir::TypeId(i as u32))))
+            .collect();
+        let mut ir_of: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for (t, k) in deep_keys(&ir_table) {
+            ir_of.entry(k).or_insert(t);
+        }
+        for (t, k) in deep_keys(&sigs) {
+            let Some(&i) = ir_of.get(&k) else { continue };
+            let got = &sizes[t as usize];
+            let want = match layouts.get_layout(stave_ir::TypeId(i)) {
+                Err(_) => {
+                    assert!(
+                        !got.contains(" align "),
+                        "{case}: t{t} ({k}): stave-ir has no layout, kinds: {got}"
+                    );
+                    continue;
+                }
+                Ok(l) => {
+                    let list = |v: &[(u64, stave_ir::TypeId)]| {
+                        v.iter().map(|(o, _)| o.to_string()).collect::<Vec<_>>().join(" ")
+                    };
+                    let record = k.starts_with("adt ") || k.starts_with("tuple");
+                    let shape = match &l.shape {
+                        stave_ir::layout::Shape::Fields(fs) if record => format!(" fields[{}]", list(fs)),
+                        stave_ir::layout::Shape::Enum(vs) if record => format!(
+                            " tag 4 variants[{}]",
+                            vs.iter().map(|v| format!("[{}]", list(v))).collect::<Vec<_>>().join(" ")
+                        ),
+                        _ => String::new(),
+                    };
+                    if record {
+                        compared_records += 1;
+                    }
+                    format!("{} align {}{shape}", l.size, l.align)
+                }
+            };
+            assert_eq!(got, &want, "{case}: t{t} ({k}): kinds vs stave-ir layout");
+            compared += 1;
+        }
+    }
+    assert!(compared > 150 && compared_records > 20, "{compared} types, {compared_records} records compared");
+}
+
+/// `sigs.txt` and `kinds.txt` of every `ir_` case (a check, the pinned library).
+#[test]
+fn sigs_and_kinds_goldens_of_ir_cases() {
     let bless = std::env::var_os("STAVE_BLESS").is_some();
     let mut failures = Vec::new();
     for case in ir_cases() {
-        let got = String::from_utf8(render_to_vec(DumpStage::Sigs, &output(&case, 2)).unwrap()).unwrap();
-        let want_path = dumps_dir(&case).join("sigs.txt");
-        if bless {
-            std::fs::write(&want_path, &got).unwrap();
-            continue;
-        }
-        match std::fs::read_to_string(&want_path) {
-            Ok(want) if want == got => {}
-            Ok(want) => failures
-                .push(format!("{case}/sigs.txt: differs from the golden\n--- want\n{want}--- got\n{got}")),
-            Err(e) => failures.push(format!("{}: {e}", want_path.display())),
+        let out = output(&case, 2);
+        for stage in [DumpStage::Sigs, DumpStage::Kinds] {
+            let got = String::from_utf8(render_to_vec(stage, &out).unwrap()).unwrap();
+            let file = stage.file_name();
+            let want_path = dumps_dir(&case).join(&file);
+            if bless {
+                std::fs::write(&want_path, &got).unwrap();
+                continue;
+            }
+            match std::fs::read_to_string(&want_path) {
+                Ok(want) if want == got => {}
+                Ok(want) => failures
+                    .push(format!("{case}/{file}: differs from the golden\n--- want\n{want}--- got\n{got}")),
+                Err(e) => failures.push(format!("{}: {e}", want_path.display())),
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -445,14 +605,19 @@ fn ir_cases() -> Vec<String> {
     v
 }
 
-/// Writes `ir.txt` (plus `diags.txt`) of `case` lowered in debug or release mode.
-fn run_ir_case(case: &str, release: bool, threads: usize) -> (PathBuf, Output) {
+/// `case` lowered in debug or release mode.
+fn lowered(case: &str, release: bool, threads: usize) -> Output {
     let mut opts = Options::new(Goal::Check).threads(Some(threads));
     opts.lower = true;
     opts.release = release;
     // Fixed target: the dispatch arms dropped for another arch must not depend on the host.
     opts.target = Some(stave_target::Triple::parse("x86_64-linux").unwrap());
-    let out = pipeline::run(&dumps_dir(case).join("input"), &golden_std(), &opts).unwrap();
+    pipeline::run(&dumps_dir(case).join("input"), &golden_std(case), &opts).unwrap()
+}
+
+/// Writes `ir.txt` (plus `diags.txt`) of `case` lowered in debug or release mode.
+fn run_ir_case(case: &str, release: bool, threads: usize) -> (PathBuf, Output) {
+    let out = lowered(case, release, threads);
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("dump_goldens")
         .join(format!("ir_{case}_{}_{threads}", if release { "release" } else { "debug" }));

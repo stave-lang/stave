@@ -1,0 +1,9 @@
+// Stand-in for std/string.stv (dump goldens): the type of an f-string.
+import std.core;
+
+pub struct String { len: usize }
+
+impl core.Write for String {
+    fn write_str(&mut self, s: &str) {
+    }
+}

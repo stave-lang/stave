@@ -18,6 +18,7 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
 | `strings` | interned string | `S hash32 "escaped-bytes"`: hash32 = xxHash32 (seed 0) of the bytes, 8 lowercase hex digits | S |
 | `names` | resolving Ident use | `I N -> decl D` or `I N -> local I N2` | I, N |
 | `sigs` | decl | `d<D> KIND MODULE PARENT NAME I N INDEX FLAGS SIG` and, once, the type table `T key` of the types the decl lines name | T table, then D |
+| `kinds` | `sigs` table type, impl, (type, trait) with a candidate impl | `t<T> FLAGS depth D SIZE`, `impl d<D> trait .. head .. gen N methods[..]`, `apply t<T> d<D> [d<D> ..]` | T, then (trait, head, I), then (T, trait D) |
 | `types` | expression node | `I N T` and, once, the type table `T key` | T table, then I, N |
 | `borrow` | access | `I N access-kind verdict loan` | I, N, access-kind |
 | `ir` | checked IR line | the canonical checked-IR printer ([checked-ir.md](checked-ir.md); after type, borrow, and mono; before optimization) | instance id, block, inst |
@@ -115,6 +116,67 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
   - Errors: a written type with an error component is the error type (`-`), so no key names
     it; were one to, the component would print `t<n>`, n = the number of table lines (the
     error type ranks last). A name declared only by a dropped item is an `error` decl.
+- `kinds`: the kind, depth, and layout of every type of the `sigs` table, the impl table, and
+  which impls apply to those types: what the trait, kind, and layout rules decide from the
+  signatures alone, never a body fact. `t<T>` is the `sigs` T (the same types, the same numbers;
+  the table is not printed again), `d<D>` a decl. Every answer is taken in the empty environment:
+  a generic param has no bound and is not `view`; `Self` likewise (it is `sized`, and Send and
+  Sync hold for it by the structural rule over no parts). Three sections:
+  - `t<T> FLAGS depth DEPTH SIZE`, one per table type, by T.
+    - `FLAGS`: the ones that hold, joined by `,` in this order, or `-`: `copy` (built-in Copy or
+      an `impl Copy`), `view`, `send`, `sync` (an explicit impl decides for its ADT, else
+      structural), `sized` (not `str` or a slice), `flat`, `frozen` (derived), `drop-impl` (an
+      ADT type whose `Drop` impl, declared in the ADT's package, applies; with params: the ADT
+      has one), `drop` (needs drop glue: a `drop-impl` type or a non-Copy generic param reached
+      by value through fields, payloads, tuple and array elements), `lock` (a
+      `std.sync.MutexGuard` reached by value through fields, payloads, tuple and array elements,
+      or through the pointee of an ADT's raw-pointer field).
+    - `DEPTH`: the type depth of E0005 case `type`: 1 for a type without components, else one
+      above its deepest component; a struct or enum one above its deepest type argument and
+      field (after substitution); a part reached through a reference, pointer, slice, or fn
+      type adds nothing. `over`: past the limit (1000). `-`: the type reaches, through parts held
+      by value, a type that holds itself by value.
+    - `SIZE`: `size S align A` in bytes, then ` fields[O ..]` for a struct or tuple (each
+      field's offset, in declaration order) or ` tag 4 variants[[O ..] ..]` for an enum (a `u32`
+      tag at offset 0 whose value is the variant's `INDEX`; per variant by `INDEX`, its fields'
+      offsets; no niche: every enum has the tag). Rules: ints, floats, `bool` (1), `char` (4)
+      naturally aligned; `never` (0, 1); a reference or raw pointer (8, 8), (16, 8) to `str` or
+      a slice; a fn value (16, 8); an array `len` elements; a vector or mask lanes × lane bytes,
+      aligned to its size; a tuple, struct, or range: fields in order, each at the next offset
+      aligned to it, the size rounded up to the largest alignment; an enum: tag, then each
+      variant's fields from offset 4, the largest variant rounded up. No layout: the first part
+      without one, in that order (variants, fields, elements), decides: `size param` (a generic
+      param, `Self`, an array of const-param length), `size unsized` (`str`, a slice, a sizeless
+      vector or mask), `size none` (a type that holds itself by value, one nested past the depth
+      limit, an ADT without a definition); `size overflow`: the size does not fit in 64 bits.
+      The same on every target (each has 8-byte pointers): the dump takes no target. A
+      `size_of::<X>()` / `align_of::<X>()` in a `sigs` array length or const argument is X's `S`
+      / `A` here.
+  - `impl d<D> trait d<D>|- head HEAD gen N methods[d<D> ..]`, one per impl decl: its trait
+    (`-`: inherent, or an unresolved trait), the head of its self type (`-`: none, as for a
+    generic param, reference, tuple, array, fn type, or the error type; `d<D>`: an ADT; else the
+    built-in type's spelling, `u32`, `f32x8`, `mask32x8`, `vec`), its generic param count, its
+    methods in declaration order. Ordered by trait (inherent first, then by D), then head (`-`,
+    ADTs by D, built-in types by spelling bytes), then item `I`.
+  - `apply t<T> d<D> [d<D> ..]`, for each table type and trait (by T, then trait D) that has a
+    candidate, an impl of the trait whose head is the type's or none: the candidates that apply
+    (the self type matches, every bound of the impl's params holds, and no param without `view`
+    gets a view), in item order. Trait queries are answered on demand, so this is the finite
+    set that stands for them: impl selection takes the first applying impl whose trait arguments
+    match, so for a trait without params the first listed is the impl and `[]` is none. Two
+    impls that both apply overlap (E0903) and are both listed. Whether a type is Copy, Send, Sync,
+    Flat, or Frozen is its flag (an impl of Flat or Frozen, E1408, is listed here and ignored
+    there); the operator impls of scalars are built in, not impls.
+  - Errors: the tables print as stage0 holds them. An impl whose self type is the error type has
+    head `-` and applies to nothing; an unresolved trait makes the impl inherent (`trait -`).
+    The impl checks over this table report E0414 (case `drop`), E0415, E0416, E0419, E0420,
+    E0421, E0422, E0810, E0903, E0905, E0906, E0907, E1408 (gated through `diags`).
+  - Example (`kinds_layout`): `enum Shape { Dot, Circle(u8, f64), Rect { lo: Pair, hi: u32 } }`
+    with `Pair { a: u8, b: u64, c: u16 }` (t46) prints `t45 send,sync,sized,flat,frozen depth 3
+    size 40 align 8 tag 4 variants[[] [4 8] [8 32]]` and `t46 copy,send,sync,sized,flat,frozen
+    depth 2 size 24 align 8 fields[0 8 16]`; `impl<T: Area> Area for Wrap<T>` (d83, `Area` d66,
+    `Wrap` d50) prints `impl d83 trait d66 head d50 gen 1 methods[d84]`, and `apply t42 d66
+    [d83]` for `Wrap<Pair>` (Pair implements Area), `apply t41 d66 []` for `Wrap<Res>`.
 - `types`: one `I N T` line for every expression node, in items not dropped. A node that denotes
   no value (a module or type name, e.g. `io` in `io.print(..)`) or has the error type prints `-` as
   T. The type table lists every T a line names plus every T their keys reference, transitively,
