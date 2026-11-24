@@ -59,7 +59,7 @@ fn split_flag(a: &string.String) -> (string.String, Option<string.String>) {
 
 fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
     let n = env.count();
-    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] --dump=tokens --dump-dir DIR")); }
+    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] --dump=tokens,items,ast --dump-dir DIR")); }
     let cmd = arg(1);
     if !text.eq_str(cmd.as_bytes(), "build") && !text.eq_str(cmd.as_bytes(), "check") {
         return Result.Err(f"unknown command `{cmd}` (stage1 runs build and check)");
