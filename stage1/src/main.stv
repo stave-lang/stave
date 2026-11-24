@@ -3,13 +3,16 @@
 // it keeps on the GPU.
 //
 // Command line (a subset of stage0's): `stage1 build|check [PATH]
-// [--dump=tokens,items,ast,strings,names,diags --dump-dir DIR] [--diagnostics human|json]
+// [--dump=tokens,items,ast,strings,names,sigs,diags --dump-dir DIR] [--diagnostics human|json]
 // [--target T] [-o OUT]`. PATH (default `.`) is a `.stv` file or a package directory; the build
 // covers it, its path dependencies, and the shipped `std` and `runtime` from the library
 // directory (`$STAVE_STD_DIR`, else next to the binary as for stage0). It writes the requested dumps as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for
 // byte stage0's for the stages stage1 has, and prints its diagnostics to stderr in stage0's text
-// (or JSON lines). `-o` is accepted and unused: no code is generated yet. Exit codes: 0 done,
+// (or JSON lines). `-o` is accepted and unused: no code is generated yet. A `sigs` dump whose
+// signatures need a type layout or a const form stage1 does not evaluate yet is not written;
+// one line on stderr says which. Exit codes: 0 done,
 // 1 diagnostics, 2 usage, 3 internal error (a diagnostic the registry cannot build).
+import consteval;
 import decls;
 import diag;
 import diag_lex;
@@ -26,6 +29,7 @@ import parse;
 import paths;
 import resdiag;
 import resolve;
+import sigs;
 import source;
 import text;
 import std.env;
@@ -55,6 +59,7 @@ struct Cli {
     want_ast: bool,
     want_strings: bool,
     want_names: bool,
+    want_sigs: bool,
     want_diags: bool,
 }
 
@@ -76,7 +81,7 @@ fn split_flag(a: &string.String) -> (string.String, Option<string.String>) {
 
 fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
     let n = env.count();
-    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] [--dump=tokens,items,ast,strings,names,diags --dump-dir DIR]")); }
+    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] [--dump=tokens,items,ast,strings,names,sigs,diags --dump-dir DIR]")); }
     let cmd = arg(1);
     if !text.eq_str(cmd.as_bytes(), "build") && !text.eq_str(cmd.as_bytes(), "check") {
         return Result.Err(f"unknown command `{cmd}` (stage1 runs build and check)");
@@ -138,6 +143,8 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
                 cli.want_strings = true;
             } else if text.eq_str(st.as_bytes(), "names") {
                 cli.want_names = true;
+            } else if text.eq_str(st.as_bytes(), "sigs") {
+                cli.want_sigs = true;
             } else if text.eq_str(st.as_bytes(), "diags") {
                 cli.want_diags = true;
             } else if d.len() > 0 {
@@ -233,7 +240,7 @@ fn root_dir(root: &str) -> string.String {
 }
 
 fn main() -> i32 {
-    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), json: false, want_tokens: false, want_items: false, want_ast: false, want_strings: false, want_names: false, want_diags: false };
+    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), json: false, want_tokens: false, want_items: false, want_ast: false, want_strings: false, want_names: false, want_sigs: false, want_diags: false };
     match parse_args(&mut cli) {
         Result.Ok(_) => {}
         Result.Err(m) => { return usage(m.as_str()); }
@@ -316,6 +323,18 @@ fn main() -> i32 {
             let out = dump.names_txt(&res);
             let code = write_dump(cli.dump_dir.as_str(), "names.txt", out.as_slice());
             if code != EXIT_OK { return code; }
+        }
+        if cli.want_sigs {
+            let sg = sigs.build(&fl, &md, &ds, &nm, &set, &toks, &cut, &tree, &res);
+            if sg.cx.skip == consteval.CV_LAYOUT {
+                io.eprint("stage1: sigs.txt not written: a signature needs a type layout\n");
+            } else if sg.cx.skip != consteval.CV_NONE {
+                io.eprint("stage1: sigs.txt not written: a signature needs a const form stage1 does not evaluate\n");
+            } else {
+                let out = dump.sigs_txt(&sg, &ds, &md);
+                let code = write_dump(cli.dump_dir.as_str(), "sigs.txt", out.as_slice());
+                if code != EXIT_OK { return code; }
+            }
         }
         if cli.want_diags {
             let out = dump.diags(&d, rows.as_slice(), &ft, &set);

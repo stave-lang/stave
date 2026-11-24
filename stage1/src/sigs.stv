@@ -1,0 +1,1675 @@
+// Signatures (types/sigs): every declaration's signature facts, built from the syntax and the
+// resolutions alone, before any body: generic params with their const types and bounds, fn
+// signatures (params, return, `self`, ABI, needs, deny clause, `from` origins), field and payload
+// types, impl headers, alias targets, const and static types. The types are rows of the type
+// table (`types`); const values come from `consteval`.
+//
+// Passes, each over whole columns (the order is the dependency order of the facts):
+// 1. generic params: one row per `GenericParam` of each decl's own list, by D;
+// 2. the declared type of each const param;
+// 3. aliases, consts, and statics in dependency rounds (an alias target or a const's type may
+//    name another alias or const; a const's value may use other consts); what a cycle leaves
+//    has no value (consts) or the error type (aliases);
+// 4. impl self types and traits;
+// 5. bounds of every generic param (`Self` is the impl's self type, or a trait's `Self`);
+// 6. fn signatures, field types, and variant payloads, by D.
+// A written type is lowered with an explicit stack over its nodes (`lower`): a frame per node
+// to visit and one per node to finish from its components' results.
+import ast;
+import consteval;
+import decls;
+import files;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import items;
+import lex;
+import modules;
+import resolve;
+import source;
+import types;
+import prims.col;
+import prims.ragged;
+import prims.search;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+const ERR: u32 = types.ERR;
+
+// Fn signature flags.
+pub const SF_SELF_MASK: u16 = 3;
+pub const SF_SELF_VALUE: u16 = 1;
+pub const SF_SELF_REF: u16 = 2;
+pub const SF_SELF_MUT: u16 = 3;
+pub const SF_ABI_C: u16 = 4;
+pub const SF_ABI_INTRINSIC: u16 = 8;
+pub const SF_UNSAFE: u16 = 16;
+pub const SF_VARIADIC: u16 = 32;
+pub const SF_BUILT: u16 = 64;
+
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
+const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
+const T_AMP: u8 = terminals.T_AMP as% u8;
+const T_AMP_AMP: u8 = terminals.T_AMP_AMP as% u8;
+const T_STAR: u8 = terminals.T_STAR as% u8;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
+const T_COMMA: u8 = terminals.T_COMMA as% u8;
+const T_DOT: u8 = terminals.T_DOT as% u8;
+const T_DOT_DOT_DOT: u8 = terminals.T_DOT_DOT_DOT as% u8;
+const T_MINUS_GT: u8 = terminals.T_MINUS_GT as% u8;
+const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
+const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
+const T_KW_SELF_TYPE: u8 = terminals.T_KW_SELF_TYPE as% u8;
+const T_KW_ALIGN: u8 = terminals.T_KW_ALIGN as% u8;
+const T_KW_COPY: u8 = terminals.T_KW_COPY as% u8;
+const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
+const T_KW_VIEW: u8 = terminals.T_KW_VIEW as% u8;
+const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
+
+const K_TYPE: u8 = node_kinds.KIND_TYPE;
+const K_TYPE_BASE: u8 = node_kinds.KIND_TYPE_BASE;
+const K_GENERIC_ARGS: u8 = node_kinds.KIND_GENERIC_ARGS;
+const K_GENERIC_ARG: u8 = node_kinds.KIND_GENERIC_ARG;
+const K_GENERIC_PARAM: u8 = node_kinds.KIND_GENERIC_PARAM;
+const K_GENERICS: u8 = node_kinds.KIND_GENERICS;
+const K_ARR_OR_IDX: u8 = node_kinds.KIND_ARR_OR_IDX;
+const K_NEEDS: u8 = node_kinds.KIND_NEEDS;
+const K_WITHOUT: u8 = node_kinds.KIND_WITHOUT;
+const K_BOUND: u8 = node_kinds.KIND_BOUND;
+const K_PARAMS: u8 = node_kinds.KIND_PARAMS;
+const K_PARAM: u8 = node_kinds.KIND_PARAM;
+const K_X_PARAMS: u8 = node_kinds.KIND_X_PARAMS;
+const K_SELF_PARAM: u8 = node_kinds.KIND_SELF_PARAM;
+const K_RET_CLAUSE: u8 = node_kinds.KIND_RET_CLAUSE;
+const K_FROM: u8 = node_kinds.KIND_FROM;
+const K_ORIGIN: u8 = node_kinds.KIND_ORIGIN;
+const K_PARAM_FROM: u8 = node_kinds.KIND_PARAM_FROM;
+const K_EXTERN_FN: u8 = node_kinds.KIND_EXTERN_FN;
+const K_EXTERN_ITEM: u8 = node_kinds.KIND_EXTERN_ITEM;
+const K_KERNEL_DECL: u8 = node_kinds.KIND_KERNEL_DECL;
+
+// Lowering frame ops.
+const OP_TY: u8 = 0;
+const OP_WRAP: u8 = 1;
+const OP_ARRAY: u8 = 2;
+const OP_TUPLE: u8 = 3;
+const OP_FN: u8 = 4;
+const OP_ADT: u8 = 5;
+const OP_ALIAS: u8 = 6;
+const OP_GARG: u8 = 7;
+const OP_GARG_T: u8 = 8;
+const OP_GARG_ARR: u8 = 9;
+const OP_VECG: u8 = 10;
+
+// The target features (contracts/simd-ops.md), in their listing order (= bit), each with the
+// features it implies directly.
+const FEATURES: &str = "sse42 avx avx2 fma bmi2 f16c avx512f avx512bw avx512vl avx512dq avx512cd avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16 neon fp16 dotprod bf16 sve sve2 cuda";
+const IMPLIES: [u32; 24] = [0, 1, 2, 2, 0, 2, 44, 64, 64, 64, 64, 128, 128, 64, 128, 896, 128, 0, 131072, 131072, 131072, 262144, 2097152, 0];
+// `v3`, `v4`: their members.
+const V3: u32 = 60;
+const V4: u32 = 1980;
+// The effect names, by deny bit.
+const EFFECTS: &str = "alloc trap recursive lock unsafe io block park";
+const PARK: u8 = 128;
+
+// The closure of feature set `bits` under implication.
+pub fn feature_closure(bits: u64) -> u64 {
+    let mut s = bits;
+    loop {
+        let mut next = s;
+        for f in 0..24usize {
+            if (s >> f as u64) & 1 == 1 { next = next | (IMPLIES[f] as u64); }
+        }
+        if next == s { return s; }
+        s = next;
+    }
+}
+
+// The features of set `bits` no other one of the set implies directly: what `needs` prints.
+pub fn feature_maximal(bits: u64) -> u64 {
+    let mut out: u64 = 0;
+    for f in 0..24usize {
+        if (bits >> f as u64) & 1 == 0 { continue; }
+        let mut implied = false;
+        for g in 0..24usize {
+            if g != f && (bits >> g as u64) & 1 == 1 && (IMPLIES[g] >> f as% u32) & 1 == 1 { implied = true; }
+        }
+        if !implied { out = out | (1u64 << f as u64); }
+    }
+    return out;
+}
+
+// The k-th space-separated word of `words`: (start, end) in its bytes.
+pub fn word(words: &str, k: usize) -> (usize, usize) {
+    let b = mem.str_bytes(words);
+    let mut at: usize = 0;
+    let mut seen: usize = 0;
+    for i in 0..b.len() + 1 {
+        if i == b.len() || b[i] == 32 {
+            if seen == k { return (at, i); }
+            seen = seen + 1;
+            at = i + 1;
+        }
+    }
+    return (0, 0);
+}
+
+// The index of word b in `words`, or NONE.
+fn word_index(words: &str, b: &[u8]) -> u32 {
+    let w = mem.str_bytes(words);
+    let mut at: usize = 0;
+    let mut seen: u32 = 0;
+    for i in 0..w.len() + 1 {
+        if i == w.len() || w[i] == 32 {
+            if w[at..i].eq(b) { return seen; }
+            seen = seen + 1;
+            at = i + 1;
+        }
+    }
+    return NONE;
+}
+
+// Appends feature f's name.
+pub fn push_feature(buf: &mut vec.Vec<u8>, f: usize) {
+    let (a, b) = word(FEATURES, f);
+    buf.extend_from_slice(&mem.str_bytes(FEATURES)[a..b]);
+}
+
+// Appends effect e's name.
+pub fn push_effect(buf: &mut vec.Vec<u8>, e: usize) {
+    let (a, b) = word(EFFECTS, e);
+    buf.extend_from_slice(&mem.str_bytes(EFFECTS)[a..b]);
+}
+
+// The feature set a `needs` name stands for (closed), or none.
+fn feature_of(b: &[u8]) -> (bool, u64) {
+    let f = word_index(FEATURES, b);
+    if f != NONE { return (true, feature_closure(1u64 << f as u64)); }
+    if b.eq(mem.str_bytes("v3")) { return (true, feature_closure(V3 as u64)); }
+    if b.eq(mem.str_bytes("v4")) { return (true, feature_closure((V3 | V4) as u64)); }
+    return (false, 0);
+}
+
+// The deny bits a `without` name stands for (`block` also denies `park`).
+fn effect_of(b: &[u8]) -> (bool, u8) {
+    let e = word_index(EFFECTS, b);
+    if e == NONE { return (false, 0u8); }
+    let bit = (1u32 << e) as% u8;
+    return (true, if e == 6 then bit | PARK else bit);
+}
+
+// A built-in type name: (kind, x, y): kind 1 a scalar (x = scalar code), 2 a vector (x = lane
+// code, y = lanes), 3 a mask (x = width, y = lanes), 4 `vec`, 5 `mask`, 6 `never`; 0 none.
+// Scalar codes: 0..9 i8 i16 i32 i64 isize u8 u16 u32 u64 usize, 10 f16, 11 bf16, 12 f32, 13 f64,
+// 14 bool, 15 char, 16 str.
+const SCALARS: &str = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize f16 bf16 f32 f64 bool char str";
+
+fn scalar_code(b: &[u8]) -> u32 {
+    return word_index(SCALARS, b);
+}
+
+fn lanes_of(b: &[u8]) -> u32 {
+    if b.eq(mem.str_bytes("n")) { return types.LANES_N; }
+    let ok = ["2", "4", "8", "16", "32", "64"];
+    let v = [2u32, 4, 8, 16, 32, 64];
+    for k in 0..6usize {
+        if b.eq(mem.str_bytes(ok[k])) { return v[k]; }
+    }
+    return NONE;
+}
+
+pub fn prim_of(b: &[u8]) -> (u8, u32, u32) {
+    let s = scalar_code(b);
+    if s != NONE { return (1u8, s, 0); }
+    if b.eq(mem.str_bytes("vec")) { return (4u8, 0, 0); }
+    if b.eq(mem.str_bytes("mask")) { return (5u8, 0, 0); }
+    if b.eq(mem.str_bytes("never")) { return (6u8, 0, 0); }
+    // `TxN` / `maskWxN`: split at the last `x`
+    let mut x = b.len();
+    for k in 0..b.len() {
+        if b[k] == 120 { x = k; }
+    }
+    if x == b.len() { return (0u8, 0, 0); }
+    let n = lanes_of(&b[x + 1..b.len()]);
+    if n == NONE { return (0u8, 0, 0); }
+    let head = &b[0..x];
+    if head.len() >= 4 && head[0..4].eq(mem.str_bytes("mask")) {
+        let w = &head[4..head.len()];
+        let ws = ["8", "16", "32", "64"];
+        let wv = [8u32, 16, 32, 64];
+        for k in 0..4usize {
+            if w.eq(mem.str_bytes(ws[k])) { return (3u8, wv[k], n); }
+        }
+        return (0u8, 0, 0);
+    }
+    let l = scalar_code(head);
+    if l == NONE || l == 4 || l == 9 || l >= 14 { return (0u8, 0, 0); }
+    return (2u8, l, n);
+}
+
+// The type of scalar code s.
+pub fn scalar_ty(tab: &mut types.Table, s: u32) -> u32 {
+    if s < 10 { return tab.int(s < 5, s % 5); }
+    if s == 10 { return tab.key(types.TK_FLOAT, 0, 0); }
+    if s == 11 { return tab.key(types.TK_FLOAT, 3, 0); }
+    if s == 12 { return tab.key(types.TK_FLOAT, 1, 0); }
+    if s == 13 { return tab.key(types.TK_FLOAT, 2, 0); }
+    if s == 14 { return tab.key(types.TK_BOOL, 0, 0); }
+    if s == 15 { return tab.key(types.TK_CHAR, 0, 0); }
+    return tab.key(types.TK_STR, 0, 0);
+}
+
+// The signature facts, per decl D (the columns a decl kind does not have stay empty).
+pub struct Sigs {
+    pub cx: consteval.Cx,
+    // fn: SF_* flags, feature bits, deny bits; params Ts (a tuple variant: its payload)
+    pub sflags: vec.Vec<u16>,
+    pub feats: vec.Vec<u64>,
+    pub deny: vec.Vec<u8>,
+    pub params: ragged.Ragged<u32>,
+    // the `from` entries of the return (param | copy << 8), in source order; the parameter
+    // clauses' entries (target << 16 | source << 8 | copy), sorted, unique
+    pub rfrom: ragged.Ragged<u32>,
+    pub pfrom: ragged.Ragged<u32>,
+    // impl: its trait ref (a row of `bounds`), NONE for an inherent impl or no trait
+    pub trait_ref: vec.Vec<u32>,
+    // per generic param row: its bounds (rows of `bounds`)
+    pub gp_bounds: ragged.Ragged<u32>,
+    // trait refs: the trait decl, its arguments (3 words each)
+    pub b_trait: vec.Vec<u32>,
+    pub b_args: ragged.Ragged<u32>,
+}
+
+// The lowering's stacks: frames (op, row, x, y), the types and generic arguments made.
+pub struct Lw {
+    op: vec.Vec<u8>,
+    row: vec.Vec<u32>,
+    fx: vec.Vec<u32>,
+    fy: vec.Vec<u32>,
+    vals: vec.Vec<u32>,
+    gas: vec.Vec<u32>,
+    tmp: vec.Vec<u32>,
+}
+
+impl Lw {
+    fn new() -> Lw {
+        return Lw.{ op: vec.Vec::<u8>.new(), row: vec.Vec::<u32>.new(), fx: vec.Vec::<u32>.new(), fy: vec.Vec::<u32>.new(), vals: vec.Vec::<u32>.new(), gas: vec.Vec::<u32>.new(), tmp: vec.Vec::<u32>.new() };
+    }
+
+    fn frame(&mut self, op: u8, row: usize, x: u32, y: u32) {
+        self.op.push(op);
+        self.row.push(row as% u32);
+        self.fx.push(x);
+        self.fy.push(y);
+    }
+
+    fn garg(&mut self, k: u32, x: u32, y: u32) {
+        self.gas.push(k);
+        self.gas.push(x);
+        self.gas.push(y);
+    }
+}
+
+fn tk(t: &lex.Tokens, tok: u32) -> u8 {
+    return consteval.tk(t, tok);
+}
+
+fn kind(tree: &ast.Ast, g: usize) -> u8 {
+    return tree.kind.as_slice()[g];
+}
+
+fn child(tree: &ast.Ast, base: usize, g: usize, k: u8) -> u32 {
+    return consteval.child(tree, base, g, k);
+}
+
+fn first_child(tree: &ast.Ast, base: usize, g: usize) -> u32 {
+    let ks = tree.kids.row(g);
+    if ks.len() == 0 { return NONE; }
+    return (base + ks[0] as usize) as% u32;
+}
+
+fn sym_text(nm: &intern.Interned, t: u32) -> &[u8] from nm {
+    let s = nm.tok_str.as_slice()[t as usize];
+    if s == NONE { return mem.str_bytes(""); }
+    return nm.tab.text(s as usize);
+}
+
+// The matching bracket of global token tok.
+fn close_of(cut: &items.Items, tok: u32) -> u32 {
+    let m = cut.mate.as_slice()[tok as usize];
+    return if m == NONE then tok else m;
+}
+
+// The int value of the literal at token tok (`align` sizes), capped at 2^20; 0 if malformed.
+fn int_lit(t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, tok: u32) -> (bool, u64, bool) {
+    let f = cut.file.as_slice()[it as usize] as usize;
+    let src = set.file(f);
+    let s = t.start.as_slice()[tok as usize] as usize;
+    let mut e = s;
+    while e < src.len() {
+        let c = src[e];
+        let ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+        if !ok { break; }
+        e = e + 1;
+    }
+    let (v, big, suf) = consteval.parse_int(&src[s..e]);
+    return (suf != 255, v, big);
+}
+
+// What the last resolved segment of the path at TypeBase or BoundItem row g names: (R_*, id).
+const R_UNRES: u8 = 0;
+const R_DECL: u8 = 1;
+const R_GENERIC: u8 = 2;
+const R_PRIM: u8 = 3;
+const R_BUILTIN: u8 = 4;
+
+fn path_res(cx: &consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, ds: &decls.Decls, it: u32, base: usize, g: usize) -> (u8, u32) {
+    let a = tree.tok.as_slice()[g];
+    let end = tree.tok_end.as_slice()[g];
+    let mut last = a;
+    let mut p = a + 1;
+    while p + 1 < end && tk(t, p) == T_DOT && tk(t, p + 1) == T_IDENT {
+        last = p + 1;
+        p = p + 2;
+    }
+    let (lo, hi) = cx.uses.range(it, (g - base) as% u32);
+    if lo == hi {
+        let s = nm.tok_str.as_slice()[a as usize];
+        if s == NONE || last != a { return (R_UNRES, NONE); }
+        if ds.is_prim.as_slice()[s as usize] { return (R_PRIM, s); }
+        if ds.builtin.as_slice()[s as usize] != 0 { return (R_BUILTIN, s); }
+        return (R_UNRES, NONE);
+    }
+    let r = hi - 1;
+    if cx.uses.tag.as_slice()[r] == resolve.TAG_LOCAL { return (R_GENERIC, cx.uses.target.as_slice()[r]); }
+    let d = cx.uses.target.as_slice()[r];
+    if cx.uses.off.as_slice()[r] != t.start.as_slice()[last as usize] && ds.kind.as_slice()[d as usize] == decls.DK_MODULE { return (R_UNRES, NONE); }
+    return (R_DECL, d);
+}
+
+// Lowers the written type at row g of item it (`rp`: right after `->`, where `never` is legal)
+// in scope sc.
+pub fn lower(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, rp: bool, sc: consteval.Scope) -> u32 {
+    let f0 = lw.op.len();
+    let v0 = lw.vals.len();
+    lw.frame(OP_TY, g, if rp then 1u32 else 0u32, 0);
+    run(cx, lw, tree, t, nm, set, cut, ds, it, f0, sc);
+    let r = if lw.vals.len() > v0 then lw.vals.as_slice()[lw.vals.len() - 1] else ERR;
+    lw.vals.truncate(v0);
+    return r;
+}
+
+// Visits row g as a written type: pushes its result or the frames that make it.
+fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, base: usize, g: usize, rp: bool, chain: u32, sc: consteval.Scope) {
+    if chain >= types.MAX_HEIGHT {
+        lw.vals.push(ERR);
+        return;
+    }
+    let k = kind(tree, g);
+    let a = tree.tok.as_slice()[g];
+    if k == K_TYPE {
+        if tk(t, a) == T_L_BRACKET {
+            let e = child(tree, base, g, K_TYPE);
+            if e == NONE {
+                lw.vals.push(ERR);
+                return;
+            }
+            lw.frame(OP_ARRAY, g, 0, 0);
+            lw.frame(OP_TY, e as usize, 0, 0);
+            return;
+        }
+        let c = first_child(tree, base, g);
+        if c == NONE {
+            lw.vals.push(ERR);
+            return;
+        }
+        lw.frame(OP_TY, c as usize, if rp then 1u32 else 0u32, chain);
+        return;
+    }
+    if k != K_TYPE_BASE {
+        lw.vals.push(ERR);
+        return;
+    }
+    let ta = tk(t, a);
+    if ta == T_AMP || ta == T_AMP_AMP {
+        let c = first_child(tree, base, g);
+        if c == NONE {
+            lw.vals.push(ERR);
+            return;
+        }
+        if ta == T_AMP_AMP {
+            let inner = first_child(tree, base, c as usize);
+            if inner != NONE && tree.tok.as_slice()[inner as usize] == a {
+                let m = tk(t, a + 1) == T_KW_MUT;
+                lw.frame(OP_WRAP, g, 1, 0);
+                lw.frame(OP_WRAP, g, 1, if m then 1u32 else 0u32);
+                let cc = first_child(tree, base, inner as usize);
+                if cc == NONE {
+                    lw.vals.push(ERR);
+                    return;
+                }
+                lw.frame(OP_TY, cc as usize, 0, chain + 2);
+                return;
+            }
+        }
+        let m = tk(t, a + 1) == T_KW_MUT;
+        lw.frame(OP_WRAP, g, 1, if m then 1u32 else 0u32);
+        lw.frame(OP_TY, c as usize, 0, chain + 1);
+        return;
+    }
+    if ta == T_STAR {
+        let m = tk(t, a + 1) == T_KW_MUT;
+        let c = first_child(tree, base, g);
+        if c == NONE {
+            lw.vals.push(ERR);
+            return;
+        }
+        lw.frame(OP_WRAP, g, 0, if m then 1u32 else 0u32);
+        lw.frame(OP_TY, c as usize, 0, chain + 1);
+        return;
+    }
+    if ta == T_L_PAREN {
+        lw.tmp.clear();
+        let ks = tree.kids.row(g);
+        for j in 0..ks.len() {
+            let c = base + ks[j] as usize;
+            if kind(tree, c) == K_TYPE { lw.tmp.push(c as% u32); }
+        }
+        let n = lw.tmp.len();
+        lw.frame(OP_TUPLE, g, n as% u32, 0);
+        for j in 0..n {
+            let c = lw.tmp.as_slice()[n - 1 - j] as usize;
+            lw.frame(OP_TY, c, 0, 0);
+        }
+        return;
+    }
+    if ta == T_KW_FN {
+        let close = close_of(cut, a + 1);
+        let has_ret = tk(t, close + 1) == T_MINUS_GT;
+        lw.tmp.clear();
+        let ks = tree.kids.row(g);
+        for j in 0..ks.len() {
+            let c = base + ks[j] as usize;
+            if kind(tree, c) == K_TYPE { lw.tmp.push(c as% u32); }
+        }
+        let mut n = lw.tmp.len();
+        let ret_node = if has_ret && n > 0 then lw.tmp.as_slice()[n - 1] else NONE;
+        if ret_node != NONE { n = n - 1; }
+        let flag: u32 = (if has_ret then 1u32 else 0u32) | (if ret_node != NONE then 2u32 else 0u32);
+        lw.frame(OP_FN, g, n as% u32, flag);
+        if ret_node != NONE { lw.frame(OP_TY, ret_node as usize, 1, 0); }
+        for j in 0..n {
+            let c = lw.tmp.as_slice()[n - 1 - j] as usize;
+            lw.frame(OP_TY, c, 0, 0);
+        }
+        return;
+    }
+    if ta == T_KW_SELF_TYPE {
+        lw.vals.push(if sc.self_ty == NONE then ERR else sc.self_ty);
+        return;
+    }
+    if ta != T_IDENT {
+        lw.vals.push(ERR);
+        return;
+    }
+    let gargs = child(tree, base, g, K_GENERIC_ARGS);
+    let (r, id) = path_res(cx, tree, t, nm, ds, it, base, g);
+    if r == R_UNRES {
+        lw.vals.push(ERR);
+        return;
+    }
+    if r == R_BUILTIN {
+        lw.vals.push(ERR);
+        return;
+    }
+    if r == R_GENERIC {
+        let gp = base + id as usize;
+        if kind(tree, gp) != K_GENERIC_PARAM {
+            lw.vals.push(ERR);
+            return;
+        }
+        let (idx, is_const, _) = consteval.generic_index(cx, tree, t, ds, it, gp, sc);
+        if is_const || idx == NONE {
+            lw.vals.push(ERR);
+            return;
+        }
+        lw.vals.push(cx.tab.key(types.TK_PARAM, idx, 0));
+        return;
+    }
+    if r == R_PRIM {
+        let (pk, px, py) = prim_of(nm.tab.text(id as usize));
+        if pk == 1 {
+            if gargs != NONE {
+                lw.vals.push(ERR);
+                return;
+            }
+            lw.vals.push(scalar_ty(&mut cx.tab, px));
+            return;
+        }
+        if pk == 6 {
+            lw.vals.push(if rp then cx.tab.key(types.TK_NEVER, 0, 0) else ERR);
+            return;
+        }
+        if pk == 2 {
+            let l = scalar_ty(&mut cx.tab, px);
+            lw.vals.push(cx.tab.key(types.TK_VECTOR, l, py));
+            return;
+        }
+        if pk == 3 {
+            lw.vals.push(cx.tab.key(types.TK_MASK, px, py));
+            return;
+        }
+        if pk == 4 || pk == 5 {
+            // `vec<T, N>` / `mask<W, N>` (always E0609)
+            let n = if gargs == NONE then 0usize else tree.kids.row(gargs as usize).len();
+            if n != 2 {
+                lw.vals.push(ERR);
+                return;
+            }
+            let us = cx.tab.usize_t();
+            let ks = tree.kids.row(gargs as usize);
+            let k0 = base + ks[0] as usize;
+            let k1 = base + ks[1] as usize;
+            lw.frame(OP_VECG, g, pk as% u32, 0);
+            lw.frame(OP_GARG, k1, us, 1);
+            if pk == 4 { lw.frame(OP_GARG, k0, NONE, 0); } else { lw.frame(OP_GARG, k0, us, 1); }
+            return;
+        }
+        lw.vals.push(ERR);
+        return;
+    }
+    // a decl
+    let dk = ds.kind.as_slice()[id as usize];
+    if dk == decls.DK_STRUCT || dk == decls.DK_ENUM || dk == decls.DK_TYPE_ALIAS {
+        if dk == decls.DK_TYPE_ALIAS && !cx.ready.as_slice()[id as usize] {
+            lw.vals.push(ERR);
+            return;
+        }
+        let glo = cx.gens.lo.as_slice()[id as usize];
+        let ghi = cx.gens.lo.as_slice()[id as usize + 1];
+        let n = if gargs == NONE then 0usize else tree.kids.row(gargs as usize).len();
+        if n != (ghi - glo) as usize {
+            lw.vals.push(ERR);
+            return;
+        }
+        let rpbit: u32 = if rp then 2147483648u32 else 0u32;
+        lw.frame(if dk == decls.DK_TYPE_ALIAS then OP_ALIAS else OP_ADT, g, id, (n as% u32) | rpbit);
+        for j in 0..n {
+            let ga = base + tree.kids.row(gargs as usize)[n - 1 - j] as usize;
+            let gp = glo as usize + n - 1 - j;
+            let c = cx.gens.is_const.as_slice()[gp];
+            lw.frame(OP_GARG, ga, if c then cx.gens.cty.as_slice()[gp] else NONE, if c then 1u32 else 0u32);
+        }
+        return;
+    }
+    lw.vals.push(ERR);
+}
+
+// One generic argument at row ga: a type (`is_const` 0), or a const of type `want`.
+fn visit_garg(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, base: usize, ga: usize, want: u32, is_const: u32, sc: consteval.Scope) {
+    let a = tree.tok.as_slice()[ga];
+    let c = first_child(tree, base, ga);
+    if is_const == 1 {
+        if want == ERR {
+            lw.garg(types.GA_ERROR, 0, 0);
+            return;
+        }
+        let cty = if want == NONE then cx.tab.usize_t() else want;
+        if tk(t, a) == T_INT_LIT {
+            let (ok, v, big) = int_lit(t, set, cut, it, a);
+            if !ok {
+                lw.garg(types.GA_ERROR, 0, 0);
+                return;
+            }
+            let bits = cx.tab.int_bits(cty);
+            let hi: u64 = if bits == 0 || bits == 64 then (if cx.tab.is_signed(cty) then 9223372036854775807u64 else 18446744073709551615u64) else if cx.tab.is_signed(cty) then (1u64 << (bits - 1) as u64) - 1 else (1u64 << bits as u64) - 1;
+            if big || v > hi {
+                lw.garg(types.GA_ERROR, 0, 0);
+                return;
+            }
+            lw.garg(types.GA_VALUE, (v >> 32) as% u32, v as% u32);
+            return;
+        }
+        if c != NONE {
+            let ck = kind(tree, c as usize);
+            if consteval.is_expr_kind(ck) {
+                let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, c as usize, cty, sc);
+                lw.garg(k, x, y);
+                return;
+            }
+            if ck == K_TYPE_BASE {
+                let (lo, hi) = cx.uses.range(it, (c as usize - base) as% u32);
+                if lo < hi {
+                    let r = hi - 1;
+                    if cx.uses.tag.as_slice()[r] == resolve.TAG_LOCAL {
+                        let gp = base + cx.uses.target.as_slice()[r] as usize;
+                        let (idx, gc, _) = consteval.generic_index(cx, tree, t, ds, it, gp, sc);
+                        if gc {
+                            let (k, x, y) = consteval.const_param_arg(cx, idx, want, sc);
+                            lw.garg(k, x, y);
+                            return;
+                        }
+                    } else {
+                        let d = cx.uses.target.as_slice()[r];
+                        if ds.kind.as_slice()[d as usize] == decls.DK_CONST {
+                            let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, c as usize, cty, sc);
+                            lw.garg(k, x, y);
+                            return;
+                        }
+                    }
+                } else {
+                    let s = nm.tok_str.as_slice()[tree.tok.as_slice()[c as usize] as usize];
+                    if s != NONE && !ds.is_prim.as_slice()[s as usize] && ds.builtin.as_slice()[s as usize] == 0 {
+                        lw.garg(types.GA_ERROR, 0, 0);
+                        return;
+                    }
+                }
+            }
+        }
+        lw.garg(types.GA_ERROR, 0, 0);
+        return;
+    }
+    if c != NONE && kind(tree, c as usize) == K_TYPE_BASE {
+        lw.frame(OP_GARG_T, ga, 0, 0);
+        lw.frame(OP_TY, c as usize, 0, 0);
+        return;
+    }
+    if c != NONE && kind(tree, c as usize) == K_ARR_OR_IDX {
+        let e = child(tree, base, c as usize, K_TYPE);
+        if e == NONE {
+            lw.garg(types.GA_TYPE, ERR, 0);
+            return;
+        }
+        lw.frame(OP_GARG_ARR, c as usize, 0, 0);
+        lw.frame(OP_TY, e as usize, 0, 0);
+        return;
+    }
+    lw.garg(types.GA_TYPE, ERR, 0);
+}
+
+// The first expression child row of row g, or NONE.
+fn expr_child(tree: &ast.Ast, base: usize, g: usize) -> u32 {
+    let ks = tree.kids.row(g);
+    for j in 0..ks.len() {
+        let c = base + ks[j] as usize;
+        if consteval.is_expr_kind(kind(tree, c)) { return c as% u32; }
+    }
+    return NONE;
+}
+
+// An array type of element `elem` written at row g (a `Type` or `ArrOrIdx` starting with `[`
+// or holding the element and length): its length is an expression child, else a slice.
+fn array_of(cx: &mut consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, base: usize, g: usize, elem: u32, need_lit: bool, sc: consteval.Scope) -> u32 {
+    let e = expr_child(tree, base, g);
+    if e != NONE {
+        let us = cx.tab.usize_t();
+        let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, e as usize, us, sc);
+        if elem == ERR || k == types.GA_ERROR { return ERR; }
+        cx.tab.begin();
+        cx.tab.push_garg(k, x, y);
+        return cx.tab.intern(types.TK_ARRAY, elem, 0);
+    }
+    let a = tree.tok.as_slice()[g];
+    let close = close_of(cut, a);
+    let mut al: u32 = 0;
+    if close >= 2 && tk(t, close - 2) == T_KW_ALIGN && (!need_lit || tk(t, close - 1) == T_INT_LIT) {
+        let (ok, v, big) = int_lit(t, set, cut, it, close - 1);
+        if ok { al = if big || v > 1048576 then 1048576u32 else v as% u32; }
+    }
+    if elem == ERR { return ERR; }
+    return cx.tab.key(types.TK_SLICE, elem, al);
+}
+
+// The feature bits of a `Needs` row.
+fn needs_bits(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, base: usize, nd: usize) -> u64 {
+    let mut bits: u64 = 0;
+    let ks = tree.kids.row(nd);
+    for j in 0..ks.len() {
+        let f = base + ks[j] as usize;
+        let (ok, b) = feature_of(sym_text(nm, tree.tok.as_slice()[f]));
+        if ok { bits = bits | b; }
+    }
+    return bits;
+}
+
+// The deny bits of a `Without` row.
+fn deny_bits(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, it: u32, base: usize, nd: usize) -> u8 {
+    let mut bits: u8 = 0;
+    let ks = tree.kids.row(nd);
+    for j in 0..ks.len() {
+        let e = base + ks[j] as usize;
+        let tok = tree.tok.as_slice()[e];
+        let name = if tk(t, tok) == T_IDENT then sym_text(nm, tok) else mem.str_bytes("unsafe");
+        let (ok, b) = effect_of(name);
+        if ok { bits = bits | b; }
+    }
+    return bits;
+}
+
+// Substitutes the generic arguments `args` (3 words each) for the params of type ty.
+fn subst(cx: &mut consteval.Cx, ty: u32, args: &[u32]) -> u32 {
+    if args.len() == 0 || ty == ERR { return ty; }
+    // memo over the type's components, by postorder with an explicit stack
+    let mut mk = vec.Vec::<u32>.new();
+    let mut mv = vec.Vec::<u32>.new();
+    let mut stack = vec.Vec::<u32>.new();
+    let mut done = vec.Vec::<bool>.new();
+    stack.push(ty);
+    done.push(false);
+    let mut kids = vec.Vec::<u32>.new();
+    let mut xs = vec.Vec::<u32>.new();
+    loop {
+        let n = stack.len();
+        if n == 0 { break; }
+        let u = stack.as_slice()[n - 1];
+        let expanded = done.as_slice()[n - 1];
+        if memo_get(mk.as_slice(), mv.as_slice(), u) != NONE {
+            stack.truncate(n - 1);
+            done.truncate(n - 1);
+            continue;
+        }
+        let tag = cx.tab.tag_of(u);
+        if tag == types.TK_PARAM {
+            let i = cx.tab.a_of(u) as usize;
+            let r = if 3 * i + 2 < args.len() && args[3 * i] == types.GA_TYPE then args[3 * i + 1] else u;
+            mk.push(u);
+            mv.push(r);
+            stack.truncate(n - 1);
+            done.truncate(n - 1);
+            continue;
+        }
+        cx.tab.kids(u, &mut kids);
+        if kids.len() == 0 && tag != types.TK_ADT && tag != types.TK_ARRAY {
+            mk.push(u);
+            mv.push(u);
+            stack.truncate(n - 1);
+            done.truncate(n - 1);
+            continue;
+        }
+        if !expanded {
+            done.as_mut_slice()[n - 1] = true;
+            for k in 0..kids.len() {
+                let c = kids.as_slice()[k];
+                if memo_get(mk.as_slice(), mv.as_slice(), c) == NONE {
+                    stack.push(c);
+                    done.push(false);
+                }
+            }
+            continue;
+        }
+        // rebuild the key with mapped components
+        let mut err = false;
+        xs.clear();
+        xs.extend_from_slice(cx.tab.x(u));
+        let a0 = cx.tab.a_of(u);
+        let b0 = cx.tab.b_of(u);
+        let mut na = a0;
+        let mut nb = b0;
+        if tag == types.TK_REF || tag == types.TK_PTR {
+            nb = memo_get(mk.as_slice(), mv.as_slice(), b0);
+            err = nb == ERR;
+        } else if tag == types.TK_ARRAY || tag == types.TK_SLICE || tag == types.TK_VECTOR || tag == types.TK_RANGE {
+            na = memo_get(mk.as_slice(), mv.as_slice(), a0);
+            err = na == ERR;
+            if tag == types.TK_ARRAY && xs.as_slice()[0] == types.GA_PARAM {
+                let i = xs.as_slice()[1] as usize;
+                if 3 * i + 2 < args.len() && args[3 * i] != types.GA_TYPE {
+                    xs.as_mut_slice()[0] = args[3 * i];
+                    xs.as_mut_slice()[1] = args[3 * i + 1];
+                    xs.as_mut_slice()[2] = args[3 * i + 2];
+                }
+            }
+        } else if tag == types.TK_TUPLE {
+            for k in 0..xs.len() {
+                let m = memo_get(mk.as_slice(), mv.as_slice(), xs.as_slice()[k]);
+                if m == ERR { err = true; }
+                xs.as_mut_slice()[k] = m;
+            }
+        } else if tag == types.TK_ADT {
+            let mut k: usize = 0;
+            while k + 2 < xs.len() {
+                let w = xs.as_slice()[k];
+                if w == types.GA_TYPE {
+                    let m = memo_get(mk.as_slice(), mv.as_slice(), xs.as_slice()[k + 1]);
+                    if m == ERR { err = true; }
+                    xs.as_mut_slice()[k + 1] = m;
+                } else if w == types.GA_PARAM {
+                    let i = xs.as_slice()[k + 1] as usize;
+                    if 3 * i + 2 < args.len() && args[3 * i] != types.GA_TYPE {
+                        xs.as_mut_slice()[k] = args[3 * i];
+                        xs.as_mut_slice()[k + 1] = args[3 * i + 1];
+                        xs.as_mut_slice()[k + 2] = args[3 * i + 2];
+                    }
+                }
+                k = k + 3;
+            }
+        } else if tag == types.TK_FN {
+            let np = a0 as usize;
+            for k in 0..np + 1 {
+                let m = memo_get(mk.as_slice(), mv.as_slice(), xs.as_slice()[k]);
+                if m == ERR { err = true; }
+                xs.as_mut_slice()[k] = m;
+            }
+        }
+        let mut r = ERR;
+        if !err {
+            cx.tab.begin();
+            for k in 0..xs.len() {
+                cx.tab.push(xs.as_slice()[k]);
+            }
+            r = cx.tab.intern(tag, na, nb);
+        }
+        mk.push(u);
+        mv.push(r);
+        stack.truncate(n - 1);
+        done.truncate(n - 1);
+    }
+    return memo_get(mk.as_slice(), mv.as_slice(), ty);
+}
+
+fn memo_get(ks: &[u32], vs: &[u32], u: u32) -> u32 {
+    for k in 0..ks.len() {
+        if ks[k] == u { return vs[k]; }
+    }
+    return NONE;
+}
+
+// The height of ty with the type arguments of `args` substituted (MAX_HEIGHT + 1 past it).
+fn subst_height(cx: &consteval.Cx, ty: u32, args: &[u32]) -> u32 {
+    if ty == ERR { return 0; }
+    // heights of the types reachable from ty, params replaced by their argument's height
+    let mut stack = vec.Vec::<u32>.new();
+    let mut mk = vec.Vec::<u32>.new();
+    let mut hs = vec.Vec::<u32>.new();
+    let mut done = vec.Vec::<bool>.new();
+    let mut kids = vec.Vec::<u32>.new();
+    stack.push(ty);
+    done.push(false);
+    loop {
+        let n = stack.len();
+        if n == 0 { break; }
+        let u = stack.as_slice()[n - 1];
+        if memo_get(mk.as_slice(), hs.as_slice(), u) != NONE {
+            stack.truncate(n - 1);
+            done.truncate(n - 1);
+            continue;
+        }
+        if cx.tab.tag_of(u) == types.TK_PARAM {
+            let i = cx.tab.a_of(u) as usize;
+            if 3 * i + 2 < args.len() && args[3 * i] == types.GA_TYPE {
+                let x = args[3 * i + 1];
+                mk.push(u);
+                hs.push(if x == ERR then 0u32 else cx.tab.height.as_slice()[x as usize]);
+                stack.truncate(n - 1);
+                done.truncate(n - 1);
+                continue;
+            }
+        }
+        cx.tab.kids(u, &mut kids);
+        if !done.as_slice()[n - 1] {
+            done.as_mut_slice()[n - 1] = true;
+            for k in 0..kids.len() {
+                stack.push(kids.as_slice()[k]);
+                done.push(false);
+            }
+            continue;
+        }
+        let mut h: u32 = 0;
+        for k in 0..kids.len() {
+            let x = memo_get(mk.as_slice(), hs.as_slice(), kids.as_slice()[k]);
+            if x > h { h = x; }
+        }
+        mk.push(u);
+        hs.push(h + 1);
+        stack.truncate(n - 1);
+        done.truncate(n - 1);
+    }
+    return memo_get(mk.as_slice(), hs.as_slice(), ty);
+}
+
+// Finishes a frame from the results of its components.
+fn finish(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, base: usize, op: u8, g: usize, x: u32, y: u32, sc: consteval.Scope) {
+    if op == OP_WRAP {
+        let inner = pop(lw);
+        let r = if x == 1 then cx.tab.mk_ref(y == 1, inner) else cx.tab.mk_ptr(y == 1, inner);
+        lw.vals.push(r);
+        return;
+    }
+    if op == OP_ARRAY {
+        let elem = pop(lw);
+        let r = array_of(cx, tree, t, nm, set, cut, ds, it, base, g, elem, true, sc);
+        lw.vals.push(r);
+        return;
+    }
+    if op == OP_GARG_ARR {
+        let elem = pop(lw);
+        let r = array_of(cx, tree, t, nm, set, cut, ds, it, base, g, elem, false, sc);
+        lw.garg(types.GA_TYPE, r, 0);
+        return;
+    }
+    if op == OP_GARG_T {
+        let r = pop(lw);
+        lw.garg(types.GA_TYPE, r, 0);
+        return;
+    }
+    if op == OP_TUPLE {
+        let n = x as usize;
+        let lo = lw.vals.len() - n;
+        let a = tree.tok.as_slice()[g];
+        let close = close_of(cut, a);
+        if n == 1 && tk(t, close - 1) != T_COMMA {
+            return;
+        }
+        let mut err = false;
+        cx.tab.begin();
+        for k in lo..lw.vals.len() {
+            let v = lw.vals.as_slice()[k];
+            if v == ERR { err = true; }
+            cx.tab.push(v);
+        }
+        lw.vals.truncate(lo);
+        lw.vals.push(if err then ERR else cx.tab.intern(types.TK_TUPLE, 0, 0));
+        return;
+    }
+    if op == OP_FN {
+        let np = x as usize;
+        let has_ret = y & 1 == 1;
+        let ret_node = y & 2 == 2;
+        let mut ret = if ret_node then pop(lw) else if has_ret then ERR else cx.tab.unit();
+        let lo = lw.vals.len() - np;
+        let nd = child(tree, base, g, K_NEEDS);
+        let feats = if nd == NONE then 0u64 else needs_bits(tree, t, nm, base, nd as usize);
+        let wd = child(tree, base, g, K_WITHOUT);
+        let deny = if wd == NONE then 0u8 else deny_bits(tree, t, nm, set, cut, it, base, wd as usize) & ~PARK;
+        let mut err = ret == ERR;
+        cx.tab.begin();
+        for k in lo..lw.vals.len() {
+            let v = lw.vals.as_slice()[k];
+            if v == ERR { err = true; }
+            cx.tab.push(v);
+        }
+        lw.vals.truncate(lo);
+        if err {
+            lw.vals.push(ERR);
+            return;
+        }
+        cx.tab.push(ret);
+        cx.tab.push((feats >> 32) as% u32);
+        cx.tab.push(feats as% u32);
+        cx.tab.push(deny as% u32);
+        ret = cx.tab.intern(types.TK_FN, np as% u32, 0);
+        lw.vals.push(ret);
+        return;
+    }
+    if op == OP_ADT || op == OP_ALIAS {
+        let n = (y & 2147483647) as usize;
+        let at_ret = y >> 31 == 1;
+        let lo = lw.gas.len() - 3 * n;
+        lw.tmp.clear();
+        lw.tmp.extend_from_slice(&lw.gas.as_slice()[lo..lw.gas.len()]);
+        lw.gas.truncate(lo);
+        if op == OP_ADT {
+            let mut err = false;
+            cx.tab.begin();
+            for k in 0..lw.tmp.len() {
+                let w = lw.tmp.as_slice()[k];
+                if k % 3 == 0 && w == types.GA_TYPE && lw.tmp.as_slice()[k + 1] == ERR { err = true; }
+                cx.tab.push(w);
+            }
+            lw.vals.push(if err then ERR else cx.tab.intern(types.TK_ADT, x, 0));
+            return;
+        }
+        let target = cx.ty.as_slice()[x as usize];
+        if subst_height(cx, target, lw.tmp.as_slice()) > types.MAX_HEIGHT {
+            lw.vals.push(ERR);
+            return;
+        }
+        let mut args = vec.Vec::<u32>.new();
+        args.extend_from_slice(lw.tmp.as_slice());
+        let r = subst(cx, target, args.as_slice());
+        let never = r != ERR && cx.tab.tag_of(r) == types.TK_NEVER;
+        lw.vals.push(if never && !at_ret then ERR else r);
+        return;
+    }
+    if op == OP_VECG {
+        let lo = lw.gas.len() - 6;
+        let k0 = lw.gas.as_slice()[lo];
+        let x0 = lw.gas.as_slice()[lo + 1];
+        let y0 = lw.gas.as_slice()[lo + 2];
+        let k1 = lw.gas.as_slice()[lo + 3];
+        let y1 = lw.gas.as_slice()[lo + 5];
+        let x1 = lw.gas.as_slice()[lo + 4];
+        lw.gas.truncate(lo);
+        if k1 == types.GA_ERROR {
+            lw.vals.push(ERR);
+            return;
+        }
+        let lanes = lanes_value(k1, x1, y1);
+        if lanes == NONE {
+            lw.vals.push(ERR);
+            return;
+        }
+        if x == 4 {
+            if k0 != types.GA_TYPE || x0 == ERR {
+                lw.vals.push(ERR);
+                return;
+            }
+            let lt = cx.tab.tag_of(x0);
+            if lt == types.TK_PARAM || lt == types.TK_SELF {
+                lw.vals.push(cx.tab.key(types.TK_VECTOR, x0, lanes));
+                return;
+            }
+            let ok = (lt == types.TK_INT && cx.tab.b_of(x0) != types.W_SIZE) || lt == types.TK_FLOAT;
+            lw.vals.push(if ok then cx.tab.key(types.TK_VECTOR, x0, lanes) else ERR);
+            return;
+        }
+        if k0 == types.GA_VALUE && x0 == 0 && (y0 == 8 || y0 == 16 || y0 == 32 || y0 == 64) {
+            lw.vals.push(cx.tab.key(types.TK_MASK, y0, lanes));
+            return;
+        }
+        lw.vals.push(ERR);
+        return;
+    }
+}
+
+fn lanes_value(k: u32, x: u32, y: u32) -> u32 {
+    if k != types.GA_VALUE || x != 0 { return NONE; }
+    if y == 2 || y == 4 || y == 8 || y == 16 || y == 32 || y == 64 { return y; }
+    return NONE;
+}
+
+fn pop(lw: &mut Lw) -> u32 {
+    return match lw.vals.pop() {
+        Option.Some(v) => v,
+        Option.None => ERR,
+    };
+}
+
+// Runs the frames above f0 to the end.
+fn run(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, f0: usize, sc: consteval.Scope) {
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    while lw.op.len() > f0 {
+        let top = lw.op.len() - 1;
+        let op = lw.op.as_slice()[top];
+        let row = lw.row.as_slice()[top] as usize;
+        let fx = lw.fx.as_slice()[top];
+        let fy = lw.fy.as_slice()[top];
+        lw.op.truncate(top);
+        lw.row.truncate(top);
+        lw.fx.truncate(top);
+        lw.fy.truncate(top);
+        if op == OP_TY {
+            visit(cx, lw, tree, t, nm, set, cut, ds, it, base, row, fx == 1, fy, sc);
+        } else if op == OP_GARG {
+            visit_garg(cx, lw, tree, t, nm, set, cut, ds, it, base, row, fx, fy, sc);
+        } else {
+            finish(cx, lw, tree, t, nm, set, cut, ds, it, base, op, row, fx, fy, sc);
+        }
+    }
+}
+
+// The generic arguments at `GenericArgs` row ga (NONE: none) for the params of decl d, into
+// out (3 words each); false on a count mismatch (E0201).
+fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, d: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) -> bool {
+    out.clear();
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let glo = cx.gens.lo.as_slice()[d as usize] as usize;
+    let ghi = cx.gens.lo.as_slice()[d as usize + 1] as usize;
+    let n = if ga == NONE then 0usize else tree.kids.row(ga as usize).len();
+    if n != ghi - glo { return false; }
+    let f0 = lw.op.len();
+    let g0 = lw.gas.len();
+    for j in 0..n {
+        let a = base + tree.kids.row(ga as usize)[n - 1 - j] as usize;
+        let gp = glo + n - 1 - j;
+        let c = cx.gens.is_const.as_slice()[gp];
+        lw.frame(OP_GARG, a, if c then cx.gens.cty.as_slice()[gp] else NONE, if c then 1u32 else 0u32);
+    }
+    run(cx, lw, tree, t, nm, set, cut, ds, it, f0, sc);
+    out.extend_from_slice(&lw.gas.as_slice()[g0..lw.gas.len()]);
+    lw.gas.truncate(g0);
+    return true;
+}
+
+// The trait a `BoundItem` or `TypeBase` path row names, with its arguments: a row of `bounds`,
+// or NONE (not a trait, or a wrong argument count).
+fn trait_ref_at(sg: &mut Sigs, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, sc: consteval.Scope) -> u32 {
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let (lo, hi) = sg.cx.uses.range(it, (g - base) as% u32);
+    if lo == hi || sg.cx.uses.tag.as_slice()[hi - 1] != resolve.TAG_DECL { return NONE; }
+    let d = sg.cx.uses.target.as_slice()[hi - 1];
+    if ds.kind.as_slice()[d as usize] != decls.DK_TRAIT { return NONE; }
+    let ga = child(tree, base, g, K_GENERIC_ARGS);
+    let mut args = vec.Vec::<u32>.new();
+    if !lower_gargs(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, ga, d, sc, &mut args) { return NONE; }
+    sg.b_trait.push(d);
+    sg.b_args.push_row(args.as_slice());
+    return (sg.b_trait.len() - 1) as% u32;
+}
+
+// The scope of decl d's signature: a method's container params, then its own.
+fn scope_of(cx: &consteval.Cx, ds: &decls.Decls, d: u32, self_ty: u32) -> consteval.Scope {
+    let k = ds.kind.as_slice()[d as usize];
+    let p = ds.parent.as_slice()[d as usize];
+    let lo = cx.gens.lo.as_slice()[d as usize];
+    let hi = cx.gens.lo.as_slice()[d as usize + 1];
+    if (k == decls.DK_METHOD || k == decls.DK_TRAIT_METHOD) && p != NONE {
+        return consteval.Scope.{ par_lo: cx.gens.lo.as_slice()[p as usize], par_hi: cx.gens.lo.as_slice()[p as usize + 1], own_lo: lo, own_hi: hi, own: d, self_ty: self_ty };
+    }
+    return consteval.Scope.{ par_lo: 0, par_hi: 0, own_lo: lo, own_hi: hi, own: d, self_ty: self_ty };
+}
+
+// `Self` in the signature of member d: its impl's self type, or a trait's `Self`; NONE else.
+fn self_of(cx: &mut consteval.Cx, ds: &decls.Decls, d: u32) -> u32 {
+    let k = ds.kind.as_slice()[d as usize];
+    let p = ds.parent.as_slice()[d as usize];
+    if (k != decls.DK_METHOD && k != decls.DK_TRAIT_METHOD) || p == NONE { return NONE; }
+    let pk = ds.kind.as_slice()[p as usize];
+    if pk == decls.DK_IMPL { return cx.ty.as_slice()[p as usize]; }
+    if pk == decls.DK_TRAIT { return cx.tab.key(types.TK_SELF, 0, 0); }
+    return NONE;
+}
+
+fn has_generics(k: u8) -> bool {
+    return k == decls.DK_FN || k == decls.DK_METHOD || k == decls.DK_TRAIT_METHOD || k == decls.DK_STRUCT || k == decls.DK_ENUM || k == decls.DK_IMPL || k == decls.DK_TYPE_ALIAS || k == decls.DK_TRAIT;
+}
+
+// The row of decl d's node, or NONE.
+fn decl_row(tree: &ast.Ast, ds: &decls.Decls, d: usize) -> u32 {
+    let i = ds.item.as_slice()[d];
+    let n = ds.node.as_slice()[d];
+    if i == NONE || n == NONE { return NONE; }
+    return tree.item_node.as_slice()[i as usize] + n;
+}
+
+// Whether type ty is or holds a reference or view in scope sc (a `T: view` param counts).
+fn is_view_in(cx: &consteval.Cx, ds: &decls.Decls, ty: u32, sc: consteval.Scope) -> bool {
+    let mut stack = vec.Vec::<u32>.new();
+    let mut seen = vec.Vec::<u32>.new();
+    let mut kids = vec.Vec::<u32>.new();
+    stack.push(ty);
+    while stack.len() > 0 {
+        let x = stack.as_slice()[stack.len() - 1];
+        stack.truncate(stack.len() - 1);
+        if x == ERR || memo_get(seen.as_slice(), seen.as_slice(), x) != NONE { continue; }
+        seen.push(x);
+        let tag = cx.tab.tag_of(x);
+        if tag == types.TK_REF || tag == types.TK_FN { return true; }
+        if tag == types.TK_PTR || tag == types.TK_SELF { continue; }
+        if tag == types.TK_PARAM {
+            let r = sc.row(cx.tab.a_of(x));
+            if r != NONE && cx.gens.is_view.as_slice()[r as usize] { return true; }
+            continue;
+        }
+        if tag == types.TK_ADT && ds.flags.as_slice()[cx.tab.a_of(x) as usize] & decls.F_VIEW != 0 { return true; }
+        cx.tab.kids(x, &mut kids);
+        stack.extend_from_slice(kids.as_slice());
+    }
+    return false;
+}
+
+// The origin-table class of a param type: 0 none (an error), 1 `&T`, 2 `&V`, 3 a view, 4 owned.
+fn classify(cx: &consteval.Cx, ds: &decls.Decls, ty: u32, sc: consteval.Scope) -> u8 {
+    if ty == ERR { return 0u8; }
+    let tag = cx.tab.tag_of(ty);
+    if tag == types.TK_REF {
+        let inner = cx.tab.b_of(ty);
+        let v = cx.tab.tag_of(inner) == types.TK_SELF || is_view_in(cx, ds, inner, sc);
+        return if v then 2u8 else 1u8;
+    }
+    if tag == types.TK_SELF || is_view_in(cx, ds, ty, sc) { return 3u8; }
+    return 4u8;
+}
+
+fn valid(c: u8, cp: bool) -> bool {
+    if c == 0 { return true; }
+    if cp { return c == 2; }
+    return c != 4;
+}
+
+// The param index of local binding row b among the param rows ps (a param or its `self`).
+fn param_index(tree: &ast.Ast, base: usize, ps: &[u32], b: usize) -> u32 {
+    for k in 0..ps.len() {
+        let p = ps[k] as usize;
+        if p == b || child(tree, base, p, K_SELF_PARAM) == b as% u32 { return if k > 255 then 255u32 else k as% u32; }
+    }
+    return NONE;
+}
+
+// The `Origin` entries of a `From` row: (param index, copy) as `index | copy << 8`.
+fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: usize, ps: &[u32], out: &mut vec.Vec<u32>) {
+    out.clear();
+    let ks = tree.kids.row(f);
+    for j in 0..ks.len() {
+        let o = base + ks[j] as usize;
+        if kind(tree, o) != K_ORIGIN { continue; }
+        let a = tree.tok.as_slice()[o];
+        let cp = tk(t, a) == T_KW_COPY;
+        // `self` has no resolution row: it names the fn's `self` parameter
+        if tk(t, if cp then a + 1 else a) == T_KW_SELF {
+            for k in 0..ps.len() {
+                if child(tree, base, ps[k] as usize, K_SELF_PARAM) != NONE {
+                    out.push((if k > 255 then 255u32 else k as% u32) | (if cp then 256u32 else 0u32));
+                    break;
+                }
+            }
+            continue;
+        }
+        let (lo, hi) = sg.cx.uses.range(it, (o - base) as% u32);
+        if lo == hi || sg.cx.uses.tag.as_slice()[lo] != resolve.TAG_LOCAL { continue; }
+        let b = base + sg.cx.uses.target.as_slice()[lo] as usize;
+        let i = param_index(tree, base, ps, b);
+        if i != NONE { out.push(i | (if cp then 256u32 else 0u32)); }
+    }
+}
+
+// Whether the `extern` item holding fn row g has the ABI string "stave-intrinsic".
+fn is_intrinsic(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, g: usize) -> bool {
+    let mut x = g;
+    loop {
+        if kind(tree, x) == K_EXTERN_ITEM {
+            let s = tree.tok.as_slice()[x] + 1;
+            if tk(t, s) != T_STR_LIT { return false; }
+            let f = cut.file.as_slice()[it as usize] as usize;
+            let src = set.file(f);
+            let o = t.start.as_slice()[s as usize] as usize;
+            let want = mem.str_bytes("\"stave-intrinsic\"");
+            return o + want.len() <= src.len() && src[o..o + want.len()].eq(want);
+        }
+        let p = sg.cx.parent.as_slice()[x];
+        if p == NONE { return false; }
+        x = p as usize;
+    }
+}
+
+// Whether fn d may not declare `needs` (E0709): a trait method, a trait impl's method, or an
+// entry point (a `test fn`, an export, the root package's `main`, an allocator fn).
+fn needs_forbidden(sg: &Sigs, fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, d: u32) -> bool {
+    let k = ds.kind.as_slice()[d as usize];
+    if k == decls.DK_TRAIT_METHOD { return true; }
+    if k == decls.DK_METHOD {
+        let p = ds.parent.as_slice()[d as usize];
+        if p != NONE && sg.trait_ref.as_slice()[p as usize] != NONE { return true; }
+    }
+    if k != decls.DK_FN && k != decls.DK_METHOD { return false; }
+    let df = ds.flags.as_slice()[d as usize];
+    if df & (decls.F_TEST | decls.F_EXTERN_EXPORT) != 0 { return true; }
+    let main = modules.lookup(&nm.tab, mem.str_bytes("main"));
+    for p in 0..fl.pkg_root.len() {
+        if fl.pkg_root.as_slice()[p] && p < md.pkg_root_mod.len() {
+            let m = md.pkg_root_mod.as_slice()[p];
+            if m != NONE && main != NONE && ds.module_item(m, main) == d { return true; }
+        }
+    }
+    let names = ["alloc", "free", "realloc"];
+    for a in 0..md.alloc_item.len() {
+        let hi = md.alloc_seg_off.as_slice()[a + 1];
+        let lo = md.alloc_seg_off.as_slice()[a];
+        if hi == lo { continue; }
+        let m = md.alloc_seg_mod.as_slice()[hi as usize - 1];
+        if m == NONE { continue; }
+        for j in 0..3usize {
+            let s = modules.lookup(&nm.tab, mem.str_bytes(names[j]));
+            if s != NONE && ds.module_item(m, s) == d { return true; }
+        }
+    }
+    return false;
+}
+
+// The signature of fn, method, or trait method d.
+fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, d: u32) {
+    let it = ds.item.as_slice()[d as usize];
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let g = base + ds.node.as_slice()[d as usize] as usize;
+    let k = kind(tree, g);
+    let st = self_of(&mut sg.cx, ds, d);
+    let sc = scope_of(&sg.cx, ds, d, st);
+    let mut ps = vec.Vec::<u32>.new();
+    let mut variadic = false;
+    let pn = child(tree, base, g, K_PARAMS);
+    if pn != NONE {
+        let ks = tree.kids.row(pn as usize);
+        for j in 0..ks.len() {
+            let c = base + ks[j] as usize;
+            if kind(tree, c) == K_PARAM { ps.push(c as% u32); }
+        }
+    }
+    let mut xp = child(tree, base, g, K_X_PARAMS);
+    while xp != NONE {
+        if tk(t, tree.tok.as_slice()[xp as usize]) == T_DOT_DOT_DOT { variadic = true; }
+        let p = child(tree, base, xp as usize, K_PARAM);
+        if p != NONE { ps.push(p); }
+        xp = child(tree, base, xp as usize, K_X_PARAMS);
+    }
+    let mut flags: u16 = SF_BUILT;
+    let mut tys = vec.Vec::<u32>.new();
+    for j in 0..ps.len() {
+        let p = ps.as_slice()[j] as usize;
+        let sp = child(tree, base, p, K_SELF_PARAM);
+        if sp != NONE {
+            let a = tree.tok.as_slice()[sp as usize];
+            let sk = if tk(t, a) == T_AMP then (if tk(t, a + 1) == T_KW_MUT then SF_SELF_MUT else SF_SELF_REF) else SF_SELF_VALUE;
+            let s0 = if st == NONE then ERR else st;
+            let ty = if sk == SF_SELF_VALUE then s0 else sg.cx.tab.mk_ref(sk == SF_SELF_MUT, s0);
+            if tys.len() == 0 { flags = flags | sk; }
+            tys.push(ty);
+            continue;
+        }
+        let tn = child(tree, base, p, K_TYPE);
+        tys.push(if tn == NONE then ERR else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, tn as usize, false, sc));
+    }
+    let rc = child(tree, base, g, K_RET_CLAUSE);
+    let mut ret_n = NONE;
+    let mut from_n = NONE;
+    if rc != NONE {
+        ret_n = child(tree, base, rc as usize, K_TYPE);
+        from_n = child(tree, base, rc as usize, K_FROM);
+    } else if k == K_EXTERN_FN || k == K_EXTERN_ITEM {
+        ret_n = child(tree, base, g, K_TYPE);
+    }
+    let ret = if ret_n == NONE then sg.cx.tab.unit() else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, ret_n as usize, true, sc);
+    let mut ro = vec.Vec::<u32>.new();
+    if from_n != NONE { origins(sg, tree, t, it, base, from_n as usize, ps.as_slice(), &mut ro); }
+    let nd = child(tree, base, g, K_NEEDS);
+    let mut feats = if nd == NONE then 0u64 else needs_bits(tree, t, nm, base, nd as usize);
+    if nd != NONE && needs_forbidden(sg, fl, md, ds, nm, d) { feats = 0; }
+    let wd = child(tree, base, g, K_WITHOUT);
+    let deny = if wd == NONE then 0u8 else deny_bits(tree, t, nm, set, cut, it, base, wd as usize);
+    let df = ds.flags.as_slice()[d as usize];
+    if df & decls.F_UNSAFE != 0 { flags = flags | SF_UNSAFE; }
+    let stave_abi = df & (decls.F_EXTERN_IMPORT | decls.F_EXTERN_EXPORT) == 0;
+    if df & decls.F_EXTERN_IMPORT != 0 {
+        flags = flags | SF_UNSAFE | (if is_intrinsic(sg, tree, t, set, cut, it, g) then SF_ABI_INTRINSIC else SF_ABI_C);
+    } else if df & decls.F_EXTERN_EXPORT != 0 {
+        flags = flags | SF_ABI_C;
+    }
+    if variadic { flags = flags | SF_VARIADIC; }
+    // the parameters' `from` clauses: legal only on a `&mut` param of a view (any `&mut` in a
+    // trait impl's method) of a Stave-ABI fn that is no kernel
+    let mut po = vec.Vec::<u32>.new();
+    let mut ent = vec.Vec::<u32>.new();
+    let par = ds.parent.as_slice()[d as usize];
+    let mirrors = ds.kind.as_slice()[d as usize] == decls.DK_METHOD && par != NONE && sg.trait_ref.as_slice()[par as usize] != NONE;
+    for j in 0..ps.len() {
+        let p = ps.as_slice()[j] as usize;
+        let pf = child(tree, base, p, K_PARAM_FROM);
+        if pf == NONE { continue; }
+        let tt = tys.as_slice()[j];
+        let class = classify(&sg.cx, ds, tt, sc);
+        let is_mut = tt != ERR && sg.cx.tab.tag_of(tt) == types.TK_REF && sg.cx.tab.a_of(tt) == 1;
+        let legal = stave_abi && k != K_KERNEL_DECL && (class == 0 || (is_mut && (mirrors || class == 2)));
+        if !legal || class == 0 { continue; }
+        let fr = child(tree, base, pf as usize, K_FROM);
+        origins(sg, tree, t, it, base, if fr == NONE then pf as usize else fr as usize, ps.as_slice(), &mut ent);
+        for e in 0..ent.len() {
+            let src = ent.as_slice()[e] & 255;
+            let cp = ent.as_slice()[e] >> 8 == 1;
+            if src == j as% u32 { continue; }
+            if !mirrors && !valid(classify(&sg.cx, ds, tys.as_slice()[src as usize], sc), cp) { continue; }
+            po.push(((j as% u32) << 16) | (src << 8) | (if cp then 1u32 else 0u32));
+        }
+    }
+    // sorted by (target, source, copy), unique
+    let mut sorted = vec.Vec::<u32>.new();
+    for a in 0..po.len() {
+        let v = po.as_slice()[a];
+        let mut dup = false;
+        for b in 0..sorted.len() {
+            if sorted.as_slice()[b] == v { dup = true; }
+        }
+        if dup { continue; }
+        sorted.push(v);
+        let mut c = sorted.len() - 1;
+        while c > 0 && sorted.as_slice()[c - 1] > sorted.as_slice()[c] {
+            let lo = sorted.as_slice()[c - 1];
+            let hi = sorted.as_slice()[c];
+            sorted.as_mut_slice()[c - 1] = hi;
+            sorted.as_mut_slice()[c] = lo;
+            c = c - 1;
+        }
+    }
+    sg.cx.ty.as_mut_slice()[d as usize] = ret;
+    sg.sflags.as_mut_slice()[d as usize] = flags;
+    sg.feats.as_mut_slice()[d as usize] = feats;
+    sg.deny.as_mut_slice()[d as usize] = deny;
+    sg.params.push_row(tys.as_slice());
+    sg.rfrom.push_row(ro.as_slice());
+    sg.pfrom.push_row(sorted.as_slice());
+}
+
+// Builds every decl's signature facts (the passes of the module doc).
+pub fn build(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, res: &resolve.Names) -> Sigs {
+    let n = ds.decls();
+    let gens = consteval.Gens.{ lo: vec.Vec::<u32>.new(), name: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new(), is_const: vec.Vec::<bool>.new(), cty: vec.Vec::<u32>.new(), is_view: vec.Vec::<bool>.new() };
+    let consts = consteval.Consts.{ state: col.filled(n, consteval.CV_NONE), ty: col.filled(n, ERR), neg: col.filled(n, false), mag: col.filled(n, 0u64) };
+    let cx = consteval.Cx.{ tab: types.Table.new(), uses: consteval.Uses.new(res), parent: consteval.parents(tree), gens: gens, consts: consts, ty: col.filled(n, ERR), ready: col.filled(n, false), skip: consteval.CV_NONE };
+    let mut sg = Sigs.{
+        cx: cx,
+        sflags: col.filled(n, 0u16),
+        feats: col.filled(n, 0u64),
+        deny: col.filled(n, 0u8),
+        params: ragged.Ragged::<u32>.new(),
+        rfrom: ragged.Ragged::<u32>.new(),
+        pfrom: ragged.Ragged::<u32>.new(),
+        trait_ref: col.filled(n, NONE),
+        gp_bounds: ragged.Ragged::<u32>.new(),
+        b_trait: vec.Vec::<u32>.new(),
+        b_args: ragged.Ragged::<u32>.new(),
+    };
+    let mut lw = Lw.new();
+    // 1. generic params
+    for d in 0..n {
+        sg.cx.gens.lo.push(sg.cx.gens.name.len() as% u32);
+        if !has_generics(ds.kind.as_slice()[d]) { continue; }
+        let g = decl_row(tree, ds, d);
+        if g == NONE { continue; }
+        let it = ds.item.as_slice()[d];
+        let base = tree.item_node.as_slice()[it as usize] as usize;
+        let gn = child(tree, base, g as usize, K_GENERICS);
+        if gn == NONE { continue; }
+        let ks = tree.kids.row(gn as usize);
+        for j in 0..ks.len() {
+            let c = base + ks[j] as usize;
+            if kind(tree, c) != K_GENERIC_PARAM { continue; }
+            let a = tree.tok.as_slice()[c];
+            let is_const = tk(t, a) == T_KW_CONST;
+            let nt = if is_const then a + 1 else a;
+            sg.cx.gens.name.push(nm.tok_str.as_slice()[nt as usize]);
+            sg.cx.gens.node.push(ks[j]);
+            sg.cx.gens.is_const.push(is_const);
+            sg.cx.gens.cty.push(ERR);
+            sg.cx.gens.is_view.push(false);
+        }
+    }
+    sg.cx.gens.lo.push(sg.cx.gens.name.len() as% u32);
+    // 2. const param types (an unsigned int type, else the error type: E0201)
+    for d in 0..n {
+        let lo = sg.cx.gens.lo.as_slice()[d] as usize;
+        let hi = sg.cx.gens.lo.as_slice()[d + 1] as usize;
+        if lo == hi { continue; }
+        let it = ds.item.as_slice()[d];
+        let base = tree.item_node.as_slice()[it as usize] as usize;
+        let sc = scope_of(&sg.cx, ds, d as% u32, NONE);
+        for r in lo..hi {
+            if !sg.cx.gens.is_const.as_slice()[r] { continue; }
+            let gp = base + sg.cx.gens.node.as_slice()[r] as usize;
+            let tn = child(tree, base, gp, K_TYPE);
+            if tn == NONE { continue; }
+            let ct = lower(&mut sg.cx, &mut lw, tree, t, nm, set, cut, ds, it, tn as usize, false, sc);
+            let ok = ct == ERR || (sg.cx.tab.tag_of(ct) == types.TK_INT && sg.cx.tab.a_of(ct) == 0);
+            sg.cx.gens.cty.as_mut_slice()[r] = if ok then ct else ERR;
+        }
+    }
+    // 3. aliases, consts, statics in dependency rounds
+    let mut pend = vec.Vec::<u32>.new();
+    for d in 0..n {
+        let k = ds.kind.as_slice()[d];
+        if (k == decls.DK_TYPE_ALIAS || k == decls.DK_CONST || k == decls.DK_STATIC) && decl_row(tree, ds, d) != NONE { pend.push(d as% u32); }
+    }
+    let mut done = col.filled(n, false);
+    let mut round = vec.Vec::<u32>.new();
+    loop {
+        round.clear();
+        for j in 0..pend.len() {
+            let d = pend.as_slice()[j];
+            if done.as_slice()[d as usize] { continue; }
+            if deps_done(&sg.cx, ds, done.as_slice(), ds.item.as_slice()[d as usize]) { round.push(d); }
+        }
+        if round.len() == 0 { break; }
+        for j in 0..round.len() {
+            let d = round.as_slice()[j];
+            alias_or_const(&mut sg, &mut lw, ds, nm, set, t, cut, tree, d);
+            done.as_mut_slice()[d as usize] = true;
+        }
+    }
+    // what a cycle leaves: no const value, an alias of the error type; the types of the consts
+    // and statics left are lowered with that
+    for j in 0..pend.len() {
+        let d = pend.as_slice()[j] as usize;
+        if !done.as_slice()[d] && ds.kind.as_slice()[d] == decls.DK_CONST { sg.cx.consts.state.as_mut_slice()[d] = consteval.CV_FAIL; }
+    }
+    for j in 0..pend.len() {
+        let d = pend.as_slice()[j];
+        if done.as_slice()[d as usize] || ds.kind.as_slice()[d as usize] == decls.DK_TYPE_ALIAS { continue; }
+        alias_or_const(&mut sg, &mut lw, ds, nm, set, t, cut, tree, d);
+        if ds.kind.as_slice()[d as usize] == decls.DK_CONST { sg.cx.consts.state.as_mut_slice()[d as usize] = consteval.CV_FAIL; }
+    }
+    // 4. impl self types and traits
+    for d in 0..n {
+        if ds.kind.as_slice()[d] != decls.DK_IMPL { continue; }
+        let it = ds.item.as_slice()[d];
+        if it == NONE { continue; }
+        let base = tree.item_node.as_slice()[it as usize] as usize;
+        let sc = scope_of(&sg.cx, ds, d as% u32, NONE);
+        let sn = ds.impl_self_ty.as_slice()[d];
+        let st = if sn == NONE then ERR else lower(&mut sg.cx, &mut lw, tree, t, nm, set, cut, ds, it, base + sn as usize, false, sc);
+        sg.cx.ty.as_mut_slice()[d] = st;
+        let tn = ds.impl_trait_ty.as_slice()[d];
+        if tn != NONE {
+            let tr = base + tn as usize;
+            let tb = child(tree, base, tr, K_TYPE_BASE);
+            let sc2 = scope_of(&sg.cx, ds, d as% u32, st);
+            let r = trait_ref_at(&mut sg, &mut lw, tree, t, nm, set, cut, ds, it, if tb == NONE then tr else tb as usize, sc2);
+            sg.trait_ref.as_mut_slice()[d] = r;
+        }
+    }
+    // 5. bounds
+    for d in 0..n {
+        let lo = sg.cx.gens.lo.as_slice()[d] as usize;
+        let hi = sg.cx.gens.lo.as_slice()[d + 1] as usize;
+        if lo == hi { continue; }
+        let it = ds.item.as_slice()[d];
+        let base = tree.item_node.as_slice()[it as usize] as usize;
+        let k = ds.kind.as_slice()[d];
+        let st = if k == decls.DK_IMPL then sg.cx.ty.as_slice()[d] else self_of(&mut sg.cx, ds, d as% u32);
+        let sc = scope_of(&sg.cx, ds, d as% u32, st);
+        for r in lo..hi {
+            let mut bs = vec.Vec::<u32>.new();
+            let gp = base + sg.cx.gens.node.as_slice()[r] as usize;
+            let bn = if sg.cx.gens.is_const.as_slice()[r] then NONE else child(tree, base, gp, K_BOUND);
+            if bn != NONE {
+                let ks = tree.kids.row(bn as usize);
+                for j in 0..ks.len() {
+                    let bi = base + ks[j] as usize;
+                    if tk(t, tree.tok.as_slice()[bi]) == T_KW_VIEW {
+                        sg.cx.gens.is_view.as_mut_slice()[r] = true;
+                        continue;
+                    }
+                    let tr = trait_ref_at(&mut sg, &mut lw, tree, t, nm, set, cut, ds, it, bi, sc);
+                    if tr != NONE { bs.push(tr); }
+                }
+            }
+            sg.gp_bounds.push_row(bs.as_slice());
+        }
+    }
+    // 6. fn signatures, field types, variant payloads
+    let empty = vec.Vec::<u32>.new();
+    for d in 0..n {
+        let k = ds.kind.as_slice()[d];
+        let g = decl_row(tree, ds, d);
+        if (k == decls.DK_FN || k == decls.DK_METHOD || k == decls.DK_TRAIT_METHOD) && g != NONE {
+            build_fn(&mut sg, &mut lw, fl, md, ds, nm, set, t, cut, tree, d as% u32);
+            continue;
+        }
+        if g != NONE && (k == decls.DK_FIELD || k == decls.DK_VARIANT) {
+            let it = ds.item.as_slice()[d];
+            let base = tree.item_node.as_slice()[it as usize] as usize;
+            // the struct or enum whose params are in scope
+            let mut adt = ds.parent.as_slice()[d];
+            if adt != NONE && ds.kind.as_slice()[adt as usize] == decls.DK_VARIANT { adt = ds.parent.as_slice()[adt as usize]; }
+            let sc = if adt == NONE then consteval.no_scope() else scope_of(&sg.cx, ds, adt, NONE);
+            if k == decls.DK_FIELD {
+                let tn = child(tree, base, g as usize, K_TYPE);
+                let ty = if tn == NONE then ERR else lower(&mut sg.cx, &mut lw, tree, t, nm, set, cut, ds, it, tn as usize, false, sc);
+                sg.cx.ty.as_mut_slice()[d] = ty;
+                sg.sflags.as_mut_slice()[d] = SF_BUILT;
+            } else if ds.flags.as_slice()[d] & decls.F_TUPLE != 0 {
+                let mut pl = vec.Vec::<u32>.new();
+                let ks = tree.kids.row(g as usize);
+                for j in 0..ks.len() {
+                    let c = base + ks[j] as usize;
+                    if kind(tree, c) == K_TYPE { pl.push(lower(&mut sg.cx, &mut lw, tree, t, nm, set, cut, ds, it, c, false, sc)); }
+                }
+                sg.sflags.as_mut_slice()[d] = SF_BUILT;
+                sg.params.push_row(pl.as_slice());
+                sg.rfrom.push_row(empty.as_slice());
+                sg.pfrom.push_row(empty.as_slice());
+                continue;
+            }
+        }
+        sg.params.push_row(empty.as_slice());
+        sg.rfrom.push_row(empty.as_slice());
+        sg.pfrom.push_row(empty.as_slice());
+    }
+    return sg;
+}
+
+// Whether every alias and const that item it's uses name is done.
+fn deps_done(cx: &consteval.Cx, ds: &decls.Decls, done: &[bool], it: u32) -> bool {
+    let lo = search.lower_bound(cx.uses.key.as_slice(), search.pair(it, 0));
+    let hi = search.lower_bound(cx.uses.key.as_slice(), search.pair(it + 1, 0));
+    for k in lo..hi {
+        if cx.uses.tag.as_slice()[k] != resolve.TAG_DECL { continue; }
+        let d = cx.uses.target.as_slice()[k] as usize;
+        let dk = ds.kind.as_slice()[d];
+        if (dk == decls.DK_TYPE_ALIAS || dk == decls.DK_CONST) && !done[d] { return false; }
+    }
+    return true;
+}
+
+// An alias target, or a const's or static's type and a const's value.
+fn alias_or_const(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, d: u32) {
+    let du = d as usize;
+    let it = ds.item.as_slice()[du];
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let g = base + ds.node.as_slice()[du] as usize;
+    let k = ds.kind.as_slice()[du];
+    let tn = child(tree, base, g, K_TYPE);
+    if k == decls.DK_TYPE_ALIAS {
+        let sc = scope_of(&sg.cx, ds, d, NONE);
+        let ty = if tn == NONE then ERR else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, tn as usize, true, sc);
+        sg.cx.ty.as_mut_slice()[du] = ty;
+        sg.cx.ready.as_mut_slice()[du] = true;
+        return;
+    }
+    let ty = if tn == NONE then ERR else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, tn as usize, false, consteval.no_scope());
+    sg.cx.ty.as_mut_slice()[du] = ty;
+    sg.cx.consts.ty.as_mut_slice()[du] = ty;
+    if k != decls.DK_CONST { return; }
+    let e = expr_child(tree, base, g);
+    if e == NONE || ty == ERR {
+        sg.cx.consts.state.as_mut_slice()[du] = consteval.CV_FAIL;
+        return;
+    }
+    if sg.cx.tab.tag_of(ty) != types.TK_INT {
+        sg.cx.consts.state.as_mut_slice()[du] = consteval.CV_UNSUP;
+        return;
+    }
+    let (st, _, neg, mag) = consteval.eval(&mut sg.cx, tree, t, nm, set, cut, ds, it, e as usize, ty);
+    sg.cx.consts.state.as_mut_slice()[du] = st;
+    sg.cx.consts.neg.as_mut_slice()[du] = neg;
+    sg.cx.consts.mag.as_mut_slice()[du] = mag;
+}
