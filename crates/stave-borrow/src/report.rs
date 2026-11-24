@@ -295,18 +295,24 @@ pub fn diagnostics(
                     out.extend(mk("E0501", Some(case), &all, t.span, &roles));
                 } else if let Some(h) = holder {
                     // an exit drops `place` and then `h`, whose drop reads the borrow: the fix is
-                    // to declare `place` before what holds the borrow, so it ends after it
+                    // to borrow a local declared before what holds the borrow, so it ends after
+                    // it: `place` itself, or, when a pattern binds it where its block begins, a
+                    // local `place` is copied into
                     let name = local_name(body, tys, h);
                     let hl = &body.locals[h as usize];
                     let before = body.stmt_words.get(&hl.stmt).copied().unwrap_or("the statement");
                     let mut all: Vec<(&str, &str)> = holes.to_vec();
                     all.push(("holder", &name));
-                    let case = if hl.temp {
-                        all.push(("before", before));
-                        "exit-temp"
-                    } else {
-                        "exit-local"
+                    let matched = body.locals[place.local as usize].matched;
+                    let case = match (hl.temp, matched) {
+                        (true, false) => "exit-temp",
+                        (true, true) => "exit-temp-binding",
+                        (false, false) => "exit-local",
+                        (false, true) => "exit-local-binding",
                     };
+                    if hl.temp {
+                        all.push(("before", before));
+                    }
                     out.extend(mk("E0501", Some(case), &all, span, &roles));
                 } else if later.is_some_and(|(u, _, _)| body.joins.iter().any(|j| j.1 == u)) {
                     // the later use stands for a thread of the scope, which runs until the scope
@@ -467,6 +473,7 @@ mod tests {
             stmt: u32::MAX,
             made: None,
             env: false,
+            matched: false,
             node,
         };
         Body {

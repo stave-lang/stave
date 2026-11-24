@@ -1,0 +1,1047 @@
+// Traits (types/traits): the impl table, impl matching, and trait answers over the type table,
+// from the signatures alone. Every answer is taken in the empty environment: a generic param has
+// no bound and is not `view`.
+//
+// Data:
+// - `Lang`: the compiler-known traits and types (fixed paths of the built-in packages).
+// - `Impls`: per impl decl its trait (NONE: inherent, or an unresolved trait) and the head of its
+//   self type; the impl lines in dump order (trait, head, item); per trait (by D) its impls in
+//   item order, the order impl selection tries them.
+// - `Goals`: one row per question "does type t implement trait tr with args": its clauses (an
+//   answer holds when every goal of one clause holds; no clause: it does not hold). Copy and
+//   impl-selected traits are inductive (a goal met again on its own path does not hold through
+//   it), Send, Sync, Flat, Frozen coinductive (it holds through it).
+//
+// Passes:
+// 1. the impl table: one row per impl decl, sorted into line order (merge sort on the key);
+// 2. queries: the goals and impl-applies clauses the callers ask for (`goal`, `applies_q`);
+// 3. expansion, in goal order: a goal's clauses from the rules (structural parts, the impls whose
+//    self type matches and whose params take no view), creating the goals they name;
+// 4. solving: strongly connected components of the goal graph (Tarjan, explicit stack), each
+//    decided after the components it depends on: a component's coinductive goals start true,
+//    its inductive ones false, and its members are re-evaluated until none changes.
+import decls;
+import files;
+import intern;
+import layout;
+import modules;
+import sigs;
+import types;
+import prims.col;
+import prims.ragged;
+import prims.sort;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+const ERR: u32 = types.ERR;
+
+pub const H_NONE: u64 = 0;
+const H_ADT: u64 = 4611686018427387904;
+const H_PRIM: u64 = 9223372036854775808;
+
+// The operator traits of `std.core`, in a fixed order (`builtin_op`).
+const OPS: &str = "Add WrapAdd SatAdd Sub WrapSub SatSub Mul WrapMul SatMul Div Rem Shl WrapShl Shr BitAnd BitOr BitXor Neg Not";
+const N_OPS: usize = 19;
+
+pub struct Lang {
+    pub copy_tr: u32,
+    pub send: u32,
+    pub sync: u32,
+    pub flat: u32,
+    pub frozen: u32,
+    pub drop: u32,
+    pub unsafe_cell: u32,
+    pub guard: u32,
+    pub ops: vec.Vec<u32>,
+}
+
+fn known(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, m: &str, name: &[u8]) -> u32 {
+    let mo = sigs.builtin_module(fl, md, mem.str_bytes(m));
+    if mo == NONE { return NONE; }
+    let s = modules.lookup(&nm.tab, name);
+    if s == NONE { return NONE; }
+    return ds.module_item(mo, s);
+}
+
+pub fn lang_items(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned) -> Lang {
+    let mut ops = vec.Vec::<u32>.new();
+    let w = mem.str_bytes(OPS);
+    for k in 0..N_OPS {
+        let (a, b) = sigs.word(OPS, k);
+        ops.push(known(fl, md, ds, nm, "std.core", &w[a..b]));
+    }
+    return Lang.{
+        copy_tr: known(fl, md, ds, nm, "std.core", mem.str_bytes("Copy")),
+        send: known(fl, md, ds, nm, "std.core", mem.str_bytes("Send")),
+        sync: known(fl, md, ds, nm, "std.core", mem.str_bytes("Sync")),
+        flat: known(fl, md, ds, nm, "std.core", mem.str_bytes("Flat")),
+        frozen: known(fl, md, ds, nm, "std.core", mem.str_bytes("Frozen")),
+        drop: known(fl, md, ds, nm, "std.core", mem.str_bytes("Drop")),
+        unsafe_cell: known(fl, md, ds, nm, "std.cell", mem.str_bytes("UnsafeCell")),
+        guard: known(fl, md, ds, nm, "std.sync", mem.str_bytes("MutexGuard")),
+        ops: ops,
+    };
+}
+
+// Whether operator trait k (in `OPS` order) is built in for type t.
+pub fn builtin_op(tab: &types.Table, k: usize, t: u32) -> bool {
+    let tag = tab.tag_of(t);
+    let int = tag == types.TK_INT;
+    let float = tag == types.TK_FLOAT;
+    if k == 0 || k == 3 || k == 6 || k == 9 || k == 10 { return int || float; }
+    if k == 14 || k == 15 || k == 16 { return int || tag == types.TK_BOOL; }
+    if k == 17 { return (int && tab.a_of(t) == 1) || float; }
+    return int;
+}
+
+fn is_scalar(tag: u8) -> bool {
+    return tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_STR;
+}
+
+// The head of type t for impl tables: an ADT, a built-in scalar, vector (of a scalar lane), or
+// mask; H_NONE for any other type.
+pub fn head(tab: &types.Table, t: u32) -> u64 {
+    if t == ERR || t == NONE { return H_NONE; }
+    let tag = tab.tag_of(t);
+    if tag == types.TK_ADT { return H_ADT | (tab.a_of(t) as u64); }
+    if is_scalar(tag) || tag == types.TK_MASK { return H_PRIM | (t as u64); }
+    if tag == types.TK_VECTOR && is_scalar(tab.tag_of(tab.a_of(t))) { return H_PRIM | (t as u64); }
+    return H_NONE;
+}
+
+fn push_str(buf: &mut vec.Vec<u8>, s: &str) {
+    buf.extend_from_slice(mem.str_bytes(s));
+}
+
+fn push_u32(buf: &mut vec.Vec<u8>, v: u32) {
+    let mut d = [0u8; 10];
+    let mut n: usize = 0;
+    let mut x = v;
+    loop {
+        d[n] = (x % 10) as% u8 + 48;
+        n = n + 1;
+        x = x / 10;
+        if x == 0 { break; }
+    }
+    while n > 0 {
+        n = n - 1;
+        buf.push(d[n]);
+    }
+}
+
+fn scalar_name(tab: &types.Table, t: u32, buf: &mut vec.Vec<u8>) {
+    let tag = tab.tag_of(t);
+    let a = tab.a_of(t);
+    let b = tab.b_of(t);
+    if tag == types.TK_INT {
+        buf.push(if a == 1 then 105u8 else 117u8);
+        push_str(buf, if b == types.W_8 then "8" else if b == types.W_16 then "16" else if b == types.W_32 then "32" else if b == types.W_64 then "64" else "size");
+    } else if tag == types.TK_FLOAT {
+        push_str(buf, if a == 0 then "f16" else if a == 1 then "f32" else if a == 2 then "f64" else "bf16");
+    } else if tag == types.TK_BOOL {
+        push_str(buf, "bool");
+    } else if tag == types.TK_CHAR {
+        push_str(buf, "char");
+    } else {
+        push_str(buf, "str");
+    }
+}
+
+fn push_lanes(buf: &mut vec.Vec<u8>, n: u32) {
+    if n == types.LANES_N {
+        buf.push(110);
+    } else {
+        push_u32(buf, n);
+    }
+}
+
+// The spelling of head h (`-`, `d<D>` for an ADT, else the built-in type's name).
+pub fn head_text(tab: &types.Table, h: u64, buf: &mut vec.Vec<u8>) {
+    if h == H_NONE {
+        buf.push(45);
+        return;
+    }
+    if h & H_PRIM == 0 {
+        buf.push(100);
+        push_u32(buf, (h & 4294967295) as% u32);
+        return;
+    }
+    let t = (h & 4294967295) as% u32;
+    let tag = tab.tag_of(t);
+    if tag == types.TK_VECTOR {
+        scalar_name(tab, tab.a_of(t), buf);
+        buf.push(120);
+        push_lanes(buf, tab.b_of(t));
+    } else if tag == types.TK_MASK {
+        push_str(buf, "mask");
+        push_u32(buf, tab.a_of(t));
+        buf.push(120);
+        push_lanes(buf, tab.b_of(t));
+    } else {
+        scalar_name(tab, t, buf);
+    }
+}
+
+pub struct Impls {
+    // per decl: the impl's trait (NONE: none) and head
+    pub trait_of: vec.Vec<u32>,
+    pub head_of: vec.Vec<u64>,
+    // the impl decls in line order
+    pub line: vec.Vec<u32>,
+    // the traits with impls, by D; trait k's impls are `t_impl[t_lo[k]..t_lo[k + 1]]`, by item
+    pub traits: vec.Vec<u32>,
+    pub t_lo: vec.Vec<u32>,
+    pub t_impl: vec.Vec<u32>,
+}
+
+impl Impls {
+    // The position of trait tr among `traits`, or NONE.
+    pub fn trait_pos(&self, tr: u32) -> u32 {
+        for k in 0..self.traits.len() {
+            if self.traits.as_slice()[k] == tr { return k as% u32; }
+        }
+        return NONE;
+    }
+
+    // The impls of trait position k.
+    pub fn of(&self, k: u32) -> &[u32] from self {
+        let a = self.t_lo.as_slice()[k as usize] as usize;
+        let b = self.t_lo.as_slice()[k as usize + 1] as usize;
+        return &self.t_impl.as_slice()[a..b];
+    }
+}
+
+// Line order of impls x and y: trait (inherent first, then by D), head (none, ADTs by D,
+// built-in types by spelling), item.
+fn cmp_line(tab: &types.Table, ds: &decls.Decls, im: &Impls, x: u32, y: u32, bx: &mut vec.Vec<u8>, by: &mut vec.Vec<u8>) -> i32 {
+    let tx = im.trait_of.as_slice()[x as usize];
+    let ty = im.trait_of.as_slice()[y as usize];
+    let kx: u64 = if tx == NONE then 0 else tx as u64 + 1;
+    let ky: u64 = if ty == NONE then 0 else ty as u64 + 1;
+    if kx != ky { return if kx < ky then -1 else 1; }
+    let hx = im.head_of.as_slice()[x as usize];
+    let hy = im.head_of.as_slice()[y as usize];
+    let cx: u64 = if hx == H_NONE then 0 else if hx & H_PRIM == 0 then 1 else 2;
+    let cy: u64 = if hy == H_NONE then 0 else if hy & H_PRIM == 0 then 1 else 2;
+    if cx != cy { return if cx < cy then -1 else 1; }
+    if cx == 1 && hx != hy { return if hx < hy then -1 else 1; }
+    if cx == 2 && hx != hy {
+        bx.clear();
+        by.clear();
+        head_text(tab, hx, bx);
+        head_text(tab, hy, by);
+        let a = bx.as_slice();
+        let b = by.as_slice();
+        let n = if a.len() < b.len() then a.len() else b.len();
+        for k in 0..n {
+            if a[k] != b[k] { return if a[k] < b[k] then -1 else 1; }
+        }
+        if a.len() != b.len() { return if a.len() < b.len() then -1 else 1; }
+    }
+    let ix = ds.item.as_slice()[x as usize];
+    let iy = ds.item.as_slice()[y as usize];
+    if ix != iy { return if ix < iy then -1 else 1; }
+    return if x < y then -1 else if x > y then 1 else 0;
+}
+
+// Sorts impl decls by `cmp_line`: a bottom-up merge sort.
+fn sort_lines(tab: &types.Table, ds: &decls.Decls, im: &Impls, ids: &mut vec.Vec<u32>) {
+    let n = ids.len();
+    let mut out = vec.Vec::<u32>.new();
+    let mut bx = vec.Vec::<u8>.new();
+    let mut by = vec.Vec::<u8>.new();
+    let mut width: usize = 1;
+    while width < n {
+        out.clear();
+        let src = ids.as_slice();
+        let mut lo: usize = 0;
+        while lo < n {
+            let mid = if lo + width < n then lo + width else n;
+            let hi = if lo + 2 * width < n then lo + 2 * width else n;
+            let mut i = lo;
+            let mut j = mid;
+            while i < mid || j < hi {
+                if j == hi || (i < mid && cmp_line(tab, ds, im, src[i], src[j], &mut bx, &mut by) <= 0) {
+                    out.push(src[i]);
+                    i = i + 1;
+                } else {
+                    out.push(src[j]);
+                    j = j + 1;
+                }
+            }
+            lo = hi;
+        }
+        ids.clear();
+        ids.extend_from_slice(out.as_slice());
+        width = width * 2;
+    }
+}
+
+// The impl table of the signatures.
+pub fn impls(sg: &sigs.Sigs, tab: &types.Table, ds: &decls.Decls) -> Impls {
+    let n = ds.decls();
+    let mut im = Impls.{ trait_of: col.filled(n, NONE), head_of: col.filled(n, H_NONE), line: vec.Vec::<u32>.new(), traits: vec.Vec::<u32>.new(), t_lo: vec.Vec::<u32>.new(), t_impl: vec.Vec::<u32>.new() };
+    let mut all = vec.Vec::<u32>.new();
+    for d in 0..n {
+        if ds.kind.as_slice()[d] != decls.DK_IMPL || ds.item.as_slice()[d] == NONE { continue; }
+        let r = sg.trait_ref.as_slice()[d];
+        im.trait_of.as_mut_slice()[d] = if r == NONE then NONE else sg.b_trait.as_slice()[r as usize];
+        im.head_of.as_mut_slice()[d] = head(tab, sg.cx.ty.as_slice()[d]);
+        all.push(d as% u32);
+    }
+    let mut line = vec.Vec::<u32>.new();
+    line.extend_from_slice(all.as_slice());
+    sort_lines(tab, ds, &im, &mut line);
+    im.line = line;
+    // per trait: the line order is (trait, head, item); by trait then item is a second sort
+    let mut tr_items = vec.Vec::<u64>.new();
+    for j in 0..all.len() {
+        let d = all.as_slice()[j];
+        let tr = im.trait_of.as_slice()[d as usize];
+        if tr == NONE { continue; }
+        tr_items.push(((tr as u64) << 32) | (ds.item.as_slice()[d as usize] as u64));
+    }
+    let mut pairs = vec.Vec::<u32>.new();
+    for j in 0..all.len() {
+        if im.trait_of.as_slice()[all.as_slice()[j] as usize] != NONE { pairs.push(all.as_slice()[j]); }
+    }
+    let perm = sort.sort_perm(tr_items.as_slice());
+    let mut prev = NONE;
+    for j in 0..perm.len() {
+        let d = pairs.as_slice()[perm.as_slice()[j] as usize];
+        let tr = im.trait_of.as_slice()[d as usize];
+        if tr != prev {
+            im.traits.push(tr);
+            im.t_lo.push(im.t_impl.len() as% u32);
+            prev = tr;
+        }
+        im.t_impl.push(d);
+    }
+    im.t_lo.push(im.t_impl.len() as% u32);
+    return im;
+}
+
+// Interned word rows: the id of a row by hash, ids in first-seen order.
+struct Keys {
+    rows: ragged.Ragged<u32>,
+    hashes: vec.Vec<u64>,
+    slots: vec.Vec<u32>,
+}
+
+fn mix(k: u64) -> u64 {
+    let mut x = k;
+    x = x ^ (x >> 33);
+    x = x *% 0xff51afd7ed558ccd;
+    x = x ^ (x >> 33);
+    x = x *% 0xc4ceb9fe1a85ec53;
+    return x ^ (x >> 33);
+}
+
+impl Keys {
+    fn new() -> Keys {
+        return Keys.{ rows: ragged.Ragged::<u32>.new(), hashes: vec.Vec::<u64>.new(), slots: col.filled(64, NONE) };
+    }
+
+    fn len(&self) -> usize {
+        return self.rows.rows();
+    }
+
+    // The id of row w, and whether it is new.
+    fn id(&mut self, w: &[u32]) -> (u32, bool) {
+        let mut h = mix(w.len() as u64);
+        for k in 0..w.len() {
+            h = mix(h ^ (w[k] as u64) ^ ((k as u64) << 40));
+        }
+        let mask = self.slots.len() - 1;
+        let mut at = (h as usize) & mask;
+        loop {
+            let s = self.slots.as_slice()[at];
+            if s == NONE { break; }
+            if self.hashes.as_slice()[s as usize] == h && self.rows.row(s as usize).eq(w) { return (s, false); }
+            at = (at + 1) & mask;
+        }
+        let id = self.rows.rows() as% u32;
+        self.rows.push_row(w);
+        self.hashes.push(h);
+        self.slots.as_mut_slice()[at] = id;
+        if self.rows.rows() * 2 > self.slots.len() {
+            let cap = self.slots.len() * 2;
+            let m2 = cap - 1;
+            let mut slots = col.filled(cap, NONE);
+            for t in 0..self.hashes.len() {
+                let mut a = (self.hashes.as_slice()[t] as usize) & m2;
+                while slots.as_slice()[a] != NONE {
+                    a = (a + 1) & m2;
+                }
+                slots.as_mut_slice()[a] = t as% u32;
+            }
+            self.slots = slots;
+        }
+        return (id, true);
+    }
+}
+
+// Per type, facts of its components (ids ascend from a component to its holder, so one pass in
+// id order decides them): whether it is or holds a reference or view, and whether it names a
+// generic param (type or const) or `Self`.
+pub struct Comp {
+    pub is_view: vec.Vec<bool>,
+    pub hasp: vec.Vec<bool>,
+}
+
+impl Comp {
+    pub fn new() -> Comp {
+        return Comp.{ is_view: vec.Vec::<bool>.new(), hasp: vec.Vec::<bool>.new() };
+    }
+
+    pub fn ensure(&mut self, tab: &types.Table, adt_view: &[bool]) {
+        let mut kids = vec.Vec::<u32>.new();
+        while self.is_view.len() < tab.len() {
+            let t = self.is_view.len() as% u32;
+            let tag = tab.tag_of(t);
+            tab.kids(t, &mut kids);
+            let mut v = false;
+            let mut p = tag == types.TK_PARAM || tag == types.TK_CONSTPARAM || tag == types.TK_SELF;
+            for k in 0..kids.len() {
+                let c = kids.as_slice()[k] as usize;
+                v = v || self.is_view.as_slice()[c];
+                p = p || self.hasp.as_slice()[c];
+            }
+            if tag == types.TK_REF || tag == types.TK_FN { v = true; }
+            if tag == types.TK_PTR || tag == types.TK_SELF || tag == types.TK_PARAM { v = false; }
+            if tag == types.TK_ADT && adt_view[tab.a_of(t) as usize] { v = true; }
+            let xs = tab.x(t);
+            if tag == types.TK_ARRAY && xs[0] == types.GA_PARAM { p = true; }
+            if tag == types.TK_ADT {
+                let mut k: usize = 0;
+                while k + 2 < xs.len() {
+                    if xs[k] == types.GA_PARAM { p = true; }
+                    k = k + 3;
+                }
+            }
+            self.is_view.push(v);
+            self.hasp.push(p);
+        }
+    }
+}
+
+// The trait answers.
+pub struct Traits {
+    pub lang: Lang,
+    pub im: Impls,
+    pub comp: Comp,
+    // per decl: a `view` struct or enum
+    adt_view: vec.Vec<bool>,
+    keys: Keys,
+    co: vec.Vec<bool>,
+    // per goal: its clauses are the rows `cl_lo[g]..cl_hi[g]` of `cl`
+    cl_lo: vec.Vec<u32>,
+    cl_hi: vec.Vec<u32>,
+    cl: ragged.Ragged<u32>,
+    pub val: vec.Vec<bool>,
+    // the next goal to expand
+    done: usize,
+    // queries: whether an impl's self type matched with no view refused, and its bound goals
+    pub q_ok: vec.Vec<bool>,
+    pub q_mem: ragged.Ragged<u32>,
+    // scratch: a goal key; the lists of `each`, `impl_clauses`, and `applies`, kept between
+    // calls (taken out while in use)
+    w: vec.Vec<u32>,
+    s_each: vec.Vec<u32>,
+    s_cands: vec.Vec<u32>,
+    s_mem: vec.Vec<u32>,
+    s_args: vec.Vec<u32>,
+    s_sub: vec.Vec<u32>,
+    s_stack: vec.Vec<u32>,
+    s_bargs: vec.Vec<u32>,
+}
+
+pub fn new(sg: &sigs.Sigs, tab: &types.Table, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned) -> Traits {
+    let mut adt_view = col.filled(ds.decls(), false);
+    for d in 0..ds.decls() {
+        adt_view.as_mut_slice()[d] = ds.flags.as_slice()[d] & decls.F_VIEW != 0;
+    }
+    return Traits.{
+        adt_view: adt_view,
+        lang: lang_items(fl, md, ds, nm),
+        im: impls(sg, tab, ds),
+        comp: Comp.new(),
+        keys: Keys.new(),
+        co: vec.Vec::<bool>.new(),
+        cl_lo: vec.Vec::<u32>.new(),
+        cl_hi: vec.Vec::<u32>.new(),
+        cl: ragged.Ragged::<u32>.new(),
+        val: vec.Vec::<bool>.new(),
+        done: 0,
+        q_ok: vec.Vec::<bool>.new(),
+        q_mem: ragged.Ragged::<u32>.new(),
+        w: vec.Vec::<u32>.new(),
+        s_each: vec.Vec::<u32>.new(),
+        s_cands: vec.Vec::<u32>.new(),
+        s_mem: vec.Vec::<u32>.new(),
+        s_args: vec.Vec::<u32>.new(),
+        s_sub: vec.Vec::<u32>.new(),
+        s_stack: vec.Vec::<u32>.new(),
+        s_bargs: vec.Vec::<u32>.new(),
+    };
+}
+
+fn real(t: u32) -> bool {
+    return t != ERR && t != layout.TALL && t != NONE;
+}
+
+// Matches impl pattern `pat` (the impl's params are variables bound in `bk`, 3 words each, kind
+// NONE while unbound) against type t.
+fn match_ty(tab: &types.Table, comp: &Comp, pat: u32, t: u32, bk: &mut vec.Vec<u32>, stack: &mut vec.Vec<u32>) -> bool {
+    stack.clear();
+    stack.push(pat);
+    stack.push(t);
+    while stack.len() > 0 {
+        let n = stack.len();
+        let x = stack.as_slice()[n - 1];
+        let p = stack.as_slice()[n - 2];
+        stack.truncate(n - 2);
+        if p == x && !comp.hasp.as_slice()[p as usize] { continue; }
+        if !real(x) { continue; }
+        let tp = tab.tag_of(p);
+        if tp == types.TK_PARAM {
+            let i = tab.a_of(p) as usize;
+            if 3 * i + 2 >= bk.len() { return false; }
+            let k = bk.as_slice()[3 * i];
+            if k == NONE {
+                bk.as_mut_slice()[3 * i] = types.GA_TYPE;
+                bk.as_mut_slice()[3 * i + 1] = x;
+                bk.as_mut_slice()[3 * i + 2] = 0;
+            } else if k != types.GA_TYPE || bk.as_slice()[3 * i + 1] != x {
+                return false;
+            }
+            continue;
+        }
+        if tp != tab.tag_of(x) { return false; }
+        let pa = tab.a_of(p);
+        let xa = tab.a_of(x);
+        let pb = tab.b_of(p);
+        let xb = tab.b_of(x);
+        if tp == types.TK_REF || tp == types.TK_PTR {
+            if pa != xa { return false; }
+            stack.push(pb);
+            stack.push(xb);
+        } else if tp == types.TK_ARRAY {
+            let px = tab.x(p);
+            let xx = tab.x(x);
+            if !match_const(px[0], px[1], px[2], xx[0], xx[1], xx[2], bk) { return false; }
+            stack.push(pa);
+            stack.push(xa);
+        } else if tp == types.TK_SLICE || tp == types.TK_RANGE || tp == types.TK_VECTOR {
+            if pb != xb { return false; }
+            stack.push(pa);
+            stack.push(xa);
+        } else if tp == types.TK_TUPLE {
+            let px = tab.x(p);
+            let xx = tab.x(x);
+            if px.len() != xx.len() { return false; }
+            for k in 0..px.len() {
+                stack.push(px[k]);
+                stack.push(xx[k]);
+            }
+        } else if tp == types.TK_ADT {
+            let px = tab.x(p);
+            let xx = tab.x(x);
+            if pa != xa || px.len() != xx.len() { return false; }
+            let mut k: usize = 0;
+            while k + 2 < px.len() {
+                let pt = px[k] == types.GA_TYPE;
+                let xt = xx[k] == types.GA_TYPE;
+                if pt && xt {
+                    stack.push(px[k + 1]);
+                    stack.push(xx[k + 1]);
+                } else if pt || xt {
+                    return false;
+                } else if !match_const(px[k], px[k + 1], px[k + 2], xx[k], xx[k + 1], xx[k + 2], bk) {
+                    return false;
+                }
+                k = k + 3;
+            }
+        } else if tp == types.TK_FN {
+            let px = tab.x(p);
+            let xx = tab.x(x);
+            if pa != xa { return false; }
+            let np = pa as usize;
+            for k in np + 1..np + 4 {
+                if px[k] != xx[k] { return false; }
+            }
+            for k in 0..np + 1 {
+                stack.push(px[k]);
+                stack.push(xx[k]);
+            }
+        } else if p != x {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Matches a const argument of a pattern against one of a type.
+fn match_const(pk: u32, px: u32, py: u32, xk: u32, xx: u32, xy: u32, bk: &mut vec.Vec<u32>) -> bool {
+    if pk == types.GA_PARAM {
+        let i = px as usize;
+        if 3 * i + 2 >= bk.len() { return false; }
+        let k = bk.as_slice()[3 * i];
+        if k == NONE {
+            bk.as_mut_slice()[3 * i] = xk;
+            bk.as_mut_slice()[3 * i + 1] = xx;
+            bk.as_mut_slice()[3 * i + 2] = xy;
+            return true;
+        }
+        if k == types.GA_TYPE { return false; }
+        return k == xk && bk.as_slice()[3 * i + 1] == xx && bk.as_slice()[3 * i + 2] == xy;
+    }
+    return (pk == xk && px == xx && py == xy) || xk == types.GA_ERROR;
+}
+
+// Generic argument words xs with the params replaced by `args` (3 words each), into out.
+fn subst_args(tab: &mut types.Table, xs: &[u32], args: &[u32], out: &mut vec.Vec<u32>) {
+    let mut k: usize = 0;
+    while k + 2 < xs.len() {
+        if xs[k] == types.GA_TYPE {
+            out.push(types.GA_TYPE);
+            out.push(tab.subst(xs[k + 1], args));
+            out.push(0);
+        } else if xs[k] == types.GA_PARAM && 3 * (xs[k + 1] as usize) + 2 < args.len() && args[3 * xs[k + 1] as usize] != types.GA_TYPE {
+            let i = 3 * xs[k + 1] as usize;
+            out.push(args[i]);
+            out.push(args[i + 1]);
+            out.push(args[i + 2]);
+        } else {
+            out.push(xs[k]);
+            out.push(xs[k + 1]);
+            out.push(xs[k + 2]);
+        }
+        k = k + 3;
+    }
+}
+
+impl Traits {
+    pub fn goals(&self) -> usize {
+        return self.keys.len();
+    }
+
+    // The component facts of every type of the table so far.
+    pub fn ensure_comp(&mut self, tab: &types.Table) {
+        self.comp.ensure(tab, self.adt_view.as_slice());
+    }
+
+    fn is_co(&self, tr: u32) -> bool {
+        let l = &self.lang;
+        return tr != NONE && (tr == l.send || tr == l.sync || tr == l.flat || tr == l.frozen);
+    }
+
+    // The goal "t implements tr with args" (Copy takes none); NONE when it holds for every type
+    // (t is the error type).
+    pub fn goal(&mut self, t: u32, tr: u32, args: &[u32]) -> u32 {
+        if !real(t) { return NONE; }
+        self.w.clear();
+        self.w.push(t);
+        self.w.push(tr);
+        if tr != self.lang.copy_tr { self.w.extend_from_slice(args); }
+        let (g, fresh) = self.keys.id(self.w.as_slice());
+        if fresh {
+            self.co.push(self.is_co(tr));
+            self.cl_lo.push(0);
+            self.cl_hi.push(0);
+            self.val.push(false);
+        }
+        return g;
+    }
+
+    // Whether impl i applies to t: its self type matches and no param without `view` takes a
+    // view. The goals of its params' bounds into ms, its generic args into args (an unbound
+    // param: the error type, or `_`).
+    fn applies(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, i: u32, t: u32, ms: &mut vec.Vec<u32>, args: &mut vec.Vec<u32>) -> bool {
+        let mut stack = mem.replace(&mut self.s_stack, vec.Vec::<u32>.new());
+        let mut bargs = mem.replace(&mut self.s_bargs, vec.Vec::<u32>.new());
+        let ok = self.applies_in(tab, sg, i, t, ms, args, &mut stack, &mut bargs);
+        self.s_stack = stack;
+        self.s_bargs = bargs;
+        return ok;
+    }
+
+    fn applies_in(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, i: u32, t: u32, ms: &mut vec.Vec<u32>, args: &mut vec.Vec<u32>, stack: &mut vec.Vec<u32>, bargs: &mut vec.Vec<u32>) -> bool {
+        args.clear();
+        let st = sg.cx.ty.as_slice()[i as usize];
+        if !real(st) { return false; }
+        let lo = sg.cx.gens.lo.as_slice()[i as usize] as usize;
+        let hi = sg.cx.gens.lo.as_slice()[i as usize + 1] as usize;
+        for _ in lo..hi {
+            args.push(NONE);
+            args.push(0);
+            args.push(0);
+        }
+        self.comp.ensure(tab, self.adt_view.as_slice());
+        if !match_ty(tab, &self.comp, st, t, args, stack) { return false; }
+        for k in 0..hi - lo {
+            if args.as_slice()[3 * k] == NONE {
+                let c = sg.cx.gens.is_const.as_slice()[lo + k];
+                args.as_mut_slice()[3 * k] = if c then types.GA_ERROR else types.GA_TYPE;
+                args.as_mut_slice()[3 * k + 1] = if c then 0u32 else ERR;
+            }
+        }
+        for k in 0..hi - lo {
+            if args.as_slice()[3 * k] != types.GA_TYPE { continue; }
+            let a = args.as_slice()[3 * k + 1];
+            if real(a) && !sg.cx.gens.is_view.as_slice()[lo + k] && self.comp.is_view.as_slice()[a as usize] { return false; }
+        }
+        for k in 0..hi - lo {
+            if args.as_slice()[3 * k] != types.GA_TYPE { continue; }
+            let a = args.as_slice()[3 * k + 1];
+            let bs = sg.gp_bounds.row(lo + k);
+            for j in 0..bs.len() {
+                let r = bs[j] as usize;
+                bargs.clear();
+                subst_args(tab, sg.b_args.row(r), args.as_slice(), bargs);
+                let g = self.goal(a, sg.b_trait.as_slice()[r], bargs.as_slice());
+                if g != NONE { ms.push(g); }
+            }
+        }
+        return true;
+    }
+
+    // The candidates of trait position k for type t: its impls whose head is t's or none.
+    fn candidates(&self, tab: &types.Table, k: u32, t: u32, out: &mut vec.Vec<u32>) {
+        out.clear();
+        if k == NONE { return; }
+        let h = head(tab, t);
+        let is = self.im.of(k);
+        for j in 0..is.len() {
+            let hi = self.im.head_of.as_slice()[is[j] as usize];
+            if hi == H_NONE || hi == h { out.push(is[j]); }
+        }
+    }
+
+    // The candidate impls of trait position k for t (by item), into out.
+    pub fn candidates_at(&self, tab: &types.Table, k: u32, t: u32, out: &mut vec.Vec<u32>) {
+        self.candidates(tab, k, t, out);
+    }
+
+    // A query: whether impl i applies to t (once solved: `holds`).
+    pub fn applies_q(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, i: u32, t: u32) -> u32 {
+        let mut mem = vec.Vec::<u32>.new();
+        let mut args = vec.Vec::<u32>.new();
+        let ok = self.applies(tab, sg, i, t, &mut mem, &mut args);
+        self.q_ok.push(ok);
+        self.q_mem.push_row(mem.as_slice());
+        return (self.q_ok.len() - 1) as% u32;
+    }
+
+    // Whether query q holds (after `solve`).
+    pub fn holds(&self, q: u32) -> bool {
+        if !self.q_ok.as_slice()[q as usize] { return false; }
+        let ms = self.q_mem.row(q as usize);
+        for k in 0..ms.len() {
+            if !self.val.as_slice()[ms[k] as usize] { return false; }
+        }
+        return true;
+    }
+
+    // Whether goal g holds (after `solve`; NONE: it holds).
+    pub fn is(&self, g: u32) -> bool {
+        return g == NONE || self.val.as_slice()[g as usize];
+    }
+
+    // Whether trait tr has an impl whose self type is an instance of ADT d.
+    pub fn head_has(&self, tr: u32, d: u32) -> bool {
+        let k = self.im.trait_pos(tr);
+        if k == NONE { return false; }
+        let is = self.im.of(k);
+        for j in 0..is.len() {
+            if self.im.head_of.as_slice()[is[j] as usize] == H_ADT | (d as u64) { return true; }
+        }
+        return false;
+    }
+
+    // Adds a clause: every goal of `mem` holds.
+    fn clause(&mut self, mem: &[u32]) {
+        self.cl.push_row(mem);
+    }
+
+    // The clauses of the impls of tr that apply to t with trait args `targs`.
+    fn impl_clauses(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, t: u32, tr: u32, targs: &[u32]) {
+        let mut cands = mem.replace(&mut self.s_cands, vec.Vec::<u32>.new());
+        let mut ms = mem.replace(&mut self.s_mem, vec.Vec::<u32>.new());
+        let mut args = mem.replace(&mut self.s_args, vec.Vec::<u32>.new());
+        let mut sub = mem.replace(&mut self.s_sub, vec.Vec::<u32>.new());
+        self.candidates(tab, self.im.trait_pos(tr), t, &mut cands);
+        for j in 0..cands.len() {
+            let i = cands.as_slice()[j];
+            ms.clear();
+            if !self.applies(tab, sg, i, t, &mut ms, &mut args) { continue; }
+            // the trait args must match after substitution
+            let r = sg.trait_ref.as_slice()[i as usize];
+            if r == NONE { continue; }
+            sub.clear();
+            if tr != self.lang.copy_tr { subst_args(tab, sg.b_args.row(r as usize), args.as_slice(), &mut sub); }
+            if !sub.as_slice().eq(targs) { continue; }
+            self.clause(ms.as_slice());
+        }
+        self.s_cands = cands;
+        self.s_mem = ms;
+        self.s_args = args;
+        self.s_sub = sub;
+    }
+
+    // A clause of one goal per type of ts (a type without a goal holds).
+    fn each(&mut self, ts: &[u32], tr: u32, targs: &[u32]) {
+        let mut ms = mem.replace(&mut self.s_each, vec.Vec::<u32>.new());
+        ms.clear();
+        for k in 0..ts.len() {
+            let g = self.goal(ts[k], tr, targs);
+            if g != NONE { ms.push(g); }
+        }
+        self.clause(ms.as_slice());
+        self.s_each = ms;
+    }
+
+    // The clause of the structural rule of Flat (`frozen` false) or Frozen over t; none when t
+    // itself breaks it.
+    fn derived(&mut self, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, t: u32, tr: u32, targs: &[u32], frozen: bool) {
+        let tag = tab.tag_of(t);
+        let a = tab.a_of(t);
+        let mut ts = vec.Vec::<u32>.new();
+        if tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_VECTOR || tag == types.TK_MASK || tag == types.TK_NEVER || (frozen && tag == types.TK_STR) {
+            self.clause(ts.as_slice());
+            return;
+        }
+        if tag == types.TK_ARRAY || tag == types.TK_RANGE || (frozen && tag == types.TK_SLICE) {
+            ts.push(a);
+        } else if frozen && (tag == types.TK_REF || tag == types.TK_PTR) {
+            ts.push(tab.b_of(t));
+        } else if tag == types.TK_TUPLE {
+            ts.extend_from_slice(tab.x(t));
+        } else if tag == types.TK_ADT {
+            if a == self.lang.unsafe_cell { return; }
+            if !frozen {
+                if self.adt_view.as_slice()[a as usize] { return; }
+                if self.lang.drop != NONE && self.head_has(self.lang.drop, a) { return; }
+            }
+            if sh.kind_of(a) == layout.SK_NONE { return; }
+            pa.make(tab, sh, t);
+            ts.extend_from_slice(pa.fields(t));
+            let xs = tab.x(t);
+            let mut k: usize = 0;
+            while k + 2 < xs.len() {
+                if xs[k] == types.GA_TYPE { ts.push(xs[k + 1]); }
+                k = k + 3;
+            }
+        } else {
+            return;
+        }
+        self.each(ts.as_slice(), tr, targs);
+    }
+
+    // The structural clause of Send or Sync over t; none when t itself breaks it.
+    fn send_sync(&mut self, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, t: u32, tr: u32, targs: &[u32]) {
+        let tag = tab.tag_of(t);
+        let a = tab.a_of(t);
+        let mut ts = vec.Vec::<u32>.new();
+        if tag == types.TK_PTR || tag == types.TK_FN { return; }
+        if tag == types.TK_REF {
+            // &T: Send iff T: Sync; &mut T: Send iff T: Send; both Sync iff T: Sync
+            let want = if tr == self.lang.send && a == 0 then self.lang.sync else tr;
+            ts.push(tab.b_of(t));
+            let empty = vec.Vec::<u32>.new();
+            self.each(ts.as_slice(), want, empty.as_slice());
+            return;
+        }
+        if tag == types.TK_ADT {
+            if tr == self.lang.sync && a == self.lang.unsafe_cell { return; }
+            if sh.kind_of(a) == layout.SK_NONE { return; }
+            pa.make(tab, sh, t);
+            ts.extend_from_slice(pa.fields(t));
+        } else {
+            tab.kids(t, &mut ts);
+        }
+        self.each(ts.as_slice(), tr, targs);
+    }
+
+    // Expands every goal not expanded yet, in goal order (and those its clauses create).
+    pub fn expand(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, sh: &layout.Shapes, pa: &mut layout.Parts) {
+        let mut key = vec.Vec::<u32>.new();
+        let mut targs = vec.Vec::<u32>.new();
+        while self.done < self.keys.len() {
+            let g = self.done;
+            self.done = g + 1;
+            key.clear();
+            key.extend_from_slice(self.keys.rows.row(g));
+            let t = key.as_slice()[0];
+            let tr = key.as_slice()[1];
+            targs.clear();
+            targs.extend_from_slice(&key.as_slice()[2..key.len()]);
+            self.cl_lo.as_mut_slice()[g] = self.cl.rows() as% u32;
+            self.expand_one(tab, sg, sh, pa, t, tr, targs.as_slice());
+            self.cl_hi.as_mut_slice()[g] = self.cl.rows() as% u32;
+        }
+    }
+
+    fn expand_one(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, sh: &layout.Shapes, pa: &mut layout.Parts, t: u32, tr: u32, targs: &[u32]) {
+        let tag = tab.tag_of(t);
+        let a = tab.a_of(t);
+        let mut ts = vec.Vec::<u32>.new();
+        // a generic param has no bounds in the empty environment
+        if tag == types.TK_PARAM { return; }
+        let l_copy = self.lang.copy_tr;
+        if tr == l_copy {
+            if tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_PTR || tag == types.TK_FN || tag == types.TK_NEVER || tag == types.TK_VECTOR || tag == types.TK_MASK || (tag == types.TK_REF && a == 0) {
+                self.clause(ts.as_slice());
+            } else if tag == types.TK_ARRAY || tag == types.TK_RANGE {
+                ts.push(a);
+                self.each(ts.as_slice(), l_copy, targs);
+            } else if tag == types.TK_TUPLE {
+                ts.extend_from_slice(tab.x(t));
+                self.each(ts.as_slice(), l_copy, targs);
+            } else if tag == types.TK_ADT && l_copy != NONE {
+                self.impl_clauses(tab, sg, t, l_copy, targs);
+            }
+            return;
+        }
+        if tr == self.lang.flat || tr == self.lang.frozen {
+            self.derived(tab, sh, pa, t, tr, targs, tr == self.lang.frozen);
+            return;
+        }
+        if tr == self.lang.send || tr == self.lang.sync {
+            self.impl_clauses(tab, sg, t, tr, targs);
+            if !(tag == types.TK_ADT && self.head_has(tr, a)) { self.send_sync(tab, sh, pa, t, tr, targs); }
+            return;
+        }
+        for k in 0..N_OPS {
+            if self.lang.ops.as_slice()[k] == tr && builtin_op(tab, k, t) {
+                self.clause(ts.as_slice());
+                return;
+            }
+        }
+        self.impl_clauses(tab, sg, t, tr, targs);
+    }
+
+    fn eval(&self, g: usize) -> bool {
+        for c in self.cl_lo.as_slice()[g] as usize..self.cl_hi.as_slice()[g] as usize {
+            let ms = self.cl.row(c);
+            let mut all = true;
+            for k in 0..ms.len() {
+                if !self.val.as_slice()[ms[k] as usize] {
+                    all = false;
+                    break;
+                }
+            }
+            if all { return true; }
+        }
+        return false;
+    }
+
+    // Decides every goal: Tarjan's strongly connected components over the goal graph (an edge to
+    // each goal of each clause), with an explicit stack; a component is emitted after every
+    // component it reaches and decided then.
+    pub fn solve(&mut self) {
+        let n = self.keys.len();
+        let mut e_lo = col.filled(n + 1, 0u32);
+        let mut edge = vec.Vec::<u32>.new();
+        for g in 0..n {
+            e_lo.as_mut_slice()[g] = edge.len() as% u32;
+            for c in self.cl_lo.as_slice()[g] as usize..self.cl_hi.as_slice()[g] as usize {
+                edge.extend_from_slice(self.cl.row(c));
+            }
+        }
+        e_lo.as_mut_slice()[n] = edge.len() as% u32;
+        let mut index = col.filled(n, NONE);
+        let mut low = col.filled(n, 0u32);
+        let mut on = col.filled(n, false);
+        let mut st = vec.Vec::<u32>.new();
+        let mut cs = vec.Vec::<u32>.new();
+        let mut ci = vec.Vec::<u32>.new();
+        let mut count: u32 = 0;
+        let mut comp = vec.Vec::<u32>.new();
+        for root in 0..n {
+            if index.as_slice()[root] != NONE { continue; }
+            index.as_mut_slice()[root] = count;
+            low.as_mut_slice()[root] = count;
+            count = count + 1;
+            st.push(root as% u32);
+            on.as_mut_slice()[root] = true;
+            cs.push(root as% u32);
+            ci.push(e_lo.as_slice()[root]);
+            while cs.len() > 0 {
+                let top = cs.len() - 1;
+                let g = cs.as_slice()[top] as usize;
+                let e = ci.as_slice()[top];
+                if e < e_lo.as_slice()[g + 1] {
+                    ci.as_mut_slice()[top] = e + 1;
+                    let w = edge.as_slice()[e as usize] as usize;
+                    if index.as_slice()[w] == NONE {
+                        index.as_mut_slice()[w] = count;
+                        low.as_mut_slice()[w] = count;
+                        count = count + 1;
+                        st.push(w as% u32);
+                        on.as_mut_slice()[w] = true;
+                        cs.push(w as% u32);
+                        ci.push(e_lo.as_slice()[w]);
+                    } else if on.as_slice()[w] && index.as_slice()[w] < low.as_slice()[g] {
+                        low.as_mut_slice()[g] = index.as_slice()[w];
+                    }
+                    continue;
+                }
+                cs.truncate(top);
+                ci.truncate(top);
+                if top > 0 {
+                    let p = cs.as_slice()[top - 1] as usize;
+                    let lg = low.as_slice()[g];
+                    if lg < low.as_slice()[p] { low.as_mut_slice()[p] = lg; }
+                }
+                if low.as_slice()[g] != index.as_slice()[g] { continue; }
+                comp.clear();
+                loop {
+                    let x = st.as_slice()[st.len() - 1];
+                    st.truncate(st.len() - 1);
+                    on.as_mut_slice()[x as usize] = false;
+                    comp.push(x);
+                    if x as usize == g { break; }
+                }
+                self.decide(comp.as_slice(), edge.as_slice(), e_lo.as_slice());
+            }
+        }
+    }
+
+    // Decides one component (the components it reaches are decided): a goal without a cycle
+    // from its clauses; else the coinductive members start true, the inductive ones false, and
+    // all are re-evaluated until none changes (a component of one kind moves one way and
+    // settles within its size; a mixed one stops at the cap).
+    fn decide(&mut self, comp: &[u32], edge: &[u32], e_lo: &[u32]) {
+        if comp.len() == 1 {
+            let g = comp[0] as usize;
+            let mut cyc = false;
+            for e in e_lo[g] as usize..e_lo[g + 1] as usize {
+                if edge[e] as usize == g { cyc = true; }
+            }
+            if !cyc {
+                let v = self.eval(g);
+                self.val.as_mut_slice()[g] = v;
+                return;
+            }
+        }
+        for k in 0..comp.len() {
+            let g = comp[k] as usize;
+            self.val.as_mut_slice()[g] = self.co.as_slice()[g];
+        }
+        let cap = 2 * comp.len() + 2;
+        for _ in 0..cap {
+            let mut changed = false;
+            for k in 0..comp.len() {
+                let g = comp[k] as usize;
+                let v = self.eval(g);
+                if v != self.val.as_slice()[g] {
+                    self.val.as_mut_slice()[g] = v;
+                    changed = true;
+                }
+            }
+            if !changed { break; }
+        }
+    }
+}

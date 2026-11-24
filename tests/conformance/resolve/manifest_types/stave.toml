@@ -1,0 +1,16 @@
+name = "manifest_types"
+kind = 3 #~ ERROR E1002
+dependencies = "none" #~ ERROR E1002
+run = 1 #~ ERROR E1002
+gpu = true #~ ERROR E1002
+compiler = [1, 2] #~ ERROR E1002
+"quoted  key" = 1 #~ ERROR E1002
+dotted.key = 1 #~ ERROR E1002
+version = { v = 1 } #~ ERROR E1002
+
+[target.x86_64-linux]
+dependencies = 1 #~ ERROR E1002
+extra = 2 #~ ERROR E1002
+
+[target."arm-linux".dependencies] #~ ERROR E1002
+x = { path = "x" }

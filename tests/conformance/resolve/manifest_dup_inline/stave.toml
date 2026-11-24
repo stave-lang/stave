@@ -1,0 +1,5 @@
+name = "manifest_dup_inline"
+kind = "bin"
+
+[dependencies]
+a = { path = "x", path = "y" } #~ ERROR E1002

@@ -22,7 +22,8 @@
 //! dumps (stage-gates `strings`, `names`) and later stages never see an insertion or thread
 //! order. Diagnostics are in canonical order.
 //!
-//! Dumps (stage-gates): [`dump_strings`], [`dump_names`], [`dump_types`].
+//! Dumps (stage-gates): [`dump_strings`], [`dump_names`], [`dump_sigs`], [`dump_kinds`],
+//! [`dump_types`].
 //!
 //! Type checking: [`check`] ([`typeck`]), which also builds the whole-program call graph
 //! ([`callgraph`]). Monomorphization and lowering to the checked IR:
@@ -80,6 +81,8 @@ pub mod expr;
 mod canon;
 mod diag;
 mod dump;
+mod dump_kinds;
+mod dump_sigs;
 mod ids;
 mod intern;
 pub mod pool;
@@ -100,6 +103,8 @@ pub use decls::{Decl, DeclFlags, DeclKind};
 pub use diag::failures as diagnostic_build_failures;
 pub use diag::first_failure as first_diagnostic_build_failure;
 pub use dump::{dump_names, dump_strings, names_file_into, strings_into};
+pub use dump_kinds::dump_kinds;
+pub use dump_sigs::dump_sigs;
 pub use ids::{BindingRef, DeclId, GenericRef, ItemId, ModuleId, PackageId, Sym};
 pub use intern::Strings;
 pub use known::KnownItems;

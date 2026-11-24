@@ -42,7 +42,7 @@ use crate::diag::mk;
 use crate::ids::DeclId;
 use crate::resolve::TypeHead;
 use crate::sigs::{GenericParam, TraitRef};
-use crate::traits::World;
+use crate::traits::{Answers, World};
 use crate::types::{GArg, Interner, TypeId, TypeKind};
 
 /// The kind of a type.
@@ -123,15 +123,24 @@ pub fn is_view_in<I: Interner + ?Sized>(
     is_view(tys, t, &|d| adt_is_view(prog, d), &|i| generics.get(i as usize).is_some_and(|g| g.view))
 }
 
-/// The kind of `t` in the scope of `env`.
-pub fn kind_of<I: Interner + ?Sized>(w: World<'_>, cx: &mut I, t: TypeId, env: &[GenericParam]) -> Kind {
+/// The kind of `t` in the scope of `env`, with the trait answers of earlier queries in `env`
+/// ([`Answers`]).
+pub fn kind_of<I: Interner + ?Sized>(
+    w: World<'_>,
+    cx: &mut I,
+    t: TypeId,
+    env: &[GenericParam],
+    kept: &mut Answers,
+) -> Kind {
     let view = is_view_in(w.prog, cx, t, env);
     let sized = !matches!(cx.kind(t), TypeKind::Str | TypeKind::Slice { .. });
-    let copy = w.is_copy(cx, t, env);
+    let copy = w.is_copy_kept(cx, t, env, kept);
     let fn_ty = matches!(cx.kind(t), TypeKind::Fn { .. });
     let lang = &w.sigs.lang;
     let mut marker = |tr: DeclId| {
-        !fn_ty && tr.is_some() && w.implements(cx, t, &TraitRef { trait_decl: tr, args: Vec::new() }, env)
+        !fn_ty
+            && tr.is_some()
+            && w.implements_kept(cx, t, &TraitRef { trait_decl: tr, args: Vec::new() }, env, kept)
     };
     let send = marker(lang.send);
     let sync = marker(lang.sync);

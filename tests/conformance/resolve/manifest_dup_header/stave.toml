@@ -1,0 +1,8 @@
+name = "manifest_dup_header"
+kind = "bin"
+
+[run]
+stack = "8MiB"
+
+[run] #~ ERROR E1002
+stack = "9MiB"

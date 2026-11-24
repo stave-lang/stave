@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// Dump golden: identifiers with one xxHash32 (seed 0) are different strings with adjacent ids,
+// in byte order, whatever order they appear in: `gnzqvgsv` and `phffgesg` (0x0b6f24fb), and
+// `hfxkvjss`, `kederfsb`, `newahlbr` (0x866b33ce).
+fn main() -> i32 {
+    let phffgesg: i32 = 1;
+    let kederfsb: i32 = 2;
+    let gnzqvgsv: i32 = 3;
+    let newahlbr: i32 = 4;
+    let hfxkvjss: i32 = 5;
+    let again = f"{phffgesg}{gnzqvgsv}{newahlbr}{hfxkvjss}{kederfsb}";
+    return if gnzqvgsv + phffgesg + hfxkvjss + kederfsb + newahlbr > 0 then 0 else 1;
+}

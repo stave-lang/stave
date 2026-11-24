@@ -1,0 +1,20 @@
+// The diagnostics of the manifests, as rows of `diag.Diags`: the rows `files` found (E1002, and
+// E1203 `stack`), each located in its manifest. A manifest is a diagnostic file numbered after
+// the source files: file `nsrc + m` is manifest `m`.
+import diag;
+import files;
+import manifest_check;
+import std.mem;
+
+pub fn manifests(d: &mut diag.Diags, fl: &files.FileList, nsrc: usize) {
+    let rows = &fl.issues;
+    for k in 0..rows.len() {
+        let case = rows.case.as_slice()[k];
+        d.begin(rows.code.as_slice()[k], manifest_check.case_name(case));
+        if manifest_check.has_key(case) { d.arg("key", rows.key.get_ref(k).as_slice()); }
+        if case == manifest_check.C_WRONG_TYPE { d.arg("expected", rows.extra.get_ref(k).as_slice()); }
+        if case == manifest_check.C_MISSING_ROOT { d.arg("root", rows.extra.get_ref(k).as_slice()); }
+        let lo = rows.lo.as_slice()[k];
+        d.end((nsrc + (rows.man.as_slice()[k] as usize)) as% u32, lo, rows.hi.as_slice()[k] - lo);
+    }
+}

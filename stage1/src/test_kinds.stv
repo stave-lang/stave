@@ -1,0 +1,148 @@
+// Tests of `layout`, `traits`, `kinds`, and `diag_kinds` over a program with a stand-in std:
+// layout edge cases (zero-sized, padding, nested enums, overflow), a type that holds itself by
+// value, flag propagation (Copy by impl, drop glue and held locks through fields and raw-pointer
+// fields, Send and Sync with `UnsafeCell` and an explicit impl), overlapping impls, and the
+// E0903 shape of an operator impl beside a built-in one.
+import diag;
+import diag_kinds;
+import diag_out;
+import diag_reg;
+import dump;
+import files;
+import kinds;
+import sigs;
+import test_kit;
+import text;
+import types;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+const CORE: &str = "pub enum Option<T> { Some(T), None }\npub trait Copy {}\npub unsafe(\"x\") trait Send {}\npub unsafe(\"x\") trait Sync {}\npub trait Flat {}\npub trait Frozen {}\npub trait Drop {\n    fn drop(&mut self);\n}\npub trait Add {\n    fn add(self, rhs: Self) -> Self;\n}\n";
+
+const MAIN: &str = "import std.cell;\nimport std.sync;\nstruct Z {}\nstruct Pad { a: u8, b: u64, c: u8 }\nenum In { A, B(u16) }\nenum Out { X(In), Y(u8, In) }\nstruct Big { a: [[u64; 4294967296]; 4294967296] }\nstruct Loop { next: Loop, n: u32 }\nstruct HoldsLoop { l: Loop }\nstruct Cpy { a: u32 }\nimpl Copy for Cpy {}\nstruct Res { fd: i32 }\nimpl Drop for Res {\n    fn drop(&mut self) {}\n}\nstruct HasRes { r: Res, n: u8 }\nstruct Guarded { g: sync.MutexGuard<u32, 1> }\nstruct PtrGuard { p: *const sync.MutexGuard<u32, 1> }\nstruct Shared { c: cell.UnsafeCell<u32> }\nstruct SyncShared { c: cell.UnsafeCell<u32> }\nunsafe(\"x\") impl Sync for SyncShared {}\ntrait Area {\n    fn area(&self) -> u64;\n}\nimpl Area for Pad {\n    fn area(&self) -> u64 { return 0; }\n}\nimpl Area for Pad {\n    fn area(&self) -> u64 { return 1; }\n}\nfn use_all(a: Z, b: Pad, c: Out, d: &Big, e: &HoldsLoop, f: Cpy, g: HasRes, h: Guarded, i: PtrGuard, j: Shared, k: SyncShared) {}\nfn main() -> i32 { return 0; }\n";
+
+fn std_files() -> files.FileList {
+    let mut fl = files.FileList.empty();
+    fl.pkg_builtin.push(false);
+    fl.pkg_builtin.push(true);
+    fl.pkg_root.push(true);
+    fl.pkg_root.push(false);
+    return fl;
+}
+
+fn program(main_src: &str, core: &str) -> test_kit.Out {
+    let mut k = test_kit.kit();
+    let m = k.package("main", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(m, "std", s);
+    k.file(m, "main", main_src);
+    k.file(s, "core", core);
+    k.file(s, "cell", "pub struct UnsafeCell<T> { value: T }\n");
+    k.file(s, "sync", "pub view struct MutexGuard<T, const R: u32> { p: *mut T }\nimpl<T, const R: u32> Drop for MutexGuard<T, R> {\n    fn drop(&mut self) {}\n}\n");
+    return k.run();
+}
+
+// The printed index of the ADT named `name` of the root module without arguments.
+fn k_of(o: &test_kit.Out, sg: &sigs.Sigs, order: &[u32], name: &str) -> usize {
+    let d = o.item(o.module("main"), name);
+    for k in 0..order.len() {
+        let t = order[k];
+        if sg.cx.tab.tag_of(t) == types.TK_ADT && sg.cx.tab.a_of(t) == d && sg.cx.tab.x(t).len() == 0 { return k; }
+    }
+    return 4294967295;
+}
+
+fn has(kd: &kinds.Kinds, k: usize, bit: u16) -> bool {
+    return kd.bits.as_slice()[k] & bit != 0;
+}
+
+test fn layouts_and_flags() {
+    let o = program(MAIN, CORE);
+    let fl = std_files();
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let (_, order) = dump.sigs_order(&sg, &o.ds);
+    let kd = kinds.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, order.as_slice());
+    let ord = order.as_slice();
+    let z = k_of(&o, &sg, ord, "Z");
+    debug.assert(kd.sz.as_slice()[z] == kinds.SZ_OK && kd.size.as_slice()[z] == 0 && kd.aln.as_slice()[z] == 1, "a struct without fields: size 0, align 1");
+    debug.assert(kd.rk.as_slice()[z] == kinds.REC_FIELDS && kd.offs.row(z).len() == 0, "and no offsets");
+    let p = k_of(&o, &sg, ord, "Pad");
+    debug.assert(kd.size.as_slice()[p] == 24 && kd.aln.as_slice()[p] == 8, "padding: u8, u64, u8 take 24 bytes");
+    let po = kd.offs.row(p);
+    debug.assert(po.len() == 3 && po[0] == 0 && po[1] == 8 && po[2] == 16, "each field at the next offset its alignment allows");
+    let e = k_of(&o, &sg, ord, "Out");
+    debug.assert(kd.rk.as_slice()[e] == kinds.REC_ENUM && kd.size.as_slice()[e] == 16 && kd.aln.as_slice()[e] == 4, "a nested enum: tag, then the largest variant");
+    let eo = kd.offs.row(e);
+    let ec = kd.vcnt.row(e);
+    debug.assert(ec.len() == 2 && ec[0] == 1 && ec[1] == 2 && eo[0] == 4 && eo[1] == 4 && eo[2] == 8, "variant fields start after the u32 tag");
+    debug.assert(kd.sz.as_slice()[k_of(&o, &sg, ord, "Big")] == kinds.SZ_OVER, "a size past 64 bits overflows");
+    let hl = k_of(&o, &sg, ord, "HoldsLoop");
+    debug.assert(kd.depth.as_slice()[hl] == kinds.D_CYCLIC && kd.sz.as_slice()[hl] == kinds.SZ_NONE, "holding a type that holds itself by value: no depth, no layout");
+    let c = k_of(&o, &sg, ord, "Cpy");
+    debug.assert(has(&kd, c, kinds.K_COPY) && !has(&kd, p, kinds.K_COPY), "Copy by an impl, not without one");
+    debug.assert(!has(&kd, z, kinds.K_COPY), "no impl: not Copy");
+    let hr = k_of(&o, &sg, ord, "HasRes");
+    debug.assert(has(&kd, hr, kinds.K_DROP) && !has(&kd, hr, kinds.K_DROP_IMPL), "drop glue through a field, no Drop impl of its own");
+    debug.assert(!has(&kd, hr, kinds.K_FLAT), "a type with Drop inside is not Flat");
+    let g = k_of(&o, &sg, ord, "Guarded");
+    let pg = k_of(&o, &sg, ord, "PtrGuard");
+    debug.assert(has(&kd, g, kinds.K_LOCK) && has(&kd, g, kinds.K_DROP), "a guard held by value: lock and drop");
+    debug.assert(has(&kd, pg, kinds.K_LOCK) && !has(&kd, pg, kinds.K_DROP), "a guard behind a raw-pointer field: lock, no drop");
+    let sh = k_of(&o, &sg, ord, "Shared");
+    let ss = k_of(&o, &sg, ord, "SyncShared");
+    debug.assert(has(&kd, sh, kinds.K_SEND) && !has(&kd, sh, kinds.K_SYNC) && !has(&kd, sh, kinds.K_FROZEN), "UnsafeCell: Send, never Sync or Frozen");
+    debug.assert(has(&kd, ss, kinds.K_SYNC), "an explicit impl decides Sync");
+    // two impls of Area for Pad both apply
+    let area = o.item(o.module("main"), "Area");
+    let mut both = false;
+    for r in 0..kd.ap_t.len() {
+        if kd.ap_t.as_slice()[r] as usize == p && kd.ap_tr.as_slice()[r] == area { both = kd.ap_impls.row(r).len() == 2; }
+    }
+    debug.assert(both, "overlapping impls: both listed");
+    let mut d = diag.Diags.new();
+    diag_kinds.impl_diags(&mut d, &mut sg, &o.ds, &o.md, &o.nm, &fl, &o.lx, &o.set, &o.toks, &o.tree);
+    let mut found = false;
+    let mut msg = vec.Vec::<u8>.new();
+    for i in 0..d.len() {
+        msg.clear();
+        d.message(i, &mut msg);
+        if msg.as_slice().eq(mem.str_bytes("overlapping impls of `main.Area` for `Pad`")) { found = true; }
+    }
+    debug.assert(found && d.len() == 1, "the second impl overlaps the first: E0903, nothing else");
+}
+
+// stage0's line for an `impl Add for u32` added at line 196 of a copy of the shipped std.core (the
+// shape cannot arise outside std: an operator impl for a built-in type elsewhere is E0420).
+const OP_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0903\",\"severity\":\"error\",\"message\":\"overlapping impls of `std.core.Add` for `u32`\",\"primary\":{\"file\":\"/probe/libop/std/core.stv\",\"line\":196,\"col\":1,\"len\":4},\"related\":[{\"span\":{\"file\":\"/probe/libop/std/core.stv\",\"line\":196,\"col\":1,\"len\":4},\"label\":\"this impl\"}],\"fix\":{\"description\":\"remove one of the two impls of `std.core.Add`, or narrow one so that their types differ\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
+
+test fn operator_impl_beside_builtin() {
+    let mut core = vec.Vec::<u8>.new();
+    core.extend_from_slice(mem.str_bytes(CORE));
+    let mut lines: u32 = 0;
+    for k in 0..core.len() {
+        if core.as_slice()[k] == 10 { lines = lines + 1; }
+    }
+    while lines < 195 {
+        core.extend_from_slice(mem.str_bytes("//\n"));
+        lines = lines + 1;
+    }
+    core.extend_from_slice(mem.str_bytes("impl Add for u32 {\n    fn add(self, rhs: Self) -> Self {\n        return self;\n    }\n}\n"));
+    let o = program("fn main() -> i32 { return 0; }\n", text.string_of(core.as_slice()).as_str());
+    let fl = std_files();
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let mut d = diag.Diags.new();
+    diag_kinds.impl_diags(&mut d, &mut sg, &o.ds, &o.md, &o.nm, &fl, &o.lx, &o.set, &o.toks, &o.tree);
+    debug.assert(d.len() == 1, "one diagnostic: E0903 against the built-in operator");
+    let mut ft = diag_out.FileTable.sources();
+    for f in 0..o.set.files() {
+        ft.rank.push(f as% u32);
+        ft.path.push(mem.str_bytes(if o.set.file(f).len() > 600 then "/probe/libop/std/core.stv" else "other.stv"));
+    }
+    ft.nsrc = ft.rank.len();
+    let rows = d.order(ft.rank.as_slice());
+    let out = diag_out.render(&d, rows.as_slice(), &ft, &o.set, true);
+    debug.assert(out.as_slice().eq(mem.str_bytes(OP_LINE)), "the JSON line is stage0's");
+}

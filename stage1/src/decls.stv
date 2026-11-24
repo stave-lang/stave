@@ -1,0 +1,1309 @@
+// Declarations: the decl table, the module scopes, members, impl heads, and method tables, as
+// stage0 builds them.
+//
+// - One decl per module, item (fn, struct, enum, trait, const, static, type alias, impl), and
+//   member (field, variant, method, trait method). A name declared only by a dropped item, and
+//   the name a failed import binds, is an error decl: uses resolve to it silently. Locals and
+//   generic params are no decls (`resolve`).
+// - D = rank of the key (module path, steps): the module path as S ids (a module decl: its
+//   parent path), and the steps (name, kind, tiebreak, name offset) from the top-level decl down,
+//   a member's extending its parent's. An impl has no name and sorts after every name; kinds
+//   compare in `DK_*` order; the tiebreak is the package for a module, the item for a top-level
+//   decl (none for an error decl: last), the index among its siblings for a member. A prefix
+//   sorts first. The key is ranked by stable LSD radix passes over u64 columns, one present bit
+//   above each step so that a missing step sorts first.
+// - A module scope maps (module, name) to a decl: the imports (in item order), then the
+//   top-level decls by name offset; the first of a name wins and each later one is E0105; a name
+//   only a dropped item declares binds an error decl. The scope is one column of
+//   `search.pair(module, name)` keys, sorted: entries are rows, sorted by (key, class, order),
+//   cut into runs, the first of a run kept.
+// - Members: (parent, name) -> the first field, variant, or trait method of that name. Methods:
+//   (type, name) -> the impl methods of the struct or enum the impl's self type names, inherent
+//   and trait-impl apart, in item order.
+import ast;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import items;
+import lex;
+import modules;
+import prims.col;
+import prims.perm;
+import prims.search;
+import prims.sort;
+import resdiag;
+import source;
+import text;
+import std.debug;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+
+// Decl kinds, in canonical key order.
+pub const DK_MODULE: u8 = 0;
+pub const DK_FN: u8 = 1;
+pub const DK_STRUCT: u8 = 2;
+pub const DK_ENUM: u8 = 3;
+pub const DK_TRAIT: u8 = 4;
+pub const DK_CONST: u8 = 5;
+pub const DK_STATIC: u8 = 6;
+pub const DK_TYPE_ALIAS: u8 = 7;
+pub const DK_IMPL: u8 = 8;
+pub const DK_FIELD: u8 = 9;
+pub const DK_VARIANT: u8 = 10;
+pub const DK_METHOD: u8 = 11;
+pub const DK_TRAIT_METHOD: u8 = 12;
+pub const DK_ERROR: u8 = 13;
+
+pub const F_PUB: u16 = 1;
+pub const F_UNSAFE: u16 = 2;
+pub const F_VIEW: u16 = 4;
+pub const F_TEST: u16 = 8;
+pub const F_KERNEL: u16 = 16;
+pub const F_DISPATCH: u16 = 32;
+pub const F_EXTERN_IMPORT: u16 = 64;
+pub const F_EXTERN_EXPORT: u16 = 128;
+pub const F_TRAIT_IMPL: u16 = 256;
+pub const F_TUPLE: u16 = 512;
+pub const F_RECORD: u16 = 1024;
+pub const F_HAS_SELF: u16 = 2048;
+pub const F_MUT: u16 = 4096;
+pub const F_REC: u16 = 8192;
+
+// What a global name lookup gives.
+pub const G_NONE: u8 = 0;
+pub const G_DECL: u8 = 1;
+pub const G_PRIM: u8 = 2;
+pub const G_BUILTIN: u8 = 3;
+
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_KW_PUB: u8 = terminals.T_KW_PUB as% u8;
+const T_KW_TEST: u8 = terminals.T_KW_TEST as% u8;
+const T_KW_REC: u8 = terminals.T_KW_REC as% u8;
+const T_KW_UNSAFE: u8 = terminals.T_KW_UNSAFE as% u8;
+const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
+const T_KW_VIEW: u8 = terminals.T_KW_VIEW as% u8;
+const T_KW_ENUM: u8 = terminals.T_KW_ENUM as% u8;
+const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
+const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
+const T_KW_STRUCT: u8 = terminals.T_KW_STRUCT as% u8;
+const T_KW_TRAIT: u8 = terminals.T_KW_TRAIT as% u8;
+const T_KW_TYPE: u8 = terminals.T_KW_TYPE as% u8;
+const T_KW_DISPATCH: u8 = terminals.T_KW_DISPATCH as% u8;
+const T_KW_KERNEL: u8 = terminals.T_KW_KERNEL as% u8;
+const T_KW_STATIC: u8 = terminals.T_KW_STATIC as% u8;
+const T_KW_EXTERN: u8 = terminals.T_KW_EXTERN as% u8;
+const T_KW_IMPL: u8 = terminals.T_KW_IMPL as% u8;
+const T_KW_IMPORT: u8 = terminals.T_KW_IMPORT as% u8;
+const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
+const T_SEMI: u8 = terminals.T_SEMI as% u8;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
+const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
+const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
+const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
+const T_R_BRACKET: u8 = terminals.T_R_BRACKET as% u8;
+const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
+
+// The decls being collected, in stage0's collection order (module decls, then file by file).
+struct Raw {
+    kind: vec.Vec<u8>,
+    name: vec.Vec<u32>,
+    module: vec.Vec<u32>,
+    parent: vec.Vec<u32>,
+    item: vec.Vec<u32>,
+    node: vec.Vec<u32>,
+    off: vec.Vec<u32>,
+    flags: vec.Vec<u16>,
+    index: vec.Vec<u32>,
+}
+
+impl Raw {
+    fn new() -> Raw {
+        return Raw.{
+            kind: vec.Vec::<u8>.new(),
+            name: vec.Vec::<u32>.new(),
+            module: vec.Vec::<u32>.new(),
+            parent: vec.Vec::<u32>.new(),
+            item: vec.Vec::<u32>.new(),
+            node: vec.Vec::<u32>.new(),
+            off: vec.Vec::<u32>.new(),
+            flags: vec.Vec::<u16>.new(),
+            index: vec.Vec::<u32>.new(),
+        };
+    }
+
+    fn len(&self) -> usize {
+        return self.kind.len();
+    }
+
+    fn push(&mut self, kind: u8, name: u32, module: u32, parent: u32, item: u32, node: u32, off: u32, flags: u16, index: u32) -> u32 {
+        self.kind.push(kind);
+        self.name.push(name);
+        self.module.push(module);
+        self.parent.push(parent);
+        self.item.push(item);
+        self.node.push(node);
+        self.off.push(off);
+        self.flags.push(flags);
+        self.index.push(index);
+        return (self.kind.len() - 1) as% u32;
+    }
+}
+
+pub struct Decls {
+    // per decl D (canonical): kind, name S (NONE for an impl), module, parent decl, item and its
+    // node N (NONE for modules and error decls), the name's byte offset in its file, flags,
+    // index among its siblings
+    pub kind: vec.Vec<u8>,
+    pub name: vec.Vec<u32>,
+    pub module: vec.Vec<u32>,
+    pub parent: vec.Vec<u32>,
+    pub item: vec.Vec<u32>,
+    pub node: vec.Vec<u32>,
+    pub off: vec.Vec<u32>,
+    pub flags: vec.Vec<u16>,
+    pub index: vec.Vec<u32>,
+    // per module M: its module decl
+    pub mod_decl: vec.Vec<u32>,
+    // per item I: its main decl (an impl item: the impl), NONE if none
+    pub item_decl: vec.Vec<u32>,
+    // module scopes: sorted pair(module, name) -> decl, bound by an import
+    pub scope_key: vec.Vec<u64>,
+    pub scope_decl: vec.Vec<u32>,
+    pub scope_import: vec.Vec<bool>,
+    // members: sorted pair(parent, name) -> field, variant, or trait method (first by index)
+    pub mem_key: vec.Vec<u64>,
+    pub mem_decl: vec.Vec<u32>,
+    // per impl decl: the struct or enum its self type names (else NONE), the built-in type name S
+    // it names (else NONE), its trait (NONE for an inherent impl or an unresolved trait), its
+    // self and trait `Type` nodes (NONE)
+    pub impl_head: vec.Vec<u32>,
+    pub impl_prim: vec.Vec<u32>,
+    pub impl_trait: vec.Vec<u32>,
+    pub impl_self_ty: vec.Vec<u32>,
+    pub impl_trait_ty: vec.Vec<u32>,
+    // methods by pair(head decl, name), in item then declaration order: inherent, trait impls
+    pub inh_key: vec.Vec<u64>,
+    pub inh_decl: vec.Vec<u32>,
+    pub tr_key: vec.Vec<u64>,
+    pub tr_decl: vec.Vec<u32>,
+    // enums with a variant of a name: sorted pair(name, module), then the enum name's offset
+    pub var_key: vec.Vec<u64>,
+    pub var_off: vec.Vec<u32>,
+    pub var_enum: vec.Vec<u32>,
+    // the identifiers of dropped impl headers (a failed method lookup on such a name is silent)
+    pub poisoned: vec.Vec<u32>,
+    // per string S: a built-in type name; a built-in fn (1, 2: one of `std.soa` only)
+    pub is_prim: vec.Vec<bool>,
+    pub builtin: vec.Vec<u8>,
+}
+
+impl Decls {
+    pub fn decls(&self) -> usize {
+        return self.kind.len();
+    }
+
+    // The scope entry of name S in module m: (decl, bound by an import), or (NONE, false).
+    pub fn entry(&self, m: u32, s: u32) -> (u32, bool) {
+        if m == NONE || s == NONE { return (NONE, false); }
+        let k = find(self.scope_key.as_slice(), search.pair(m, s));
+        if k == self.scope_key.len() { return (NONE, false); }
+        return (self.scope_decl.as_slice()[k], self.scope_import.as_slice()[k]);
+    }
+
+    // An item of module m reached through a path: its scope entry unless an import bound it.
+    pub fn module_item(&self, m: u32, s: u32) -> u32 {
+        let (d, imp) = self.entry(m, s);
+        if imp { return NONE; }
+        return d;
+    }
+
+    // A name looked up from module m outside every local scope: the module scope, the prelude
+    // (if m sees it), the built-in type names, the built-in fns.
+    pub fn global(&self, md: &modules.Modules, m: u32, s: u32) -> (u8, u32) {
+        if s == NONE { return (G_NONE, NONE); }
+        let (d, _) = self.entry(m, s);
+        if d != NONE { return (G_DECL, d); }
+        if md.prelude_ok.as_slice()[m as usize] && md.core_mod != NONE {
+            let (p, imp) = self.entry(md.core_mod, s);
+            if p != NONE && !imp && self.flags.as_slice()[p as usize] & F_PUB != 0 { return (G_DECL, p); }
+        }
+        if self.is_prim.as_slice()[s as usize] { return (G_PRIM, s); }
+        let b = self.builtin.as_slice()[s as usize];
+        if b == 1 || (b == 2 && m == md.soa_mod) { return (G_BUILTIN, s); }
+        return (G_NONE, NONE);
+    }
+
+    // The member named S of decl d that a path step reaches: a variant or a trait method.
+    pub fn step_member(&self, d: u32, s: u32) -> u32 {
+        let k = search.lower_bound(self.mem_key.as_slice(), search.pair(d, s));
+        if k == self.mem_key.len() || self.mem_key.as_slice()[k] != search.pair(d, s) { return NONE; }
+        let m = self.mem_decl.as_slice()[k];
+        let mk = self.kind.as_slice()[m as usize];
+        if mk == DK_VARIANT || mk == DK_TRAIT_METHOD { return m; }
+        return NONE;
+    }
+
+    // Method S of struct or enum d: the first inherent one, else the only trait-impl one
+    // (`(NONE, true)` when several trait impls have it).
+    pub fn method(&self, d: u32, s: u32) -> (u32, bool) {
+        let key = search.pair(d, s);
+        let k = find(self.inh_key.as_slice(), key);
+        if k < self.inh_key.len() { return (self.inh_decl.as_slice()[k], false); }
+        let t = find(self.tr_key.as_slice(), key);
+        if t == self.tr_key.len() { return (NONE, false); }
+        if t + 1 < self.tr_key.len() && self.tr_key.as_slice()[t + 1] == key { return (NONE, true); }
+        return (self.tr_decl.as_slice()[t], false);
+    }
+
+    pub fn is_poisoned(&self, s: u32) -> bool {
+        let k = search.lower_bound(self.poisoned.as_slice(), s);
+        return k < self.poisoned.len() && self.poisoned.as_slice()[k] == s;
+    }
+}
+
+// The position of key in the sorted keys, or keys.len().
+fn find(keys: &[u64], key: u64) -> usize {
+    let k = search.lower_bound(keys, key);
+    if k < keys.len() && keys[k] == key { return k; }
+    return keys.len();
+}
+
+// The node view of the build: an item's nodes are rows `item_node[I] + N`.
+fn kids(tree: &ast.Ast, g: usize) -> &[u32] from tree {
+    return tree.kids.row(g);
+}
+
+// The first child of row g (item base `base`) of kind k, as a row, or NONE.
+fn child(tree: &ast.Ast, base: usize, g: usize, k: u8) -> u32 {
+    let ks = tree.kids.row(g);
+    for j in 0..ks.len() {
+        let c = base + ks[j] as usize;
+        if tree.kind.as_slice()[c] == k { return c as% u32; }
+    }
+    return NONE;
+}
+
+fn kind_at(t: &lex.Tokens, g: usize) -> u8 {
+    return if g < t.kind.len() then t.kind.as_slice()[g] else 255u8;
+}
+
+// The per-file token facts collection needs.
+struct Toks {
+    lo: usize,
+    hi: usize,
+}
+
+// One file's collection: the decls of its ok items, its dropped names, and its impls.
+struct Collect {
+    // dropped names: (module, S, global token)
+    drop_mod: vec.Vec<u32>,
+    drop_sym: vec.Vec<u32>,
+    drop_tok: vec.Vec<u32>,
+    poisoned: vec.Vec<u32>,
+    // impls: raw decl, self Type row, trait Type row (NONE)
+    impl_decl: vec.Vec<u32>,
+    impl_self: vec.Vec<u32>,
+    impl_trait: vec.Vec<u32>,
+    item_decl: vec.Vec<u32>,
+}
+
+fn tok_off(t: &lex.Tokens, g: u32) -> u32 {
+    return t.start.as_slice()[g as usize];
+}
+
+fn name_of(nm: &intern.Interned, g: u32) -> u32 {
+    if g == NONE { return NONE; }
+    return nm.tok_str.as_slice()[g as usize];
+}
+
+// `rec`? `fn` Ident: the name token of a fn whose first token is a.
+fn fn_name(t: &lex.Tokens, a: u32) -> u32 {
+    return if kind_at(t, a as usize) == T_KW_REC then a + 2 else a + 1;
+}
+
+fn rec_flag(t: &lex.Tokens, a: u32) -> u16 {
+    return if kind_at(t, a as usize) == T_KW_REC then F_REC else 0u16;
+}
+
+// Whether row p (a `Params` node, or NONE) has a `self` parameter.
+fn has_self(tree: &ast.Ast, base: usize, p: u32) -> bool {
+    if p == NONE { return false; }
+    let ks = kids(tree, p as usize);
+    for j in 0..ks.len() {
+        if child(tree, base, base + ks[j] as usize, node_kinds.KIND_SELF_PARAM) != NONE { return true; }
+    }
+    return false;
+}
+
+struct Item {
+    i: u32,
+    base: usize,
+    module: u32,
+    lo: usize,
+    hi: usize,
+}
+
+impl Copy for Item {}
+
+fn push_decl(raw: &mut Raw, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, kind: u8, name_tok: u32, node: u32, parent: u32, flags: u16, index: u32) -> u32 {
+    let off = if name_tok == NONE then tok_off(t, tree.tok.as_slice()[node as usize]) else tok_off(t, name_tok);
+    return raw.push(kind, name_of(nm, name_tok), it.module, parent, it.i, (node as usize - it.base) as% u32, off, flags, index);
+}
+
+fn fields(raw: &mut Raw, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, fnode: u32, parent: u32) {
+    let ks = kids(tree, fnode as usize);
+    for j in 0..ks.len() {
+        let f = (it.base + ks[j] as usize) as% u32;
+        if tree.kind.as_slice()[f as usize] != node_kinds.KIND_FIELD { continue; }
+        let a = tree.tok.as_slice()[f as usize];
+        let is_pub = kind_at(t, a as usize) == T_KW_PUB;
+        let _ = push_decl(raw, it, tree, t, nm, DK_FIELD, if is_pub then a + 1 else a, f, parent, if is_pub then F_PUB else 0u16, j as% u32);
+    }
+}
+
+fn adt(raw: &mut Raw, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, n: u32, pub_flag: u16) -> u32 {
+    let a = tree.tok.as_slice()[n as usize];
+    let is_view = kind_at(t, a as usize) == T_KW_VIEW;
+    let kw = if is_view then a + 1 else a;
+    let dk = if kind_at(t, kw as usize) == T_KW_ENUM then DK_ENUM else DK_STRUCT;
+    let d = push_decl(raw, it, tree, t, nm, dk, kw + 1, n, NONE, pub_flag | (if is_view then F_VIEW else 0u16), 0);
+    if dk == DK_STRUCT {
+        let f = child(tree, it.base, n as usize, node_kinds.KIND_FIELDS);
+        if f != NONE { fields(raw, it, tree, t, nm, f, d); }
+        return d;
+    }
+    let ks = kids(tree, n as usize);
+    let mut k: u32 = 0;
+    for j in 0..ks.len() {
+        let v = (it.base + ks[j] as usize) as% u32;
+        if tree.kind.as_slice()[v as usize] != node_kinds.KIND_VARIANT { continue; }
+        let vt = tree.tok.as_slice()[v as usize];
+        let next = kind_at(t, vt as usize + 1);
+        let shape = if next == T_L_PAREN then F_TUPLE else if next == T_L_BRACE then F_RECORD else 0u16;
+        let vd = push_decl(raw, it, tree, t, nm, DK_VARIANT, vt, v, d, shape | F_PUB, k);
+        k = k + 1;
+        let f = child(tree, it.base, v as usize, node_kinds.KIND_FIELDS);
+        if f != NONE { fields(raw, it, tree, t, nm, f, vd); }
+    }
+    return d;
+}
+
+// The name token after keyword kw within 8 tokens of `from` (an `unsafe ( StrLit )` skipped).
+fn name_after(t: &lex.Tokens, it: Item, at: u32, kw: u8) -> u32 {
+    let mut i = at as usize;
+    let lim = if i + 8 < it.hi then i + 8 else it.hi;
+    while i < lim {
+        let k = kind_at(t, i);
+        if k == kw { return if kind_at(t, i + 1) == T_IDENT then (i + 1) as% u32 else NONE; }
+        if k == T_KW_UNSAFE {
+            i = i + 4;
+            continue;
+        }
+        i = i + 1;
+    }
+    return NONE;
+}
+
+fn impl_decl(raw: &mut Raw, c: &mut Collect, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, n: u32, unsafe_flag: u16) -> u32 {
+    let ks = kids(tree, n as usize);
+    let mut types = vec.Vec::<u32>.new();
+    for j in 0..ks.len() {
+        let x = (it.base + ks[j] as usize) as% u32;
+        if tree.kind.as_slice()[x as usize] == node_kinds.KIND_TYPE { types.push(x); }
+    }
+    let mut self_ty = NONE;
+    let mut trait_ty = NONE;
+    if types.len() == 1 {
+        self_ty = types.as_slice()[0];
+    } else if types.len() >= 2 {
+        trait_ty = types.as_slice()[0];
+        self_ty = types.as_slice()[1];
+    }
+    let trait_flag = if trait_ty != NONE then F_TRAIT_IMPL else 0u16;
+    let d = push_decl(raw, it, tree, t, nm, DK_IMPL, NONE, n, NONE, unsafe_flag | trait_flag, 0);
+    let mut prev_unsafe = NONE;
+    let mut k: u32 = 0;
+    for j in 0..ks.len() {
+        let x = (it.base + ks[j] as usize) as% u32;
+        let xk = tree.kind.as_slice()[x as usize];
+        if xk == node_kinds.KIND_UNSAFE {
+            prev_unsafe = x;
+        } else if xk == node_kinds.KIND_FN_DECL {
+            let first = if prev_unsafe != NONE then prev_unsafe else x;
+            prev_unsafe = NONE;
+            let fa = tree.tok.as_slice()[first as usize] as usize;
+            let mut fl = trait_flag;
+            if has_self(tree, it.base, child(tree, it.base, x as usize, node_kinds.KIND_PARAMS)) { fl = fl | F_HAS_SELF; }
+            if first != x { fl = fl | F_UNSAFE; }
+            if fa > it.lo && kind_at(t, fa - 1) == T_KW_PUB { fl = fl | F_PUB; }
+            let a = tree.tok.as_slice()[x as usize];
+            fl = fl | rec_flag(t, a);
+            let _ = push_decl(raw, it, tree, t, nm, DK_METHOD, fn_name(t, a), x, d, fl, k);
+            k = k + 1;
+        } else {
+            prev_unsafe = NONE;
+        }
+    }
+    c.impl_decl.push(d);
+    c.impl_self.push(self_ty);
+    c.impl_trait.push(trait_ty);
+    return d;
+}
+
+// E0811 for the `extern` item whose first token is a (`unsafe_tok`: its `unsafe`, or NONE).
+fn extern_form(set: &source.SourceSet, t: &lex.Tokens, lx: &lex.Lexer, a: u32, unsafe_tok: u32, export: bool, rows: &mut resdiag.Rows) {
+    let lit = a + 1;
+    let (f, off, len) = modules.tok_span(lx, set, t, lit);
+    let abi = &set.file(f as usize)[off as usize..(off + len) as usize];
+    let has_unsafe = unsafe_tok != NONE;
+    if text.eq_str(abi, "\"C\"") {
+        if !export && !has_unsafe {
+            let (af, ao, al) = modules.tok_span(lx, set, t, a);
+            rows.add(resdiag.E0811, af, ao, al, resdiag.ABI_OBLIGATION, NONE, NONE);
+        }
+        return;
+    }
+    if text.eq_str(abi, "\"stave-intrinsic\"") && !export {
+        if has_unsafe {
+            let (uf, uo, ul) = modules.tok_span(lx, set, t, unsafe_tok);
+            rows.add(resdiag.E0811, uf, uo, ul, resdiag.ABI_INTRINSIC, NONE, NONE);
+        }
+        return;
+    }
+    rows.add(resdiag.E0811, f, off, len, resdiag.ABI_OTHER, NONE, NONE);
+}
+
+fn item_body(raw: &mut Raw, c: &mut Collect, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, lx: &lex.Lexer, body: u32, pub_flag: u16, rows: &mut resdiag.Rows) -> u32 {
+    let ks = kids(tree, body as usize);
+    let mut unsafe_flag: u16 = 0;
+    let mut unsafe_tok = NONE;
+    let mut main = NONE;
+    for j in 0..ks.len() {
+        let x = (it.base + ks[j] as usize) as% u32;
+        let a = tree.tok.as_slice()[x as usize];
+        let xk = tree.kind.as_slice()[x as usize];
+        if xk == node_kinds.KIND_UNSAFE {
+            unsafe_flag = F_UNSAFE;
+            unsafe_tok = a;
+        } else if xk == node_kinds.KIND_FN_DECL {
+            main = push_decl(raw, it, tree, t, nm, DK_FN, fn_name(t, a), x, NONE, pub_flag | unsafe_flag | rec_flag(t, a), 0);
+        } else if xk == node_kinds.KIND_KERNEL_DECL {
+            main = push_decl(raw, it, tree, t, nm, DK_FN, a + 2, x, NONE, pub_flag | F_KERNEL, 0);
+        } else if xk == node_kinds.KIND_DISPATCH_DECL {
+            main = push_decl(raw, it, tree, t, nm, DK_FN, a + 2, x, NONE, pub_flag | F_DISPATCH, 0);
+        } else if xk == node_kinds.KIND_CONST_DECL {
+            main = push_decl(raw, it, tree, t, nm, DK_CONST, a + 1, x, NONE, pub_flag, 0);
+        } else if xk == node_kinds.KIND_STATIC_DECL {
+            let m = kind_at(t, a as usize + 1) == T_KW_MUT;
+            main = push_decl(raw, it, tree, t, nm, DK_STATIC, if m then a + 2 else a + 1, x, NONE, pub_flag | (if m then F_MUT else 0u16), 0);
+        } else if xk == node_kinds.KIND_TYPE_ALIAS {
+            main = push_decl(raw, it, tree, t, nm, DK_TYPE_ALIAS, a + 1, x, NONE, pub_flag, 0);
+        } else if xk == node_kinds.KIND_ADT_DECL {
+            main = adt(raw, it, tree, t, nm, x, pub_flag);
+        } else if xk == node_kinds.KIND_TRAIT_DECL {
+            let d = push_decl(raw, it, tree, t, nm, DK_TRAIT, a + 1, x, NONE, pub_flag | unsafe_flag, 0);
+            main = d;
+            let fs = kids(tree, x as usize);
+            let mut k: u32 = 0;
+            for q in 0..fs.len() {
+                let f = (it.base + fs[q] as usize) as% u32;
+                if tree.kind.as_slice()[f as usize] != node_kinds.KIND_TRAIT_FN { continue; }
+                let fa = tree.tok.as_slice()[f as usize];
+                let name_tok = name_after(t, it, fa, T_KW_FN);
+                let mut fl = F_PUB;
+                if child(tree, it.base, f as usize, node_kinds.KIND_UNSAFE) != NONE { fl = fl | F_UNSAFE; }
+                if has_self(tree, it.base, child(tree, it.base, f as usize, node_kinds.KIND_PARAMS)) { fl = fl | F_HAS_SELF; }
+                let _ = push_decl(raw, it, tree, t, nm, DK_TRAIT_METHOD, name_tok, f, d, fl, k);
+                k = k + 1;
+            }
+        } else if xk == node_kinds.KIND_IMPL_DECL {
+            main = impl_decl(raw, c, it, tree, t, nm, x, unsafe_flag);
+        } else if xk == node_kinds.KIND_EXTERN_ITEM {
+            let export = child(tree, it.base, x as usize, node_kinds.KIND_BLOCK) != NONE;
+            extern_form(set, t, lx, a, unsafe_tok, export, rows);
+            if export {
+                main = push_decl(raw, it, tree, t, nm, DK_FN, a + 3, x, NONE, pub_flag | unsafe_flag | F_EXTERN_EXPORT, 0);
+            } else {
+                let fs = kids(tree, x as usize);
+                for q in 0..fs.len() {
+                    let f = (it.base + fs[q] as usize) as% u32;
+                    if tree.kind.as_slice()[f as usize] != node_kinds.KIND_EXTERN_FN { continue; }
+                    let fa = tree.tok.as_slice()[f as usize];
+                    let _ = push_decl(raw, it, tree, t, nm, DK_FN, fa + 1, f, NONE, pub_flag | F_EXTERN_IMPORT | F_UNSAFE, 0);
+                }
+            }
+        }
+    }
+    return main;
+}
+
+// The names a dropped item would declare (its tokens lo..hi), and the identifiers of a dropped
+// impl header.
+fn dropped(c: &mut Collect, t: &lex.Tokens, nm: &intern.Interned, module: u32, lo: usize, hi: usize) {
+    let mut i = lo;
+    loop {
+        let k = kind_at(t, i);
+        if k == T_KW_PUB || k == T_KW_TEST || k == T_KW_REC {
+            i = i + 1;
+        } else if k == T_KW_UNSAFE {
+            i = i + 1;
+            if kind_at(t, i) == T_L_PAREN {
+                while i < hi && kind_at(t, i) != T_R_PAREN { i = i + 1; }
+                i = i + 1;
+            }
+        } else {
+            break;
+        }
+    }
+    let k = kind_at(t, i);
+    let mut name = NONE;
+    if k == T_KW_IMPORT {
+        let mut j = i + 1;
+        while j < hi && kind_at(t, j) != T_SEMI {
+            if kind_at(t, j) == T_KW_AS {
+                name = if kind_at(t, j + 1) == T_IDENT then (j + 1) as% u32 else NONE;
+                break;
+            }
+            if kind_at(t, j) == T_IDENT { name = j as% u32; }
+            j = j + 1;
+        }
+        push_dropped(c, nm, module, name);
+        return;
+    }
+    if k == T_KW_FN || k == T_KW_STRUCT || k == T_KW_ENUM || k == T_KW_TRAIT || k == T_KW_CONST || k == T_KW_TYPE {
+        name = i as% u32 + 1;
+    } else if k == T_KW_VIEW || k == T_KW_DISPATCH || k == T_KW_KERNEL {
+        name = i as% u32 + 2;
+    } else if k == T_KW_STATIC {
+        name = if kind_at(t, i + 1) == T_KW_MUT then i as% u32 + 2 else i as% u32 + 1;
+    } else if k == T_KW_EXTERN {
+        if kind_at(t, i + 2) == T_KW_FN {
+            name = i as% u32 + 3;
+        } else {
+            let mut depth: i32 = 0;
+            for j in i + 1..hi {
+                let x = kind_at(t, j);
+                if x == T_L_BRACE || x == T_L_PAREN || x == T_L_BRACKET || x == T_DOT_L_BRACE {
+                    depth = depth + 1;
+                } else if x == T_R_BRACE || x == T_R_PAREN || x == T_R_BRACKET {
+                    depth = depth - 1;
+                } else if x == T_KW_FN && depth == 1 && j + 1 < hi && kind_at(t, j + 1) == T_IDENT {
+                    push_dropped(c, nm, module, (j + 1) as% u32);
+                }
+            }
+        }
+    } else if k == T_KW_IMPL {
+        let mut depth: i32 = 0;
+        for j in i + 1..hi {
+            let x = kind_at(t, j);
+            if x == T_L_BRACE && depth == 0 { break; }
+            if x == T_L_PAREN || x == T_L_BRACKET || x == T_L_BRACE || x == T_DOT_L_BRACE {
+                depth = depth + 1;
+            } else if x == T_R_PAREN || x == T_R_BRACKET || x == T_R_BRACE {
+                depth = depth - 1;
+            } else if x == T_IDENT {
+                let s = nm.tok_str.as_slice()[j];
+                if s != NONE { c.poisoned.push(s); }
+            }
+        }
+        return;
+    }
+    if name != NONE && (name as usize) < hi && kind_at(t, name as usize) == T_IDENT { push_dropped(c, nm, module, name); }
+}
+
+fn push_dropped(c: &mut Collect, nm: &intern.Interned, module: u32, g: u32) {
+    if g == NONE { return; }
+    let s = nm.tok_str.as_slice()[g as usize];
+    if s == NONE { return; }
+    c.drop_mod.push(module);
+    c.drop_sym.push(s);
+    c.drop_tok.push(g);
+}
+
+// Ranks of the module path prefixes the decl keys use: per module, of its whole path and of the
+// path without its last segment, lexicographic by S ids (a prefix first).
+fn path_ranks(md: &modules.Modules) -> (vec.Vec<u32>, vec.Vec<u32>) {
+    let n = md.modules();
+    let order = text.sorted(2 * n, fn(a: u32, b: u32) -> bool {
+        return seq_cmp(md, a, b) < 0;
+    });
+    let mut rank = col.filled(2 * n, 0u32);
+    let mut r: u32 = 0;
+    for k in 0..order.len() {
+        if k > 0 && seq_cmp(md, order.as_slice()[k - 1], order.as_slice()[k]) != 0 { r = r + 1; }
+        rank.as_mut_slice()[order.as_slice()[k] as usize] = r;
+    }
+    let mut full = vec.Vec::<u32>.with_capacity(n);
+    let mut parent = vec.Vec::<u32>.with_capacity(n);
+    for m in 0..n {
+        full.push(rank.as_slice()[2 * m]);
+        parent.push(rank.as_slice()[2 * m + 1]);
+    }
+    return (full, parent);
+}
+
+// Sequence x is module x/2's path, without its last segment when x is odd.
+fn seq_cmp(md: &modules.Modules, x: u32, y: u32) -> i32 {
+    let a = md.path(x as usize / 2);
+    let b = md.path(y as usize / 2);
+    let la = if x % 2 == 1 && a.len() > 0 then a.len() - 1 else a.len();
+    let lb = if y % 2 == 1 && b.len() > 0 then b.len() - 1 else b.len();
+    let n = if la < lb then la else lb;
+    for k in 0..n {
+        if a[k] != b[k] { return if a[k] < b[k] then -1 else 1; }
+    }
+    if la == lb { return 0; }
+    return if la < lb then -1 else 1;
+}
+
+// The canonical order of the raw decls: position k holds the raw decl with the k-th key.
+fn canonical_order(raw: &Raw, md: &modules.Modules) -> vec.Vec<u32> {
+    let n = raw.len();
+    let (pfull, pparent) = path_ranks(md);
+    let pf = pfull.as_slice();
+    let pp = pparent.as_slice();
+    let rk = raw.kind.as_slice();
+    let rm = raw.module.as_slice();
+    let rp = raw.parent.as_slice();
+    let rn = raw.name.as_slice();
+    let ri = raw.item.as_slice();
+    let rx = raw.index.as_slice();
+    let ro = raw.off.as_slice();
+    let mpkg = md.mod_pkg.as_slice();
+    let mut k0 = col.filled(n, 0u32);
+    let mut depth = col.filled(n, 0u8);
+    let mut sa = col.filled(3 * n, 0u64);
+    let mut sb = col.filled(3 * n, 0u64);
+    {
+        let k0s = k0.as_mut_slice();
+        let dp = depth.as_mut_slice();
+        let xa = sa.as_mut_slice();
+        let xb = sb.as_mut_slice();
+        // a member's key extends its parent's (parents precede their members)
+        for d in 0..n {
+            let kind = rk[d];
+            let m = rm[d] as usize;
+            let p = rp[d];
+            let a = (1u64 << 40) | ((rn[d] as u64) << 8) | (kind as u64);
+            let mut tie = ri[d];
+            let mut lev: usize = 0;
+            if kind == DK_MODULE {
+                k0s[d] = pp[m];
+                tie = mpkg[m];
+            } else if p == NONE {
+                k0s[d] = pf[m];
+            } else {
+                let pu = p as usize;
+                debug.assert(pu < d, "decls: a parent follows its member");
+                k0s[d] = k0s[pu];
+                lev = dp[pu] as usize;
+                for s in 0..lev {
+                    xa[3 * d + s] = xa[3 * pu + s];
+                    xb[3 * d + s] = xb[3 * pu + s];
+                }
+                tie = rx[d];
+            }
+            xa[3 * d + lev] = a;
+            xb[3 * d + lev] = ((tie as u64) << 32) | (ro[d] as u64);
+            dp[d] = (lev + 1) as% u8;
+        }
+    }
+    // the fields' widths: a NONE name, tie, or offset sorts last, as the value above the others
+    let mut top = [0u32; 4];
+    let mut mk0: u32 = 0;
+    {
+        let xa = sa.as_slice();
+        let xb = sb.as_slice();
+        let dp = depth.as_slice();
+        let k0v = k0.as_slice();
+        let t = &mut top;
+        for d in 0..n {
+            let e = 3 * d + dp[d] as usize - 1;
+            let v = [((xa[e] >> 8) & 4294967295) as% u32, (xa[e] & 255) as% u32, (xb[e] >> 32) as% u32, (xb[e] & 4294967295) as% u32];
+            for f in 0..4usize {
+                if v[f] != NONE && v[f] > t[f] { t[f] = v[f]; }
+            }
+            if k0v[d] > mk0 { mk0 = k0v[d]; }
+        }
+    }
+    let wo = bits_for(top[3] + 1);
+    let wt = bits_for(top[2] + 1);
+    let wk = bits_for(top[1] + 1);
+    let wn = bits_for(top[0] + 1);
+    let wl = 1 + wn + wk + wt + wo;
+    let mut order = col.iota(n);
+    if wl + bits_for(mk0) <= 64 {
+        // one key per level, (present, name, kind, tie, offset); the path rank above level 0's
+        let mut keys = col.filled(n, 0u64);
+        let mut s: usize = 3;
+        while s > 0 {
+            s = s - 1;
+            {
+                let os = order.as_slice();
+                let ks = keys.as_mut_slice();
+                let xa = sa.as_slice();
+                let xb = sb.as_slice();
+                let dp = depth.as_slice();
+                let k0v = k0.as_slice();
+                for k in 0..n {
+                    let d = os[k] as usize;
+                    let mut key: u64 = 0;
+                    if s < dp[d] as usize {
+                        let a = xa[3 * d + s];
+                        let b = xb[3 * d + s];
+                        let name = enc(((a >> 8) & 4294967295) as% u32, top[0]);
+                        let tie = enc((b >> 32) as% u32, top[2]);
+                        let off = enc((b & 4294967295) as% u32, top[3]);
+                        key = (1u64 << (wl - 1)) | (name << (wk + wt + wo)) | ((a & 255) << (wt + wo)) | (tie << wo) | off;
+                    }
+                    if s == 0 && mk0 != 0 { key = key | ((k0v[d] as u64) << wl); }
+                    ks[k] = key;
+                }
+            }
+            let p = sort.sort_perm(keys.as_slice());
+            order = perm.gather(order.as_slice(), p.as_slice());
+        }
+        return order;
+    }
+    let mut keys = col.filled(n, 0u64);
+    let mut s: usize = 3;
+    while s > 0 {
+        s = s - 1;
+        for pass in 0usize..2 {
+            {
+                let os = order.as_slice();
+                let ks = keys.as_mut_slice();
+                let src = if pass == 0 then sb.as_slice() else sa.as_slice();
+                for k in 0..n {
+                    ks[k] = src[3 * os[k] as usize + s];
+                }
+            }
+            let p = sort.sort_perm(keys.as_slice());
+            order = perm.gather(order.as_slice(), p.as_slice());
+        }
+    }
+    let mut k0s = col.filled(n, 0u32);
+    {
+        let os = order.as_slice();
+        let kv = k0.as_slice();
+        let w = k0s.as_mut_slice();
+        for k in 0..n {
+            w[k] = kv[os[k] as usize];
+        }
+    }
+    let p = sort.sort_perm(k0s.as_slice());
+    return perm.gather(order.as_slice(), p.as_slice());
+}
+
+// v as a key field: NONE becomes top + 1, above every other value.
+fn enc(v: u32, top: u32) -> u64 {
+    return if v == NONE then (top as u64) + 1 else v as u64;
+}
+
+// The number of bits a value up to x needs.
+fn bits_for(x: u32) -> u64 {
+    let mut w: u64 = 0;
+    while w < 32 && ((x as u64) >> w) != 0 {
+        w = w + 1;
+    }
+    return w;
+}
+
+// The built-in type names: the scalars, `vec`, `mask`, `never`, a vector `TxN` of a lane type,
+// a mask `maskWxN` (N a power of two from 2 to 64, or `n`); and the built-in fns (1; 2: of
+// `std.soa` only). They are few, so each is looked up in the string table.
+fn mark_builtins(nm: &intern.Interned, is_prim: &mut [bool], builtin: &mut [u8]) {
+    let names = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize", "f16", "bf16", "f32", "f64", "bool", "char", "str", "vec", "mask", "never"];
+    let lane_types = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "bf16", "f32", "f64"];
+    let lanes = ["n", "2", "4", "8", "16", "32", "64"];
+    let widths = ["8", "16", "32", "64"];
+    for k in 0..names.len() {
+        mark(nm, is_prim, mem.str_bytes(names[k]));
+    }
+    for n in 0..lanes.len() {
+        let l = lanes[n];
+        for k in 0..lane_types.len() {
+            let t = lane_types[k];
+            let v = f"{t}x{l}";
+            mark(nm, is_prim, v.as_bytes());
+        }
+        for k in 0..widths.len() {
+            let w = widths[k];
+            let m = f"mask{w}x{l}";
+            mark(nm, is_prim, m.as_bytes());
+        }
+    }
+    let fns = ["size_of", "align_of", "needs_drop", "fence_stream", "soa_row_size", "soa_read", "soa_write"];
+    for k in 0..fns.len() {
+        let s = intern.find_str(&nm.tab, mem.str_bytes(fns[k]));
+        if s != NONE { builtin[s as usize] = if k < 4 then 1u8 else 2u8; }
+    }
+}
+
+fn mark(nm: &intern.Interned, flags: &mut [bool], b: &[u8]) {
+    let s = intern.find_str(&nm.tab, b);
+    if s != NONE { flags[s as usize] = true; }
+}
+
+fn sorted_by_key(keys: &[u64], vals: &[u32]) -> (vec.Vec<u64>, vec.Vec<u32>) {
+    let p = sort.sort_perm(keys);
+    return (perm.gather(keys, p.as_slice()), perm.gather(vals, p.as_slice()));
+}
+
+// The declarations of the build.
+pub fn build(md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, rows: &mut resdiag.Rows) -> Decls {
+    let mut raw = Raw.new();
+    let nmod = md.modules();
+    for m in 0..nmod {
+        let path = md.path(m);
+        let name = if path.len() > 0 then path[path.len() - 1] else NONE;
+        let _ = raw.push(DK_MODULE, name, m as% u32, NONE, NONE, NONE, 0, F_PUB, 0);
+    }
+    let mut c = Collect.{
+        drop_mod: vec.Vec::<u32>.new(),
+        drop_sym: vec.Vec::<u32>.new(),
+        drop_tok: vec.Vec::<u32>.new(),
+        poisoned: vec.Vec::<u32>.new(),
+        impl_decl: vec.Vec::<u32>.new(),
+        impl_self: vec.Vec::<u32>.new(),
+        impl_trait: vec.Vec::<u32>.new(),
+        item_decl: col.filled(cut.len(), NONE),
+    };
+    let mut impl_item = vec.Vec::<u32>.new();
+    for i in 0..cut.len() {
+        let f = cut.file.as_slice()[i] as usize;
+        let module = md.file_mod.as_slice()[f];
+        let lo = cut.tok_lo.as_slice()[i] as usize;
+        let hi = cut.tok_hi.as_slice()[i] as usize;
+        if !tree.ok(i) {
+            if cut.kind.as_slice()[i] != items.ITEM_PRE { dropped(&mut c, t, nm, module, lo, hi); }
+            continue;
+        }
+        let base = tree.item_node.as_slice()[i] as usize;
+        let end = tree.item_node.as_slice()[i + 1] as usize;
+        if end == base { continue; }
+        let root = end - 1;
+        if tree.kind.as_slice()[root] != node_kinds.KIND_ITEM { continue; }
+        let it = Item.{ i: i as% u32, base: base, module: module, lo: lo, hi: hi };
+        let a = tree.tok.as_slice()[root];
+        let pub_flag = if kind_at(t, a as usize) == T_KW_PUB then F_PUB else 0u16;
+        let is_test = kind_at(t, a as usize) == T_KW_TEST;
+        let nimpl = c.impl_decl.len();
+        let ks = kids(tree, root);
+        for j in 0..ks.len() {
+            let ch = (base + ks[j] as usize) as% u32;
+            let ck = tree.kind.as_slice()[ch as usize];
+            if ck == node_kinds.KIND_ITEM_BODY {
+                let d = item_body(&mut raw, &mut c, it, tree, t, nm, set, lx, ch, pub_flag, rows);
+                if d != NONE { c.item_decl.as_mut_slice()[i] = d; }
+            } else if ck == node_kinds.KIND_FN_DECL && is_test {
+                let fa = tree.tok.as_slice()[ch as usize];
+                let d = push_decl(&mut raw, it, tree, t, nm, DK_FN, fn_name(t, fa), ch, NONE, F_TEST | rec_flag(t, fa), 0);
+                c.item_decl.as_mut_slice()[i] = d;
+            }
+        }
+        for _ in nimpl..c.impl_decl.len() {
+            impl_item.push(i as% u32);
+        }
+    }
+    let nraw_items = raw.len();
+    // module scopes: imports (class 0), top-level decls (1), dropped names (2)
+    let mut e_key = vec.Vec::<u64>.new();
+    let mut e_class = vec.Vec::<u8>.new();
+    let mut e_ord = vec.Vec::<u64>.new();
+    let mut e_decl = vec.Vec::<u32>.new();
+    let mut e_off = vec.Vec::<u32>.new();
+    for k in 0..md.imp_item.len() {
+        let tg = md.imp_target.as_slice()[k];
+        e_key.push(search.pair(md.imp_mod.as_slice()[k], md.imp_bound.as_slice()[k]));
+        e_class.push(0);
+        e_ord.push(k as u64);
+        e_decl.push(tg);
+        e_off.push(md.imp_bound_tok.as_slice()[k]);
+    }
+    for d in nmod..nraw_items {
+        let kind = raw.kind.as_slice()[d];
+        if raw.parent.as_slice()[d] != NONE || kind == DK_IMPL { continue; }
+        e_key.push(search.pair(raw.module.as_slice()[d], raw.name.as_slice()[d]));
+        e_class.push(1);
+        e_ord.push(((raw.off.as_slice()[d] as u64) << 32) | (d as u64));
+        e_decl.push(d as% u32);
+        e_off.push(NONE);
+    }
+    for k in 0..c.drop_sym.len() {
+        e_key.push(search.pair(c.drop_mod.as_slice()[k], c.drop_sym.as_slice()[k]));
+        e_class.push(2);
+        e_ord.push(c.drop_tok.as_slice()[k] as u64);
+        e_decl.push(NONE);
+        e_off.push(c.drop_tok.as_slice()[k]);
+    }
+    let mut order = sort.sort_perm(e_ord.as_slice());
+    let cls = perm.gather(e_class.as_slice(), order.as_slice());
+    order = perm.gather(order.as_slice(), sort.sort_perm(cls.as_slice()).as_slice());
+    let ks = perm.gather(e_key.as_slice(), order.as_slice());
+    order = perm.gather(order.as_slice(), sort.sort_perm(ks.as_slice()).as_slice());
+    let mut scope_key = vec.Vec::<u64>.new();
+    let mut scope_raw = vec.Vec::<u32>.new();
+    let mut scope_import = vec.Vec::<bool>.new();
+    // winners that need an error decl: (module, class, order) for stage0's creation order
+    let mut err_entry = vec.Vec::<u32>.new();
+    let mut k: usize = 0;
+    while k < order.len() {
+        let e = order.as_slice()[k] as usize;
+        let key = e_key.as_slice()[e];
+        let mut j = k + 1;
+        while j < order.len() && e_key.as_slice()[order.as_slice()[j] as usize] == key {
+            let x = order.as_slice()[j] as usize;
+            if e_class.as_slice()[x] < 2 {
+                let (pf, po, pl) = entry_span(&raw, md, lx, set, t, e_class.as_slice()[x], e_decl.as_slice()[x], e_off.as_slice()[x]);
+                let (ff, fo, fln) = entry_span(&raw, md, lx, set, t, e_class.as_slice()[e], e_decl.as_slice()[e], e_off.as_slice()[e]);
+                rows.related(ff, fo, fln);
+                rows.add(resdiag.E0105, pf, po, pl, (key & 4294967295) as% u32, resdiag.SCOPE_MODULE, (key >> 32) as% u32);
+            }
+            j = j + 1;
+        }
+        let cl = e_class.as_slice()[e];
+        scope_key.push(key);
+        scope_import.push(cl == 0);
+        if cl == 1 {
+            scope_raw.push(e_decl.as_slice()[e]);
+        } else if cl == 0 && e_decl.as_slice()[e] != NONE {
+            scope_raw.push(e_decl.as_slice()[e]);
+        } else {
+            scope_raw.push(NONE);
+            err_entry.push(e as% u32);
+        }
+        k = j;
+    }
+    // error decls, in stage0's order: module by module, the failed imports, then the dropped names
+    let mut eo = vec.Vec::<u64>.new();
+    for q in 0..err_entry.len() {
+        let e = err_entry.as_slice()[q] as usize;
+        let m = (e_key.as_slice()[e] >> 32) as% u32;
+        let late: u64 = if e_class.as_slice()[e] == 2 then 1 else 0;
+        eo.push(((m as u64) << 32) | (late << 31) | (e_ord.as_slice()[e] & 2147483647));
+    }
+    let ep = sort.sort_perm(eo.as_slice());
+    let mut err_decl = col.filled(err_entry.len(), NONE);
+    for q in 0..ep.len() {
+        let e = err_entry.as_slice()[ep.as_slice()[q] as usize] as usize;
+        let key = e_key.as_slice()[e];
+        let g = e_off.as_slice()[e];
+        let d = raw.push(DK_ERROR, (key & 4294967295) as% u32, (key >> 32) as% u32, NONE, NONE, NONE, tok_off(t, g), F_PUB, 0);
+        err_decl.as_mut_slice()[ep.as_slice()[q] as usize] = d;
+    }
+    let mut q: usize = 0;
+    for s in 0..scope_raw.len() {
+        if scope_raw.as_slice()[s] == NONE {
+            scope_raw.as_mut_slice()[s] = err_decl.as_slice()[q];
+            q = q + 1;
+        }
+    }
+    // canonical ids
+    let corder = canonical_order(&raw, md);
+    let canon = perm.invert(corder.as_slice());
+    let cs = canon.as_slice();
+    let n = raw.len();
+    let mut ds = Decls.{
+        kind: perm.gather(raw.kind.as_slice(), corder.as_slice()),
+        name: perm.gather(raw.name.as_slice(), corder.as_slice()),
+        module: perm.gather(raw.module.as_slice(), corder.as_slice()),
+        parent: vec.Vec::<u32>.with_capacity(n),
+        item: perm.gather(raw.item.as_slice(), corder.as_slice()),
+        node: perm.gather(raw.node.as_slice(), corder.as_slice()),
+        off: perm.gather(raw.off.as_slice(), corder.as_slice()),
+        flags: perm.gather(raw.flags.as_slice(), corder.as_slice()),
+        index: perm.gather(raw.index.as_slice(), corder.as_slice()),
+        mod_decl: vec.Vec::<u32>.with_capacity(nmod),
+        item_decl: vec.Vec::<u32>.with_capacity(cut.len()),
+        scope_key: scope_key,
+        scope_decl: vec.Vec::<u32>.with_capacity(scope_raw.len()),
+        scope_import: scope_import,
+        mem_key: vec.Vec::<u64>.new(),
+        mem_decl: vec.Vec::<u32>.new(),
+        impl_head: col.filled(n, NONE),
+        impl_prim: col.filled(n, NONE),
+        impl_trait: col.filled(n, NONE),
+        impl_self_ty: col.filled(n, NONE),
+        impl_trait_ty: col.filled(n, NONE),
+        inh_key: vec.Vec::<u64>.new(),
+        inh_decl: vec.Vec::<u32>.new(),
+        tr_key: vec.Vec::<u64>.new(),
+        tr_decl: vec.Vec::<u32>.new(),
+        var_key: vec.Vec::<u64>.new(),
+        var_off: vec.Vec::<u32>.new(),
+        var_enum: vec.Vec::<u32>.new(),
+        poisoned: vec.Vec::<u32>.new(),
+        is_prim: col.filled(nm.tab.len(), false),
+        builtin: col.filled(nm.tab.len(), 0u8),
+    };
+    {
+        let rp = raw.parent.as_slice();
+        let co = corder.as_slice();
+        for d in 0..n {
+            let p = rp[co[d] as usize];
+            ds.parent.push(if p == NONE then NONE else cs[p as usize]);
+        }
+    }
+    for m in 0..nmod {
+        ds.mod_decl.push(cs[m]);
+    }
+    {
+        let idl = c.item_decl.as_slice();
+        for i in 0..cut.len() {
+            let d = idl[i];
+            ds.item_decl.push(if d == NONE then NONE else cs[d as usize]);
+        }
+    }
+    {
+        let sr = scope_raw.as_slice();
+        for s in 0..sr.len() {
+            ds.scope_decl.push(cs[sr[s] as usize]);
+        }
+    }
+    mark_builtins(nm, ds.is_prim.as_mut_slice(), ds.builtin.as_mut_slice());
+    let pp = sort.sort_perm(c.poisoned.as_slice());
+    let pz = perm.gather(c.poisoned.as_slice(), pp.as_slice());
+    for k in 0..pz.len() {
+        if k == 0 || pz.as_slice()[k] != pz.as_slice()[k - 1] { ds.poisoned.push(pz.as_slice()[k]); }
+    }
+    members(&mut ds, md, lx, set, t, rows);
+    impls(&mut ds, md, nm, t, tree, &c, impl_item.as_slice(), cs, lx, set, rows);
+    return ds;
+}
+
+// The span of a scope entry: an import's bound name, a decl's name, a dropped name token.
+fn entry_span(raw: &Raw, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, class: u8, decl: u32, g: u32) -> (u32, u32, u32) {
+    if class == 1 { return raw_span(raw, md, lx, set, t, decl); }
+    return modules.tok_span(lx, set, t, g);
+}
+
+// The name span of raw decl d: (file, offset, length); a nameless decl's first token.
+fn raw_span(raw: &Raw, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, d: u32) -> (u32, u32, u32) {
+    let f = md.mod_file.as_slice()[raw.module.as_slice()[d as usize] as usize];
+    let off = raw.off.as_slice()[d as usize];
+    let lo = t.file_tok.as_slice()[f as usize];
+    let hi = t.file_tok.as_slice()[f as usize + 1];
+    let g = search.lower_bound(&t.start.as_slice()[lo as usize..hi as usize], off) as% u32 + lo;
+    return modules.tok_span(lx, set, t, g);
+}
+
+// The name span of canonical decl d.
+pub fn span(ds: &Decls, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, d: u32) -> (u32, u32, u32) {
+    let f = md.mod_file.as_slice()[ds.module.as_slice()[d as usize] as usize];
+    let off = ds.off.as_slice()[d as usize];
+    if ds.kind.as_slice()[d as usize] == DK_MODULE { return (f, 0, 0); }
+    let lo = t.file_tok.as_slice()[f as usize];
+    let hi = t.file_tok.as_slice()[f as usize + 1];
+    let g = search.lower_bound(&t.start.as_slice()[lo as usize..hi as usize], off) as% u32 + lo;
+    return modules.tok_span(lx, set, t, g);
+}
+
+// The member table, the enums by variant name, and E0105 for members of one parent named alike.
+fn members(ds: &mut Decls, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, rows: &mut resdiag.Rows) {
+    let mut keys = vec.Vec::<u64>.new();
+    let mut vals = vec.Vec::<u32>.new();
+    let mut vk = vec.Vec::<u64>.new();
+    let mut vo = vec.Vec::<u32>.new();
+    let mut ve = vec.Vec::<u32>.new();
+    for d in 0..ds.decls() {
+        let k = ds.kind.as_slice()[d];
+        let p = ds.parent.as_slice()[d];
+        if p == NONE || (k != DK_VARIANT && k != DK_FIELD && k != DK_TRAIT_METHOD) { continue; }
+        keys.push(search.pair(p, ds.name.as_slice()[d]));
+        vals.push(d as% u32);
+        if k == DK_VARIANT {
+            vk.push(search.pair(ds.name.as_slice()[d], ds.module.as_slice()[p as usize]));
+            vo.push(ds.off.as_slice()[p as usize]);
+            ve.push(p);
+        }
+    }
+    let (mk, mv) = sorted_by_key(keys.as_slice(), vals.as_slice());
+    for k in 1..mk.len() {
+        if mk.as_slice()[k] != mk.as_slice()[k - 1] { continue; }
+        let mut first = k - 1;
+        while first > 0 && mk.as_slice()[first - 1] == mk.as_slice()[k] { first = first - 1; }
+        let d = mv.as_slice()[k];
+        let (pf, po, pl) = span(ds, md, lx, set, t, d);
+        let (ff, fo, fln) = span(ds, md, lx, set, t, mv.as_slice()[first]);
+        rows.related(ff, fo, fln);
+        rows.add(resdiag.E0105, pf, po, pl, ds.name.as_slice()[d as usize], resdiag.SCOPE_DECL, ds.parent.as_slice()[d as usize]);
+    }
+    ds.mem_key = mk;
+    ds.mem_decl = mv;
+    let p = sort.sort_perm(vo.as_slice());
+    let vk1 = perm.gather(vk.as_slice(), p.as_slice());
+    let p2 = perm.gather(p.as_slice(), sort.sort_perm(vk1.as_slice()).as_slice());
+    ds.var_key = perm.gather(vk.as_slice(), p2.as_slice());
+    ds.var_off = perm.gather(vo.as_slice(), p2.as_slice());
+    ds.var_enum = perm.gather(ve.as_slice(), p2.as_slice());
+}
+
+// The generic param names of the `ImplDecl` row n.
+fn impl_generics(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, base: usize, n: u32, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let g = child(tree, base, n as usize, node_kinds.KIND_GENERICS);
+    if g == NONE { return; }
+    let ks = kids(tree, g as usize);
+    for j in 0..ks.len() {
+        let a = tree.tok.as_slice()[base + ks[j] as usize];
+        let nt = if kind_at(t, a as usize) == T_KW_CONST then a + 1 else a;
+        out.push(nm.tok_str.as_slice()[nt as usize]);
+    }
+}
+
+// What the path type of `Type` row ty names: (G_* tag, id), without diagnostics.
+fn type_path(ds: &Decls, md: &modules.Modules, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, base: usize, module: u32, ty: u32, gnames: &[u32], chain: &mut vec.Vec<u32>) -> (u8, u32) {
+    if ty == NONE { return (G_NONE, NONE); }
+    let tb = child(tree, base, ty as usize, node_kinds.KIND_TYPE_BASE);
+    if tb == NONE { return (G_NONE, NONE); }
+    modules.ident_chain(t.kind.as_slice(), tree.tok.as_slice()[tb as usize] as usize, chain);
+    if chain.len() == 0 { return (G_NONE, NONE); }
+    let head = nm.tok_str.as_slice()[chain.as_slice()[0] as usize];
+    for k in 0..gnames.len() {
+        if gnames[k] == head { return (G_NONE, NONE); }
+    }
+    let (mut tag, mut id) = ds.global(md, module, head);
+    if tag == G_NONE { return (G_NONE, NONE); }
+    for k in 1..chain.len() {
+        if tag != G_DECL || ds.kind.as_slice()[id as usize] != DK_MODULE { return (G_NONE, NONE); }
+        let x = ds.module_item(ds.module.as_slice()[id as usize], nm.tok_str.as_slice()[chain.as_slice()[k] as usize]);
+        if x == NONE { return (G_NONE, NONE); }
+        tag = G_DECL;
+        id = x;
+    }
+    return (tag, id);
+}
+
+// Impl heads and traits, the method tables, and E0105 for methods named alike.
+fn impls(ds: &mut Decls, md: &modules.Modules, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, c: &Collect, impl_item: &[u32], cs: &[u32], lx: &lex.Lexer, set: &source.SourceSet, rows: &mut resdiag.Rows) {
+    let mut gnames = vec.Vec::<u32>.new();
+    let mut chain = vec.Vec::<u32>.new();
+    let ni = c.impl_decl.len();
+    let mut dec = vec.Vec::<u32>.with_capacity(ni);
+    for k in 0..ni {
+        let d = cs[c.impl_decl.as_slice()[k] as usize];
+        dec.push(d);
+        let i = impl_item[k] as usize;
+        let base = tree.item_node.as_slice()[i] as usize;
+        let module = ds.module.as_slice()[d as usize];
+        let n = (base + ds.node.as_slice()[d as usize] as usize) as% u32;
+        impl_generics(tree, t, nm, base, n, &mut gnames);
+        let st = c.impl_self.as_slice()[k];
+        let tt = c.impl_trait.as_slice()[k];
+        ds.impl_self_ty.as_mut_slice()[d as usize] = if st == NONE then NONE else (st as usize - base) as% u32;
+        ds.impl_trait_ty.as_mut_slice()[d as usize] = if tt == NONE then NONE else (tt as usize - base) as% u32;
+        let (htag, hid) = type_path(ds, md, nm, t, tree, base, module, st, gnames.as_slice(), &mut chain);
+        if htag == G_DECL {
+            let hk = ds.kind.as_slice()[hid as usize];
+            if hk == DK_STRUCT || hk == DK_ENUM { ds.impl_head.as_mut_slice()[d as usize] = hid; }
+        } else if htag == G_PRIM {
+            ds.impl_prim.as_mut_slice()[d as usize] = hid;
+        }
+        if tt != NONE {
+            let (ttag, tid) = type_path(ds, md, nm, t, tree, base, module, tt, gnames.as_slice(), &mut chain);
+            if ttag == G_DECL && ds.kind.as_slice()[tid as usize] == DK_TRAIT { ds.impl_trait.as_mut_slice()[d as usize] = tid; }
+        }
+    }
+    // methods per impl, in item then declaration order (impls are in item order)
+    let mut mstart = vec.Vec::<u32>.new();
+    let mut mlist = vec.Vec::<u32>.new();
+    let mut by_parent_key = vec.Vec::<u64>.new();
+    let mut by_parent_val = vec.Vec::<u32>.new();
+    for d in 0..ds.decls() {
+        if ds.kind.as_slice()[d] != DK_METHOD { continue; }
+        by_parent_key.push(search.pair(ds.parent.as_slice()[d], ds.index.as_slice()[d]));
+        by_parent_val.push(d as% u32);
+    }
+    let (pk, pv) = sorted_by_key(by_parent_key.as_slice(), by_parent_val.as_slice());
+    for k in 0..ni {
+        mstart.push(mlist.len() as% u32);
+        let d = dec.as_slice()[k];
+        let mut j = search.lower_bound(pk.as_slice(), search.pair(d, 0));
+        while j < pk.len() && (pk.as_slice()[j] >> 32) as% u32 == d {
+            mlist.push(pv.as_slice()[j]);
+            j = j + 1;
+        }
+    }
+    mstart.push(mlist.len() as% u32);
+    let mut ik = vec.Vec::<u64>.new();
+    let mut iv = vec.Vec::<u32>.new();
+    let mut tk = vec.Vec::<u64>.new();
+    let mut tv = vec.Vec::<u32>.new();
+    for k in 0..ni {
+        let d = dec.as_slice()[k] as usize;
+        let h = ds.impl_head.as_slice()[d];
+        if h == NONE { continue; }
+        let inherent = c.impl_trait.as_slice()[k] == NONE;
+        for j in mstart.as_slice()[k]..mstart.as_slice()[k + 1] {
+            let m = mlist.as_slice()[j as usize];
+            let key = search.pair(h, ds.name.as_slice()[m as usize]);
+            if inherent {
+                ik.push(key);
+                iv.push(m);
+            } else {
+                tk.push(key);
+                tv.push(m);
+            }
+        }
+    }
+    let (a, b) = sorted_by_key(ik.as_slice(), iv.as_slice());
+    ds.inh_key = a;
+    ds.inh_decl = b;
+    let (x, y) = sorted_by_key(tk.as_slice(), tv.as_slice());
+    ds.tr_key = x;
+    ds.tr_decl = y;
+    // E0105: per head over the inherent impls with a head, per impl otherwise: a group key per
+    // impl (0 << 32 | head decl, 1 << 32 | built-in type S, 2 << 32 | impl), the group's scope its
+    // first impl
+    let mut group = vec.Vec::<u64>.with_capacity(ni);
+    for k in 0..ni {
+        let d = dec.as_slice()[k] as usize;
+        let h = ds.impl_head.as_slice()[d];
+        let hp = ds.impl_prim.as_slice()[d];
+        let inherent = c.impl_trait.as_slice()[k] == NONE;
+        group.push(if inherent && h != NONE then (h as u64) else if inherent && hp != NONE then ((1u64 << 32) | (hp as u64)) else ((2u64 << 32) | (k as u64)));
+    }
+    let gp = sort.sort_perm(group.as_slice());
+    let mut first_impl = col.filled(ni, NONE);
+    for r in 0..gp.len() {
+        let k = gp.as_slice()[r] as usize;
+        let lead = if r > 0 && group.as_slice()[gp.as_slice()[r - 1] as usize] == group.as_slice()[k] then first_impl.as_slice()[gp.as_slice()[r - 1] as usize] else dec.as_slice()[k];
+        first_impl.as_mut_slice()[k] = lead;
+    }
+    let mut gk = vec.Vec::<u64>.new();
+    let mut gv = vec.Vec::<u32>.new();
+    let mut gscope = vec.Vec::<u32>.new();
+    let mut names = vec.Vec::<u32>.new();
+    for k in 0..ni {
+        for j in mstart.as_slice()[k]..mstart.as_slice()[k + 1] {
+            let m = mlist.as_slice()[j as usize];
+            gk.push(group.as_slice()[k]);
+            gv.push(m);
+            gscope.push(first_impl.as_slice()[k]);
+            names.push(ds.name.as_slice()[m as usize]);
+        }
+    }
+    // within a group, methods of one name keep item then declaration order
+    let p1 = sort.sort_perm(names.as_slice());
+    let g1 = perm.gather(gk.as_slice(), p1.as_slice());
+    let p = perm.gather(p1.as_slice(), sort.sort_perm(g1.as_slice()).as_slice());
+    let mut k: usize = 0;
+    while k < p.len() {
+        let e = p.as_slice()[k] as usize;
+        let mut j = k + 1;
+        while j < p.len() && gk.as_slice()[p.as_slice()[j] as usize] == gk.as_slice()[e] && names.as_slice()[p.as_slice()[j] as usize] == names.as_slice()[e] {
+            let x = p.as_slice()[j] as usize;
+            let m = gv.as_slice()[x];
+            let (pf, po, pl) = span(ds, md, lx, set, t, m);
+            let (ff, fo, fln) = span(ds, md, lx, set, t, gv.as_slice()[e]);
+            rows.related(ff, fo, fln);
+            rows.add(resdiag.E0105, pf, po, pl, names.as_slice()[x], resdiag.SCOPE_IMPL, gscope.as_slice()[x]);
+            j = j + 1;
+        }
+        k = j;
+    }
+}
