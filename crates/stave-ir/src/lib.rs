@@ -4,6 +4,7 @@
 //!   text; canonical renumbering.
 //! - [`ir`]: SSA with block params, struct-of-arrays bodies, `u32` ids; the op set ([`Op`]).
 //! - [`build`]: [`FuncBuilder`] for the front end's lowering.
+//! - [`canon`]: the canonical numbering of a module's functions, blocks, values and pools.
 //! - [`fence`]: the placement of `mem.fence_stream` after streaming stores.
 //! - [`verify`]: structure, dominance, block params, terminators, op typing.
 //! - [`interp`]: the scalar reference interpreter (oracle) over [`mem`] with a pluggable [`host`];
@@ -25,6 +26,7 @@ pub mod arith;
 pub mod borrowtrack;
 pub mod bounds;
 pub mod build;
+pub mod canon;
 pub mod divmagic;
 pub mod fence;
 pub mod host;
