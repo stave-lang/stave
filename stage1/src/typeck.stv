@@ -146,6 +146,7 @@ const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
 const T_AS_PERCENT: u8 = terminals.T_AS_PERCENT as% u8;
 const T_AS_PIPE: u8 = terminals.T_AS_PIPE as% u8;
 const T_AS_TILDE: u8 = terminals.T_AS_TILDE as% u8;
+const T_AS_QUESTION: u8 = terminals.T_AS_QUESTION as% u8;
 const T_EQ: u8 = terminals.T_EQ as% u8;
 const T_EQ_EQ: u8 = terminals.T_EQ_EQ as% u8;
 const T_BANG_EQ: u8 = terminals.T_BANG_EQ as% u8;
@@ -1151,11 +1152,20 @@ impl tc_rows.Typeck {
             let to = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, tn, false, self.sc);
             if to == ERR || to == NONE { return self.err(); }
             if acc == UNK || acc == NONE { return UNK; }
-            if op != T_KW_AS && op != T_AS_PERCENT && op != T_AS_PIPE && op != T_AS_TILDE { return UNK; }
+            if op != T_KW_AS && op != T_AS_PERCENT && op != T_AS_PIPE && op != T_AS_TILDE && op != T_AS_QUESTION { return UNK; }
             if !cast_ok(&sg.cx.tab, op, acc, to) { return self.err(); }
-            acc = to;
+            acc = if op == T_AS_QUESTION then self.option_of(&mut sg.cx.tab, to) else to;
+            if acc == UNK { return UNK; }
         }
         return acc;
+    }
+
+    // `Option<t>` (the result of `as?`); `UNK` in a program without `Option`.
+    fn option_of(&mut self, tab: &mut types.Table, t: u32) -> u32 {
+        if self.opt == NONE { return UNK; }
+        tab.begin();
+        tab.push_garg(types.GA_TYPE, t, 0);
+        return tab.intern(types.TK_ADT, self.opt, 0);
     }
 
     // Before child c of `ForStmt` row r: the annotation (kept in `acc`), the source with the
@@ -1543,8 +1553,8 @@ fn is_64(tab: &types.Table, ty: u32) -> bool {
     return tab.tag_of(ty) == types.TK_INT && tab.b_of(ty) >= types.W_64;
 }
 
-// stage0's cast table for `as`, `as%`, `as|`, `as~` (`as?` is not checked yet): whether `src op
-// dst` is allowed; the result type is `dst`.
+// stage0's cast table for `as`, `as%`, `as|`, `as~`, `as?`: whether `src op dst` is allowed; the
+// result type is `dst` (`Option<dst>` for `as?`).
 fn cast_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
     let fk = tab.tag_of(src);
     let tk2 = tab.tag_of(dst);
@@ -1601,6 +1611,10 @@ fn scalar_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
     if op == T_AS_PERCENT { return tint && (fint || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_PTR); }
     if op == T_AS_PIPE { return tint && (fint || ffloat || fk == types.TK_CHAR); }
     if op == T_AS_TILDE { return tfloat && (fint || ffloat); }
+    if op == T_AS_QUESTION {
+        if tint { return fint || ffloat || fk == types.TK_CHAR; }
+        if tk2 == types.TK_CHAR || tfloat { return fint || (ffloat && tfloat); }
+    }
     return false;
 }
 
