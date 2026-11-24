@@ -38,6 +38,7 @@
 import ast;
 import consteval;
 import decls;
+import files;
 import generated.node_kinds;
 import generated.terminals;
 import intern;
@@ -51,6 +52,7 @@ import tc_builtins;
 import tc_chain;
 import tc_pat;
 import tc_rows;
+import tc_traits;
 import types;
 import prims.col;
 import std.mem;
@@ -1432,7 +1434,7 @@ fn is_body(sg: &sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, d: usize, x86: bool
     return built_on(sg.feats.as_slice()[d], x86);
 }
 
-pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, x86: bool) -> tc_rows.Typeck {
+pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, x86: bool) -> tc_rows.Typeck {
     let n = tree.nodes();
     let tab = &mut sg.cx.tab;
     let t_bool = tab.key(types.TK_BOOL, 0, 0);
@@ -1481,16 +1483,32 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &in
         mt_h: vec.Vec::<u32>.new(),
         mt_k: vec.Vec::<u32>.new(),
         bt: tc_builtins.table(&nm.tab),
+        tq: tc_traits.new(sg, ds, fl, md, nm),
         t_bool: t_bool,
         t_char: t_char,
         t_unit: t_unit,
         t_never: t_never,
         t_ref_str: t_ref_str,
     };
+    // rounds (`tc_traits`): the bodies that asked a trait question without an answer are checked
+    // again after the questions are solved
+    let mut todo = vec.Vec::<u32>.new();
     for d in 0..ds.decls() {
-        if is_body(sg, ds, tree, d, x86) {
-            tc.body(sg, ds, nm, set, t, cut, tree, d as% u32);
+        if is_body(sg, ds, tree, d, x86) { todo.push(d as% u32); }
+    }
+    loop {
+        let mut next = vec.Vec::<u32>.new();
+        for k in 0..todo.len() {
+            let d = todo.as_slice()[k];
+            tc.begin_body(tree, ds, d);
+            tc.body(sg, ds, nm, set, t, cut, tree, d);
+            if tc.tq.pending && !tc.tq.last { next.push(d); }
         }
+        if next.len() == 0 { break; }
+        tc.tq.solve(sg);
+        tc.tq.round = tc.tq.round + 1;
+        tc.tq.last = tc.tq.round + 1 >= tc_traits.MAX_ROUNDS;
+        todo = next;
     }
     return tc;
 }

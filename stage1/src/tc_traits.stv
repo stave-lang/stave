@@ -1,0 +1,209 @@
+// The trait questions of the body checker (types/check, see `typeck`), asked of one
+// `traits.Traits` in rounds. A method lookup that needs a trait answer the last round did not
+// give asks for it (impl-applies goals, in the body's environment: its generic params' bounds
+// and `view` flags) and marks its body pending; the walk goes on with that call unknown, so one
+// round collects every question a body can ask so far. After a round, `solve` expands and
+// decides every goal asked, and the pending bodies are checked again from their start. A round
+// in which no body asks a new question is the last; a body still pending after `MAX_ROUNDS` is
+// not modeled (`last`: its lookups that would wait are type errors).
+import consteval;
+import decls;
+import files;
+import intern;
+import layout;
+import modules;
+import sigs;
+import traits;
+import types;
+import prims.col;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = traits.NONE;
+const ERR: u32 = types.ERR;
+
+pub const MAX_ROUNDS: u32 = 64;
+
+// An impl-applies answer: no, yes (its generic arguments in `qargs`), not answered yet.
+pub const A_NO: u8 = 0;
+pub const A_YES: u8 = 1;
+pub const A_WAIT: u8 = 2;
+
+pub struct Tq {
+    pub tr: traits.Traits,
+    sh: layout.Shapes,
+    pa: layout.Parts,
+    // the environment of the body being checked, once made
+    env_ok: bool,
+    env: u32,
+    // whether the body being checked asked a question that has no answer yet
+    pub pending: bool,
+    // the rounds solved so far, and whether this round is the last one allowed
+    pub round: u32,
+    pub last: bool,
+    // the generic arguments of the last impl that applied (3 words each); the bound methods of a
+    // lookup; scratch goals
+    pub qargs: vec.Vec<u32>,
+    pub bm: vec.Vec<u32>,
+    ms: vec.Vec<u32>,
+}
+
+pub fn new(sg: &sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned) -> Tq {
+    let nopend = col.filled(ds.decls(), false);
+    let sh = layout.shapes(ds, sg.cx.ty.as_slice(), &sg.params, nopend.as_slice());
+    return Tq.{
+        tr: traits.new(sg, &sg.cx.tab, ds, fl, md, nm),
+        sh: sh,
+        pa: layout.Parts.new(),
+        env_ok: false,
+        env: 0,
+        pending: false,
+        round: 0,
+        last: false,
+        qargs: vec.Vec::<u32>.new(),
+        bm: vec.Vec::<u32>.new(),
+        ms: vec.Vec::<u32>.new(),
+    };
+}
+
+impl Tq {
+    // A body's check starts: its environment is made on first use.
+    pub fn begin(&mut self) {
+        self.env_ok = false;
+        self.pending = false;
+    }
+
+    // The environment of the body with generic scope sc.
+    pub fn env_of(&mut self, sg: &sigs.Sigs, sc: consteval.Scope) -> u32 {
+        if !self.env_ok {
+            self.env = self.tr.env_of(sg, sc.par_lo, sc.par_hi, sc.own_lo, sc.own_hi);
+            self.env_ok = true;
+        }
+        return self.env;
+    }
+
+    // Whether impl i applies to type t in environment e.
+    pub fn applies(&mut self, sg: &mut sigs.Sigs, e: u32, i: u32, t: u32) -> u8 {
+        let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());
+        self.ms.clear();
+        let ok = self.tr.applies_env(&mut tab, sg, e, i, t, &mut self.ms, &mut self.qargs);
+        sg.cx.tab = tab;
+        if !ok { return A_NO; }
+        let mut wait = false;
+        for k in 0..self.ms.len() {
+            let g = self.ms.as_slice()[k];
+            if !self.tr.decided(g) {
+                wait = true;
+            } else if !self.tr.is(g) {
+                return A_NO;
+            }
+        }
+        if wait {
+            self.pending = true;
+            return A_WAIT;
+        }
+        return A_YES;
+    }
+
+    // Expands and decides every goal asked so far.
+    pub fn solve(&mut self, sg: &mut sigs.Sigs) {
+        let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());
+        self.tr.expand(&mut tab, sg, &self.sh, &mut self.pa);
+        self.tr.solve();
+        sg.cx.tab = tab;
+    }
+}
+
+// Type ty with `Self` replaced by type s (a trait method's signature at its receiver); `ERR` if
+// the result holds the error type.
+pub fn subst_self(tab: &mut types.Table, ty: u32, s: u32) -> u32 {
+    if ty == ERR || ty == NONE { return ty; }
+    let mut mk = vec.Vec::<u32>.new();
+    let mut mv = vec.Vec::<u32>.new();
+    let mut stack = vec.Vec::<u32>.new();
+    let mut done = vec.Vec::<bool>.new();
+    let mut kids = vec.Vec::<u32>.new();
+    let mut xs = vec.Vec::<u32>.new();
+    stack.push(ty);
+    done.push(false);
+    while stack.len() > 0 {
+        let n = stack.len();
+        let u = stack.as_slice()[n - 1];
+        if memo(mk.as_slice(), mv.as_slice(), u) != NONE {
+            stack.truncate(n - 1);
+            done.truncate(n - 1);
+            continue;
+        }
+        let tag = tab.tag_of(u);
+        tab.kids(u, &mut kids);
+        if tag == types.TK_SELF || kids.len() == 0 {
+            mk.push(u);
+            mv.push(if tag == types.TK_SELF then s else u);
+            stack.truncate(n - 1);
+            done.truncate(n - 1);
+            continue;
+        }
+        if !done.as_slice()[n - 1] {
+            done.as_mut_slice()[n - 1] = true;
+            for k in 0..kids.len() {
+                stack.push(kids.as_slice()[k]);
+                done.push(false);
+            }
+            continue;
+        }
+        xs.clear();
+        xs.extend_from_slice(tab.x(u));
+        let mut na = tab.a_of(u);
+        let mut nb = tab.b_of(u);
+        let mut err = false;
+        if tag == types.TK_REF || tag == types.TK_PTR {
+            nb = memo(mk.as_slice(), mv.as_slice(), nb);
+            err = nb == ERR;
+        } else if tag == types.TK_ARRAY || tag == types.TK_SLICE || tag == types.TK_VECTOR || tag == types.TK_RANGE {
+            na = memo(mk.as_slice(), mv.as_slice(), na);
+            err = na == ERR;
+        } else if tag == types.TK_TUPLE {
+            for k in 0..xs.len() {
+                let m = memo(mk.as_slice(), mv.as_slice(), xs.as_slice()[k]);
+                err = err || m == ERR;
+                xs.as_mut_slice()[k] = m;
+            }
+        } else if tag == types.TK_ADT {
+            let mut k: usize = 0;
+            while k + 2 < xs.len() {
+                if xs.as_slice()[k] == types.GA_TYPE {
+                    let m = memo(mk.as_slice(), mv.as_slice(), xs.as_slice()[k + 1]);
+                    err = err || m == ERR;
+                    xs.as_mut_slice()[k + 1] = m;
+                }
+                k = k + 3;
+            }
+        } else if tag == types.TK_FN {
+            for k in 0..na as usize + 1 {
+                let m = memo(mk.as_slice(), mv.as_slice(), xs.as_slice()[k]);
+                err = err || m == ERR;
+                xs.as_mut_slice()[k] = m;
+            }
+        }
+        let mut r = ERR;
+        if !err {
+            tab.begin();
+            for k in 0..xs.len() {
+                tab.push(xs.as_slice()[k]);
+            }
+            r = tab.intern(tag, na, nb);
+        }
+        mk.push(u);
+        mv.push(r);
+        stack.truncate(n - 1);
+        done.truncate(n - 1);
+    }
+    return memo(mk.as_slice(), mv.as_slice(), ty);
+}
+
+fn memo(mk: &[u32], mv: &[u32], u: u32) -> u32 {
+    for k in 0..mk.len() {
+        if mk[k] == u { return mv[k]; }
+    }
+    return NONE;
+}

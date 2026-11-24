@@ -19,6 +19,7 @@ import lex;
 import sigs;
 import source;
 import tc_builtins;
+import tc_traits;
 import types;
 import std.vec;
 
@@ -89,6 +90,8 @@ pub struct Typeck {
     pub mt_k: vec.Vec<u32>,
     // the built-in methods and type-relative built-ins
     pub bt: tc_builtins.Builtins,
+    // the trait questions, asked in rounds (`tc_traits`)
+    pub tq: tc_traits.Tq,
     pub t_bool: u32,
     pub t_char: u32,
     pub t_unit: u32,
