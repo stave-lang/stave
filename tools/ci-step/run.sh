@@ -16,7 +16,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 step="${1:-}"; [ $# -gt 0 ] && shift
 case "$step" in
   fmt)     cargo fmt --all --check ;;
-  stave-fmt) cargo run -q --locked -p stave-cli -- fmt --check std runtime stage1/src ;;
+  stave-fmt) cargo run -q --locked -p stave-cli -- fmt --check std runtime stage1/src stage1/prims ;;
   clippy)  cargo clippy --locked --workspace --all-targets -- -D warnings ;;
   build)   cargo build --locked --workspace "$@" ;;
   test)    cargo test --locked --workspace "$@" ;;
@@ -38,13 +38,15 @@ case "$step" in
            cargo run -q --locked -p gen-tables ;;
   # stage1 `tokens` dumps against stage0's on the conformance corpus and stage1 itself.
   stage1-gate) sh tools/ci-step/stage1-gate.sh ;;
+  # The unit tests of the stage1 library packages.
+  stage1-test) cargo run -q --locked -p stave-cli -- test stage1/prims/seq ;;
   lang-budget)
            cargo run -q --locked -p lang-budget -- LANG.md --limit 15000 ;;
   # `check` in two halves that need nothing from each other, so they can run on two machines.
   check-test)
            "$0" fmt; "$0" stave-fmt; "$0" clippy; "$0" test ;;
   check-gates)
-           "$0" interp-gate; "$0" stage1-gate; "$0" gen-check; "$0" lang-budget ;;
+           "$0" interp-gate; "$0" stage1-gate; "$0" stage1-test; "$0" gen-check; "$0" lang-budget ;;
   check)   "$0" check-test; "$0" check-gates ;;
   unsafe-diff) sh tools/ci-step/unsafe-diff.sh ;;
   # Scores a directory of answers (`--answers DIR`, `DIR/<task>/answer.stv`) against
@@ -56,5 +58,5 @@ case "$step" in
              --work target/agent-eval/work "$@" ;;
   bench)   sh bench/run.sh "$@" ;;
   cargo)   cargo "$@" ;;
-  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|stage1-gate|gen|gen-check|lang-budget|check|check-test|check-gates|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
+  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|stage1-gate|stage1-test|gen|gen-check|lang-budget|check|check-test|check-gates|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
 esac

@@ -1,0 +1,147 @@
+// bracket.mates: balanced and unbalanced inputs, and a quadratic reference written from the
+// definition (a step pairs with the nearest step across the same level edge that closes it).
+import bracket;
+import test_util;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+// The steps of a string of '(' ')' and other characters.
+fn steps_of(b: &[u8]) -> vec.Vec<i8> {
+    let mut v = vec.Vec::<i8>.new();
+    for i in 0..b.len() {
+        if b[i] == 40 {
+            v.push(1);
+        } else if b[i] == 41 {
+            v.push(-1);
+        } else {
+            v.push(0);
+        }
+    }
+    return v;
+}
+
+// The partner of position i by the definition. An opener at level a (depth a before, a + 1
+// after) pairs with the first later position whose depth is back at a; a closer going from b
+// to b - 1 pairs with the last earlier opener that went from b - 1 to b, if depth stayed at or
+// above b in between.
+fn partner(d: &[i32], i: usize) -> u32 {
+    let n = d.len();
+    let before = if i == 0 then 0 else d[i - 1];
+    if d[i] == before + 1 {
+        for j in i + 1..n {
+            if d[j] <= before { return j as% u32; }
+        }
+        return NONE;
+    }
+    if d[i] == before - 1 {
+        let mut j = i;
+        while j > 0 {
+            j = j - 1;
+            let jb = if j == 0 then 0 else d[j - 1];
+            if d[j] == jb + 1 && jb == d[i] {
+                // depth stays above d[i] between j and i
+                let mut ok = true;
+                for k in j + 1..i {
+                    if d[k] <= d[i] { ok = false; }
+                }
+                if ok { return j as% u32; }
+            }
+        }
+        return NONE;
+    }
+    return NONE;
+}
+
+fn check(steps: &[i8], what: &str) {
+    let d = bracket.depth_of(steps);
+    let m = bracket.mates(d.as_slice());
+    debug.assert(m.len() == steps.len(), what);
+    for i in 0..steps.len() {
+        debug.assert(m.as_slice()[i] == partner(d.as_slice(), i), what);
+        let o = m.as_slice()[i];
+        if o != NONE {
+            debug.assert(m.as_slice()[o as usize] as usize == i, "mates are symmetric");
+            debug.assert(steps[i] != 0 && steps[o as usize] == -steps[i], "a pair is an opener and a closer");
+        } else {
+            // unmatched or not a bracket
+        }
+    }
+}
+
+fn mates_of(s: &str) -> vec.Vec<u32> {
+    let steps = steps_of(mem.str_bytes(s));
+    return bracket.mates(bracket.depth_of(steps.as_slice()).as_slice());
+}
+
+test fn balanced() {
+    debug.assert(mates_of("()").as_slice().eq(&[1u32, 0]), "()");
+    debug.assert(mates_of("(()())").as_slice().eq(&[5u32, 2, 1, 4, 3, 0]), "(()())");
+    debug.assert(mates_of("()()").as_slice().eq(&[1u32, 0, 3, 2]), "()()");
+    debug.assert(mates_of("a(b(c)d)e").as_slice().eq(&[NONE, 7, NONE, 5, NONE, 3, NONE, 1, NONE]), "text between");
+}
+
+test fn empty_and_no_brackets() {
+    debug.assert(mates_of("").len() == 0, "empty");
+    debug.assert(mates_of("abc").as_slice().eq(&[NONE, NONE, NONE]), "no brackets");
+    check(steps_of(mem.str_bytes("")).as_slice(), "empty");
+}
+
+test fn unbalanced() {
+    // a closer with no opener, an opener never closed
+    debug.assert(mates_of(")").as_slice().eq(&[NONE]), ")");
+    debug.assert(mates_of("(").as_slice().eq(&[NONE]), "(");
+    debug.assert(mates_of(")(").as_slice().eq(&[NONE, NONE]), ")(");
+    debug.assert(mates_of("(()").as_slice().eq(&[NONE, 2, 1]), "(()");
+    debug.assert(mates_of("())").as_slice().eq(&[1u32, 0, NONE]), "())");
+    debug.assert(mates_of("())(").as_slice().eq(&[1u32, 0, NONE, NONE]), "())(");
+    // after the depth went below zero, the walk pairs again at its own levels
+    debug.assert(mates_of(")()").as_slice().eq(&[NONE, 2, 1]), ")()");
+    debug.assert(mates_of("))(()(").as_slice().eq(&[NONE, NONE, NONE, 4, 3, NONE]), "))(()(");
+    debug.assert(mates_of("((())").as_slice().eq(&[NONE, 4, 3, 2, 1]), "((())");
+    for k in 0..6usize {
+        let s = mem.str_bytes(")))))))");
+        check(steps_of(&s[0..k]).as_slice(), "closers only");
+    }
+}
+
+test fn a_deep_nest() {
+    let mut steps = vec.Vec::<i8>.new();
+    for _ in 0..1000usize {
+        steps.push(1);
+    }
+    for _ in 0..1000usize {
+        steps.push(-1);
+    }
+    let d = bracket.depth_of(steps.as_slice());
+    let m = bracket.mates(d.as_slice());
+    for i in 0..1000usize {
+        debug.assert(m.as_slice()[i] as usize == 1999 - i, "nested pairs");
+        debug.assert(m.as_slice()[1999 - i] as usize == i, "nested pairs, closers");
+    }
+}
+
+test fn random_walks() {
+    let mut r = test_util.Rng.new(2718);
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        for q in 0..20usize {
+            let mut steps = vec.Vec::<i8>.new();
+            for _ in 0..n {
+                let c = r.below(4);
+                if c == 0 {
+                    steps.push(1);
+                } else if c == 1 {
+                    steps.push(-1);
+                } else if c == 2 && q % 2 == 0 {
+                    steps.push(1);
+                } else {
+                    steps.push(0);
+                }
+            }
+            check(steps.as_slice(), "random walk");
+        }
+    }
+}

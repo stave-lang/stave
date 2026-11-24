@@ -1,0 +1,82 @@
+// Run-length encoding against a count of run starts, and the decode round trip.
+import rle;
+import test_util;
+import word;
+import std.debug;
+import std.vec;
+
+fn check<T: word.Word + Copy>(xs: &[T], what: &str) {
+    let n = xs.len();
+    let runs = rle.encode(xs);
+    // the number of runs: positions that differ from their predecessor, plus the first
+    let mut want: usize = 0;
+    for i in 0..n {
+        if i == 0 || !xs[i].same(xs[i - 1]) { want = want + 1; }
+    }
+    debug.assert(runs.len() == want, what);
+    debug.assert(runs.start.len() == want + 1, what);
+    debug.assert(runs.start.as_slice()[want] as usize == n, what);
+    for r in 0..want {
+        let a = runs.start.as_slice()[r] as usize;
+        let b = runs.start.as_slice()[r + 1] as usize;
+        debug.assert(a < b, what);
+        debug.assert(runs.run_len(r) == b - a, what);
+        for i in a..b {
+            debug.assert(xs[i].same(runs.value.as_slice()[r]), what);
+        }
+        if r > 0 {
+            debug.assert(!runs.value.as_slice()[r].same(runs.value.as_slice()[r - 1]), "maximal runs");
+        }
+    }
+    let back = runs.decode();
+    debug.assert(back.len() == n, what);
+    for i in 0..n {
+        debug.assert(back.as_slice()[i].same(xs[i]), what);
+    }
+}
+
+test fn edge_shapes() {
+    let e = [0u32; 0];
+    let r = rle.encode(&e);
+    debug.assert(r.len() == 0 && r.start.as_slice().eq(&[0u32]), "empty input: no runs, start = [0]");
+    check(&e, "empty");
+    check(&[5u32], "one");
+    check(&[5u32, 5], "two equal");
+    check(&[5u32, 6], "two different");
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        let mut same = vec.Vec::<u32>.new();
+        let mut distinct = vec.Vec::<u64>.new();
+        for i in 0..n {
+            same.push(4294967295);
+            distinct.push((i as u64) << 33);
+        }
+        check(same.as_slice(), "all equal");
+        check(distinct.as_slice(), "all distinct");
+    }
+}
+
+test fn known_runs() {
+    let xs = [1u32, 1, 1, 2, 3, 3, 1, 1];
+    let r = rle.encode(&xs);
+    debug.assert(r.value.as_slice().eq(&[1u32, 2, 3, 1]), "values");
+    debug.assert(r.start.as_slice().eq(&[0u32, 3, 4, 6, 8]), "starts");
+}
+
+test fn random_columns() {
+    let mut g = test_util.Rng.new(77);
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        let a = test_util.keys_u32(&mut g, n, 2);
+        check(a.as_slice(), "binary u32");
+        let b = test_util.keys_u32(&mut g, n, 5);
+        check(b.as_slice(), "u32 over 5 values");
+        let mut c = vec.Vec::<u8>.new();
+        for _ in 0..n {
+            c.push(g.below(3) as% u8);
+        }
+        check(c.as_slice(), "u8");
+        let d = test_util.keys_u64(&mut g, n, 3, 63);
+        check(d.as_slice(), "u64 high bit");
+    }
+}

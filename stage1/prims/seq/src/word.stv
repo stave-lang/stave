@@ -1,0 +1,58 @@
+// The unsigned integer types the generic operations of this package accept (`u8 u16 u32 u64`),
+// and the one place their arithmetic is written out.
+//
+// `plus` traps `Overflow` like `+`: a sum of unsigned values only grows, so whether a total
+// overflows does not depend on the order the parts are added in.
+
+pub trait Word {
+    fn zero() -> Self;
+    fn plus(self, o: Self) -> Self;
+    fn same(self, o: Self) -> bool;
+    fn less(self, o: Self) -> bool;
+    // Width in bits.
+    fn bits() -> u32;
+    // The k-th byte of the value, k = 0 the least significant (k < bits() / 8).
+    fn byte(self, k: u32) -> usize;
+}
+
+impl Word for u8 {
+    fn zero() -> u8 { return 0; }
+    fn plus(self, o: u8) -> u8 { return self + o; }
+    fn same(self, o: u8) -> bool { return self == o; }
+    fn less(self, o: u8) -> bool { return self < o; }
+    fn bits() -> u32 { return 8; }
+    fn byte(self, k: u32) -> usize { return self as usize; }
+}
+
+impl Word for u16 {
+    fn zero() -> u16 { return 0; }
+    fn plus(self, o: u16) -> u16 { return self + o; }
+    fn same(self, o: u16) -> bool { return self == o; }
+    fn less(self, o: u16) -> bool { return self < o; }
+    fn bits() -> u32 { return 16; }
+    fn byte(self, k: u32) -> usize {
+        let sh = (k * 8) as% u16;
+        return ((self >> sh) & 255) as usize;
+    }
+}
+
+impl Word for u32 {
+    fn zero() -> u32 { return 0; }
+    fn plus(self, o: u32) -> u32 { return self + o; }
+    fn same(self, o: u32) -> bool { return self == o; }
+    fn less(self, o: u32) -> bool { return self < o; }
+    fn bits() -> u32 { return 32; }
+    fn byte(self, k: u32) -> usize { return ((self >> (k * 8)) & 255) as usize; }
+}
+
+impl Word for u64 {
+    fn zero() -> u64 { return 0; }
+    fn plus(self, o: u64) -> u64 { return self + o; }
+    fn same(self, o: u64) -> bool { return self == o; }
+    fn less(self, o: u64) -> bool { return self < o; }
+    fn bits() -> u32 { return 64; }
+    fn byte(self, k: u32) -> usize {
+        let sh = (k * 8) as u64;
+        return ((self >> sh) & 255) as usize;
+    }
+}

@@ -1,0 +1,83 @@
+// lower_bound / upper_bound against a count over the whole column.
+import search;
+import sort;
+import perm;
+import test_util;
+import word;
+import std.debug;
+import std.vec;
+
+fn check<T: word.Word + Copy>(xs: &[T], x: T, what: &str) {
+    let mut below: usize = 0;
+    let mut not_above: usize = 0;
+    for i in 0..xs.len() {
+        if xs[i].less(x) { below = below + 1; }
+        if !x.less(xs[i]) { not_above = not_above + 1; }
+    }
+    debug.assert(search.lower_bound(xs, x) == below, what);
+    debug.assert(search.upper_bound(xs, x) == not_above, what);
+}
+
+test fn empty_and_single() {
+    let e = [0u32; 0];
+    debug.assert(search.lower_bound(&e, 5) == 0 && search.upper_bound(&e, 5) == 0, "empty");
+    let one = [10u32];
+    debug.assert(search.lower_bound(&one, 9) == 0, "below the only element");
+    debug.assert(search.lower_bound(&one, 10) == 0, "equal to the only element");
+    debug.assert(search.upper_bound(&one, 10) == 1, "upper bound after the only element");
+    debug.assert(search.lower_bound(&one, 11) == 1, "above the only element");
+}
+
+test fn duplicates() {
+    let xs = [1u32, 3, 3, 3, 5, 5, 8];
+    debug.assert(search.lower_bound(&xs, 3) == 1 && search.upper_bound(&xs, 3) == 4, "run of 3");
+    debug.assert(search.lower_bound(&xs, 0) == 0 && search.upper_bound(&xs, 0) == 0, "before all");
+    debug.assert(search.lower_bound(&xs, 9) == 7 && search.upper_bound(&xs, 9) == 7, "after all");
+    debug.assert(search.lower_bound(&xs, 4) == 4 && search.upper_bound(&xs, 4) == 4, "absent between");
+    let eq = [7u64, 7, 7, 7, 7];
+    debug.assert(search.lower_bound(&eq, 7) == 0 && search.upper_bound(&eq, 7) == 5, "all equal");
+}
+
+test fn extreme_values() {
+    let xs = [0u64, 0, 18446744073709551615, 18446744073709551615];
+    check(&xs, 0, "zero");
+    check(&xs, 18446744073709551615, "max");
+    check(&xs, 1, "one");
+    debug.assert(search.upper_bound(&xs, 18446744073709551615) == 4, "upper of max");
+}
+
+test fn random_sorted_columns() {
+    let mut r = test_util.Rng.new(404);
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        let raw = test_util.keys_u32(&mut r, n, 40);
+        let p = sort.sort_perm(raw.as_slice());
+        let xs = perm.gather(raw.as_slice(), p.as_slice());
+        for q in 0..45u32 {
+            check(xs.as_slice(), q, "u32");
+        }
+        let raw64 = test_util.keys_u64(&mut r, n, 30, 35);
+        let p64 = sort.sort_perm(raw64.as_slice());
+        let ys = perm.gather(raw64.as_slice(), p64.as_slice());
+        for q in 0..32u64 {
+            check(ys.as_slice(), q << 35, "u64 on a value");
+            check(ys.as_slice(), (q << 35) + 1, "u64 between values");
+        }
+    }
+}
+
+test fn all_queries_at_once() {
+    let xs = [2u32, 4, 4, 6];
+    let qs = [0u32, 2, 3, 4, 5, 6, 7];
+    let got = search.lower_bounds(&xs, &qs);
+    debug.assert(got.as_slice().eq(&[0u32, 0, 1, 1, 3, 3, 4]), "lower_bounds");
+}
+
+test fn pair_keys_sort_by_hi_then_lo() {
+    debug.assert(search.pair(1, 0) > search.pair(0, 4294967295), "hi first");
+    debug.assert(search.pair(3, 4) < search.pair(3, 5), "then lo");
+    debug.assert(search.pair(4294967295, 4294967295) == 18446744073709551615, "max");
+    let table = [search.pair(0, 5), search.pair(1, 2), search.pair(1, 9), search.pair(4, 0)];
+    debug.assert(search.lower_bound(&table, search.pair(1, 9)) == 2, "pair lookup");
+    debug.assert(search.lower_bound(&table, search.pair(1, 3)) == 2, "pair between");
+}
