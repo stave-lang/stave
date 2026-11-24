@@ -32,7 +32,7 @@ import resolve;
 import sigs;
 import source;
 import text;
-import types;
+import ir.types;
 import std.mem;
 import std.vec;
 

@@ -27,7 +27,8 @@ import lex;
 import modules;
 import resolve;
 import source;
-import types;
+import ir.features;
+import ir.types;
 import prims.col;
 import prims.ragged;
 import prims.search;
@@ -119,10 +120,6 @@ const OP_GARG_T: u8 = 8;
 const OP_GARG_ARR: u8 = 9;
 const OP_VECG: u8 = 10;
 
-// The target features (contracts/simd-ops.md), in their listing order (= bit), each with the
-// features it implies directly.
-const FEATURES: &str = "sse42 avx avx2 fma bmi2 f16c avx512f avx512bw avx512vl avx512dq avx512cd avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16 neon fp16 dotprod bf16 sve sve2 cuda";
-const IMPLIES: [u32; 24] = [0, 1, 2, 2, 0, 2, 44, 64, 64, 64, 64, 128, 128, 64, 128, 896, 128, 0, 131072, 131072, 131072, 262144, 2097152, 0];
 // `v3`, `v4`: their members.
 const V3: u32 = 60;
 const V4: u32 = 1980;
@@ -132,29 +129,12 @@ const PARK: u8 = 128;
 
 // The closure of feature set `bits` under implication.
 pub fn feature_closure(bits: u64) -> u64 {
-    let mut s = bits;
-    loop {
-        let mut next = s;
-        for f in 0..24usize {
-            if (s >> f as u64) & 1 == 1 { next = next | (IMPLIES[f] as u64); }
-        }
-        if next == s { return s; }
-        s = next;
-    }
+    return features.closure(bits);
 }
 
 // The features of set `bits` no other one of the set implies directly: what `needs` prints.
 pub fn feature_maximal(bits: u64) -> u64 {
-    let mut out: u64 = 0;
-    for f in 0..24usize {
-        if (bits >> f as u64) & 1 == 0 { continue; }
-        let mut implied = false;
-        for g in 0..24usize {
-            if g != f && (bits >> g as u64) & 1 == 1 && (IMPLIES[g] >> f as% u32) & 1 == 1 { implied = true; }
-        }
-        if !implied { out = out | (1u64 << f as u64); }
-    }
-    return out;
+    return features.maximal(bits);
 }
 
 // The k-th space-separated word of `words`: (start, end) in its bytes.
@@ -189,8 +169,7 @@ fn word_index(words: &str, b: &[u8]) -> u32 {
 
 // Appends feature f's name.
 pub fn push_feature(buf: &mut vec.Vec<u8>, f: usize) {
-    let (a, b) = word(FEATURES, f);
-    buf.extend_from_slice(&mem.str_bytes(FEATURES)[a..b]);
+    features.push_name(buf, f);
 }
 
 // Appends effect e's name.
@@ -201,7 +180,7 @@ pub fn push_effect(buf: &mut vec.Vec<u8>, e: usize) {
 
 // The feature set a `needs` name stands for (closed), or none.
 fn feature_of(b: &[u8]) -> (bool, u64) {
-    let f = word_index(FEATURES, b);
+    let f = features.index(b);
     if f != NONE { return (true, feature_closure(1u64 << f as u64)); }
     if b.eq(mem.str_bytes("v3")) { return (true, feature_closure(V3 as u64)); }
     if b.eq(mem.str_bytes("v4")) { return (true, feature_closure((V3 | V4) as u64)); }

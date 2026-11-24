@@ -1,0 +1,51 @@
+// The compiler-known items (`generated.known_items`, from crates/stave-ir/tables/known.toml, the
+// table stage0's `Known` comes from): a fn marked `known` is the item whose path is its path.
+import generated.known_items;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+pub struct Table {
+    path_off: vec.Vec<u32>,
+    path: vec.Vec<u8>,
+    pub report: vec.Vec<bool>,
+    pub abi_ret: vec.Vec<u8>,
+    abi_off: vec.Vec<u32>,
+    abi_param: vec.Vec<u8>,
+}
+
+impl Table {
+    pub fn new() -> Table {
+        let mut t = Table.{ path_off: vec.Vec::<u32>.new(), path: vec.Vec::<u8>.new(), report: vec.Vec::<bool>.new(), abi_ret: vec.Vec::<u8>.new(), abi_off: vec.Vec::<u32>.new(), abi_param: vec.Vec::<u8>.new() };
+        t.path_off.extend_from_slice(&known_items.KNOWN_PATH_OFF);
+        t.path.extend_from_slice(&known_items.KNOWN_PATH);
+        t.report.extend_from_slice(&known_items.KNOWN_REPORT);
+        t.abi_ret.extend_from_slice(&known_items.KNOWN_ABI_RET);
+        t.abi_off.extend_from_slice(&known_items.KNOWN_ABI_OFF);
+        t.abi_param.extend_from_slice(&known_items.KNOWN_ABI_PARAM);
+        return t;
+    }
+
+    pub fn len(&self) -> usize {
+        return self.report.len();
+    }
+
+    pub fn path(&self, k: usize) -> &[u8] from self {
+        let o = self.path_off.as_slice();
+        return &self.path.as_slice()[o[k] as usize..o[k + 1] as usize];
+    }
+
+    // The item whose path is p, or NONE.
+    pub fn find(&self, p: &[u8]) -> u32 {
+        for k in 0..self.len() {
+            if self.path(k).eq(p) { return k as% u32; }
+        }
+        return NONE;
+    }
+
+    // The ABI params of item k (`ITY_*` codes); its result is `abi_ret[k]` (`ITY_NONE`: none).
+    pub fn abi_params(&self, k: usize) -> &[u8] from self {
+        let o = self.abi_off.as_slice();
+        return &self.abi_param.as_slice()[o[k] as usize..o[k + 1] as usize];
+    }
+}

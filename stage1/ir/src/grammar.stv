@@ -1,0 +1,95 @@
+// The generated IR text grammar tables (`generated.ir_text_*`, from contracts/ir-text.ebnf),
+// copied once into columns: terminal spellings (sorted by bytes), the LL(1) table, the
+// productions. The reader's lexer, its table driver, and the printer's op spellings read only
+// these.
+import generated.ir_text_ll1_table;
+import generated.ir_text_terminals;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+pub struct Grammar {
+    pub text_off: vec.Vec<u32>,
+    pub text: vec.Vec<u8>,
+    pub is_class: vec.Vec<bool>,
+    pub is_word: vec.Vec<bool>,
+    pub table: vec.Vec<i16>,
+    pub prod_off: vec.Vec<u16>,
+    pub prod_rhs: vec.Vec<u16>,
+    pub named: vec.Vec<bool>,
+}
+
+impl Grammar {
+    pub fn new() -> Grammar {
+        let mut g = Grammar.{
+            text_off: vec.Vec::<u32>.new(),
+            text: vec.Vec::<u8>.new(),
+            is_class: vec.Vec::<bool>.new(),
+            is_word: vec.Vec::<bool>.new(),
+            table: vec.Vec::<i16>.new(),
+            prod_off: vec.Vec::<u16>.new(),
+            prod_rhs: vec.Vec::<u16>.new(),
+            named: vec.Vec::<bool>.new(),
+        };
+        g.text_off.extend_from_slice(&ir_text_terminals.IR_TERM_TEXT_OFF);
+        g.text.extend_from_slice(&ir_text_terminals.IR_TERM_TEXT);
+        g.is_class.extend_from_slice(&ir_text_terminals.IR_TERM_IS_CLASS);
+        g.is_word.extend_from_slice(&ir_text_terminals.IR_TERM_IS_WORD);
+        g.table.extend_from_slice(&ir_text_ll1_table.IR_TABLE);
+        g.prod_off.extend_from_slice(&ir_text_ll1_table.IR_PROD_OFF);
+        g.prod_rhs.extend_from_slice(&ir_text_ll1_table.IR_PROD_RHS);
+        g.named.extend_from_slice(&ir_text_ll1_table.IR_NT_NAMED);
+        return g;
+    }
+
+    pub fn nterm(&self) -> usize {
+        return self.is_class.len();
+    }
+
+    // The spelling of terminal t.
+    pub fn spell(&self, t: u32) -> &[u8] from self {
+        let o = self.text_off.as_slice();
+        return &self.text.as_slice()[o[t as usize] as usize..o[t as usize + 1] as usize];
+    }
+
+    // The keyword terminal spelled w (never a class name), or NONE.
+    pub fn keyword(&self, w: &[u8]) -> u32 {
+        let n = self.nterm();
+        let mut lo: usize = 0;
+        let mut hi: usize = n;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let c = cmp_bytes(self.spell(mid as% u32), w);
+            if c == 0 {
+                if self.is_class.as_slice()[mid] { return NONE; }
+                return mid as% u32;
+            }
+            if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return NONE;
+    }
+
+    // The production for nonterminal nt on terminal t, or -1.
+    pub fn action(&self, nt: u32, t: u32) -> i32 {
+        return self.table.as_slice()[nt as usize * self.nterm() + t as usize] as i32;
+    }
+
+    // Production p's right-hand side, reversed (push order).
+    pub fn rhs_rev(&self, p: u32) -> &[u16] from self {
+        let o = self.prod_off.as_slice();
+        return &self.prod_rhs.as_slice()[o[p as usize] as usize..o[p as usize + 1] as usize];
+    }
+}
+
+pub fn cmp_bytes(a: &[u8], b: &[u8]) -> i32 {
+    let n = if a.len() < b.len() then a.len() else b.len();
+    for i in 0..n {
+        if a[i] != b[i] { return if a[i] < b[i] then -1 else 1; }
+    }
+    if a.len() == b.len() { return 0; }
+    return if a.len() < b.len() then -1 else 1;
+}

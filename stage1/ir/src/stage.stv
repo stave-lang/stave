@@ -1,0 +1,1379 @@
+// Step 1 of loading (contracts/checked-ir.md "Loading"): each line on its own, after the table
+// driver accepted it, into staged rows in text order, with the checks that need the line alone
+// (number ranges, canonical spellings). Ids that name other lines are kept as written; the
+// section ids among them are listed as refs for step 2. Types go to the module's type table as
+// raw rows and int values to its wide-int pool; everything else waits for step 2.
+import bytes;
+import features;
+import grammar;
+import lexer;
+import model;
+import types;
+import generated.ir_text_terminals;
+import prims.ragged;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+// Line kinds, in section order (the stack section's kinds in their listed order).
+pub const LK_HEADER: u8 = 0;
+pub const LK_DECL: u8 = 1;
+pub const LK_TYPE: u8 = 2;
+pub const LK_SHAPE: u8 = 3;
+pub const LK_STR: u8 = 4;
+pub const LK_SITE: u8 = 5;
+pub const LK_STATIC: u8 = 6;
+pub const LK_DATA: u8 = 7;
+pub const LK_REF: u8 = 8;
+pub const LK_MAIN: u8 = 9;
+pub const LK_CELL: u8 = 10;
+pub const LK_RUNSTACK: u8 = 11;
+pub const LK_TRUNCATED: u8 = 12;
+pub const LK_NODE: u8 = 13;
+pub const LK_EDGE: u8 = 14;
+pub const LK_NODES: u8 = 15;
+pub const LK_FN: u8 = 16;
+pub const LK_CLAIM: u8 = 17;
+pub const LK_BLOCK: u8 = 18;
+pub const LK_INST: u8 = 19;
+pub const LK_TERM: u8 = 20;
+pub const LK_CLOSE: u8 = 21;
+
+// Ref kinds: ids checked against their sections.
+pub const R_TYPE: u8 = 0;
+pub const R_STR: u8 = 1;
+pub const R_SITE: u8 = 2;
+pub const R_STATIC: u8 = 3;
+pub const R_DECL: u8 = 4;
+pub const R_NODE: u8 = 5;
+
+pub struct Stage {
+    // the error of the line that failed
+    pub col: u32,
+    pub msg: vec.Vec<u8>,
+    // lines (blank lines dropped): kind, number, first column, row in the kind's rows
+    pub ln_kind: vec.Vec<u8>,
+    pub ln_no: vec.Vec<u32>,
+    pub ln_col: vec.Vec<u32>,
+    pub ln_row: vec.Vec<u32>,
+    // section ids named
+    pub ref_kind: vec.Vec<u8>,
+    pub ref_n: vec.Vec<u32>,
+    pub ref_line: vec.Vec<u32>,
+    pub ref_col: vec.Vec<u32>,
+    // instance ids as written (`.u` = `model.UNCHECKED_ENTRY`)
+    pub iref: ragged.Ragged<u32>,
+    pub hd_target: vec.Vec<u32>,
+    pub hd_mode: vec.Vec<u8>,
+    pub hd_level: vec.Vec<u8>,
+    pub dc_id: vec.Vec<u32>,
+    pub dc_kind: vec.Vec<u8>,
+    pub dc_path: ragged.Ragged<u8>,
+    pub ty_id: vec.Vec<u32>,
+    pub sh_id: vec.Vec<u32>,
+    pub sh_kind: vec.Vec<u8>,
+    pub sh_vars: ragged.Ragged<u32>,
+    pub var_fields: ragged.Ragged<u32>,
+    pub sr_id: vec.Vec<u32>,
+    pub sr_bytes: ragged.Ragged<u8>,
+    pub si_row: vec.Vec<u32>,
+    pub si_file: ragged.Ragged<u8>,
+    pub si_line: vec.Vec<u32>,
+    pub si_col: vec.Vec<u32>,
+    pub si_fn: ragged.Ragged<u8>,
+    pub st_idx: vec.Vec<u32>,
+    pub st_ty: vec.Vec<u32>,
+    pub st_path: ragged.Ragged<u8>,
+    pub da_idx: vec.Vec<u32>,
+    pub da_off: vec.Vec<u32>,
+    pub da_bytes: ragged.Ragged<u8>,
+    pub rf_idx: vec.Vec<u32>,
+    pub rf_off: vec.Vec<u32>,
+    pub rf_kind: vec.Vec<u8>,
+    pub rf_to: vec.Vec<u32>,
+    pub rf_add: vec.Vec<u32>,
+    pub mn_inst: vec.Vec<u32>,
+    pub mn_col: vec.Vec<u32>,
+    pub ce_decl: vec.Vec<u32>,
+    pub rs_val: vec.Vec<u64>,
+    pub nd_n: vec.Vec<u32>,
+    pub nd_rec: vec.Vec<bool>,
+    pub ed_from: vec.Vec<u32>,
+    pub ed_to: vec.Vec<u32>,
+    pub ed_kind: vec.Vec<u8>,
+    pub ns_inst: vec.Vec<u32>,
+    pub ns_col: vec.Vec<u32>,
+    pub ns_nodes: ragged.Ragged<u32>,
+    pub fn_inst: vec.Vec<u32>,
+    pub fn_path: ragged.Ragged<u8>,
+    pub fn_targ: ragged.Ragged<u32>,
+    pub fn_params: ragged.Ragged<u32>,
+    pub fn_ret: vec.Vec<u32>,
+    pub fn_feat: vec.Vec<u64>,
+    pub fn_sym: ragged.Ragged<u8>,
+    pub fn_flags: vec.Vec<u8>,
+    pub fn_known_col: vec.Vec<u32>,
+    pub fn_site: vec.Vec<u32>,
+    pub cl_inst: vec.Vec<u32>,
+    pub cl_col: vec.Vec<u32>,
+    pub cl_kind: vec.Vec<u8>,
+    pub cl_a: vec.Vec<u8>,
+    pub cl_ai: vec.Vec<u32>,
+    pub cl_b: vec.Vec<u8>,
+    pub cl_bi: vec.Vec<u32>,
+    pub cl_w: vec.Vec<u32>,
+    pub bk_label: vec.Vec<u32>,
+    pub bk_p_lo: vec.Vec<u32>,
+    pub bk_p_n: vec.Vec<u32>,
+    pub bp_val: vec.Vec<u32>,
+    pub bp_col: vec.Vec<u32>,
+    pub bp_ty: vec.Vec<u32>,
+    pub in_res: vec.Vec<u32>,
+    pub in_res_col: vec.Vec<u32>,
+    pub in_op: vec.Vec<u16>,
+    pub in_intr: ragged.Ragged<u8>,
+    pub in_ty: vec.Vec<u32>,
+    pub in_o_lo: vec.Vec<u32>,
+    pub in_o_n: vec.Vec<u32>,
+    pub in_site: vec.Vec<u32>,
+    pub tm_kind: vec.Vec<u8>,
+    pub tm_o: vec.Vec<u32>,
+    pub tm_t_lo: vec.Vec<u32>,
+    pub tm_t_n: vec.Vec<u32>,
+    pub tg_label: vec.Vec<u32>,
+    pub tg_col: vec.Vec<u32>,
+    pub tg_o_lo: vec.Vec<u32>,
+    pub tg_o_n: vec.Vec<u32>,
+    pub tg_case: vec.Vec<u32>,
+    // operands: kind, a (value number, constant kind, string, iref row, or type), b (constant
+    // bits: a wide-int row for an int), column
+    pub op_kind: vec.Vec<u8>,
+    pub op_a: vec.Vec<u32>,
+    pub op_b: vec.Vec<u64>,
+    pub op_col: vec.Vec<u32>,
+    no: u32,
+    tmp: vec.Vec<u8>,
+}
+
+fn t_(t: u16) -> u32 {
+    return t as u32;
+}
+
+impl Stage {
+    pub fn new() -> Stage {
+        return Stage.{
+            col: 0,
+            msg: vec.Vec::<u8>.new(),
+            ln_kind: vec.Vec::<u8>.new(),
+            ln_no: vec.Vec::<u32>.new(),
+            ln_col: vec.Vec::<u32>.new(),
+            ln_row: vec.Vec::<u32>.new(),
+            ref_kind: vec.Vec::<u8>.new(),
+            ref_n: vec.Vec::<u32>.new(),
+            ref_line: vec.Vec::<u32>.new(),
+            ref_col: vec.Vec::<u32>.new(),
+            iref: ragged.Ragged::<u32>.new(),
+            hd_target: vec.Vec::<u32>.new(),
+            hd_mode: vec.Vec::<u8>.new(),
+            hd_level: vec.Vec::<u8>.new(),
+            dc_id: vec.Vec::<u32>.new(),
+            dc_kind: vec.Vec::<u8>.new(),
+            dc_path: ragged.Ragged::<u8>.new(),
+            ty_id: vec.Vec::<u32>.new(),
+            sh_id: vec.Vec::<u32>.new(),
+            sh_kind: vec.Vec::<u8>.new(),
+            sh_vars: ragged.Ragged::<u32>.new(),
+            var_fields: ragged.Ragged::<u32>.new(),
+            sr_id: vec.Vec::<u32>.new(),
+            sr_bytes: ragged.Ragged::<u8>.new(),
+            si_row: vec.Vec::<u32>.new(),
+            si_file: ragged.Ragged::<u8>.new(),
+            si_line: vec.Vec::<u32>.new(),
+            si_col: vec.Vec::<u32>.new(),
+            si_fn: ragged.Ragged::<u8>.new(),
+            st_idx: vec.Vec::<u32>.new(),
+            st_ty: vec.Vec::<u32>.new(),
+            st_path: ragged.Ragged::<u8>.new(),
+            da_idx: vec.Vec::<u32>.new(),
+            da_off: vec.Vec::<u32>.new(),
+            da_bytes: ragged.Ragged::<u8>.new(),
+            rf_idx: vec.Vec::<u32>.new(),
+            rf_off: vec.Vec::<u32>.new(),
+            rf_kind: vec.Vec::<u8>.new(),
+            rf_to: vec.Vec::<u32>.new(),
+            rf_add: vec.Vec::<u32>.new(),
+            mn_inst: vec.Vec::<u32>.new(),
+            mn_col: vec.Vec::<u32>.new(),
+            ce_decl: vec.Vec::<u32>.new(),
+            rs_val: vec.Vec::<u64>.new(),
+            nd_n: vec.Vec::<u32>.new(),
+            nd_rec: vec.Vec::<bool>.new(),
+            ed_from: vec.Vec::<u32>.new(),
+            ed_to: vec.Vec::<u32>.new(),
+            ed_kind: vec.Vec::<u8>.new(),
+            ns_inst: vec.Vec::<u32>.new(),
+            ns_col: vec.Vec::<u32>.new(),
+            ns_nodes: ragged.Ragged::<u32>.new(),
+            fn_inst: vec.Vec::<u32>.new(),
+            fn_path: ragged.Ragged::<u8>.new(),
+            fn_targ: ragged.Ragged::<u32>.new(),
+            fn_params: ragged.Ragged::<u32>.new(),
+            fn_ret: vec.Vec::<u32>.new(),
+            fn_feat: vec.Vec::<u64>.new(),
+            fn_sym: ragged.Ragged::<u8>.new(),
+            fn_flags: vec.Vec::<u8>.new(),
+            fn_known_col: vec.Vec::<u32>.new(),
+            fn_site: vec.Vec::<u32>.new(),
+            cl_inst: vec.Vec::<u32>.new(),
+            cl_col: vec.Vec::<u32>.new(),
+            cl_kind: vec.Vec::<u8>.new(),
+            cl_a: vec.Vec::<u8>.new(),
+            cl_ai: vec.Vec::<u32>.new(),
+            cl_b: vec.Vec::<u8>.new(),
+            cl_bi: vec.Vec::<u32>.new(),
+            cl_w: vec.Vec::<u32>.new(),
+            bk_label: vec.Vec::<u32>.new(),
+            bk_p_lo: vec.Vec::<u32>.new(),
+            bk_p_n: vec.Vec::<u32>.new(),
+            bp_val: vec.Vec::<u32>.new(),
+            bp_col: vec.Vec::<u32>.new(),
+            bp_ty: vec.Vec::<u32>.new(),
+            in_res: vec.Vec::<u32>.new(),
+            in_res_col: vec.Vec::<u32>.new(),
+            in_op: vec.Vec::<u16>.new(),
+            in_intr: ragged.Ragged::<u8>.new(),
+            in_ty: vec.Vec::<u32>.new(),
+            in_o_lo: vec.Vec::<u32>.new(),
+            in_o_n: vec.Vec::<u32>.new(),
+            in_site: vec.Vec::<u32>.new(),
+            tm_kind: vec.Vec::<u8>.new(),
+            tm_o: vec.Vec::<u32>.new(),
+            tm_t_lo: vec.Vec::<u32>.new(),
+            tm_t_n: vec.Vec::<u32>.new(),
+            tg_label: vec.Vec::<u32>.new(),
+            tg_col: vec.Vec::<u32>.new(),
+            tg_o_lo: vec.Vec::<u32>.new(),
+            tg_o_n: vec.Vec::<u32>.new(),
+            tg_case: vec.Vec::<u32>.new(),
+            op_kind: vec.Vec::<u8>.new(),
+            op_a: vec.Vec::<u32>.new(),
+            op_b: vec.Vec::<u64>.new(),
+            op_col: vec.Vec::<u32>.new(),
+            no: 0,
+            tmp: vec.Vec::<u8>.new(),
+        };
+    }
+
+    fn fail(&mut self, col: u32, msg: &str) -> bool {
+        self.col = col;
+        self.msg.clear();
+        bytes.push_str(&mut self.msg, msg);
+        return false;
+    }
+
+    // `what `X` is out of range 0..=max` / `integer `X` is out of range`.
+    fn fail_range(&mut self, col: u32, what: &str, tok: &[u8], max: u64) -> bool {
+        self.col = col;
+        self.msg.clear();
+        bytes.push_str(&mut self.msg, what);
+        bytes.push_str(&mut self.msg, " `");
+        bytes.push_show(&mut self.msg, tok);
+        bytes.push_str(&mut self.msg, "` is out of range 0..=");
+        bytes.push_u64(&mut self.msg, max);
+        return false;
+    }
+
+    fn fail_int(&mut self, col: u32, tok: &[u8]) -> bool {
+        self.col = col;
+        self.msg.clear();
+        bytes.push_str(&mut self.msg, "integer `");
+        bytes.push_show(&mut self.msg, tok);
+        bytes.push_str(&mut self.msg, "` is out of range");
+        return false;
+    }
+
+    fn fail_id(&mut self, col: u32, tok: &[u8]) -> bool {
+        self.col = col;
+        self.msg.clear();
+        self.msg.push(96);
+        bytes.push_show(&mut self.msg, tok);
+        bytes.push_str(&mut self.msg, "` is out of range");
+        return false;
+    }
+
+    fn add_ref(&mut self, kind: u8, n: u32, col: u32) {
+        self.ref_kind.push(kind);
+        self.ref_n.push(n);
+        self.ref_line.push(self.no);
+        self.ref_col.push(col);
+    }
+
+    // Line `no` (its bytes src, its tokens lx, which the driver accepted) into staged rows.
+    // False: an error in `col`, `msg`.
+    pub fn line(&mut self, g: &grammar.Grammar, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, no: u32) -> bool {
+        self.no = no;
+        let mut c = Cur.{ k: 0, n: lx.len() };
+        let t0 = lx.term.as_slice()[0] as u32;
+        let col0 = lx.start.as_slice()[0] + 1;
+        let mut kind = LK_INST;
+        let mut row: u32 = 0;
+        let mut ok = true;
+        if t0 == t_(ir_text_terminals.IR_T_STAVE_DOT_IR) {
+            kind = LK_HEADER;
+            row = self.hd_mode.len() as% u32;
+            ok = self.header(src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_DECL) {
+            kind = LK_DECL;
+            row = self.dc_id.len() as% u32;
+            ok = self.decl(src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_TYPE) {
+            kind = LK_TYPE;
+            row = self.ty_id.len() as% u32;
+            ok = self.type_line(m, src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_SHAPE) {
+            kind = LK_SHAPE;
+            row = self.sh_id.len() as% u32;
+            ok = self.shape(src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_STR) {
+            kind = LK_STR;
+            row = self.sr_id.len() as% u32;
+            c.k = 1;
+            let (o, id) = self.id(src, lx, c.next());
+            ok = o;
+            if ok {
+                self.tmp.clear();
+                lexer.unescape(text(src, lx, c.next()), &mut self.tmp);
+                self.sr_id.push(id);
+                self.sr_bytes.push_row(self.tmp.as_slice());
+            }
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_SITE) {
+            kind = LK_SITE;
+            row = self.si_row.len() as% u32;
+            ok = self.site(src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_STATIC) {
+            kind = LK_STATIC;
+            row = self.st_idx.len() as% u32;
+            ok = self.static_line(src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_DATA) {
+            kind = LK_DATA;
+            row = self.da_idx.len() as% u32;
+            ok = self.data(src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_REF) {
+            kind = LK_REF;
+            row = self.rf_idx.len() as% u32;
+            ok = self.ref_line(src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_MAIN) {
+            kind = LK_MAIN;
+            row = self.mn_inst.len() as% u32;
+            let k = c.at(1);
+            let (o, r) = self.inst(src, lx, k);
+            ok = o;
+            if ok {
+                self.mn_inst.push(r);
+                self.mn_col.push(lx.start.as_slice()[k] + 1);
+            }
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_CELL) {
+            kind = LK_CELL;
+            row = self.ce_decl.len() as% u32;
+            let k = c.at(1);
+            let (o, d) = self.reference(src, lx, k, R_DECL);
+            ok = o;
+            if ok { self.ce_decl.push(d); }
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_RUNSTACK) {
+            kind = LK_RUNSTACK;
+            row = self.rs_val.len() as% u32;
+            let (o, v) = self.uint(src, lx, c.at(1), 18446744073709551615, "a stack size");
+            ok = o;
+            if ok { self.rs_val.push(v); }
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_TRUNCATED) {
+            kind = LK_TRUNCATED;
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_NODE) {
+            kind = LK_NODE;
+            row = self.nd_n.len() as% u32;
+            let (o, v) = self.uint(src, lx, c.at(1), 4294967295, "a node number");
+            ok = o;
+            if ok {
+                self.nd_n.push(v as% u32);
+                self.nd_rec.push(lx.len() > 2);
+            }
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_EDGE) {
+            kind = LK_EDGE;
+            row = self.ed_from.len() as% u32;
+            ok = self.edge(src, lx);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_NODES) {
+            kind = LK_NODES;
+            row = self.ns_inst.len() as% u32;
+            ok = self.nodes(src, lx);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_FN) {
+            kind = LK_FN;
+            row = self.fn_inst.len() as% u32;
+            ok = self.fn_line(m, src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_CLAIM) {
+            kind = LK_CLAIM;
+            row = self.cl_inst.len() as% u32;
+            ok = self.claim(m, src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_BLK) {
+            kind = LK_BLOCK;
+            row = self.bk_label.len() as% u32;
+            ok = self.block(src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_KW_BR) || t0 == t_(ir_text_terminals.IR_T_KW_CBR) || t0 == t_(ir_text_terminals.IR_T_KW_SWITCH) || t0 == t_(ir_text_terminals.IR_T_KW_RET) || t0 == t_(ir_text_terminals.IR_T_KW_UNREACHABLE) {
+            kind = LK_TERM;
+            row = self.tm_kind.len() as% u32;
+            ok = self.term(m, src, lx, &mut c);
+        } else if t0 == t_(ir_text_terminals.IR_T_R_BRACE) {
+            kind = LK_CLOSE;
+        } else {
+            kind = LK_INST;
+            row = self.in_op.len() as% u32;
+            ok = self.inst_line(m, src, lx, &mut c);
+        }
+        if !ok { return false; }
+        self.ln_kind.push(kind);
+        self.ln_no.push(no);
+        self.ln_col.push(col0);
+        self.ln_row.push(row);
+        return true;
+    }
+
+    // `Int` token k as i128 (hi, lo).
+    fn int(&mut self, src: &[u8], lx: &lexer.Lexed, k: usize) -> (bool, u64, u64) {
+        let b = text(src, lx, k);
+        let (ok, hi, lo) = parse_i128(b);
+        if !ok { return (self.fail_int(lx.start.as_slice()[k] + 1, b), 0, 0); }
+        return (true, hi, lo);
+    }
+
+    // `Int` token k in 0..=max.
+    fn uint(&mut self, src: &[u8], lx: &lexer.Lexed, k: usize, max: u64, what: &str) -> (bool, u64) {
+        let (ok, hi, lo) = self.int(src, lx, k);
+        if !ok { return (false, 0); }
+        if hi != 0 || lo > max { return (self.fail_range(lx.start.as_slice()[k] + 1, what, text(src, lx, k), max), 0); }
+        return (true, lo);
+    }
+
+    // The number after the one-letter prefix of a `Val`, `Blk`, `TId`, `SId` or `DId` token.
+    fn id(&mut self, src: &[u8], lx: &lexer.Lexed, k: usize) -> (bool, u32) {
+        let b = text(src, lx, k);
+        let mut v: u64 = 0;
+        for i in 1..b.len() {
+            v = v * 10 + ((b[i] - 48) as u64);
+            if v > 4294967295 { return (self.fail_id(lx.start.as_slice()[k] + 1, b), 0); }
+        }
+        return (true, v as% u32);
+    }
+
+    fn reference(&mut self, src: &[u8], lx: &lexer.Lexed, k: usize, kind: u8) -> (bool, u32) {
+        let (ok, n) = self.id(src, lx, k);
+        if !ok { return (false, 0); }
+        self.add_ref(kind, n, lx.start.as_slice()[k] + 1);
+        return (true, n);
+    }
+
+    // A `FnRef` token: its parts as an iref row.
+    fn inst(&mut self, src: &[u8], lx: &lexer.Lexed, k: usize) -> (bool, u32) {
+        let b = text(src, lx, k);
+        let col = lx.start.as_slice()[k] + 1;
+        let mut i: usize = 1;
+        let mut part: usize = 0;
+        while i <= b.len() {
+            let mut j = i;
+            while j < b.len() && b[j] != 46 {
+                j = j + 1;
+            }
+            if part > 0 && j == i + 1 && b[i] == 117 {
+                self.iref.push(model.UNCHECKED_ENTRY);
+            } else {
+                let mut v: u64 = 0;
+                for x in i..j {
+                    v = v * 10 + ((b[x] - 48) as u64);
+                    if v > 4294967295 {
+                        self.iref.end_row();
+                        return (self.fail_id(col, b), 0);
+                    }
+                }
+                if part > 0 && v == 4294967295 {
+                    self.iref.end_row();
+                    self.col = col;
+                    self.msg.clear();
+                    self.msg.push(96);
+                    bytes.push_show(&mut self.msg, b);
+                    bytes.push_str(&mut self.msg, "`: the number 4294967295 is spelled `u`");
+                    return (false, 0);
+                }
+                self.iref.push(v as% u32);
+            }
+            part = part + 1;
+            i = j + 1;
+        }
+        self.iref.end_row();
+        return (true, (self.iref.rows() - 1) as% u32);
+    }
+
+    // A `Path` at token k into out (cleared).
+    fn path(&mut self, src: &[u8], lx: &lexer.Lexed, k: usize, out: &mut vec.Vec<u8>) -> bool {
+        out.clear();
+        let b = text(src, lx, k);
+        if lx.term.as_slice()[k] == ir_text_terminals.IR_T_STRING {
+            lexer.unescape(b, out);
+            let col = lx.start.as_slice()[k] + 1;
+            if !bytes.utf8_ok(out.as_slice()) { return self.fail(col, "a path is not UTF-8"); }
+            if bytes.is_word(out.as_slice()) {
+                self.col = col;
+                self.msg.clear();
+                bytes.push_str(&mut self.msg, "path `");
+                self.msg.extend_from_slice(out.as_slice());
+                bytes.push_str(&mut self.msg, "` has the Word shape: it is written bare");
+                return false;
+            }
+            return true;
+        }
+        out.extend_from_slice(b);
+        return true;
+    }
+
+    fn utf8(&mut self, src: &[u8], lx: &lexer.Lexed, k: usize, what: &str, out: &mut vec.Vec<u8>) -> bool {
+        out.clear();
+        lexer.unescape(text(src, lx, k), out);
+        if !bytes.utf8_ok(out.as_slice()) {
+            self.col = lx.start.as_slice()[k] + 1;
+            self.msg.clear();
+            bytes.push_str(&mut self.msg, what);
+            bytes.push_str(&mut self.msg, " is not UTF-8");
+            return false;
+        }
+        return true;
+    }
+
+    // Feature tokens lo..hi (keywords; separators skipped) as a set; false if the list is not
+    // the canonical one (the generators of its closure, in feature order).
+    fn features(&mut self, src: &[u8], lx: &lexer.Lexed, lo: usize, hi: usize, sep: &str) -> (bool, u64) {
+        let mut bits: u64 = 0;
+        let mut last: i32 = -1;
+        let mut ordered = true;
+        let mut first_col: u32 = 1;
+        let mut seen = false;
+        for k in lo..hi {
+            let t = lx.term.as_slice()[k];
+            if t == ir_text_terminals.IR_T_COMMA { continue; }
+            let f = features.index(text(src, lx, k));
+            if !seen {
+                first_col = lx.start.as_slice()[k] + 1;
+                seen = true;
+            }
+            if f as i64 <= last as i64 { ordered = false; }
+            last = f as% i32;
+            bits = bits | (1u64 << f as u64);
+        }
+        let set = features.closure(bits);
+        let canon = features.maximal(set);
+        if !ordered || canon != bits {
+            self.col = first_col;
+            self.msg.clear();
+            bytes.push_str(&mut self.msg, "feature list is not canonical (implied members left out, in feature order): write `");
+            let mut first = true;
+            for f in 0..features.COUNT {
+                if (canon >> f as u64) & 1 == 0 { continue; }
+                if !first { bytes.push_str(&mut self.msg, sep); }
+                first = false;
+                features.push_name(&mut self.msg, f);
+            }
+            self.msg.push(96);
+            return (false, 0);
+        }
+        return (true, set);
+    }
+
+    fn header(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (ok, hi, lo) = self.int(src, lx, 1);
+        if !ok { return false; }
+        if hi != 0 || lo != 4 {
+            self.col = lx.start.as_slice()[1] + 1;
+            self.msg.clear();
+            bytes.push_str(&mut self.msg, "IR text version ");
+            bytes.push_i128(&mut self.msg, hi, lo);
+            bytes.push_str(&mut self.msg, " is not read here (this reader reads version 4)");
+            return false;
+        }
+        self.tmp.clear();
+        lexer.unescape(text(src, lx, 2), &mut self.tmp);
+        let t = bytes.target_row(self.tmp.as_slice());
+        if t == NONE {
+            self.col = lx.start.as_slice()[2] + 1;
+            self.msg.clear();
+            if self.tmp.as_slice().eq(mem.str_bytes("x86_64-linux")) {
+                bytes.push_str(&mut self.msg, "target `x86_64-linux` is written by its canonical name `x86_64-linux-v2`");
+            } else {
+                bytes.push_str(&mut self.msg, "unknown target `");
+                self.msg.extend_from_slice(self.tmp.as_slice());
+                bytes.push_str(&mut self.msg, "` (known: x86_64-linux[-v2|-v3|-v4], aarch64-linux[+sve|+sve2], gpu-sm86)");
+            }
+            return false;
+        }
+        let mode = if lx.term.as_slice()[3] == ir_text_terminals.IR_T_KW_DEBUG then model.MODE_DEBUG else model.MODE_RELEASE;
+        let lt = lx.term.as_slice()[4];
+        let level = if lt == ir_text_terminals.IR_T_KW_LOWERED then model.LEVEL_LOWERED else if lt == ir_text_terminals.IR_T_KW_CHECKED then model.LEVEL_CHECKED else model.LEVEL_OPT;
+        if level == model.LEVEL_OPT && mode != model.MODE_RELEASE { return self.fail(lx.start.as_slice()[4] + 1, "level `opt` exists only with mode `release`"); }
+        c.k = 5;
+        self.hd_target.push(t);
+        self.hd_mode.push(mode);
+        self.hd_level.push(level);
+        return true;
+    }
+
+    fn decl(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (ok, id) = self.id(src, lx, 1);
+        if !ok { return false; }
+        let kind = if lx.term.as_slice()[2] == ir_text_terminals.IR_T_KW_STRUCT then model.KIND_STRUCT else model.KIND_ENUM;
+        let mut p = vec.Vec::<u8>.new();
+        if !self.path(src, lx, 3, &mut p) { return false; }
+        c.k = 4;
+        self.dc_id.push(id);
+        self.dc_kind.push(kind);
+        self.dc_path.push_row(p.as_slice());
+        return true;
+    }
+
+    fn type_line(&mut self, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (ok, id) = self.id(src, lx, 1);
+        if !ok { return false; }
+        c.k = 2;
+        if !self.key(m, src, lx, c) { return false; }
+        self.ty_id.push(id);
+        return true;
+    }
+
+    // A `Key` at the cursor, pushed as a raw row of the type table.
+    fn key(&mut self, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let kw = lx.term.as_slice()[c.next()];
+        m.types.begin();
+        if kw == ir_text_terminals.IR_T_KW_INT {
+            let signed = lx.term.as_slice()[c.next()] == ir_text_terminals.IR_T_KW_S;
+            let w = c.next();
+            let mut code = types.W_SIZE;
+            if lx.term.as_slice()[w] != ir_text_terminals.IR_T_KW_SIZE {
+                let (ok, hi, lo) = self.int(src, lx, w);
+                if !ok { return false; }
+                if hi != 0 || (lo != 8 && lo != 16 && lo != 32 && lo != 64) { return self.fail(lx.start.as_slice()[w] + 1, "an int width is 8, 16, 32, 64 or `size`"); }
+                code = if lo == 8 then types.W_8 else if lo == 16 then types.W_16 else if lo == 32 then types.W_32 else types.W_64;
+            }
+            let _ = m.types.push_raw(types.TK_INT, if signed then 1u32 else 0u32, code);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_FLOAT {
+            let w = c.next();
+            let b = text(src, lx, w);
+            let t = lx.term.as_slice()[w];
+            let f: u32 = if t == ir_text_terminals.IR_T_BLK && b.eq(mem.str_bytes("b16")) then 3 else if t == ir_text_terminals.IR_T_INT && b.eq(mem.str_bytes("16")) then 0 else if t == ir_text_terminals.IR_T_INT && b.eq(mem.str_bytes("32")) then 1 else if t == ir_text_terminals.IR_T_INT && b.eq(mem.str_bytes("64")) then 2 else NONE;
+            if f == NONE { return self.fail(lx.start.as_slice()[w] + 1, "a float width is 16, 32, 64 or `b16`"); }
+            let _ = m.types.push_raw(types.TK_FLOAT, f, 0);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_BOOL {
+            let _ = m.types.push_raw(types.TK_BOOL, 0, 0);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_CHAR {
+            let _ = m.types.push_raw(types.TK_CHAR, 0, 0);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_STR {
+            let _ = m.types.push_raw(types.TK_STR, 0, 0);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_REF || kw == ir_text_terminals.IR_T_KW_PTR {
+            let mut mutable = false;
+            if kw == ir_text_terminals.IR_T_KW_REF {
+                if lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_MUT {
+                    mutable = true;
+                    c.k = c.k + 1;
+                }
+            } else {
+                mutable = lx.term.as_slice()[c.next()] == ir_text_terminals.IR_T_KW_MUT;
+            }
+            let (ok, inner) = self.reference(src, lx, c.next(), R_TYPE);
+            if !ok { return false; }
+            let _ = m.types.push_raw(if kw == ir_text_terminals.IR_T_KW_REF then types.TK_REF else types.TK_PTR, if mutable then 1u32 else 0u32, inner);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_ARRAY {
+            let (ok, elem) = self.reference(src, lx, c.next(), R_TYPE);
+            if !ok { return false; }
+            let (ok2, len) = self.uint(src, lx, c.next(), 18446744073709551615, "an array length");
+            if !ok2 { return false; }
+            m.types.begin();
+            m.types.push_garg(types.GA_VALUE, (len >> 32) as% u32, len as% u32);
+            let _ = m.types.push_raw(types.TK_ARRAY, elem, 0);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_SLICE {
+            let (ok, elem) = self.reference(src, lx, c.next(), R_TYPE);
+            if !ok { return false; }
+            let mut al: u32 = 0;
+            let mut zero = false;
+            if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_ALIGN {
+                c.k = c.k + 1;
+                let (ok2, a) = self.uint(src, lx, c.next(), 4294967295, "an alignment");
+                if !ok2 { return false; }
+                al = a as% u32;
+                zero = a == 0;
+            }
+            m.types.begin();
+            if zero { m.types.push(0); }
+            let _ = m.types.push_raw(types.TK_SLICE, elem, al);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_TUPLE {
+            let mut elems = vec.Vec::<u32>.new();
+            while c.k < c.n {
+                let (ok, t) = self.reference(src, lx, c.next(), R_TYPE);
+                if !ok { return false; }
+                elems.push(t);
+            }
+            m.types.begin();
+            for k in 0..elems.len() {
+                m.types.push(elems.as_slice()[k]);
+            }
+            let _ = m.types.push_raw(types.TK_TUPLE, 0, 0);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_ADT {
+            let (ok, d) = self.reference(src, lx, c.next(), R_DECL);
+            if !ok { return false; }
+            let mut args = vec.Vec::<u32>.new();
+            while c.k < c.n {
+                let k = c.next();
+                if lx.term.as_slice()[k] == ir_text_terminals.IR_T_T_ID {
+                    let (o, t) = self.reference(src, lx, k, R_TYPE);
+                    if !o { return false; }
+                    args.push(types.GA_TYPE);
+                    args.push(t);
+                    args.push(0);
+                } else {
+                    let (o, hi, lo) = self.int(src, lx, k);
+                    if !o { return false; }
+                    if hi == 0 {
+                        args.push(types.GA_VALUE);
+                        args.push((lo >> 32) as% u32);
+                        args.push(lo as% u32);
+                    } else {
+                        args.push(types.GA_WIDE);
+                        args.push(m.wide.intern(hi, lo));
+                        args.push(0);
+                    }
+                }
+            }
+            m.types.begin();
+            for k in 0..args.len() {
+                m.types.push(args.as_slice()[k]);
+            }
+            let _ = m.types.push_raw(types.TK_ADT, d, 0);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_FNTYPE {
+            let mut ts = vec.Vec::<u32>.new();
+            while lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_T_ID {
+                let (o, t) = self.reference(src, lx, c.next(), R_TYPE);
+                if !o { return false; }
+                ts.push(t);
+            }
+            let np = ts.len() as% u32;
+            c.k = c.k + 1;
+            let (o, ret) = self.reference(src, lx, c.next(), R_TYPE);
+            if !o { return false; }
+            let (fo, set) = self.features(src, lx, c.k, c.n, " ");
+            if !fo { return false; }
+            c.k = c.n;
+            m.types.begin();
+            for k in 0..ts.len() {
+                m.types.push(ts.as_slice()[k]);
+            }
+            m.types.push(ret);
+            m.types.push((set >> 32) as% u32);
+            m.types.push(set as% u32);
+            m.types.push(0);
+            let _ = m.types.push_raw(types.TK_FN, np, 0);
+            return true;
+        }
+        if kw == ir_text_terminals.IR_T_KW_VEC {
+            let (o, lane) = self.reference(src, lx, c.next(), R_TYPE);
+            if !o { return false; }
+            let (lo2, n) = self.lanes(src, lx, c.next());
+            if !lo2 { return false; }
+            let _ = m.types.push_raw(types.TK_VECTOR, lane, n);
+            return true;
+        }
+        let (o, w) = self.uint(src, lx, c.next(), 255, "a mask width");
+        if !o { return false; }
+        let (lo3, n) = self.lanes(src, lx, c.next());
+        if !lo3 { return false; }
+        let _ = m.types.push_raw(types.TK_MASK, w as% u32, n);
+        return true;
+    }
+
+    fn lanes(&mut self, src: &[u8], lx: &lexer.Lexed, k: usize) -> (bool, u32) {
+        if lx.term.as_slice()[k] == ir_text_terminals.IR_T_KW_N { return (true, types.LANES_N); }
+        let (ok, v) = self.uint(src, lx, k, 255, "a lane count");
+        return (ok, v as% u32);
+    }
+
+    fn shape(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (ok, id) = self.id(src, lx, 1);
+        if !ok { return false; }
+        c.k = 3;
+        let is_struct = lx.term.as_slice()[2] == ir_text_terminals.IR_T_KW_STRUCT;
+        let mut fields = vec.Vec::<u32>.new();
+        let mut vars = vec.Vec::<u32>.new();
+        if is_struct {
+            while c.k < c.n {
+                let (o, t) = self.reference(src, lx, c.next(), R_TYPE);
+                if !o { return false; }
+                fields.push(t);
+            }
+            vars.push(self.var_fields.rows() as% u32);
+            self.var_fields.push_row(fields.as_slice());
+        } else {
+            while c.k < c.n {
+                c.k = c.k + 1;
+                fields.clear();
+                while c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_T_ID {
+                    let (o, t) = self.reference(src, lx, c.next(), R_TYPE);
+                    if !o { return false; }
+                    fields.push(t);
+                }
+                vars.push(self.var_fields.rows() as% u32);
+                self.var_fields.push_row(fields.as_slice());
+            }
+        }
+        self.sh_id.push(id);
+        self.sh_kind.push(if is_struct then model.KIND_STRUCT else model.KIND_ENUM);
+        self.sh_vars.push_row(vars.as_slice());
+        return true;
+    }
+
+    fn site(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (o, r) = self.uint(src, lx, 1, 4294967295, "a site row");
+        if !o { return false; }
+        let mut file = vec.Vec::<u8>.new();
+        if !self.utf8(src, lx, 2, "a site file", &mut file) { return false; }
+        let (o2, line) = self.uint(src, lx, 3, 4294967295, "a line");
+        if !o2 { return false; }
+        let (o3, col) = self.uint(src, lx, 4, 4294967295, "a column");
+        if !o3 { return false; }
+        let mut p = vec.Vec::<u8>.new();
+        if !self.path(src, lx, 5, &mut p) { return false; }
+        c.k = 6;
+        self.si_row.push(r as% u32);
+        self.si_file.push_row(file.as_slice());
+        self.si_line.push(line as% u32);
+        self.si_col.push(col as% u32);
+        self.si_fn.push_row(p.as_slice());
+        return true;
+    }
+
+    fn static_line(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (o, idx) = self.uint(src, lx, 1, 4294967295, "a static index");
+        if !o { return false; }
+        let (o2, ty) = self.reference(src, lx, 2, R_TYPE);
+        if !o2 { return false; }
+        let mut p = vec.Vec::<u8>.new();
+        if !self.path(src, lx, 3, &mut p) { return false; }
+        c.k = 4;
+        self.st_idx.push(idx as% u32);
+        self.st_ty.push(ty);
+        self.st_path.push_row(p.as_slice());
+        return true;
+    }
+
+    fn data(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (o, idx) = self.uint(src, lx, 1, 4294967295, "a static index");
+        if !o { return false; }
+        let (o2, off) = self.uint(src, lx, 2, 4294967295, "an offset");
+        if !o2 { return false; }
+        let hex = text(src, lx, 3);
+        self.tmp.clear();
+        let mut i: usize = 1;
+        while i + 1 < hex.len() {
+            self.tmp.push(hexv(hex[i]) * 16 + hexv(hex[i + 1]));
+            i = i + 2;
+        }
+        let n = self.tmp.len() as u64;
+        let ocol = lx.start.as_slice()[2] + 1;
+        if off / 64 != (off + n - 1) / 64 { return self.fail(ocol, "a `data` line lies within one 64-byte block of its static"); }
+        if self.tmp.as_slice()[0] == 0 || self.tmp.as_slice()[self.tmp.len() - 1] == 0 { return self.fail(ocol, "a `data` line begins and ends with a nonzero byte"); }
+        c.k = 4;
+        self.da_idx.push(idx as% u32);
+        self.da_off.push(off as% u32);
+        self.da_bytes.push_row(self.tmp.as_slice());
+        return true;
+    }
+
+    fn ref_line(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (o, idx) = self.uint(src, lx, 1, 4294967295, "a static index");
+        if !o { return false; }
+        let (o2, off) = self.uint(src, lx, 2, 4294967295, "an offset");
+        if !o2 { return false; }
+        let mut kind = model.REF_STR;
+        let mut to: u32 = 0;
+        let mut k: usize = 3;
+        if lx.term.as_slice()[3] == ir_text_terminals.IR_T_S_ID {
+            let (o3, s) = self.reference(src, lx, 3, R_STR);
+            if !o3 { return false; }
+            to = s;
+            k = 4;
+        } else {
+            kind = model.REF_STATIC;
+            let (o3, j) = self.uint(src, lx, 4, 4294967295, "a static index");
+            if !o3 { return false; }
+            to = j as% u32;
+            self.add_ref(R_STATIC, to, lx.start.as_slice()[4] + 1);
+            k = 5;
+        }
+        let (o4, add) = self.uint(src, lx, k, 4294967295, "an addend");
+        if !o4 { return false; }
+        c.k = k + 1;
+        self.rf_idx.push(idx as% u32);
+        self.rf_off.push(off as% u32);
+        self.rf_kind.push(kind);
+        self.rf_to.push(to);
+        self.rf_add.push(add as% u32);
+        return true;
+    }
+
+    fn edge(&mut self, src: &[u8], lx: &lexer.Lexed) -> bool {
+        let (o, fr) = self.uint(src, lx, 1, 4294967295, "a node number");
+        if !o { return false; }
+        self.add_ref(R_NODE, fr as% u32, lx.start.as_slice()[1] + 1);
+        let (o2, to) = self.uint(src, lx, 2, 4294967295, "a node number");
+        if !o2 { return false; }
+        self.add_ref(R_NODE, to as% u32, lx.start.as_slice()[2] + 1);
+        let kt = lx.term.as_slice()[3];
+        self.ed_from.push(fr as% u32);
+        self.ed_to.push(to as% u32);
+        self.ed_kind.push(if kt == ir_text_terminals.IR_T_KW_CALL then model.EDGE_CALL else if kt == ir_text_terminals.IR_T_KW_INDIRECT then model.EDGE_INDIRECT else model.EDGE_SPAWN);
+        return true;
+    }
+
+    fn nodes(&mut self, src: &[u8], lx: &lexer.Lexed) -> bool {
+        let (o, r) = self.inst(src, lx, 1);
+        if !o { return false; }
+        let mut ns = vec.Vec::<u32>.new();
+        for k in 2..lx.len() {
+            let (o2, v) = self.uint(src, lx, k, 4294967295, "a node number");
+            if !o2 { return false; }
+            let n = v as% u32;
+            if ns.len() > 0 && ns.as_slice()[ns.len() - 1] >= n { return self.fail(lx.start.as_slice()[k] + 1, "the nodes of a fn are listed ascending, without repeats"); }
+            self.add_ref(R_NODE, n, lx.start.as_slice()[k] + 1);
+            ns.push(n);
+        }
+        self.ns_inst.push(r);
+        self.ns_col.push(lx.start.as_slice()[1] + 1);
+        self.ns_nodes.push_row(ns.as_slice());
+        return true;
+    }
+
+    fn fn_line(&mut self, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (o, r) = self.inst(src, lx, 1);
+        if !o { return false; }
+        let mut p = vec.Vec::<u8>.new();
+        if !self.path(src, lx, 2, &mut p) { return false; }
+        let path_col = lx.start.as_slice()[2] + 1;
+        c.k = 3;
+        let mut targ = vec.Vec::<u32>.new();
+        if lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_LT {
+            c.k = c.k + 1;
+            while lx.term.as_slice()[c.k] != ir_text_terminals.IR_T_GT {
+                let k = c.next();
+                let t = lx.term.as_slice()[k];
+                if t == ir_text_terminals.IR_T_COMMA { continue; }
+                if t == ir_text_terminals.IR_T_T_ID {
+                    let (o2, ty) = self.reference(src, lx, k, R_TYPE);
+                    if !o2 { return false; }
+                    targ.push(model.GARG_TYPE);
+                    targ.push(ty);
+                } else {
+                    let (o2, hi, lo) = self.int(src, lx, k);
+                    if !o2 { return false; }
+                    targ.push(model.GARG_CONST);
+                    targ.push(m.wide.intern(hi, lo));
+                }
+            }
+            c.k = c.k + 1;
+        }
+        c.k = c.k + 1;
+        let mut params = vec.Vec::<u32>.new();
+        while lx.term.as_slice()[c.k] != ir_text_terminals.IR_T_R_PAREN {
+            let k = c.next();
+            if lx.term.as_slice()[k] == ir_text_terminals.IR_T_COMMA { continue; }
+            let (o2, ty) = self.reference(src, lx, k, R_TYPE);
+            if !o2 { return false; }
+            params.push(ty);
+        }
+        c.k = c.k + 1;
+        let mut ret = NONE;
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_MINUS_GT {
+            c.k = c.k + 1;
+            let (o2, ty) = self.reference(src, lx, c.next(), R_TYPE);
+            if !o2 { return false; }
+            ret = ty;
+        }
+        let mut feat: u64 = 0;
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_NEEDS {
+            let lo = c.k + 2;
+            let mut hi = lo;
+            while lx.term.as_slice()[hi] != ir_text_terminals.IR_T_R_PAREN {
+                hi = hi + 1;
+            }
+            let (fo, set) = self.features(src, lx, lo, hi, ", ");
+            if !fo { return false; }
+            feat = set;
+            c.k = hi + 1;
+        }
+        let mut flags: u8 = 0;
+        let mut sym = vec.Vec::<u8>.new();
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_SYMBOL {
+            if !self.utf8(src, lx, c.k + 1, "a symbol", &mut sym) { return false; }
+            flags = flags | model.F_SYMBOL;
+            c.k = c.k + 2;
+        }
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_VARIADIC {
+            flags = flags | model.F_VARIADIC;
+            c.k = c.k + 1;
+        }
+        let mut known_col = path_col;
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_KNOWN {
+            flags = flags | model.F_KNOWN;
+            known_col = lx.start.as_slice()[c.k] + 1;
+            c.k = c.k + 1;
+        }
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_ALTSTACK {
+            flags = flags | model.F_ALTSTACK;
+            c.k = c.k + 1;
+        }
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_UNBUILT {
+            flags = flags | model.F_UNBUILT;
+            c.k = c.k + 1;
+        }
+        let mut site = NONE;
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_SITE {
+            let (o2, v) = self.uint(src, lx, c.k + 1, 4294967295, "a site row");
+            if !o2 { return false; }
+            site = v as% u32;
+            self.add_ref(R_SITE, site, lx.start.as_slice()[c.k + 1] + 1);
+            c.k = c.k + 2;
+        }
+        if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_L_BRACE {
+            flags = flags | model.F_BODY;
+            c.k = c.k + 1;
+        }
+        self.fn_inst.push(r);
+        self.fn_path.push_row(p.as_slice());
+        self.fn_targ.push_row(targ.as_slice());
+        self.fn_params.push_row(params.as_slice());
+        self.fn_ret.push(ret);
+        self.fn_feat.push(feat);
+        self.fn_sym.push_row(sym.as_slice());
+        self.fn_flags.push(flags);
+        self.fn_known_col.push(known_col);
+        self.fn_site.push(site);
+        return true;
+    }
+
+    fn cterm(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> (bool, u8, u32) {
+        let t = lx.term.as_slice()[c.next()];
+        if t == ir_text_terminals.IR_T_KW_ZERO { return (true, model.RT_ZERO, 0); }
+        if t == ir_text_terminals.IR_T_KW_RESULT { return (true, model.RT_RESULT, 0); }
+        if t == ir_text_terminals.IR_T_KW_LENRESULT { return (true, model.RT_LENRESULT, 0); }
+        let (o, v) = self.uint(src, lx, c.next(), 4294967295, "a param index");
+        return (o, if t == ir_text_terminals.IR_T_KW_P then model.RT_PARAM else model.RT_LENPARAM, v as% u32);
+    }
+
+    fn claim(&mut self, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (o, r) = self.inst(src, lx, 1);
+        if !o { return false; }
+        c.k = 2;
+        let mut kind = model.CL_POST;
+        if lx.term.as_slice()[c.next()] == ir_text_terminals.IR_T_KW_PRE {
+            kind = model.CL_PRE;
+            if lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_CHECKED {
+                kind = model.CL_PRE_CHECKED;
+                c.k = c.k + 1;
+            }
+        }
+        let (oa, a, ai) = self.cterm(src, lx, c);
+        if !oa { return false; }
+        c.k = c.k + 1;
+        let (ob, b, bi) = self.cterm(src, lx, c);
+        if !ob { return false; }
+        let (ow, hi, lo) = self.int(src, lx, c.next());
+        if !ow { return false; }
+        self.cl_inst.push(r);
+        self.cl_col.push(lx.start.as_slice()[1] + 1);
+        self.cl_kind.push(kind);
+        self.cl_a.push(a);
+        self.cl_ai.push(ai);
+        self.cl_b.push(b);
+        self.cl_bi.push(bi);
+        self.cl_w.push(m.wide.intern(hi, lo));
+        return true;
+    }
+
+    fn block(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let (o, label) = self.id(src, lx, 0);
+        if !o { return false; }
+        let lo = self.bp_val.len() as% u32;
+        c.k = 2;
+        while lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_VAL {
+            let vk = c.next();
+            let (o2, v) = self.id(src, lx, vk);
+            if !o2 { return false; }
+            c.k = c.k + 1;
+            let (o3, ty) = self.reference(src, lx, c.next(), R_TYPE);
+            if !o3 { return false; }
+            self.bp_val.push(v);
+            self.bp_col.push(lx.start.as_slice()[vk] + 1);
+            self.bp_ty.push(ty);
+            if lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_COMMA { c.k = c.k + 1; }
+        }
+        self.bk_label.push(label);
+        self.bk_p_lo.push(lo);
+        self.bk_p_n.push(self.bp_val.len() as% u32 - lo);
+        return true;
+    }
+
+    // One operand at the cursor (`bf16` takes two tokens).
+    fn operand(&mut self, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let k = c.next();
+        let t = lx.term.as_slice()[k];
+        let col = lx.start.as_slice()[k] + 1;
+        let mut kind = model.O_VALUE;
+        let mut a: u32 = 0;
+        let mut b: u64 = 0;
+        if t == ir_text_terminals.IR_T_VAL {
+            let (o, v) = self.id(src, lx, k);
+            if !o { return false; }
+            a = v;
+        } else if t == ir_text_terminals.IR_T_INT {
+            let (o, hi, lo) = self.int(src, lx, k);
+            if !o { return false; }
+            kind = model.O_CONST;
+            a = model.C_INT as u32;
+            b = m.wide.intern(hi, lo) as u64;
+        } else if t == ir_text_terminals.IR_T_HEX {
+            let h = text(src, lx, k);
+            kind = model.O_CONST;
+            let nd = h.len() - 2;
+            a = if nd == 4 then model.C_F16 as u32 else if nd == 8 then model.C_F32 as u32 else model.C_F64 as u32;
+            b = hex_bits(h);
+        } else if t == ir_text_terminals.IR_T_KW_BF16 {
+            let hk = c.next();
+            let h = text(src, lx, hk);
+            if h.len() != 6 { return self.fail(lx.start.as_slice()[hk] + 1, "a `bf16` constant has 4 hex digits"); }
+            kind = model.O_CONST;
+            a = model.C_BF16 as u32;
+            b = hex_bits(h);
+        } else if t == ir_text_terminals.IR_T_S_ID {
+            let (o, s) = self.reference(src, lx, k, R_STR);
+            if !o { return false; }
+            kind = model.O_STR;
+            a = s;
+        } else if t == ir_text_terminals.IR_T_FN_REF {
+            let (o, r) = self.inst(src, lx, k);
+            if !o { return false; }
+            kind = model.O_FUNC;
+            a = r;
+        } else {
+            let (o, ty) = self.reference(src, lx, k, R_TYPE);
+            if !o { return false; }
+            kind = model.O_TYPE;
+            a = ty;
+        }
+        self.op_kind.push(kind);
+        self.op_a.push(a);
+        self.op_b.push(b);
+        self.op_col.push(col);
+        return true;
+    }
+
+    fn inst_line(&mut self, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let mut res = NONE;
+        let mut res_col: u32 = 0;
+        if lx.term.as_slice()[0] == ir_text_terminals.IR_T_VAL {
+            let (o, v) = self.id(src, lx, 0);
+            if !o { return false; }
+            res = v;
+            res_col = lx.start.as_slice()[0] + 1;
+            c.k = 2;
+        }
+        let ok = c.next();
+        let op = lx.term.as_slice()[ok];
+        self.tmp.clear();
+        if op == ir_text_terminals.IR_T_INTR {
+            let b = text(src, lx, ok);
+            self.tmp.extend_from_slice(&b[10..b.len()]);
+        }
+        let mut ty = NONE;
+        if lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_T_ID {
+            let (o, t) = self.reference(src, lx, c.next(), R_TYPE);
+            if !o { return false; }
+            ty = t;
+        } else {
+            c.k = c.k + 2;
+        }
+        let lo = self.op_kind.len() as% u32;
+        while c.k < c.n && lx.term.as_slice()[c.k] != ir_text_terminals.IR_T_BANG {
+            if !self.operand(m, src, lx, c) { return false; }
+        }
+        let mut site = NONE;
+        if c.k < c.n {
+            let (o, v) = self.uint(src, lx, c.k + 1, 4294967295, "a site row");
+            if !o { return false; }
+            site = v as% u32;
+            self.add_ref(R_SITE, site, lx.start.as_slice()[c.k + 1] + 1);
+            c.k = c.k + 2;
+        }
+        self.in_res.push(res);
+        self.in_res_col.push(res_col);
+        self.in_op.push(op);
+        self.in_intr.push_row(self.tmp.as_slice());
+        self.in_ty.push(ty);
+        self.in_o_lo.push(lo);
+        self.in_o_n.push(self.op_kind.len() as% u32 - lo);
+        self.in_site.push(site);
+        return true;
+    }
+
+    // A `Target` at the cursor; `case`: the switch case's wide-int row or NONE.
+    fn target(&mut self, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, c: &mut Cur, case: u32) -> bool {
+        let bk = c.next();
+        let (o, label) = self.id(src, lx, bk);
+        if !o { return false; }
+        c.k = c.k + 1;
+        let lo = self.op_kind.len() as% u32;
+        while lx.term.as_slice()[c.k] != ir_text_terminals.IR_T_R_PAREN {
+            if lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_COMMA {
+                c.k = c.k + 1;
+                continue;
+            }
+            if !self.operand(m, src, lx, c) { return false; }
+        }
+        c.k = c.k + 1;
+        self.tg_label.push(label);
+        self.tg_col.push(lx.start.as_slice()[bk] + 1);
+        self.tg_o_lo.push(lo);
+        self.tg_o_n.push(self.op_kind.len() as% u32 - lo);
+        self.tg_case.push(case);
+        return true;
+    }
+
+    fn term(&mut self, m: &mut model.Module, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
+        let kw = lx.term.as_slice()[c.next()];
+        let tlo = self.tg_label.len() as% u32;
+        let mut kind = model.TM_UNREACHABLE;
+        let mut o = NONE;
+        if kw == ir_text_terminals.IR_T_KW_BR {
+            kind = model.TM_BR;
+            if !self.target(m, src, lx, c, NONE) { return false; }
+        } else if kw == ir_text_terminals.IR_T_KW_CBR {
+            kind = model.TM_CBR;
+            o = self.op_kind.len() as% u32;
+            if !self.operand(m, src, lx, c) { return false; }
+            if !self.target(m, src, lx, c, NONE) { return false; }
+            if !self.target(m, src, lx, c, NONE) { return false; }
+        } else if kw == ir_text_terminals.IR_T_KW_SWITCH {
+            kind = model.TM_SWITCH;
+            o = self.op_kind.len() as% u32;
+            if !self.operand(m, src, lx, c) { return false; }
+            while lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_INT {
+                let (ok, hi, lo) = self.int(src, lx, c.next());
+                if !ok { return false; }
+                c.k = c.k + 1;
+                let w = m.wide.intern(hi, lo);
+                if !self.target(m, src, lx, c, w) { return false; }
+            }
+            c.k = c.k + 2;
+            if !self.target(m, src, lx, c, NONE) { return false; }
+        } else if kw == ir_text_terminals.IR_T_KW_RET {
+            kind = model.TM_RET;
+            if c.k < c.n {
+                o = self.op_kind.len() as% u32;
+                if !self.operand(m, src, lx, c) { return false; }
+            }
+        }
+        self.tm_kind.push(kind);
+        self.tm_o.push(o);
+        self.tm_t_lo.push(tlo);
+        self.tm_t_n.push(self.tg_label.len() as% u32 - tlo);
+        return true;
+    }
+}
+
+// A cursor over the tokens of one line.
+pub struct Cur {
+    pub k: usize,
+    pub n: usize,
+}
+
+impl Cur {
+    pub fn next(&mut self) -> usize {
+        let k = self.k;
+        self.k = self.k + 1;
+        return k;
+    }
+
+    pub fn at(&mut self, k: usize) -> usize {
+        self.k = k + 1;
+        return k;
+    }
+}
+
+pub fn text(src: &[u8], lx: &lexer.Lexed, k: usize) -> &[u8] from src {
+    return &src[lx.start.as_slice()[k] as usize..lx.end.as_slice()[k] as usize];
+}
+
+fn hexv(d: u8) -> u8 {
+    return if d >= 48 && d <= 57 then d - 48 else d - 87;
+}
+
+// The bits of a `Hex` token `0x...`.
+fn hex_bits(h: &[u8]) -> u64 {
+    let mut v: u64 = 0;
+    for i in 2..h.len() {
+        v = (v << 4) | (hexv(h[i]) as u64);
+    }
+    return v;
+}
+
+// The value of `Int` text b as i128 two's-complement words; false out of the i128 range.
+pub fn parse_i128(b: &[u8]) -> (bool, u64, u64) {
+    let neg = b.len() > 0 && b[0] == 45;
+    let start: usize = if neg then 1 else 0;
+    let mut hi: u64 = 0;
+    let mut lo: u64 = 0;
+    let top: u64 = 9223372036854775808;
+    for k in start..b.len() {
+        let d = (b[k] - 48) as u64;
+        let (lh, ll) = lo.mul_wide(10);
+        let (hh, hl) = hi.mul_wide(10);
+        if hh != 0 { return (false, 0, 0); }
+        let mut nhi = hl +% lh;
+        if nhi < hl { return (false, 0, 0); }
+        let nlo = ll +% d;
+        if nlo < ll {
+            nhi = nhi +% 1;
+            if nhi == 0 { return (false, 0, 0); }
+        }
+        hi = nhi;
+        lo = nlo;
+        if hi > top || (hi == top && lo > 0) { return (false, 0, 0); }
+    }
+    if !neg {
+        if hi >= top { return (false, 0, 0); }
+        return (true, hi, lo);
+    }
+    if hi == top { return (true, hi, lo); }
+    let mut nh = ~hi;
+    let nl = (~lo) +% 1;
+    if nl == 0 { nh = nh +% 1; }
+    return (true, nh, nl);
+}

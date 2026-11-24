@@ -1,0 +1,92 @@
+// A map from u64 keys to u32 values, open addressing, grown by doubling; `reset` empties it for
+// the next fn. Lookups only: no order of its slots reaches an id.
+import prims.col;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+fn mix(k: u64) -> u64 {
+    let mut x = k;
+    x = x ^ (x >> 33);
+    x = x *% 0xff51afd7ed558ccd;
+    x = x ^ (x >> 33);
+    x = x *% 0xc4ceb9fe1a85ec53;
+    return x ^ (x >> 33);
+}
+
+pub struct Map {
+    keys: vec.Vec<u64>,
+    vals: vec.Vec<u32>,
+    used: vec.Vec<bool>,
+    n: usize,
+}
+
+impl Map {
+    pub fn new() -> Map {
+        return Map.{ keys: col.filled(16, 0u64), vals: col.filled(16, NONE), used: col.filled(16, false), n: 0 };
+    }
+
+    pub fn reset(&mut self) {
+        if self.n == 0 { return; }
+        if self.used.len() > 64 {
+            self.keys = col.filled(16, 0u64);
+            self.vals = col.filled(16, NONE);
+            self.used = col.filled(16, false);
+        } else {
+            let u = self.used.as_mut_slice();
+            for i in 0..u.len() {
+                u[i] = false;
+            }
+        }
+        self.n = 0;
+    }
+
+    pub fn get(&self, k: u64) -> u32 {
+        let mask = self.used.len() - 1;
+        let mut at = (mix(k) as usize) & mask;
+        loop {
+            if !self.used.as_slice()[at] { return NONE; }
+            if self.keys.as_slice()[at] == k { return self.vals.as_slice()[at]; }
+            at = (at + 1) & mask;
+        }
+    }
+
+    // Sets k to v when k is absent; returns the value k has after (the earlier one if present).
+    pub fn insert(&mut self, k: u64, v: u32) -> u32 {
+        let mask = self.used.len() - 1;
+        let mut at = (mix(k) as usize) & mask;
+        loop {
+            if !self.used.as_slice()[at] { break; }
+            if self.keys.as_slice()[at] == k { return self.vals.as_slice()[at]; }
+            at = (at + 1) & mask;
+        }
+        self.used.as_mut_slice()[at] = true;
+        self.keys.as_mut_slice()[at] = k;
+        self.vals.as_mut_slice()[at] = v;
+        self.n = self.n + 1;
+        if self.n * 2 > self.used.len() { self.grow(); }
+        return v;
+    }
+
+    fn grow(&mut self) {
+        let cap = self.used.len() * 2;
+        let mask = cap - 1;
+        let mut keys = col.filled(cap, 0u64);
+        let mut vals = col.filled(cap, NONE);
+        let mut used = col.filled(cap, false);
+        for i in 0..self.used.len() {
+            if !self.used.as_slice()[i] { continue; }
+            let k = self.keys.as_slice()[i];
+            let mut at = (mix(k) as usize) & mask;
+            while used.as_slice()[at] {
+                at = (at + 1) & mask;
+            }
+            used.as_mut_slice()[at] = true;
+            keys.as_mut_slice()[at] = k;
+            vals.as_mut_slice()[at] = self.vals.as_slice()[i];
+        }
+        self.keys = keys;
+        self.vals = vals;
+        self.used = used;
+    }
+}

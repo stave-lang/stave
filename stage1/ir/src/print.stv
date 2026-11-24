@@ -1,0 +1,513 @@
+// The IR text printer (contracts/checked-ir.md "Text", "Sections"): the module's lines in section
+// order, each line a function of its row and the id tables. A module read from text keeps the
+// text's ids, so a canonical text prints back byte for byte. The stack section is printed when
+// the module has one (the emit form).
+import bytes;
+import features;
+import grammar;
+import model;
+import types;
+import generated.ir_text_terminals;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+pub fn print(m: &model.Module) -> vec.Vec<u8> {
+    let g = grammar.Grammar.new();
+    let mut o = vec.Vec::<u8>.with_capacity(4096 + m.ins_op.len() * 24);
+    bytes.push_str(&mut o, "stave.ir 4 ");
+    let mut tn = vec.Vec::<u8>.new();
+    bytes.push_target(&mut tn, m.target);
+    bytes.quote(&mut o, tn.as_slice());
+    bytes.push_str(&mut o, if m.mode == model.MODE_DEBUG then " debug " else " release ");
+    bytes.push_str(&mut o, if m.level == model.LEVEL_LOWERED then "lowered\n" else if m.level == model.LEVEL_CHECKED then "checked\n" else "opt\n");
+    for d in 0..m.decl_id.len() {
+        bytes.push_str(&mut o, "decl d");
+        bytes.push_u32(&mut o, m.decl_id.as_slice()[d]);
+        bytes.push_str(&mut o, if m.decl_kind.as_slice()[d] == model.KIND_STRUCT then " struct " else " enum ");
+        bytes.push_path(&mut o, m.decl_path.row(d));
+        o.push(10);
+    }
+    for t in 0..m.types.len() {
+        bytes.push_str(&mut o, "type t");
+        bytes.push_u32(&mut o, t as% u32);
+        o.push(32);
+        key_text(m, t as% u32, &mut o);
+        o.push(10);
+    }
+    for s in 0..m.shape_ty.len() {
+        bytes.push_str(&mut o, "shape t");
+        bytes.push_u32(&mut o, m.shape_ty.as_slice()[s]);
+        let vars = m.shape_vars.row(s);
+        if m.shape_kind.as_slice()[s] == model.KIND_STRUCT {
+            bytes.push_str(&mut o, " struct");
+            if vars.len() > 0 { push_types(&mut o, m.var_fields.row(vars[0] as usize)); }
+        } else {
+            bytes.push_str(&mut o, " enum");
+            for v in 0..vars.len() {
+                bytes.push_str(&mut o, " |");
+                push_types(&mut o, m.var_fields.row(vars[v] as usize));
+            }
+        }
+        o.push(10);
+    }
+    for s in 0..m.strs.rows() {
+        bytes.push_str(&mut o, "str s");
+        bytes.push_u32(&mut o, s as% u32);
+        o.push(32);
+        bytes.quote(&mut o, m.strs.row(s));
+        o.push(10);
+    }
+    for s in 0..m.site_line.len() {
+        bytes.push_str(&mut o, "site ");
+        bytes.push_u32(&mut o, s as% u32);
+        o.push(32);
+        bytes.quote(&mut o, m.site_file.row(s));
+        o.push(32);
+        bytes.push_u32(&mut o, m.site_line.as_slice()[s]);
+        o.push(32);
+        bytes.push_u32(&mut o, m.site_col.as_slice()[s]);
+        o.push(32);
+        bytes.push_path(&mut o, m.site_fn.row(s));
+        o.push(10);
+    }
+    for s in 0..m.st_ty.len() {
+        bytes.push_str(&mut o, "static ");
+        bytes.push_u32(&mut o, s as% u32);
+        bytes.push_str(&mut o, " t");
+        bytes.push_u32(&mut o, m.st_ty.as_slice()[s]);
+        o.push(32);
+        bytes.push_path(&mut o, m.st_path.row(s));
+        o.push(10);
+        let dl = m.st_data_lo.as_slice()[s] as usize;
+        for r in dl..dl + m.st_data_n.as_slice()[s] as usize {
+            bytes.push_str(&mut o, "data ");
+            bytes.push_u32(&mut o, s as% u32);
+            o.push(32);
+            bytes.push_u32(&mut o, m.data_off.as_slice()[r]);
+            bytes.push_str(&mut o, " x");
+            let b = m.data_bytes.row(r);
+            for i in 0..b.len() {
+                bytes.push_hex(&mut o, b[i] as u64, 2);
+            }
+            o.push(10);
+        }
+        let rl = m.st_ref_lo.as_slice()[s] as usize;
+        for r in rl..rl + m.st_ref_n.as_slice()[s] as usize {
+            bytes.push_str(&mut o, "ref ");
+            bytes.push_u32(&mut o, s as% u32);
+            o.push(32);
+            bytes.push_u32(&mut o, m.ref_off.as_slice()[r]);
+            bytes.push_str(&mut o, if m.ref_kind.as_slice()[r] == model.REF_STR then " s" else " static ");
+            bytes.push_u32(&mut o, m.ref_to.as_slice()[r]);
+            o.push(32);
+            bytes.push_u32(&mut o, m.ref_add.as_slice()[r]);
+            o.push(10);
+        }
+    }
+    if m.main != NONE {
+        bytes.push_str(&mut o, "main @");
+        push_inst(&mut o, m.fn_inst.row(m.main as usize));
+        o.push(10);
+    }
+    if m.cell != NONE {
+        bytes.push_str(&mut o, "cell d");
+        bytes.push_u32(&mut o, m.cell);
+        o.push(10);
+    }
+    if m.has_stack { stack(m, &mut o); }
+    for f in 0..m.fns() {
+        func(m, &g, f, &mut o);
+        if m.level != model.LEVEL_LOWERED { claims(m, f, &mut o); }
+    }
+    return o;
+}
+
+fn push_types(o: &mut vec.Vec<u8>, ts: &[u32]) {
+    for i in 0..ts.len() {
+        bytes.push_str(o, " t");
+        bytes.push_u32(o, ts[i]);
+    }
+}
+
+pub fn push_inst(o: &mut vec.Vec<u8>, parts: &[u32]) {
+    for i in 0..parts.len() {
+        if i > 0 { o.push(46); }
+        if i > 0 && parts[i] == model.UNCHECKED_ENTRY {
+            o.push(117);
+        } else {
+            bytes.push_u32(o, parts[i]);
+        }
+    }
+}
+
+fn push_features(o: &mut vec.Vec<u8>, set: u64, sep: &str) {
+    let gen = features.maximal(set);
+    let mut first = true;
+    for f in 0..features.COUNT {
+        if (gen >> f as u64) & 1 == 0 { continue; }
+        if !first { bytes.push_str(o, sep); }
+        first = false;
+        features.push_name(o, f);
+    }
+}
+
+// The TypeKey text of type t.
+pub fn key_text(m: &model.Module, t: u32, o: &mut vec.Vec<u8>) {
+    let tab = &m.types;
+    let tag = tab.tag_of(t);
+    let a = tab.a_of(t);
+    let b = tab.b_of(t);
+    let xs = tab.x(t);
+    if tag == types.TK_INT {
+        bytes.push_str(o, if a == 1 then "int s " else "int u ");
+        bytes.push_str(o, if b == types.W_8 then "8" else if b == types.W_16 then "16" else if b == types.W_32 then "32" else if b == types.W_64 then "64" else "size");
+    } else if tag == types.TK_FLOAT {
+        bytes.push_str(o, if a == 0 then "float 16" else if a == 1 then "float 32" else if a == 2 then "float 64" else "float b16");
+    } else if tag == types.TK_BOOL {
+        bytes.push_str(o, "bool");
+    } else if tag == types.TK_CHAR {
+        bytes.push_str(o, "char");
+    } else if tag == types.TK_STR {
+        bytes.push_str(o, "str");
+    } else if tag == types.TK_REF {
+        bytes.push_str(o, if a == 1 then "ref mut t" else "ref t");
+        bytes.push_u32(o, b);
+    } else if tag == types.TK_PTR {
+        bytes.push_str(o, if a == 1 then "ptr mut t" else "ptr const t");
+        bytes.push_u32(o, b);
+    } else if tag == types.TK_ARRAY {
+        bytes.push_str(o, "array t");
+        bytes.push_u32(o, a);
+        o.push(32);
+        bytes.push_u64(o, ((xs[1] as u64) << 32) | (xs[2] as u64));
+    } else if tag == types.TK_SLICE {
+        bytes.push_str(o, "slice t");
+        bytes.push_u32(o, a);
+        if b != 0 || xs.len() > 0 {
+            bytes.push_str(o, " align ");
+            bytes.push_u32(o, b);
+        }
+    } else if tag == types.TK_TUPLE {
+        bytes.push_str(o, "tuple");
+        push_types(o, xs);
+    } else if tag == types.TK_ADT {
+        bytes.push_str(o, "adt d");
+        bytes.push_u32(o, a);
+        let mut k: usize = 0;
+        while k + 2 < xs.len() {
+            o.push(32);
+            if xs[k] == types.GA_TYPE {
+                o.push(116);
+                bytes.push_u32(o, xs[k + 1]);
+            } else if xs[k] == types.GA_VALUE {
+                bytes.push_u64(o, ((xs[k + 1] as u64) << 32) | (xs[k + 2] as u64));
+            } else {
+                let w = xs[k + 1] as usize;
+                bytes.push_i128(o, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
+            }
+            k = k + 3;
+        }
+    } else if tag == types.TK_FN {
+        bytes.push_str(o, "fntype");
+        let np = a as usize;
+        push_types(o, &xs[0..np]);
+        bytes.push_str(o, " -> t");
+        bytes.push_u32(o, xs[np]);
+        let set = ((xs[np + 1] as u64) << 32) | (xs[np + 2] as u64);
+        if features.maximal(set) != 0 {
+            o.push(32);
+            push_features(o, set, " ");
+        }
+    } else if tag == types.TK_VECTOR {
+        bytes.push_str(o, "vec t");
+        bytes.push_u32(o, a);
+        o.push(32);
+        lanes(o, b);
+    } else {
+        bytes.push_str(o, "mask ");
+        bytes.push_u32(o, a);
+        o.push(32);
+        lanes(o, b);
+    }
+}
+
+fn lanes(o: &mut vec.Vec<u8>, n: u32) {
+    if n == types.LANES_N {
+        o.push(110);
+    } else {
+        bytes.push_u32(o, n);
+    }
+}
+
+fn stack(m: &model.Module, o: &mut vec.Vec<u8>) {
+    if m.has_runstack {
+        bytes.push_str(o, "runstack ");
+        bytes.push_u64(o, m.runstack);
+        o.push(10);
+    }
+    if m.truncated { bytes.push_str(o, "truncated\n"); }
+    for n in 0..m.node_rec.len() {
+        bytes.push_str(o, "node ");
+        bytes.push_u32(o, n as% u32);
+        if m.node_rec.as_slice()[n] { bytes.push_str(o, " rec"); }
+        o.push(10);
+    }
+    for e in 0..m.edge_from.len() {
+        bytes.push_str(o, "edge ");
+        bytes.push_u32(o, m.edge_from.as_slice()[e]);
+        o.push(32);
+        bytes.push_u32(o, m.edge_to.as_slice()[e]);
+        let k = m.edge_kind.as_slice()[e];
+        bytes.push_str(o, if k == model.EDGE_CALL then " call\n" else if k == model.EDGE_INDIRECT then " indirect\n" else " spawn\n");
+    }
+    for f in 0..m.fns() {
+        let ns = m.fn_nodes.row(f);
+        if ns.len() == 0 { continue; }
+        bytes.push_str(o, "nodes @");
+        push_inst(o, m.fn_inst.row(f));
+        for i in 0..ns.len() {
+            o.push(32);
+            bytes.push_u32(o, ns[i]);
+        }
+        o.push(10);
+    }
+}
+
+fn func(m: &model.Module, g: &grammar.Grammar, f: usize, o: &mut vec.Vec<u8>) {
+    bytes.push_str(o, "fn @");
+    push_inst(o, m.fn_inst.row(f));
+    o.push(32);
+    bytes.push_path(o, m.fn_path.row(f));
+    let ta = m.fn_targ.row(f);
+    if ta.len() > 0 {
+        o.push(60);
+        let mut k: usize = 0;
+        while k + 1 < ta.len() {
+            if k > 0 { o.push(44); }
+            if ta[k] == model.GARG_TYPE {
+                o.push(116);
+                bytes.push_u32(o, ta[k + 1]);
+            } else {
+                let w = ta[k + 1] as usize;
+                bytes.push_i128(o, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
+            }
+            k = k + 2;
+        }
+        o.push(62);
+    }
+    o.push(40);
+    let ps = m.fn_params.row(f);
+    for i in 0..ps.len() {
+        if i > 0 { bytes.push_str(o, ", "); }
+        o.push(116);
+        bytes.push_u32(o, ps[i]);
+    }
+    o.push(41);
+    let ret = m.fn_ret.as_slice()[f];
+    if ret != NONE {
+        bytes.push_str(o, " -> t");
+        bytes.push_u32(o, ret);
+    }
+    let feat = m.fn_feat.as_slice()[f];
+    if features.maximal(feat) != 0 {
+        bytes.push_str(o, " needs(");
+        push_features(o, feat, ", ");
+        o.push(41);
+    }
+    let flags = m.fn_flags.as_slice()[f];
+    if flags & model.F_SYMBOL != 0 {
+        bytes.push_str(o, " symbol ");
+        bytes.quote(o, m.fn_sym.row(f));
+    }
+    if flags & model.F_VARIADIC != 0 { bytes.push_str(o, " variadic"); }
+    if flags & model.F_KNOWN != 0 { bytes.push_str(o, " known"); }
+    if flags & model.F_ALTSTACK != 0 { bytes.push_str(o, " altstack"); }
+    if flags & model.F_UNBUILT != 0 { bytes.push_str(o, " unbuilt"); }
+    let site = m.fn_site.as_slice()[f];
+    if site != NONE {
+        bytes.push_str(o, " site ");
+        bytes.push_u32(o, site);
+    }
+    if flags & model.F_BODY == 0 {
+        o.push(10);
+        return;
+    }
+    bytes.push_str(o, " {\n");
+    let blo = m.fn_blk_lo.as_slice()[f] as usize;
+    let vlo = m.fn_val_lo.as_slice()[f] as usize;
+    let clo = m.fn_const_lo.as_slice()[f] as usize;
+    for bi in 0..m.fn_blk_n.as_slice()[f] as usize {
+        let b = blo + bi;
+        o.push(98);
+        bytes.push_u32(o, bi as% u32);
+        o.push(40);
+        let pv = m.blk_val_lo.as_slice()[b];
+        for j in 0..m.blk_param_n.as_slice()[b] {
+            if j > 0 { bytes.push_str(o, ", "); }
+            o.push(37);
+            bytes.push_u32(o, pv + j);
+            bytes.push_str(o, ": t");
+            bytes.push_u32(o, m.val_ty.as_slice()[vlo + (pv + j) as usize]);
+        }
+        bytes.push_str(o, "):\n");
+        let il = m.blk_ins_lo.as_slice()[b] as usize;
+        for i in il..il + m.blk_ins_n.as_slice()[b] as usize {
+            bytes.push_str(o, "  ");
+            let r = m.ins_res.as_slice()[i];
+            if r != NONE {
+                o.push(37);
+                bytes.push_u32(o, r);
+                bytes.push_str(o, " = ");
+            }
+            let op = m.ins_op.as_slice()[i];
+            if op == ir_text_terminals.IR_T_INTR {
+                bytes.push_str(o, "intrinsic.");
+                o.extend_from_slice(m.intr.row(m.ins_intr.as_slice()[i] as usize));
+            } else {
+                o.extend_from_slice(g.spell(op as u32));
+            }
+            let ty = m.ins_ty.as_slice()[i];
+            if ty == NONE {
+                bytes.push_str(o, " ()");
+            } else {
+                bytes.push_str(o, " t");
+                bytes.push_u32(o, ty);
+            }
+            let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+            for k in ol..ol + m.ins_opnd_n.as_slice()[i] as usize {
+                o.push(32);
+                operand(m, clo, k, o);
+            }
+            let s = m.ins_site.as_slice()[i];
+            if s != NONE {
+                bytes.push_str(o, " !");
+                bytes.push_u32(o, s);
+            }
+            o.push(10);
+        }
+        bytes.push_str(o, "  ");
+        term(m, clo, b, o);
+        o.push(10);
+    }
+    bytes.push_str(o, "}\n");
+}
+
+fn operand(m: &model.Module, clo: usize, k: usize, o: &mut vec.Vec<u8>) {
+    let kind = m.opnd_kind.as_slice()[k];
+    let id = m.opnd_id.as_slice()[k];
+    if kind == model.O_VALUE {
+        o.push(37);
+        bytes.push_u32(o, id);
+    } else if kind == model.O_CONST {
+        let c = clo + id as usize;
+        let ck = m.const_kind.as_slice()[c];
+        let bits = m.const_bits.as_slice()[c];
+        if ck == model.C_INT {
+            let w = bits as usize;
+            bytes.push_i128(o, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
+        } else {
+            if ck == model.C_BF16 { bytes.push_str(o, "bf16 "); }
+            bytes.push_str(o, "0x");
+            bytes.push_hex(o, bits, if ck == model.C_F32 then 8usize else if ck == model.C_F64 then 16usize else 4usize);
+        }
+    } else if kind == model.O_STR {
+        o.push(115);
+        bytes.push_u32(o, id);
+    } else if kind == model.O_FUNC {
+        o.push(64);
+        push_inst(o, m.fn_inst.row(id as usize));
+    } else {
+        o.push(116);
+        bytes.push_u32(o, id);
+    }
+}
+
+fn target(m: &model.Module, clo: usize, t: usize, o: &mut vec.Vec<u8>) {
+    o.push(98);
+    bytes.push_u32(o, m.tgt_blk.as_slice()[t]);
+    o.push(40);
+    let ol = m.tgt_opnd_lo.as_slice()[t] as usize;
+    let n = m.tgt_opnd_n.as_slice()[t] as usize;
+    for k in ol..ol + n {
+        if k > ol { bytes.push_str(o, ", "); }
+        operand(m, clo, k, o);
+    }
+    o.push(41);
+}
+
+fn term(m: &model.Module, clo: usize, b: usize, o: &mut vec.Vec<u8>) {
+    let kind = m.blk_tkind.as_slice()[b];
+    let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+    let tn = m.blk_tgt_n.as_slice()[b] as usize;
+    let top = m.blk_topnd.as_slice()[b];
+    if kind == model.TM_BR {
+        bytes.push_str(o, "br ");
+        target(m, clo, tl, o);
+    } else if kind == model.TM_CBR {
+        bytes.push_str(o, "cbr ");
+        operand(m, clo, top as usize, o);
+        o.push(32);
+        target(m, clo, tl, o);
+        o.push(32);
+        target(m, clo, tl + 1, o);
+    } else if kind == model.TM_SWITCH {
+        bytes.push_str(o, "switch ");
+        operand(m, clo, top as usize, o);
+        for t in tl..tl + tn - 1 {
+            o.push(32);
+            let w = m.tgt_case.as_slice()[t] as usize;
+            bytes.push_i128(o, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
+            o.push(58);
+            target(m, clo, t, o);
+        }
+        bytes.push_str(o, " _:");
+        target(m, clo, tl + tn - 1, o);
+    } else if kind == model.TM_RET {
+        bytes.push_str(o, "ret");
+        if top != NONE {
+            o.push(32);
+            operand(m, clo, top as usize, o);
+        }
+    } else {
+        bytes.push_str(o, "unreachable");
+    }
+}
+
+fn row_term(o: &mut vec.Vec<u8>, k: u8, i: u32) {
+    if k == model.RT_ZERO {
+        bytes.push_str(o, "zero");
+    } else if k == model.RT_PARAM {
+        bytes.push_str(o, "p ");
+        bytes.push_u32(o, i);
+    } else if k == model.RT_LENPARAM {
+        bytes.push_str(o, "lenp ");
+        bytes.push_u32(o, i);
+    } else if k == model.RT_RESULT {
+        bytes.push_str(o, "result");
+    } else {
+        bytes.push_str(o, "lenresult");
+    }
+}
+
+// The `claim` lines of fn f: the `pre` rows, then the `post` rows, each in the summary's order.
+fn claims(m: &model.Module, f: usize, o: &mut vec.Vec<u8>) {
+    let lo = m.fn_claim_lo.as_slice()[f] as usize;
+    let n = m.fn_claim_n.as_slice()[f] as usize;
+    for pass in 0..2usize {
+        for c in lo..lo + n {
+            let k = m.claim_kind.as_slice()[c];
+            if (k == model.CL_POST) != (pass == 1) { continue; }
+            bytes.push_str(o, "claim @");
+            push_inst(o, m.fn_inst.row(f));
+            bytes.push_str(o, if k == model.CL_PRE then " pre " else if k == model.CL_PRE_CHECKED then " pre checked " else " post ");
+            row_term(o, m.claim_a.as_slice()[c], m.claim_ai.as_slice()[c]);
+            bytes.push_str(o, " <= ");
+            row_term(o, m.claim_b.as_slice()[c], m.claim_bi.as_slice()[c]);
+            o.push(32);
+            let w = m.claim_w.as_slice()[c] as usize;
+            bytes.push_i128(o, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
+            o.push(10);
+        }
+    }
+}

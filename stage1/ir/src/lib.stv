@@ -1,0 +1,17 @@
+// ir: the type table and the checked IR of stage1 (contracts/checked-ir.md). It imports no part of
+// the front end, so the back end and the prover use it alone.
+//
+// Modules:
+//   types      the type table: one `TypeKey` row per type (the front end's and the IR's)
+//   features   the target feature table
+//   model      the module as flat columns
+//   bytes      numbers, quoting, paths, target names in text
+//   grammar    the generated IR text tables (`generated.ir_text_*`)
+//   lexer      the lexer of one line
+//   drive      the LL(1) driver of one line, with the syntax messages
+//   stage      step 1: each line into staged rows
+//   read       step 2 and the module build; `read.read` runs steps 1 and 2
+//   print      the printer
+//   known      the compiler-known items (`generated.known_items`)
+//   errs       the faults of an input and their rendering
+//   umap       a u64 -> u32 map for per-fn numbering

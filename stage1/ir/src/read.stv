@@ -1,0 +1,1186 @@
+// The IR text reader (contracts/checked-ir.md "Loading"): step 1 lexes, drives the LL(1) table
+// over, and stages each line on its own; step 2 is one sequential structure pass over the staged
+// lines (sections and their order, dense and ascending ids, fn bodies), then the checks of ids
+// against their sections, equal type keys, shapes, and fn instance ids, and the build of the
+// module: fns ranked by instance id, blocks and values numbered in text order, each body's
+// constant pool by first use, the intrinsic table sorted by bytes. Step 3 is `verify`. A failing
+// step stops before the next; at most `errs.MAX` faults.
+//
+// Untrusted input: every loop is bounded by the input, no recursion, every index is checked
+// against its section before use.
+import bytes;
+import drive;
+import errs;
+import grammar;
+import known;
+import lexer;
+import model;
+import stage;
+import types;
+import umap;
+import generated.ir_text_terminals;
+import prims.col;
+import prims.ragged;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+// Body states of a fn during the structure pass.
+const BS_BODILESS: u8 = 0;
+const BS_FIRST: u8 = 1;
+const BS_IN_BLOCK: u8 = 2;
+const BS_AFTER_TERM: u8 = 3;
+const BS_CLOSED: u8 = 4;
+
+// The loaded module, its faults, and the lines verifier faults are reported at.
+pub struct Loaded {
+    pub m: model.Module,
+    pub errs: errs.Errs,
+    pub hdr_line: u32,
+    pub ty_line: vec.Vec<u32>,
+    pub st_line: vec.Vec<u32>,
+    pub da_line: vec.Vec<u32>,
+    pub fn_line: vec.Vec<u32>,
+    pub blk_line: vec.Vec<u32>,
+    pub blk_tline: vec.Vec<u32>,
+    pub ins_line: vec.Vec<u32>,
+}
+
+impl Loaded {
+    pub fn ok(&self) -> bool {
+        return self.errs.len() == 0;
+    }
+}
+
+// The section rank of a line kind and its name in messages.
+fn section(k: u8) -> (u8, &str) {
+    if k == stage.LK_HEADER { return (0u8, "`stave.ir` header"); }
+    if k == stage.LK_DECL { return (1u8, "`decl`"); }
+    if k == stage.LK_TYPE { return (2u8, "`type`"); }
+    if k == stage.LK_SHAPE { return (3u8, "`shape`"); }
+    if k == stage.LK_STR { return (4u8, "`str`"); }
+    if k == stage.LK_SITE { return (5u8, "`site`"); }
+    if k == stage.LK_STATIC { return (6u8, "`static`"); }
+    if k == stage.LK_DATA { return (6u8, "`data`"); }
+    if k == stage.LK_REF { return (6u8, "`ref`"); }
+    if k == stage.LK_MAIN { return (7u8, "`main`"); }
+    if k == stage.LK_CELL { return (8u8, "`cell`"); }
+    if k == stage.LK_RUNSTACK { return (9u8, "`runstack`"); }
+    if k == stage.LK_TRUNCATED { return (10u8, "`truncated`"); }
+    if k == stage.LK_NODE { return (11u8, "`node`"); }
+    if k == stage.LK_EDGE { return (12u8, "`edge`"); }
+    if k == stage.LK_NODES { return (13u8, "`nodes`"); }
+    if k == stage.LK_FN { return (14u8, "`fn`"); }
+    if k == stage.LK_CLAIM { return (14u8, "`claim`"); }
+    if k == stage.LK_BLOCK { return (14u8, "block header"); }
+    if k == stage.LK_INST { return (14u8, "instruction"); }
+    if k == stage.LK_TERM { return (14u8, "terminator"); }
+    return (14u8, "`}`");
+}
+
+// The `@<inst>` text of iref row r.
+fn push_inst(buf: &mut vec.Vec<u8>, parts: &[u32]) {
+    for i in 0..parts.len() {
+        if i > 0 { buf.push(46); }
+        if i > 0 && parts[i] == model.UNCHECKED_ENTRY {
+            buf.push(117);
+        } else {
+            bytes.push_u32(buf, parts[i]);
+        }
+    }
+}
+
+// Instance id order: part by part, a prefix first.
+pub fn cmp_inst(a: &[u32], b: &[u32]) -> i32 {
+    let n = if a.len() < b.len() then a.len() else b.len();
+    for i in 0..n {
+        if a[i] != b[i] { return if a[i] < b[i] then -1 else 1; }
+    }
+    if a.len() == b.len() { return 0; }
+    return if a.len() < b.len() then -1 else 1;
+}
+
+// Reads IR text src: the module and no faults, or the faults of the first failing step.
+pub fn read(src: &[u8]) -> Loaded {
+    let g = grammar.Grammar.new();
+    let mut ld = Loaded.{
+        m: model.Module.new(),
+        errs: errs.Errs.new(),
+        hdr_line: 1,
+        ty_line: vec.Vec::<u32>.new(),
+        st_line: vec.Vec::<u32>.new(),
+        da_line: vec.Vec::<u32>.new(),
+        fn_line: vec.Vec::<u32>.new(),
+        blk_line: vec.Vec::<u32>.new(),
+        blk_tline: vec.Vec::<u32>.new(),
+        ins_line: vec.Vec::<u32>.new(),
+    };
+    let mut st = stage.Stage.new();
+    let mut lx = lexer.Lexed.new();
+    let mut d = drive.Driver.new();
+    let mut lo: usize = 0;
+    let mut no: u32 = 0;
+    let n = src.len();
+    while lo <= n {
+        let mut hi = lo;
+        while hi < n && src[hi] != 10 {
+            hi = hi + 1;
+        }
+        no = no +| 1;
+        let line = &src[lo..hi];
+        lo = hi + 1;
+        if !lexer.lex(&g, line, &mut lx) {
+            ld.errs.add(errs.K_SYNTAX, no, lx.err_at as% u32 + 1, lx.err.as_slice());
+            if ld.errs.full() { break; }
+            continue;
+        }
+        if lx.len() == 0 { continue; }
+        if !d.drive(&g, line, &lx) {
+            ld.errs.add(errs.K_SYNTAX, no, d.col, d.msg.as_slice());
+            if ld.errs.full() { break; }
+            continue;
+        }
+        if !st.line(&g, &mut ld.m, line, &lx, no) {
+            ld.errs.add(errs.K_SYNTAX, no, st.col, st.msg.as_slice());
+            if ld.errs.full() { break; }
+        }
+    }
+    if ld.errs.len() > 0 { return ld; }
+    structure(&mut ld, &st);
+    return ld;
+}
+
+// Per staged fn row during the structure pass.
+struct FnG {
+    state: vec.Vec<u8>,
+    line: vec.Vec<u32>,
+    col: vec.Vec<u32>,
+    blk_lo: vec.Vec<u32>,
+    blk_n: vec.Vec<u32>,
+    cl_lo: vec.Vec<u32>,
+    cl_n: vec.Vec<u32>,
+    has_post: vec.Vec<bool>,
+}
+
+// Per staged block row.
+struct BlkG {
+    line: vec.Vec<u32>,
+    col: vec.Vec<u32>,
+    ins_lo: vec.Vec<u32>,
+    ins_n: vec.Vec<u32>,
+    term: vec.Vec<u32>,
+    tline: vec.Vec<u32>,
+}
+
+fn msg_inst(e: &mut vec.Vec<u8>, st: &stage.Stage, r: u32) {
+    push_inst(e, st.iref.row(r as usize));
+}
+
+fn structure(ld: &mut Loaded, st: &stage.Stage) {
+    let mut e = vec.Vec::<u8>.new();
+    let nl = st.ln_kind.len();
+    let mut fg = FnG.{ state: vec.Vec::<u8>.new(), line: vec.Vec::<u32>.new(), col: vec.Vec::<u32>.new(), blk_lo: vec.Vec::<u32>.new(), blk_n: vec.Vec::<u32>.new(), cl_lo: vec.Vec::<u32>.new(), cl_n: vec.Vec::<u32>.new(), has_post: vec.Vec::<bool>.new() };
+    let mut bg = BlkG.{ line: col.filled(st.bk_label.len(), 0u32), col: col.filled(st.bk_label.len(), 0u32), ins_lo: col.filled(st.bk_label.len(), 0u32), ins_n: col.filled(st.bk_label.len(), 0u32), term: col.filled(st.bk_label.len(), NONE), tline: col.filled(st.bk_label.len(), 0u32) };
+    let mut ins_line = col.filled(st.in_op.len(), 0u32);
+    let mut cl_line = col.filled(st.cl_inst.len(), 0u32);
+    let mut cl_lcol = col.filled(st.cl_inst.len(), 0u32);
+    let mut dc_line = col.filled(st.dc_id.len(), 0u32);
+    let mut dc_col = col.filled(st.dc_id.len(), 0u32);
+    let mut ty_col = col.filled(st.ty_id.len(), 0u32);
+    let mut sh_line = col.filled(st.sh_id.len(), 0u32);
+    let mut sh_col = col.filled(st.sh_id.len(), 0u32);
+    let mut st_data_lo = vec.Vec::<u32>.new();
+    let mut st_data_n = vec.Vec::<u32>.new();
+    let mut st_ref_lo = vec.Vec::<u32>.new();
+    let mut st_ref_n = vec.Vec::<u32>.new();
+    let mut da_line = col.filled(st.da_idx.len(), 0u32);
+    let mut header = NONE;
+    let mut main = NONE;
+    let mut main_line: u32 = 0;
+    let mut cell = NONE;
+    let mut runstack = NONE;
+    let mut truncated = false;
+    let mut stack_lines = false;
+    let mut nodes_line = col.filled(st.ns_inst.len(), 0u32);
+    let mut cur_rank: u8 = 0;
+    let mut cur_name = "`stave.ir` header";
+    let mut ntypes: u32 = 0;
+    let mut nstrs: u32 = 0;
+    let mut nsites: u32 = 0;
+    let mut nnodes: u32 = 0;
+    if nl == 0 { ld.errs.add_str(errs.K_STRUCTURE, 1, 1, "the file is empty: it begins with the `stave.ir` header line"); }
+    for k in 0..nl {
+        let kind = st.ln_kind.as_slice()[k];
+        let no = st.ln_no.as_slice()[k];
+        let c = st.ln_col.as_slice()[k];
+        let row = st.ln_row.as_slice()[k] as usize;
+        let (rank, name) = section(kind);
+        if k == 0 && rank != 0 { ld.errs.add_str(errs.K_STRUCTURE, no, c, "the file begins with the `stave.ir` header line"); }
+        if rank < cur_rank {
+            e.clear();
+            bytes.push_str(&mut e, name);
+            bytes.push_str(&mut e, " line out of section order: ");
+            bytes.push_str(&mut e, name);
+            bytes.push_str(&mut e, " lines come before ");
+            bytes.push_str(&mut e, cur_name);
+            bytes.push_str(&mut e, " lines");
+            ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            continue;
+        }
+        cur_rank = rank;
+        cur_name = name;
+        let nf = fg.state.len();
+        if kind == stage.LK_FN && nf > 0 {
+            let s = fg.state.as_slice()[nf - 1];
+            if s == BS_FIRST || s == BS_IN_BLOCK || s == BS_AFTER_TERM {
+                e.clear();
+                bytes.push_str(&mut e, "`fn` line inside the body of fn @");
+                msg_inst(&mut e, st, st.fn_inst.as_slice()[nf - 1]);
+                bytes.push_str(&mut e, ": the body is not closed by `}`");
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+        }
+        if kind == stage.LK_HEADER {
+            if header != NONE {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "duplicate `stave.ir` header line");
+            } else {
+                header = row as% u32;
+                ld.hdr_line = no;
+            }
+        } else if kind == stage.LK_DECL {
+            let id = st.dc_id.as_slice()[row];
+            if row > 0 && st.dc_id.as_slice()[row - 1] >= id {
+                e.clear();
+                bytes.push_str(&mut e, "decl d");
+                bytes.push_u32(&mut e, id);
+                bytes.push_str(&mut e, " out of order: decl lines ascend by id, without repeats (after d");
+                bytes.push_u32(&mut e, st.dc_id.as_slice()[row - 1]);
+                e.push(41);
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+            dc_line.as_mut_slice()[row] = no;
+            dc_col.as_mut_slice()[row] = c;
+        } else if kind == stage.LK_TYPE {
+            let id = st.ty_id.as_slice()[row];
+            if id != ntypes {
+                e.clear();
+                bytes.push_str(&mut e, "type t");
+                bytes.push_u32(&mut e, id);
+                bytes.push_str(&mut e, " out of order: type lines are t0, t1, ... (expected t");
+                bytes.push_u32(&mut e, ntypes);
+                e.push(41);
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+            ntypes = ntypes + 1;
+            ld.ty_line.push(no);
+            ty_col.as_mut_slice()[row] = c;
+        } else if kind == stage.LK_SHAPE {
+            let id = st.sh_id.as_slice()[row];
+            if row > 0 && st.sh_id.as_slice()[row - 1] >= id {
+                e.clear();
+                bytes.push_str(&mut e, "shape of t");
+                bytes.push_u32(&mut e, id);
+                bytes.push_str(&mut e, " out of order: shape lines ascend by type, without repeats");
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+            sh_line.as_mut_slice()[row] = no;
+            sh_col.as_mut_slice()[row] = c;
+        } else if kind == stage.LK_STR {
+            let id = st.sr_id.as_slice()[row];
+            if id != nstrs {
+                e.clear();
+                bytes.push_str(&mut e, "str s");
+                bytes.push_u32(&mut e, id);
+                bytes.push_str(&mut e, " out of order: str lines are s0, s1, ... (expected s");
+                bytes.push_u32(&mut e, nstrs);
+                e.push(41);
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+            nstrs = nstrs + 1;
+        } else if kind == stage.LK_SITE {
+            let r = st.si_row.as_slice()[row];
+            if r != nsites {
+                e.clear();
+                bytes.push_str(&mut e, "site ");
+                bytes.push_u32(&mut e, r);
+                bytes.push_str(&mut e, " out of order: site rows are 0, 1, ... (expected ");
+                bytes.push_u32(&mut e, nsites);
+                e.push(41);
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+            nsites = nsites + 1;
+        } else if kind == stage.LK_STATIC {
+            let idx = st.st_idx.as_slice()[row];
+            let have = st_data_lo.len() as% u32;
+            if idx != have {
+                e.clear();
+                bytes.push_str(&mut e, "static ");
+                bytes.push_u32(&mut e, idx);
+                bytes.push_str(&mut e, " out of order: statics are 0, 1, ... (expected ");
+                bytes.push_u32(&mut e, have);
+                e.push(41);
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+            ld.st_line.push(no);
+            st_data_lo.push(0);
+            st_data_n.push(0);
+            st_ref_lo.push(0);
+            st_ref_n.push(0);
+        } else if kind == stage.LK_DATA {
+            let idx = st.da_idx.as_slice()[row];
+            let ns = st_data_lo.len();
+            if ns > 0 && idx as usize + 1 == ns {
+                let s = ns - 1;
+                let dn = st_data_n.as_slice()[s];
+                if st_ref_n.as_slice()[s] > 0 {
+                    e.clear();
+                    bytes.push_str(&mut e, "`data` line of static ");
+                    bytes.push_u32(&mut e, idx);
+                    bytes.push_str(&mut e, " after its `ref` lines");
+                    ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+                } else if dn > 0 && st.da_off.as_slice()[row - 1] / 64 >= st.da_off.as_slice()[row] / 64 {
+                    e.clear();
+                    bytes.push_str(&mut e, "`data` lines of static ");
+                    bytes.push_u32(&mut e, idx);
+                    bytes.push_str(&mut e, " ascend by offset, one per 64-byte block");
+                    ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+                }
+                if dn == 0 { st_data_lo.as_mut_slice()[s] = row as% u32; }
+                st_data_n.as_mut_slice()[s] = dn + 1;
+                da_line.as_mut_slice()[row] = no;
+            } else {
+                e.clear();
+                bytes.push_str(&mut e, "`data` line of static ");
+                bytes.push_u32(&mut e, idx);
+                bytes.push_str(&mut e, " outside the lines of static ");
+                bytes.push_u32(&mut e, idx);
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+        } else if kind == stage.LK_REF {
+            let idx = st.rf_idx.as_slice()[row];
+            let ns = st_ref_lo.len();
+            if ns > 0 && idx as usize + 1 == ns {
+                let s = ns - 1;
+                let rn = st_ref_n.as_slice()[s];
+                if rn > 0 && st.rf_off.as_slice()[row - 1] >= st.rf_off.as_slice()[row] {
+                    e.clear();
+                    bytes.push_str(&mut e, "`ref` lines of static ");
+                    bytes.push_u32(&mut e, idx);
+                    bytes.push_str(&mut e, " ascend by offset, without repeats");
+                    ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+                }
+                if rn == 0 { st_ref_lo.as_mut_slice()[s] = row as% u32; }
+                st_ref_n.as_mut_slice()[s] = rn + 1;
+            } else {
+                e.clear();
+                bytes.push_str(&mut e, "`ref` line of static ");
+                bytes.push_u32(&mut e, idx);
+                bytes.push_str(&mut e, " outside the lines of static ");
+                bytes.push_u32(&mut e, idx);
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+        } else if kind == stage.LK_MAIN {
+            if main != NONE { ld.errs.add_str(errs.K_STRUCTURE, no, c, "duplicate `main` line"); }
+            main = row as% u32;
+            main_line = no;
+        } else if kind == stage.LK_CELL {
+            if cell != NONE { ld.errs.add_str(errs.K_STRUCTURE, no, c, "duplicate `cell` line"); }
+            cell = st.ce_decl.as_slice()[row];
+        } else if kind == stage.LK_RUNSTACK {
+            stack_lines = true;
+            if runstack != NONE { ld.errs.add_str(errs.K_STRUCTURE, no, c, "duplicate `runstack` line"); }
+            runstack = row as% u32;
+        } else if kind == stage.LK_TRUNCATED {
+            stack_lines = true;
+            if truncated { ld.errs.add_str(errs.K_STRUCTURE, no, c, "duplicate `truncated` line"); }
+            truncated = true;
+        } else if kind == stage.LK_NODE {
+            stack_lines = true;
+            let nn = st.nd_n.as_slice()[row];
+            if nn != nnodes {
+                e.clear();
+                bytes.push_str(&mut e, "node ");
+                bytes.push_u32(&mut e, nn);
+                bytes.push_str(&mut e, " out of order: node lines are 0, 1, ... (expected ");
+                bytes.push_u32(&mut e, nnodes);
+                e.push(41);
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            }
+            nnodes = nnodes + 1;
+        } else if kind == stage.LK_EDGE {
+            stack_lines = true;
+            if row > 0 {
+                let pf = st.ed_from.as_slice()[row - 1];
+                let pt = st.ed_to.as_slice()[row - 1];
+                let f = st.ed_from.as_slice()[row];
+                let t = st.ed_to.as_slice()[row];
+                if pf > f || (pf == f && pt >= t) { ld.errs.add_str(errs.K_STRUCTURE, no, c, "`edge` lines ascend by (from, to), without repeats"); }
+            }
+        } else if kind == stage.LK_NODES {
+            stack_lines = true;
+            nodes_line.as_mut_slice()[row] = no;
+            if row > 0 && cmp_inst(st.iref.row(st.ns_inst.as_slice()[row - 1] as usize), st.iref.row(st.ns_inst.as_slice()[row] as usize)) >= 0 { ld.errs.add_str(errs.K_STRUCTURE, no, c, "`nodes` lines ascend by instance id, one per fn"); }
+        } else if kind == stage.LK_FN {
+            fg.state.push(if st.fn_flags.as_slice()[row] & model.F_BODY != 0 then BS_FIRST else BS_BODILESS);
+            fg.line.push(no);
+            fg.col.push(c);
+            fg.blk_lo.push(0);
+            fg.blk_n.push(0);
+            fg.cl_lo.push(0);
+            fg.cl_n.push(0);
+            fg.has_post.push(false);
+        } else if kind == stage.LK_CLAIM {
+            let ci = st.cl_inst.as_slice()[row];
+            if nf == 0 {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "`claim` line before the first fn");
+            } else {
+                let f = nf - 1;
+                let s = fg.state.as_slice()[f];
+                let fi = st.fn_inst.as_slice()[f];
+                if s == BS_CLOSED || s == BS_BODILESS {
+                    if cmp_inst(st.iref.row(fi as usize), st.iref.row(ci as usize)) != 0 {
+                        e.clear();
+                        bytes.push_str(&mut e, "claim of @");
+                        msg_inst(&mut e, st, ci);
+                        bytes.push_str(&mut e, " after fn @");
+                        msg_inst(&mut e, st, fi);
+                        bytes.push_str(&mut e, ": claim lines follow the body of the fn they name");
+                        ld.errs.add(errs.K_STRUCTURE, no, st.cl_col.as_slice()[row], e.as_slice());
+                    } else if s == BS_BODILESS {
+                        e.clear();
+                        bytes.push_str(&mut e, "claim of fn @");
+                        msg_inst(&mut e, st, ci);
+                        bytes.push_str(&mut e, ", which has no body");
+                        ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+                    } else if st.cl_kind.as_slice()[row] != model.CL_POST && fg.has_post.as_slice()[f] {
+                        ld.errs.add_str(errs.K_STRUCTURE, no, c, "a `pre` claim after a `post` claim: the `pre` rows come first");
+                    }
+                    if fg.cl_n.as_slice()[f] == 0 { fg.cl_lo.as_mut_slice()[f] = row as% u32; }
+                    let cnt = fg.cl_n.as_slice()[f] + 1;
+                    fg.cl_n.as_mut_slice()[f] = cnt;
+                    if st.cl_kind.as_slice()[row] == model.CL_POST { fg.has_post.as_mut_slice()[f] = true; }
+                    cl_line.as_mut_slice()[row] = no;
+                    cl_lcol.as_mut_slice()[row] = c;
+                } else {
+                    e.clear();
+                    bytes.push_str(&mut e, "`claim` line inside the body of fn @");
+                    msg_inst(&mut e, st, fi);
+                    ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+                }
+            }
+        } else if kind == stage.LK_BLOCK {
+            let label = st.bk_label.as_slice()[row];
+            let s = if nf > 0 then fg.state.as_slice()[nf - 1] else BS_CLOSED;
+            if nf > 0 && (s == BS_FIRST || s == BS_AFTER_TERM) {
+                let f = nf - 1;
+                if s == BS_FIRST && label != 0 {
+                    e.clear();
+                    bytes.push_str(&mut e, "the body of fn @");
+                    msg_inst(&mut e, st, st.fn_inst.as_slice()[f]);
+                    bytes.push_str(&mut e, " begins with block b0, not b");
+                    bytes.push_u32(&mut e, label);
+                    ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+                }
+                if fg.blk_n.as_slice()[f] == 0 { fg.blk_lo.as_mut_slice()[f] = row as% u32; }
+                let cnt = fg.blk_n.as_slice()[f] + 1;
+                fg.blk_n.as_mut_slice()[f] = cnt;
+                bg.line.as_mut_slice()[row] = no;
+                bg.col.as_mut_slice()[row] = c;
+                fg.state.as_mut_slice()[f] = BS_IN_BLOCK;
+            } else if nf > 0 && s == BS_IN_BLOCK {
+                let f = nf - 1;
+                let lastb = fg.blk_lo.as_slice()[f] + fg.blk_n.as_slice()[f] - 1;
+                e.clear();
+                bytes.push_str(&mut e, "block b");
+                bytes.push_u32(&mut e, label);
+                bytes.push_str(&mut e, " begins before block b");
+                bytes.push_u32(&mut e, st.bk_label.as_slice()[lastb as usize]);
+                bytes.push_str(&mut e, " has its terminator");
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            } else {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "block header outside a fn body");
+            }
+        } else if kind == stage.LK_INST {
+            let s = if nf > 0 then fg.state.as_slice()[nf - 1] else BS_CLOSED;
+            if nf > 0 && s == BS_IN_BLOCK {
+                let f = nf - 1;
+                let b = (fg.blk_lo.as_slice()[f] + fg.blk_n.as_slice()[f] - 1) as usize;
+                if bg.ins_n.as_slice()[b] == 0 { bg.ins_lo.as_mut_slice()[b] = row as% u32; }
+                let cnt = bg.ins_n.as_slice()[b] + 1;
+                bg.ins_n.as_mut_slice()[b] = cnt;
+                ins_line.as_mut_slice()[row] = no;
+            } else if nf > 0 && s == BS_AFTER_TERM {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "instruction after the terminator of its block");
+            } else if nf > 0 && s == BS_FIRST {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "instruction before the first block header");
+            } else {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "instruction outside a fn body");
+            }
+        } else if kind == stage.LK_TERM {
+            let s = if nf > 0 then fg.state.as_slice()[nf - 1] else BS_CLOSED;
+            if nf > 0 && s == BS_IN_BLOCK {
+                let f = nf - 1;
+                let b = (fg.blk_lo.as_slice()[f] + fg.blk_n.as_slice()[f] - 1) as usize;
+                bg.term.as_mut_slice()[b] = row as% u32;
+                bg.tline.as_mut_slice()[b] = no;
+                fg.state.as_mut_slice()[f] = BS_AFTER_TERM;
+            } else if nf > 0 && s == BS_AFTER_TERM {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "a second terminator: a block has one");
+            } else if nf > 0 && s == BS_FIRST {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "terminator before the first block header");
+            } else {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "terminator outside a fn body");
+            }
+        } else {
+            let s = if nf > 0 then fg.state.as_slice()[nf - 1] else BS_CLOSED;
+            if nf > 0 && s == BS_AFTER_TERM {
+                fg.state.as_mut_slice()[nf - 1] = BS_CLOSED;
+            } else if nf > 0 && s == BS_FIRST {
+                e.clear();
+                bytes.push_str(&mut e, "the body of fn @");
+                msg_inst(&mut e, st, st.fn_inst.as_slice()[nf - 1]);
+                bytes.push_str(&mut e, " has no block");
+                ld.errs.add(errs.K_STRUCTURE, no, c, e.as_slice());
+            } else if nf > 0 && s == BS_IN_BLOCK {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "`}` before the terminator of the last block");
+            } else {
+                ld.errs.add_str(errs.K_STRUCTURE, no, c, "`}` outside a fn body");
+            }
+        }
+    }
+    let nfn = fg.state.len();
+    if nfn > 0 {
+        let s = fg.state.as_slice()[nfn - 1];
+        if s == BS_FIRST || s == BS_IN_BLOCK || s == BS_AFTER_TERM {
+            e.clear();
+            bytes.push_str(&mut e, "the body of fn @");
+            msg_inst(&mut e, st, st.fn_inst.as_slice()[nfn - 1]);
+            bytes.push_str(&mut e, " is not closed by `}`");
+            ld.errs.add(errs.K_STRUCTURE, fg.line.as_slice()[nfn - 1], fg.col.as_slice()[nfn - 1], e.as_slice());
+        }
+    }
+    if header == NONE {
+        if ld.errs.len() == 0 { ld.errs.add_str(errs.K_STRUCTURE, 1, 1, "the `stave.ir` header line is missing"); }
+        return;
+    }
+    if ld.errs.len() > 0 { return; }
+
+    // ids that name lines
+    let nstatics = st_data_lo.len() as% u32;
+    let ndecls = st.dc_id.len();
+    let mut named = col.filled(ndecls, false);
+    for r in 0..st.ref_kind.len() {
+        let kind = st.ref_kind.as_slice()[r];
+        let nn = st.ref_n.as_slice()[r];
+        let mut have = true;
+        e.clear();
+        if kind == stage.R_TYPE {
+            have = nn < ntypes;
+            e.push(116);
+            bytes.push_u32(&mut e, nn);
+            bytes.push_str(&mut e, " names no type line");
+        } else if kind == stage.R_STR {
+            have = nn < nstrs;
+            e.push(115);
+            bytes.push_u32(&mut e, nn);
+            bytes.push_str(&mut e, " names no str line");
+        } else if kind == stage.R_SITE {
+            have = nn < nsites;
+            bytes.push_str(&mut e, "site row ");
+            bytes.push_u32(&mut e, nn);
+            bytes.push_str(&mut e, " names no site line");
+        } else if kind == stage.R_STATIC {
+            have = nn < nstatics;
+            bytes.push_str(&mut e, "static ");
+            bytes.push_u32(&mut e, nn);
+            bytes.push_str(&mut e, " names no static line");
+        } else if kind == stage.R_DECL {
+            let at = decl_index(st.dc_id.as_slice(), nn);
+            have = at != NONE;
+            if have { named.as_mut_slice()[at as usize] = true; }
+            e.push(100);
+            bytes.push_u32(&mut e, nn);
+            bytes.push_str(&mut e, " names no decl line");
+        } else {
+            have = nn < nnodes;
+            bytes.push_str(&mut e, "node ");
+            bytes.push_u32(&mut e, nn);
+            bytes.push_str(&mut e, " names no node line");
+        }
+        if !have { ld.errs.add(errs.K_STRUCTURE, st.ref_line.as_slice()[r], st.ref_col.as_slice()[r], e.as_slice()); }
+    }
+    for dd in 0..ndecls {
+        if !named.as_slice()[dd] {
+            e.clear();
+            bytes.push_str(&mut e, "decl d");
+            bytes.push_u32(&mut e, st.dc_id.as_slice()[dd]);
+            bytes.push_str(&mut e, " is named by no `adt` type and no `cell` line");
+            ld.errs.add(errs.K_STRUCTURE, dc_line.as_slice()[dd], dc_col.as_slice()[dd], e.as_slice());
+        }
+    }
+    if ld.errs.len() > 0 { return; }
+
+    // types: no two equal keys
+    let eq = ld.m.types.first_equal();
+    for t in 0..eq.len() {
+        let j = eq.as_slice()[t];
+        if j != NONE {
+            e.clear();
+            bytes.push_str(&mut e, "type t");
+            bytes.push_u32(&mut e, t as% u32);
+            bytes.push_str(&mut e, " has the key of t");
+            bytes.push_u32(&mut e, j);
+            bytes.push_str(&mut e, ": no two type lines have equal keys");
+            ld.errs.add(errs.K_STRUCTURE, ld.ty_line.as_slice()[t], ty_col.as_slice()[t], e.as_slice());
+        }
+    }
+    if ld.errs.len() > 0 { return; }
+
+    // shapes
+    for s in 0..st.sh_id.len() {
+        let id = st.sh_id.as_slice()[s];
+        let skind = st.sh_kind.as_slice()[s];
+        if (id as usize) < ld.m.types.len() && ld.m.types.tag_of(id) == types.TK_ADT {
+            let def = ld.m.types.a_of(id);
+            let at = decl_index(st.dc_id.as_slice(), def);
+            let dk = if at == NONE then 255u8 else st.dc_kind.as_slice()[at as usize];
+            if dk != skind {
+                e.clear();
+                bytes.push_str(&mut e, "shape of t");
+                bytes.push_u32(&mut e, id);
+                bytes.push_str(&mut e, if skind == model.KIND_STRUCT then " is a struct, its decl d" else " is a enum, its decl d");
+                bytes.push_u32(&mut e, def);
+                bytes.push_str(&mut e, if dk == model.KIND_STRUCT then " a struct" else if dk == model.KIND_ENUM then " a enum" else " a ?");
+                ld.errs.add(errs.K_STRUCTURE, sh_line.as_slice()[s], sh_col.as_slice()[s], e.as_slice());
+            }
+        } else {
+            e.clear();
+            bytes.push_str(&mut e, "shape of t");
+            bytes.push_u32(&mut e, id);
+            bytes.push_str(&mut e, ", which is not an `adt` type");
+            ld.errs.add(errs.K_STRUCTURE, sh_line.as_slice()[s], sh_col.as_slice()[s], e.as_slice());
+        }
+    }
+
+    // fns by instance id
+    let order = sort_insts(st);
+    for w in 1..order.len() {
+        let a = order.as_slice()[w - 1] as usize;
+        let b = order.as_slice()[w] as usize;
+        if cmp_inst(st.iref.row(st.fn_inst.as_slice()[a] as usize), st.iref.row(st.fn_inst.as_slice()[b] as usize)) == 0 {
+            let (first, later) = if fg.line.as_slice()[a] < fg.line.as_slice()[b] then (a, b) else (b, a);
+            e.clear();
+            bytes.push_str(&mut e, "fn @");
+            msg_inst(&mut e, st, st.fn_inst.as_slice()[later]);
+            bytes.push_str(&mut e, " is defined twice (first at line ");
+            bytes.push_u32(&mut e, fg.line.as_slice()[first]);
+            e.push(41);
+            ld.errs.add(errs.K_STRUCTURE, fg.line.as_slice()[later], fg.col.as_slice()[later], e.as_slice());
+        }
+    }
+    if main != NONE {
+        let r = st.mn_inst.as_slice()[main as usize];
+        let f = find_fn(st, order.as_slice(), r);
+        if f == NONE {
+            e.clear();
+            bytes.push_str(&mut e, "`main` names @");
+            msg_inst(&mut e, st, r);
+            bytes.push_str(&mut e, ", which heads no fn");
+            ld.errs.add(errs.K_STRUCTURE, main_line, st.mn_col.as_slice()[main as usize], e.as_slice());
+        }
+        ld.m.main = f;
+    }
+    let mut nodes_of = col.filled(order.len(), NONE);
+    for r in 0..st.ns_inst.len() {
+        let f = find_fn(st, order.as_slice(), st.ns_inst.as_slice()[r]);
+        if f == NONE {
+            e.clear();
+            bytes.push_str(&mut e, "`nodes` names @");
+            msg_inst(&mut e, st, st.ns_inst.as_slice()[r]);
+            bytes.push_str(&mut e, ", which heads no fn");
+            ld.errs.add(errs.K_STRUCTURE, nodes_line.as_slice()[r], st.ns_col.as_slice()[r], e.as_slice());
+        } else {
+            nodes_of.as_mut_slice()[f as usize] = r as% u32;
+        }
+    }
+    intrinsic_table(&mut ld.m, st);
+    let kt = known.Table.new();
+    let mut b = Bodies.{ labels: umap.Map.new(), vals: umap.Map.new(), pool: umap.Map.new(), pool64: umap.Map.new() };
+    for k in 0..order.len() {
+        let i = order.as_slice()[k] as usize;
+        let flags = st.fn_flags.as_slice()[i];
+        let mut kn = NONE;
+        if flags & model.F_KNOWN != 0 {
+            kn = kt.find(st.fn_path.row(i));
+            if kn == NONE {
+                e.clear();
+                bytes.push_str(&mut e, "`known`: `");
+                e.extend_from_slice(st.fn_path.row(i));
+                bytes.push_str(&mut e, "` is the path of no compiler-known item");
+                ld.errs.add(errs.K_STRUCTURE, fg.line.as_slice()[i], st.fn_known_col.as_slice()[i], e.as_slice());
+            }
+        }
+        {
+            let m = &mut ld.m;
+            m.fn_inst.push_row(st.iref.row(st.fn_inst.as_slice()[i] as usize));
+            m.fn_path.push_row(st.fn_path.row(i));
+            m.fn_targ.push_row(st.fn_targ.row(i));
+            m.fn_params.push_row(st.fn_params.row(i));
+            m.fn_ret.push(st.fn_ret.as_slice()[i]);
+            m.fn_feat.push(st.fn_feat.as_slice()[i]);
+            m.fn_sym.push_row(st.fn_sym.row(i));
+            m.fn_flags.push(flags);
+            m.fn_known.push(kn);
+            m.fn_site.push(st.fn_site.as_slice()[i]);
+            m.fn_blk_lo.push(m.blk_tkind.len() as% u32);
+            m.fn_val_lo.push(m.val_ty.len() as% u32);
+            m.fn_const_lo.push(m.const_kind.len() as% u32);
+            m.fn_claim_lo.push(m.claim_kind.len() as% u32);
+            if nodes_of.as_slice()[k] != NONE {
+                m.fn_nodes.push_row(st.ns_nodes.row(nodes_of.as_slice()[k] as usize));
+            } else {
+                m.fn_nodes.end_row();
+            }
+        }
+        ld.fn_line.push(fg.line.as_slice()[i]);
+        if flags & model.F_BODY != 0 {
+            b.body(ld, st, &bg, ins_line.as_slice(), fg.blk_lo.as_slice()[i], fg.blk_n.as_slice()[i], st.fn_inst.as_slice()[i], order.as_slice(), &mut e);
+        }
+        {
+            let m2 = &mut ld.m;
+            let nb = m2.blk_tkind.len() as% u32 - m2.fn_blk_lo.as_slice()[k];
+            m2.fn_blk_n.push(nb);
+            let nv = m2.val_ty.len() as% u32 - m2.fn_val_lo.as_slice()[k];
+            m2.fn_val_n.push(nv);
+            let nc = m2.const_kind.len() as% u32 - m2.fn_const_lo.as_slice()[k];
+            m2.fn_const_n.push(nc);
+        }
+        let cl_lo = fg.cl_lo.as_slice()[i] as usize;
+        let cl_n = fg.cl_n.as_slice()[i] as usize;
+        for cc in cl_lo..cl_lo + cl_n {
+            if ld.m.level == model.LEVEL_LOWERED {
+                ld.errs.add_str(errs.K_STRUCTURE, cl_line.as_slice()[cc], cl_lcol.as_slice()[cc], "no `claim` line at level `lowered`");
+            }
+            ld.m.claim_kind.push(st.cl_kind.as_slice()[cc]);
+            ld.m.claim_a.push(st.cl_a.as_slice()[cc]);
+            ld.m.claim_ai.push(st.cl_ai.as_slice()[cc]);
+            ld.m.claim_b.push(st.cl_b.as_slice()[cc]);
+            ld.m.claim_bi.push(st.cl_bi.as_slice()[cc]);
+            ld.m.claim_w.push(st.cl_w.as_slice()[cc]);
+        }
+        ld.m.fn_claim_n.push(cl_n as% u32);
+    }
+    if ld.errs.len() > 0 { return; }
+
+    // the rest of the module
+    let m = &mut ld.m;
+    let h = header as usize;
+    m.target = st.hd_target.as_slice()[h];
+    m.mode = st.hd_mode.as_slice()[h];
+    m.level = st.hd_level.as_slice()[h];
+    for dd in 0..ndecls {
+        m.decl_id.push(st.dc_id.as_slice()[dd]);
+        m.decl_kind.push(st.dc_kind.as_slice()[dd]);
+        m.decl_path.push_row(st.dc_path.row(dd));
+    }
+    for s in 0..st.sh_id.len() {
+        m.shape_ty.push(st.sh_id.as_slice()[s]);
+        m.shape_kind.push(st.sh_kind.as_slice()[s]);
+        m.shape_vars.push_row(st.sh_vars.row(s));
+    }
+    for v in 0..st.var_fields.rows() {
+        m.var_fields.push_row(st.var_fields.row(v));
+    }
+    for s in 0..st.sr_id.len() {
+        m.strs.push_row(st.sr_bytes.row(s));
+    }
+    for s in 0..st.si_row.len() {
+        m.site_file.push_row(st.si_file.row(s));
+        m.site_line.push(st.si_line.as_slice()[s]);
+        m.site_col.push(st.si_col.as_slice()[s]);
+        m.site_fn.push_row(st.si_fn.row(s));
+    }
+    for s in 0..st.st_idx.len() {
+        m.st_ty.push(st.st_ty.as_slice()[s]);
+        m.st_path.push_row(st.st_path.row(s));
+    }
+    m.st_data_lo = st_data_lo;
+    m.st_data_n = st_data_n;
+    m.st_ref_lo = st_ref_lo;
+    m.st_ref_n = st_ref_n;
+    for r in 0..st.da_idx.len() {
+        m.data_off.push(st.da_off.as_slice()[r]);
+        m.data_bytes.push_row(st.da_bytes.row(r));
+    }
+    for r in 0..st.rf_idx.len() {
+        m.ref_off.push(st.rf_off.as_slice()[r]);
+        m.ref_kind.push(st.rf_kind.as_slice()[r]);
+        m.ref_to.push(st.rf_to.as_slice()[r]);
+        m.ref_add.push(st.rf_add.as_slice()[r]);
+    }
+    m.cell = cell;
+    m.has_stack = stack_lines;
+    if runstack != NONE {
+        m.has_runstack = true;
+        m.runstack = st.rs_val.as_slice()[runstack as usize];
+    }
+    m.truncated = truncated;
+    m.node_rec.extend_from_slice(st.nd_rec.as_slice());
+    m.edge_from.extend_from_slice(st.ed_from.as_slice());
+    m.edge_to.extend_from_slice(st.ed_to.as_slice());
+    m.edge_kind.extend_from_slice(st.ed_kind.as_slice());
+    ld.da_line = da_line;
+}
+
+// The row of decl id d among the ascending ids, or NONE.
+fn decl_index(ids: &[u32], d: u32) -> u32 {
+    let mut lo: usize = 0;
+    let mut hi: usize = ids.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if ids[mid] == d { return mid as% u32; }
+        if ids[mid] < d {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return NONE;
+}
+
+// The staged fn rows ordered by instance id, then by text position: a bottom-up merge sort.
+fn sort_insts(st: &stage.Stage) -> vec.Vec<u32> {
+    let n = st.fn_inst.len();
+    let mut a = col.iota(n);
+    let mut b = col.iota(n);
+    let mut w: usize = 1;
+    while w < n {
+        {
+            let src = a.as_slice();
+            let dst = b.as_mut_slice();
+            let mut lo: usize = 0;
+            while lo < n {
+                let mid = if n - lo < w then n else lo + w;
+                let hi = if n - mid < w then n else mid + w;
+                let mut x = lo;
+                let mut y = mid;
+                let mut k = lo;
+                while k < hi {
+                    let take_y = y < hi && (x >= mid || cmp_inst(st.iref.row(st.fn_inst.as_slice()[src[y] as usize] as usize), st.iref.row(st.fn_inst.as_slice()[src[x] as usize] as usize)) < 0);
+                    if take_y {
+                        dst[k] = src[y];
+                        y = y + 1;
+                    } else {
+                        dst[k] = src[x];
+                        x = x + 1;
+                    }
+                    k = k + 1;
+                }
+                lo = hi;
+            }
+        }
+        mem.swap(&mut a, &mut b);
+        w = w * 2;
+    }
+    return a;
+}
+
+// The FuncId of the fn whose instance id is iref row r, or NONE.
+fn find_fn(st: &stage.Stage, order: &[u32], r: u32) -> u32 {
+    let key = st.iref.row(r as usize);
+    let mut lo: usize = 0;
+    let mut hi: usize = order.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let c = cmp_inst(st.iref.row(st.fn_inst.as_slice()[order[mid] as usize] as usize), key);
+        if c == 0 { return mid as% u32; }
+        if c < 0 {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return NONE;
+}
+
+// The module's intrinsic table: the names the bodies use, each once, sorted by bytes.
+fn intrinsic_table(m: &mut model.Module, st: &stage.Stage) {
+    let mut ids = vec.Vec::<u32>.new();
+    for i in 0..st.in_op.len() {
+        if st.in_op.as_slice()[i] == ir_text_terminals.IR_T_INTR { ids.push(i as% u32); }
+    }
+    let n = ids.len();
+    let mut a = ids;
+    let mut b = col.filled(n, 0u32);
+    let mut w: usize = 1;
+    while w < n {
+        {
+            let src = a.as_slice();
+            let dst = b.as_mut_slice();
+            let mut lo: usize = 0;
+            while lo < n {
+                let mid = if n - lo < w then n else lo + w;
+                let hi = if n - mid < w then n else mid + w;
+                let mut x = lo;
+                let mut y = mid;
+                let mut k = lo;
+                while k < hi {
+                    let take_y = y < hi && (x >= mid || grammar.cmp_bytes(st.in_intr.row(src[y] as usize), st.in_intr.row(src[x] as usize)) < 0);
+                    if take_y {
+                        dst[k] = src[y];
+                        y = y + 1;
+                    } else {
+                        dst[k] = src[x];
+                        x = x + 1;
+                    }
+                    k = k + 1;
+                }
+                lo = hi;
+            }
+        }
+        mem.swap(&mut a, &mut b);
+        w = w * 2;
+    }
+    for k in 0..n {
+        let r = st.in_intr.row(a.as_slice()[k] as usize);
+        let rows = m.intr.rows();
+        if rows > 0 && m.intr.row(rows - 1).eq(r) { continue; }
+        m.intr.push_row(r);
+    }
+}
+
+// The row of intrinsic name x in the module's table, or NONE.
+pub fn intrinsic_id(m: &model.Module, x: &[u8]) -> u32 {
+    let mut lo: usize = 0;
+    let mut hi: usize = m.intr.rows();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let c = grammar.cmp_bytes(m.intr.row(mid), x);
+        if c == 0 { return mid as% u32; }
+        if c < 0 {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return NONE;
+}
+
+// The per-fn maps of the body build.
+struct Bodies {
+    labels: umap.Map,
+    vals: umap.Map,
+    pool: umap.Map,
+    pool64: umap.Map,
+}
+
+impl Bodies {
+    // The body of one fn: blocks staged at blk_lo..blk_lo + blk_n, appended to the module's
+    // columns; faults to ld.errs.
+    fn body(&mut self, ld: &mut Loaded, st: &stage.Stage, bg: &BlkG, ins_line: &[u32], blk_lo: u32, blk_n: u32, inst: u32, order: &[u32], e: &mut vec.Vec<u8>) {
+        let n0 = ld.errs.len();
+        self.labels.reset();
+        self.vals.reset();
+        self.pool.reset();
+        self.pool64.reset();
+        let lo = blk_lo as usize;
+        let hi = lo + blk_n as usize;
+        for b in lo..hi {
+            let label = st.bk_label.as_slice()[b];
+            let k = (b - lo) as% u32;
+            if self.labels.insert(label as u64, k) != k {
+                e.clear();
+                bytes.push_str(e, "block b");
+                bytes.push_u32(e, label);
+                bytes.push_str(e, " is defined twice in fn @");
+                msg_inst(e, st, inst);
+                ld.errs.add(errs.K_STRUCTURE, bg.line.as_slice()[b], bg.col.as_slice()[b], e.as_slice());
+            }
+        }
+        let val_lo = ld.m.val_ty.len();
+        for b in lo..hi {
+            let plo = st.bk_p_lo.as_slice()[b] as usize;
+            let pn = st.bk_p_n.as_slice()[b] as usize;
+            for p in plo..plo + pn {
+                self.define(ld, st, st.bp_val.as_slice()[p], bg.line.as_slice()[b], st.bp_col.as_slice()[p], st.bp_ty.as_slice()[p], val_lo, inst, e);
+            }
+            let ilo = bg.ins_lo.as_slice()[b] as usize;
+            let inn = bg.ins_n.as_slice()[b] as usize;
+            for i in ilo..ilo + inn {
+                let r = st.in_res.as_slice()[i];
+                if r != NONE { self.define(ld, st, r, ins_line[i], st.in_res_col.as_slice()[i], st.in_ty.as_slice()[i], val_lo, inst, e); }
+            }
+        }
+        let mut next_val: u32 = 0;
+        for b in lo..hi {
+            let pn = st.bk_p_n.as_slice()[b];
+            ld.blk_line.push(bg.line.as_slice()[b]);
+            ld.m.blk_val_lo.push(next_val);
+            ld.m.blk_param_n.push(pn);
+            next_val = next_val + pn;
+            ld.m.blk_ins_lo.push(ld.m.ins_op.len() as% u32);
+            let ilo = bg.ins_lo.as_slice()[b] as usize;
+            let inn = bg.ins_n.as_slice()[b] as usize;
+            for i in ilo..ilo + inn {
+                let line = ins_line[i];
+                let op = st.in_op.as_slice()[i];
+                let mut intr = NONE;
+                if op == ir_text_terminals.IR_T_INTR { intr = intrinsic_id(&ld.m, st.in_intr.row(i)); }
+                let r = st.in_res.as_slice()[i];
+                let res = if r == NONE then NONE else self.vals.get(r as u64);
+                if r != NONE { next_val = next_val + 1; }
+                let olo = ld.m.opnd_kind.len() as% u32;
+                let so = st.in_o_lo.as_slice()[i] as usize;
+                let sn = st.in_o_n.as_slice()[i] as usize;
+                for o in so..so + sn {
+                    self.operand(ld, st, o, line, inst, order, e);
+                }
+                ld.m.ins_op.push(op);
+                ld.m.ins_intr.push(intr);
+                ld.m.ins_ty.push(st.in_ty.as_slice()[i]);
+                ld.m.ins_res.push(res);
+                ld.m.ins_opnd_lo.push(olo);
+                ld.m.ins_opnd_n.push(sn as% u32);
+                ld.m.ins_site.push(st.in_site.as_slice()[i]);
+                ld.ins_line.push(line);
+            }
+            ld.m.blk_ins_n.push(inn as% u32);
+            let t = bg.term.as_slice()[b];
+            let tline = bg.tline.as_slice()[b];
+            ld.blk_tline.push(tline);
+            if t == NONE {
+                ld.m.blk_tkind.push(model.TM_UNREACHABLE);
+                ld.m.blk_topnd.push(NONE);
+                ld.m.blk_tgt_lo.push(ld.m.tgt_blk.len() as% u32);
+                ld.m.blk_tgt_n.push(0);
+                continue;
+            }
+            let ti = t as usize;
+            let so = st.tm_o.as_slice()[ti];
+            let mut topnd = NONE;
+            if so != NONE {
+                topnd = ld.m.opnd_kind.len() as% u32;
+                self.operand(ld, st, so as usize, tline, inst, order, e);
+            }
+            let tglo = ld.m.tgt_blk.len() as% u32;
+            let gl = st.tm_t_lo.as_slice()[ti] as usize;
+            let gn = st.tm_t_n.as_slice()[ti] as usize;
+            for gi in gl..gl + gn {
+                let label = st.tg_label.as_slice()[gi];
+                let blk = self.labels.get(label as u64);
+                if blk == NONE {
+                    e.clear();
+                    e.push(98);
+                    bytes.push_u32(e, label);
+                    bytes.push_str(e, " is not a block of fn @");
+                    msg_inst(e, st, inst);
+                    ld.errs.add(errs.K_STRUCTURE, tline, st.tg_col.as_slice()[gi], e.as_slice());
+                }
+                let olo = ld.m.opnd_kind.len() as% u32;
+                let oo = st.tg_o_lo.as_slice()[gi] as usize;
+                let on = st.tg_o_n.as_slice()[gi] as usize;
+                for o in oo..oo + on {
+                    self.operand(ld, st, o, tline, inst, order, e);
+                }
+                ld.m.tgt_blk.push(blk);
+                ld.m.tgt_opnd_lo.push(olo);
+                ld.m.tgt_opnd_n.push(on as% u32);
+                ld.m.tgt_case.push(st.tg_case.as_slice()[gi]);
+            }
+            ld.m.blk_tkind.push(st.tm_kind.as_slice()[ti]);
+            ld.m.blk_topnd.push(topnd);
+            ld.m.blk_tgt_lo.push(tglo);
+            ld.m.blk_tgt_n.push(ld.m.tgt_blk.len() as% u32 - tglo);
+        }
+        if ld.errs.len() != n0 { return; }
+        // every block is reachable from b0
+        let fb = ld.m.blk_tkind.len() - (hi - lo);
+        let nb = hi - lo;
+        let mut seen = col.filled(nb, false);
+        let mut stack = vec.Vec::<u32>.new();
+        if nb > 0 {
+            seen.as_mut_slice()[0] = true;
+            stack.push(0);
+        }
+        while stack.len() > 0 {
+            let x = stack.as_slice()[stack.len() - 1] as usize;
+            stack.truncate(stack.len() - 1);
+            let tl = ld.m.blk_tgt_lo.as_slice()[fb + x] as usize;
+            let tn = ld.m.blk_tgt_n.as_slice()[fb + x] as usize;
+            for g in tl..tl + tn {
+                let y = ld.m.tgt_blk.as_slice()[g] as usize;
+                if y < nb && !seen.as_slice()[y] {
+                    seen.as_mut_slice()[y] = true;
+                    stack.push(y as% u32);
+                }
+            }
+        }
+        for x in 0..nb {
+            if !seen.as_slice()[x] {
+                e.clear();
+                bytes.push_str(e, "block b");
+                bytes.push_u32(e, st.bk_label.as_slice()[lo + x]);
+                bytes.push_str(e, " of fn @");
+                msg_inst(e, st, inst);
+                bytes.push_str(e, " is unreachable from b0");
+                ld.errs.add(errs.K_STRUCTURE, bg.line.as_slice()[lo + x], bg.col.as_slice()[lo + x], e.as_slice());
+            }
+        }
+    }
+
+    fn define(&mut self, ld: &mut Loaded, st: &stage.Stage, v: u32, line: u32, c: u32, ty: u32, val_lo: usize, inst: u32, e: &mut vec.Vec<u8>) {
+        let id = (ld.m.val_ty.len() - val_lo) as% u32;
+        if self.vals.insert(v as u64, id) != id {
+            e.clear();
+            bytes.push_str(e, "value %");
+            bytes.push_u32(e, v);
+            bytes.push_str(e, " is defined twice in fn @");
+            msg_inst(e, st, inst);
+            ld.errs.add(errs.K_STRUCTURE, line, c, e.as_slice());
+        }
+        ld.m.val_ty.push(ty);
+    }
+
+    // Staged operand o, resolved, appended to the module's operands.
+    fn operand(&mut self, ld: &mut Loaded, st: &stage.Stage, o: usize, line: u32, inst: u32, order: &[u32], e: &mut vec.Vec<u8>) {
+        let kind = st.op_kind.as_slice()[o];
+        let a = st.op_a.as_slice()[o];
+        let mut id = a;
+        if kind == model.O_VALUE {
+            id = self.vals.get(a as u64);
+            if id == NONE {
+                e.clear();
+                e.push(37);
+                bytes.push_u32(e, a);
+                bytes.push_str(e, " is not a value of fn @");
+                msg_inst(e, st, inst);
+                ld.errs.add(errs.K_STRUCTURE, line, st.op_col.as_slice()[o], e.as_slice());
+            }
+        } else if kind == model.O_CONST {
+            let bits = st.op_b.as_slice()[o];
+            let ck = a as% u8;
+            let next = ld.m.const_kind.len() as% u32 - ld.m.fn_const_lo.as_slice()[ld.m.fn_const_lo.len() - 1];
+            if ck == model.C_F64 {
+                id = self.pool64.insert(bits, next);
+            } else {
+                id = self.pool.insert(((a as u64) << 32) | bits, next);
+            }
+            if id == next {
+                ld.m.const_kind.push(ck);
+                ld.m.const_bits.push(bits);
+            }
+        } else if kind == model.O_FUNC {
+            id = find_fn(st, order, a);
+            if id == NONE {
+                e.clear();
+                e.push(64);
+                msg_inst(e, st, a);
+                bytes.push_str(e, " heads no fn");
+                ld.errs.add(errs.K_STRUCTURE, line, st.op_col.as_slice()[o], e.as_slice());
+            }
+        }
+        ld.m.opnd_kind.push(kind);
+        ld.m.opnd_id.push(id);
+    }
+}

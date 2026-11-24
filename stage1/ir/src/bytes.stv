@@ -1,0 +1,208 @@
+// Byte text of the IR: decimal and hex numbers, i128 values, quoted strings (the `strings` dump
+// escape rule, stage-gates.md), paths, and the target names of the header.
+import std.mem;
+import std.vec;
+
+// The canonical target names (`x86_64-linux` is written `x86_64-linux-v2`), by row.
+pub const TARGETS: &str = "x86_64-linux-v2 x86_64-linux-v3 x86_64-linux-v4 aarch64-linux aarch64-linux+sve aarch64-linux+sve2 gpu-sm86";
+pub const N_TARGETS: u32 = 7;
+
+const NONE: u32 = 4294967295;
+
+pub fn push_str(buf: &mut vec.Vec<u8>, s: &str) {
+    buf.extend_from_slice(mem.str_bytes(s));
+}
+
+pub fn push_u32(buf: &mut vec.Vec<u8>, n: u32) {
+    push_u64(buf, n as u64);
+}
+
+pub fn push_u64(buf: &mut vec.Vec<u8>, n: u64) {
+    let mut tmp = [0u8; 20];
+    let mut i: usize = 20;
+    let mut v = n;
+    loop {
+        i = i - 1;
+        tmp[i] = 48 + ((v % 10) as% u8);
+        v = v / 10;
+        if v == 0 { break; }
+    }
+    buf.extend_from_slice(&tmp[i..20]);
+}
+
+fn hex_digit(d: u64) -> u8 {
+    return if d < 10 then 48 + (d as% u8) else 87 + (d as% u8);
+}
+
+// The low `digits` hex digits of v, lowercase.
+pub fn push_hex(buf: &mut vec.Vec<u8>, v: u64, digits: usize) {
+    let mut k = digits;
+    while k > 0 {
+        k = k - 1;
+        buf.push(hex_digit((v >> ((k * 4) as u64)) & 15));
+    }
+}
+
+// The decimal text of the i128 whose two's-complement words are (hi, lo).
+pub fn push_i128(buf: &mut vec.Vec<u8>, hi: u64, lo: u64) {
+    let mut h = hi;
+    let mut l = lo;
+    if (hi >> 63) == 1 {
+        buf.push(45);
+        h = ~hi;
+        l = ~lo;
+        l = l +% 1;
+        if l == 0 { h = h +% 1; }
+    }
+    let mut limb = [(h >> 32) as% u32, h as% u32, (l >> 32) as% u32, l as% u32];
+    let mut tmp = [0u8; 40];
+    let mut n: usize = 40;
+    loop {
+        let mut rem: u64 = 0;
+        let mut zero = true;
+        for k in 0..4usize {
+            let cur = (rem << 32) | (limb[k] as u64);
+            limb[k] = (cur / 10) as% u32;
+            rem = cur % 10;
+            if limb[k] != 0 { zero = false; }
+        }
+        n = n - 1;
+        tmp[n] = 48 + (rem as% u8);
+        if zero { break; }
+    }
+    buf.extend_from_slice(&tmp[n..40]);
+}
+
+// A string between double quotes: bytes 0x20..0x7E as themselves except `\` and `"`, `\n` and
+// `\t`, `\xHH` (lowercase) for every other byte.
+pub fn quote(buf: &mut vec.Vec<u8>, b: &[u8]) {
+    buf.push(34);
+    for i in 0..b.len() {
+        let c = b[i];
+        if c == 92 {
+            buf.push(92);
+            buf.push(92);
+        } else if c == 34 {
+            buf.push(92);
+            buf.push(34);
+        } else if c == 10 {
+            buf.push(92);
+            buf.push(110);
+        } else if c == 9 {
+            buf.push(92);
+            buf.push(116);
+        } else if c >= 32 && c <= 126 {
+            buf.push(c);
+        } else {
+            buf.push(92);
+            buf.push(120);
+            push_hex(buf, c as u64, 2);
+        }
+    }
+    buf.push(34);
+}
+
+pub fn is_alpha(c: u8) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+pub fn is_digit(c: u8) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+pub fn is_lower_hex(c: u8) -> bool {
+    return is_digit(c) || (c >= 97 && c <= 102);
+}
+
+// A byte that continues a word, a number, a value, a fn reference, or a float constant.
+pub fn is_word_byte(c: u8) -> bool {
+    return is_alpha(c) || is_digit(c) || c == 95 || c == 46;
+}
+
+// The `Word` shape `[A-Za-z_][A-Za-z0-9_.]*`.
+pub fn is_word(b: &[u8]) -> bool {
+    if b.len() == 0 { return false; }
+    if !is_alpha(b[0]) && b[0] != 95 { return false; }
+    for i in 1..b.len() {
+        if !is_word_byte(b[i]) { return false; }
+    }
+    return true;
+}
+
+// A path: bare when it has the Word shape, else quoted.
+pub fn push_path(buf: &mut vec.Vec<u8>, p: &[u8]) {
+    if is_word(p) {
+        buf.extend_from_slice(p);
+    } else {
+        quote(buf, p);
+    }
+}
+
+// Token bytes for a message: printable bytes as themselves, others as `\xHH`.
+pub fn push_show(buf: &mut vec.Vec<u8>, b: &[u8]) {
+    for i in 0..b.len() {
+        let c = b[i];
+        if c >= 32 && c <= 126 {
+            buf.push(c);
+        } else {
+            buf.push(92);
+            buf.push(120);
+            push_hex(buf, c as u64, 2);
+        }
+    }
+}
+
+// The row of target name b in `TARGETS`, or NONE.
+pub fn target_row(b: &[u8]) -> u32 {
+    let w = mem.str_bytes(TARGETS);
+    let mut at: usize = 0;
+    let mut seen: u32 = 0;
+    for i in 0..w.len() + 1 {
+        if i == w.len() || w[i] == 32 {
+            if w[at..i].eq(b) { return seen; }
+            seen = seen + 1;
+            at = i + 1;
+        }
+    }
+    return NONE;
+}
+
+// Whether b is valid UTF-8 (the rules of `std::str::from_utf8`).
+pub fn utf8_ok(b: &[u8]) -> bool {
+    let n = b.len();
+    let mut i: usize = 0;
+    while i < n {
+        let c = b[i];
+        if c < 128 {
+            i = i + 1;
+            continue;
+        }
+        let w: usize = if c >= 194 && c <= 223 then 2 else if c >= 224 && c <= 239 then 3 else if c >= 240 && c <= 244 then 4 else 0;
+        if w == 0 || i + w > n { return false; }
+        let c1 = b[i + 1];
+        let ok1 = if w == 2 then c1 >= 128 && c1 <= 191 else if c == 224 then c1 >= 160 && c1 <= 191 else if c == 237 then c1 >= 128 && c1 <= 159 else if c == 240 then c1 >= 144 && c1 <= 191 else if c == 244 then c1 >= 128 && c1 <= 143 else c1 >= 128 && c1 <= 191;
+        if !ok1 { return false; }
+        for k in 2..w {
+            if b[i + k] < 128 || b[i + k] > 191 { return false; }
+        }
+        i = i + w;
+    }
+    return true;
+}
+
+// Appends target row t's name.
+pub fn push_target(buf: &mut vec.Vec<u8>, t: u32) {
+    let w = mem.str_bytes(TARGETS);
+    let mut at: usize = 0;
+    let mut seen: u32 = 0;
+    for i in 0..w.len() + 1 {
+        if i == w.len() || w[i] == 32 {
+            if seen == t {
+                buf.extend_from_slice(&w[at..i]);
+                return;
+            }
+            seen = seen + 1;
+            at = i + 1;
+        }
+    }
+}
