@@ -1,0 +1,83 @@
+// Prefix sums against the definition (each entry summed from scratch).
+import scan;
+import test_util;
+import word;
+import std.debug;
+import std.vec;
+
+fn sum_to<T: word.Word + Copy>(xs: &[T], end: usize) -> T {
+    let mut acc = T.zero();
+    for i in 0..end {
+        acc = acc.plus(xs[i]);
+    }
+    return acc;
+}
+
+fn check<T: word.Word + Copy>(xs: &[T], what: &str) {
+    let ex = scan.exclusive(xs);
+    let inc = scan.inclusive(xs);
+    let off = scan.offsets(xs);
+    debug.assert(ex.len() == xs.len() && inc.len() == xs.len(), what);
+    debug.assert(off.len() == xs.len() + 1, what);
+    for i in 0..xs.len() {
+        debug.assert(ex.as_slice()[i].same(sum_to(xs, i)), what);
+        debug.assert(inc.as_slice()[i].same(sum_to(xs, i + 1)), what);
+        debug.assert(off.as_slice()[i].same(sum_to(xs, i)), what);
+    }
+    debug.assert(off.as_slice()[xs.len()].same(sum_to(xs, xs.len())), what);
+    let mut a = vec.Vec::<T>.new();
+    a.extend_from_slice(xs);
+    let total = scan.exclusive_in_place(a.as_mut_slice());
+    debug.assert(total.same(sum_to(xs, xs.len())), what);
+    debug.assert(a.len() == ex.len(), what);
+    for i in 0..a.len() {
+        debug.assert(a.as_slice()[i].same(ex.as_slice()[i]), what);
+    }
+    let mut b = vec.Vec::<T>.new();
+    b.extend_from_slice(xs);
+    let total2 = scan.inclusive_in_place(b.as_mut_slice());
+    debug.assert(total2.same(total), what);
+}
+
+test fn known_values() {
+    let xs = [3u32, 1, 4, 1, 5, 9, 2, 6];
+    debug.assert(scan.exclusive(&xs).as_slice().eq(&[0u32, 3, 4, 8, 9, 14, 23, 25]), "exclusive");
+    debug.assert(scan.inclusive(&xs).as_slice().eq(&[3u32, 4, 8, 9, 14, 23, 25, 31]), "inclusive");
+    debug.assert(scan.offsets(&xs).as_slice().eq(&[0u32, 3, 4, 8, 9, 14, 23, 25, 31]), "offsets");
+}
+
+test fn empty_and_single() {
+    let e = [0u32; 0];
+    debug.assert(scan.exclusive(&e).len() == 0, "exclusive of empty");
+    debug.assert(scan.inclusive(&e).len() == 0, "inclusive of empty");
+    debug.assert(scan.offsets(&e).as_slice().eq(&[0u32]), "offsets of empty is [0]");
+    let mut z = [0u32; 0];
+    debug.assert(scan.exclusive_in_place(&mut z) == 0, "total of empty");
+    let one = [9u64];
+    debug.assert(scan.exclusive(&one).as_slice().eq(&[0u64]), "exclusive of one");
+    debug.assert(scan.inclusive(&one).as_slice().eq(&[9u64]), "inclusive of one");
+}
+
+test fn random_columns() {
+    let mut r = test_util.Rng.new(2024);
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        let a = test_util.keys_u32(&mut r, n, 1000);
+        check(a.as_slice(), "u32");
+        let b = test_util.keys_u64(&mut r, n, 1000, 40);
+        check(b.as_slice(), "u64 above 2^32");
+        let mut c = vec.Vec::<u8>.new();
+        for _ in 0..n {
+            c.push(r.below(2) as% u8);
+        }
+        check(c.as_slice(), "u8");
+    }
+}
+
+test fn total_at_the_limit() {
+    // the sum may reach the type's maximum
+    let xs = [4294967290u32, 5, 0];
+    debug.assert(scan.inclusive(&xs).as_slice().eq(&[4294967290u32, 4294967295, 4294967295]), "u32 max total");
+    let ys = [255u8, 0];
+    debug.assert(scan.offsets(&ys).as_slice().eq(&[0u8, 255, 255]), "u8 max total");
+}
