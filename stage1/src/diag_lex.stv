@@ -1,0 +1,84 @@
+// The diagnostics of the lexer and of reading source files, as rows of `diag.Diags`: the lexer's
+// error rows (code, span) with the template holes rebuilt from the source bytes, and E1003 for a
+// file that could not be read.
+import diag;
+import lex;
+import source;
+import text;
+import std.debug;
+import std.mem;
+import std.vec;
+
+// The literal kind that E0003 and E0015 name, from the literal's first byte.
+fn literal_kind(first: u8) -> &str {
+    return if first == 34 then "string" else if first == 102 then "f-string" else "char";
+}
+
+fn is_blank(c: u8) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
+// E0024: the lifetime `[s, t)`. After a `&` (the last non-blank byte before it) the lifetime and
+// the blanks after it can be cut: role `cut`.
+fn lifetime(d: &mut diag.Diags, f: u32, src: &[u8], s: usize, t: usize) {
+    let mut k = s;
+    while k > 0 && is_blank(src[k - 1]) { k = k - 1; }
+    let after_ref = k > 0 && src[k - 1] == 38;
+    let mut cut = t;
+    while cut < src.len() && (src[cut] == 32 || src[cut] == 9) { cut = cut + 1; }
+    let case = if after_ref then "ref" else "";
+    d.begin(24, case);
+    d.arg("text", &src[s..t]);
+    if after_ref { d.role("cut", f, s as% u32, (cut - s) as% u32); }
+    d.end(f, s as% u32, (t - s) as% u32);
+}
+
+fn one(d: &mut diag.Diags, f: u32, src: &[u8], code: u16, s: usize, t: usize) {
+    let (a, n) = (s as% u32, (t - s) as% u32);
+    if code == lex.E_INVALID_UTF8 || code == lex.E_BOM || code == lex.E_BAD_CHAR || code == lex.E_BLOCK_COMMENT || code == lex.E_TOO_LARGE {
+        d.begin(code, "");
+        if code == lex.E_TOO_LARGE {
+            let mut size = vec.Vec::<u8>.new();
+            text.push_u64(&mut size, src.len() as u64);
+            d.arg("size", size.as_slice());
+        }
+        d.end(f, a, n);
+    } else if code == lex.E_EOF_IN_LITERAL || code == lex.E_NEWLINE_IN_LITERAL {
+        d.begin(code, "");
+        let what = literal_kind(src[s]);
+        d.arg("what", mem.str_bytes(what));
+        d.end(f, a, n);
+    } else if code == lex.E_BAD_HOLE {
+        let (text_end, _) = lex.hole_end(src, s);
+        d.begin(code, "");
+        d.arg("hole", &src[(s + 1)..text_end]);
+        d.end(f, a, n);
+    } else if code == lex.E_LIFETIME {
+        lifetime(d, f, src, s, t);
+    } else {
+        debug.assert(false, "a lexical error code with no diagnostic");
+    }
+}
+
+// The rows of every lexical error of `toks`, file by file.
+pub fn lexical(d: &mut diag.Diags, toks: &lex.Tokens, set: &source.SourceSet) {
+    let fe = toks.file_err.as_slice();
+    for f in 0..toks.files() {
+        let src = set.file(f);
+        for e in (fe[f] as usize)..(fe[f + 1] as usize) {
+            one(d, f as% u32, src, toks.err_code.as_slice()[e], toks.err_start.as_slice()[e] as usize, toks.err_end.as_slice()[e] as usize);
+        }
+    }
+}
+
+// E1003 for every file of `set` that could not be read, at its offset 0.
+pub fn unreadable(d: &mut diag.Diags, set: &source.SourceSet) {
+    for f in 0..set.files() {
+        let r = set.read_err.as_slice()[f];
+        if r == source.READ_OK { continue; }
+        let why = if r == source.READ_NOT_FOUND then "not found" else if r == source.READ_DENIED then "permission denied" else if r == source.READ_IS_DIR then "is a directory" else "read error";
+        d.begin(1003, "");
+        d.arg("reason", mem.str_bytes(why));
+        d.end(f as% u32, 0, 0);
+    }
+}

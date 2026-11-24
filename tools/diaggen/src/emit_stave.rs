@@ -1,5 +1,5 @@
 //! Emits `stage1/src/generated/diag_templates.stv`: the same table as stage0's, as Stave v0.4
-//! top-level `const` items (parallel arrays plus `_FIRST` range tables).
+//! top-level `pub const` items (parallel arrays plus `_FIRST` range tables).
 
 use std::fmt::Write;
 
@@ -79,7 +79,7 @@ fn commented(o: &mut String, lines: &[(String, String)]) {
 
 /// One `const` array: elements one per line, each with a trailing comment.
 fn array(o: &mut String, name: &str, elem: &str, items: &[(String, String)]) {
-    let _ = writeln!(o, "\nconst {name}: [{elem}; {}] = [", items.len());
+    let _ = writeln!(o, "\npub const {name}: [{elem}; {}] = [", items.len());
     let lines: Vec<(String, String)> =
         items.iter().map(|(value, comment)| (format!("    {value},"), comment.clone())).collect();
     commented(o, &lines);
@@ -91,7 +91,7 @@ fn strings(o: &mut String, name: &str, items: &[(String, String)]) {
     let total: usize = items.iter().map(|(v, _)| v.len()).sum();
     let mut offs = Vec::with_capacity(items.len() + 1);
     let mut at = 0usize;
-    let _ = writeln!(o, "\nconst {name}: [u8; {total}] = [");
+    let _ = writeln!(o, "\npub const {name}: [u8; {total}] = [");
     for (j, (value, tag)) in items.iter().enumerate() {
         offs.push((at.to_string(), tag.clone()));
         if tag.is_empty() {
@@ -179,12 +179,12 @@ pub fn emit(reg: &Registry) -> String {
     let mut o = String::new();
     o.push_str(HEADER);
     o.push_str(LAYOUT);
-    let _ = writeln!(o, "\nconst DIAG_COUNT: usize = {n};");
-    let _ = writeln!(o, "const HOLE_COUNT: usize = {};", hole_name.len());
-    let _ = writeln!(o, "const CHOICE_COUNT: usize = {};", choice_text.len());
-    let _ = writeln!(o, "const SHAPE_COUNT: usize = {};", shape_case.len());
-    let _ = writeln!(o, "const LABEL_COUNT: usize = {};", label_at.len());
-    let _ = writeln!(o, "const EDIT_COUNT: usize = {};", edit_at.len());
+    let _ = writeln!(o, "\npub const DIAG_COUNT: usize = {n};");
+    let _ = writeln!(o, "pub const HOLE_COUNT: usize = {};", hole_name.len());
+    let _ = writeln!(o, "pub const CHOICE_COUNT: usize = {};", choice_text.len());
+    let _ = writeln!(o, "pub const SHAPE_COUNT: usize = {};", shape_case.len());
+    let _ = writeln!(o, "pub const LABEL_COUNT: usize = {};", label_at.len());
+    let _ = writeln!(o, "pub const EDIT_COUNT: usize = {};", edit_at.len());
     strings(&mut o, "DIAG_CODE", &code_text);
     array(&mut o, "DIAG_NUMBER", "u16", &code_num);
     array(&mut o, "DIAG_SEVERITY", "u8", &severity);

@@ -1,0 +1,365 @@
+// Diagnostics as bytes, stage0's output (crates/stave-diag emit_human.rs, emit_json.rs):
+//
+//   src/a.stv:3:5: error[E0018]: unexpected character          (no `path:line:col: ` when the
+//     src/a.stv:3:5: starts no token                              code has no location)
+//     fix: remove it: ...
+//     edit src/a.stv:3:5 (1 byte): ""
+//
+// and one JSON object per line (contracts/diagnostics.schema.json). Line and column count bytes
+// from 1; lines end at `\n` only.
+import diag;
+import diag_reg;
+import files;
+import paths;
+import prims.col;
+import prims.search;
+import prims.select;
+import source;
+import text;
+import std.idx;
+import std.mem;
+import std.vec;
+
+// Per file: the rank of (package name, display path), and the display path.
+pub struct FileTable {
+    pub rank: vec.Vec<u32>,
+    pub path: diag_reg.Strs,
+}
+
+// `root_dir` is the directory of the root package (the parent of a root `.stv` file). The key
+// of a file is its package name, a 0 byte, its display path: package names hold no 0 byte, so the
+// key order is the order of the pair.
+pub fn file_table(fl: &files.FileList, root_dir: &str) -> FileTable {
+    let n = fl.abs_path.len();
+    let mut path = diag_reg.Strs.new();
+    let mut keys = diag_reg.Strs.new();
+    let mut key = vec.Vec::<u8>.new();
+    for f in 0..n {
+        let d = paths.display(root_dir, fl.abs_path.get_ref(f).as_str());
+        path.push(d.as_bytes());
+        key.clear();
+        key.extend_from_slice(fl.package.get_ref(f).as_bytes());
+        key.push(0);
+        key.extend_from_slice(d.as_bytes());
+        keys.push(key.as_slice());
+    }
+    return FileTable.{ rank: diag.ranks(&keys), path: path };
+}
+
+// The newline offsets of the files that diagnostics point into.
+struct Lines {
+    first: vec.Vec<u32>,
+    nl: vec.Vec<u32>,
+}
+
+impl Lines {
+    fn build(d: &diag.Diags, set: &source.SourceSet) -> Lines {
+        let n = set.files();
+        let mut need = col.filled(n, false);
+        for i in 0..d.len() {
+            let f = d.file.as_slice()[i];
+            if f != idx.NONE { need.as_mut_slice()[f as usize] = true; }
+        }
+        for r in 0..d.rel_file.len() {
+            need.as_mut_slice()[d.rel_file.as_slice()[r] as usize] = true;
+        }
+        let mut l = Lines.{ first: vec.Vec::<u32>.new(), nl: vec.Vec::<u32>.new() };
+        for f in 0..n {
+            l.first.push(l.nl.len() as% u32);
+            if !need.as_slice()[f] { continue; }
+            let src = set.file(f);
+            let mut flags = vec.Vec::<bool>.with_capacity(src.len());
+            for k in 0..src.len() { flags.push(src[k] == 10); }
+            let at = select.indices(flags.as_slice());
+            l.nl.extend_from_slice(at.as_slice());
+        }
+        l.first.push(l.nl.len() as% u32);
+        return l;
+    }
+
+    // The 1-based (line, column) of a byte offset of file f.
+    fn line_col(&self, f: usize, off: u32) -> (u32, u32) {
+        let lo = self.first.as_slice()[f] as usize;
+        let hi = self.first.as_slice()[f + 1] as usize;
+        let nl = &self.nl.as_slice()[lo..hi];
+        let c = search.lower_bound(nl, off);
+        let col = if c == 0 then off + 1 else (off - nl[c - 1]);
+        return ((c as% u32) + 1, col);
+    }
+}
+
+fn push_str(out: &mut vec.Vec<u8>, s: &str) {
+    out.extend_from_slice(mem.str_bytes(s));
+}
+
+// A JSON string literal: `"` `\` and the controls `\n` `\r` `\t` escaped, other bytes below 0x20
+// and DEL as `\u00xx`, everything else as is.
+fn push_json_string(out: &mut vec.Vec<u8>, s: &[u8]) {
+    let hex = "0123456789abcdef";
+    out.push(34);
+    for i in 0..s.len() {
+        let c = s[i];
+        if c == 34 {
+            push_str(out, "\\\"");
+        } else if c == 92 {
+            push_str(out, "\\\\");
+        } else if c == 10 {
+            push_str(out, "\\n");
+        } else if c == 13 {
+            push_str(out, "\\r");
+        } else if c == 9 {
+            push_str(out, "\\t");
+        } else if c < 32 || c == 127 {
+            push_str(out, "\\u00");
+            out.push(mem.str_bytes(hex)[(c / 16) as usize]);
+            out.push(mem.str_bytes(hex)[(c % 16) as usize]);
+        } else {
+            out.push(c);
+        }
+    }
+    out.push(34);
+}
+
+// The texts and spans of one diagnostic, expanded from its shape.
+struct Parts {
+    msg: vec.Vec<u8>,
+    rel_file: vec.Vec<u32>,
+    rel_start: vec.Vec<u32>,
+    rel_size: vec.Vec<u32>,
+    rel_text: diag_reg.Strs,
+    has_fix: bool,
+    fix_text: vec.Vec<u8>,
+    applicability: u8,
+    ed_file: vec.Vec<u32>,
+    ed_start: vec.Vec<u32>,
+    ed_size: vec.Vec<u32>,
+    ed_text: diag_reg.Strs,
+}
+
+impl Parts {
+    fn new() -> Parts {
+        return Parts.{
+            msg: vec.Vec::<u8>.new(),
+            rel_file: vec.Vec::<u32>.new(),
+            rel_start: vec.Vec::<u32>.new(),
+            rel_size: vec.Vec::<u32>.new(),
+            rel_text: diag_reg.Strs.new(),
+            has_fix: false,
+            fix_text: vec.Vec::<u8>.new(),
+            applicability: 0,
+            ed_file: vec.Vec::<u32>.new(),
+            ed_start: vec.Vec::<u32>.new(),
+            ed_size: vec.Vec::<u32>.new(),
+            ed_text: diag_reg.Strs.new(),
+        };
+    }
+
+    fn clear(&mut self) {
+        self.msg.clear();
+        self.rel_file.clear();
+        self.rel_start.clear();
+        self.rel_size.clear();
+        self.rel_text = diag_reg.Strs.new();
+        self.fix_text.clear();
+        self.ed_file.clear();
+        self.ed_start.clear();
+        self.ed_size.clear();
+        self.ed_text = diag_reg.Strs.new();
+    }
+
+    // Expands diagnostic i. A template at "primary" prints at the primary span; at a role, once
+    // per span supplied for it, in supply order.
+    fn fill(&mut self, d: &diag.Diags, i: usize) {
+        self.clear();
+        let reg = &d.reg;
+        let shape = d.shape.as_slice()[i] as usize;
+        d.message(i, &mut self.msg);
+        let mut buf = vec.Vec::<u8>.new();
+        let lo = reg.label_first.as_slice()[shape] as usize;
+        let hi = reg.label_first.as_slice()[shape + 1] as usize;
+        for k in lo..hi {
+            buf.clear();
+            d.expand(i, reg.label_text.get(k), true, &mut buf);
+            let at = reg.label_at.get(k);
+            let sp = spans_at(d, i, at);
+            for q in 0..sp.len() {
+                let s = *sp.get_ref(q);
+                self.rel_file.push(s.0);
+                self.rel_start.push(s.1);
+                self.rel_size.push(s.2);
+                self.rel_text.push(buf.as_slice());
+            }
+        }
+        self.has_fix = reg.shape_has_fix.as_slice()[shape];
+        if !self.has_fix {
+            self.applicability = diag_reg.APPLICABILITY_PLACEHOLDER;
+            return;
+        }
+        d.expand(i, reg.shape_fix.get(shape), true, &mut self.fix_text);
+        let elo = reg.edit_first.as_slice()[shape] as usize;
+        let ehi = reg.edit_first.as_slice()[shape + 1] as usize;
+        for k in elo..ehi {
+            buf.clear();
+            d.expand(i, reg.edit_replacement.get(k), false, &mut buf);
+            let sp = spans_at(d, i, reg.edit_at.get(k));
+            for q in 0..sp.len() {
+                let s = *sp.get_ref(q);
+                self.ed_file.push(s.0);
+                self.ed_start.push(s.1);
+                self.ed_size.push(s.2);
+                self.ed_text.push(buf.as_slice());
+            }
+        }
+        self.applicability = if self.ed_file.len() == 0 then diag_reg.APPLICABILITY_PLACEHOLDER else reg.shape_applicability.as_slice()[shape];
+    }
+}
+
+// The spans diagnostic i supplies at `at`: the primary span for "primary" (none when the code has
+// no location), else its role spans of that name, in supply order.
+fn spans_at(d: &diag.Diags, i: usize, at: &[u8]) -> vec.Vec<(u32, u32, u32)> {
+    let mut out = vec.Vec::<(u32, u32, u32)>.new();
+    if text.eq_str(at, "primary") {
+        if d.file.as_slice()[i] != idx.NONE {
+            out.push((d.file.as_slice()[i], d.start.as_slice()[i], d.size.as_slice()[i]));
+        }
+        return out;
+    }
+    for r in (d.rel_lo.as_slice()[i] as usize)..(d.rel_hi.as_slice()[i] as usize) {
+        if d.arg_value(d.rel_name.as_slice()[r] as usize).eq(at) {
+            out.push((d.rel_file.as_slice()[r], d.rel_start.as_slice()[r], d.rel_size.as_slice()[r]));
+        }
+    }
+    return out;
+}
+
+fn severity_name(s: u8) -> &str {
+    return if s == 0 then "error" else "warning";
+}
+
+struct Printer {
+    lines: Lines,
+}
+
+impl Printer {
+    // `path:line:col`
+    fn push_loc(&self, out: &mut vec.Vec<u8>, ft: &FileTable, file: u32, start: u32) {
+        let (line, col) = self.lines.line_col(file as usize, start);
+        out.extend_from_slice(ft.path.get(file as usize));
+        out.push(58);
+        text.push_u32(out, line);
+        out.push(58);
+        text.push_u32(out, col);
+    }
+
+    // `{"file":"..","line":L,"col":C,"len":N}`
+    fn push_span(&self, out: &mut vec.Vec<u8>, ft: &FileTable, file: u32, start: u32, size: u32) {
+        let (line, col) = self.lines.line_col(file as usize, start);
+        push_str(out, "{\"file\":");
+        push_json_string(out, ft.path.get(file as usize));
+        push_str(out, ",\"line\":");
+        text.push_u32(out, line);
+        push_str(out, ",\"col\":");
+        text.push_u32(out, col);
+        push_str(out, ",\"len\":");
+        text.push_u32(out, size);
+        out.push(125);
+    }
+
+    fn human(&self, out: &mut vec.Vec<u8>, d: &diag.Diags, ft: &FileTable, i: usize, p: &Parts) {
+        let f = d.file.as_slice()[i];
+        if f != idx.NONE {
+            self.push_loc(out, ft, f, d.start.as_slice()[i]);
+            push_str(out, ": ");
+        }
+        let row = d.reg.row(d.code.as_slice()[i]);
+        push_str(out, severity_name(d.severity(i)));
+        out.push(91);
+        out.extend_from_slice(d.reg.code.get(row));
+        push_str(out, "]: ");
+        out.extend_from_slice(p.msg.as_slice());
+        out.push(10);
+        for k in 0..p.rel_file.len() {
+            push_str(out, "  ");
+            self.push_loc(out, ft, p.rel_file.as_slice()[k], p.rel_start.as_slice()[k]);
+            push_str(out, ": ");
+            out.extend_from_slice(p.rel_text.get(k));
+            out.push(10);
+        }
+        if !p.has_fix { return; }
+        push_str(out, "  fix: ");
+        out.extend_from_slice(p.fix_text.as_slice());
+        out.push(10);
+        for k in 0..p.ed_file.len() {
+            push_str(out, "  edit ");
+            self.push_loc(out, ft, p.ed_file.as_slice()[k], p.ed_start.as_slice()[k]);
+            push_str(out, " (");
+            text.push_u32(out, p.ed_size.as_slice()[k]);
+            let unit = if p.ed_size.as_slice()[k] == 1 then " byte): " else " bytes): ";
+            push_str(out, unit);
+            push_json_string(out, p.ed_text.get(k));
+            out.push(10);
+        }
+    }
+
+    fn json(&self, out: &mut vec.Vec<u8>, d: &diag.Diags, ft: &FileTable, i: usize, p: &Parts) {
+        let row = d.reg.row(d.code.as_slice()[i]);
+        push_str(out, "{\"kind\":\"diagnostic\",\"code\":");
+        push_json_string(out, d.reg.code.get(row));
+        push_str(out, ",\"severity\":");
+        let sev = severity_name(d.severity(i));
+        push_json_string(out, mem.str_bytes(sev));
+        push_str(out, ",\"message\":");
+        push_json_string(out, p.msg.as_slice());
+        let f = d.file.as_slice()[i];
+        if f != idx.NONE {
+            push_str(out, ",\"primary\":");
+            self.push_span(out, ft, f, d.start.as_slice()[i], d.size.as_slice()[i]);
+        }
+        push_str(out, ",\"related\":[");
+        for k in 0..p.rel_file.len() {
+            if k > 0 { out.push(44); }
+            push_str(out, "{\"span\":");
+            self.push_span(out, ft, p.rel_file.as_slice()[k], p.rel_start.as_slice()[k], p.rel_size.as_slice()[k]);
+            push_str(out, ",\"label\":");
+            push_json_string(out, p.rel_text.get(k));
+            out.push(125);
+        }
+        out.push(93);
+        if p.has_fix {
+            push_str(out, ",\"fix\":{\"description\":");
+            push_json_string(out, p.fix_text.as_slice());
+            push_str(out, ",\"applicability\":");
+            let a = p.applicability;
+            let name = if a == 0 then "exact" else if a == 1 then "maybe" else "placeholder";
+            push_json_string(out, mem.str_bytes(name));
+            push_str(out, ",\"edits\":[");
+            for k in 0..p.ed_file.len() {
+                if k > 0 { out.push(44); }
+                push_str(out, "{\"span\":");
+                self.push_span(out, ft, p.ed_file.as_slice()[k], p.ed_start.as_slice()[k], p.ed_size.as_slice()[k]);
+                push_str(out, ",\"replacement\":");
+                push_json_string(out, p.ed_text.get(k));
+                out.push(125);
+            }
+            push_str(out, "]}");
+        }
+        push_str(out, "}\n");
+    }
+}
+
+// The listed rows of d (`d.order`) as human text, or as JSON lines.
+pub fn render(d: &diag.Diags, rows: &[u32], ft: &FileTable, set: &source.SourceSet, json: bool) -> vec.Vec<u8> {
+    let pr = Printer.{ lines: Lines.build(d, set) };
+    let mut out = vec.Vec::<u8>.new();
+    let mut p = Parts.new();
+    for k in 0..rows.len() {
+        let i = rows[k] as usize;
+        p.fill(d, i);
+        if json {
+            pr.json(&mut out, d, ft, i, &p);
+        } else {
+            pr.human(&mut out, d, ft, i, &p);
+        }
+    }
+    return out;
+}

@@ -3,9 +3,19 @@
 // `tokens`: one line `F O KIND` per token, by (F, O); KIND is the terminal's name or spelling,
 // `ERROR` for an error token. `EOF` has no line.
 //
-// `items`: one line `I F O_start O_end ok|dropped` per item, by I.
+// `items`: one line `I F O_start O_end ok|dropped` per item, by I; `ok` is the parser's verdict.
+//
+// `ast`: one line `I N KIND a b` per node of every item not dropped, by (I, N): KIND is the rule
+// name, `a` the node's first token as an index into its file's tokens, `b` its subtree size.
+//
+// `diags`: one JSON line per diagnostic, in canonical order.
+import ast;
+import generated.ll1_table;
+import diag;
+import diag_out;
 import items;
 import lex;
+import source;
 import text;
 import std.mem;
 import std.vec;
@@ -31,13 +41,12 @@ pub fn tokens(lx: &lex.Lexer, t: &lex.Tokens) -> vec.Vec<u8> {
     return buf;
 }
 
-pub fn items_txt(it: &items.Items) -> vec.Vec<u8> {
+pub fn items_txt(it: &items.Items, tree: &ast.Ast) -> vec.Vec<u8> {
     let n = it.len();
     let mut buf = vec.Vec::<u8>.with_capacity(n * 24);
     let file = it.file.as_slice();
     let off_start = it.off_start.as_slice();
     let off_end = it.off_end.as_slice();
-    let ok = it.ok.as_slice();
     for i in 0..n {
         text.push_u32(&mut buf, i as% u32);
         buf.push(32);
@@ -46,7 +55,46 @@ pub fn items_txt(it: &items.Items) -> vec.Vec<u8> {
         text.push_u32(&mut buf, off_start[i]);
         buf.push(32);
         text.push_u32(&mut buf, off_end[i]);
-        buf.extend_from_slice(if ok[i] then mem.str_bytes(" ok\n") else mem.str_bytes(" dropped\n"));
+        buf.extend_from_slice(if tree.ok(i) then mem.str_bytes(" ok\n") else mem.str_bytes(" dropped\n"));
     }
     return buf;
+}
+
+pub fn ast_txt(it: &items.Items, tree: &ast.Ast, t: &lex.Tokens) -> vec.Vec<u8> {
+    let mut name_off = vec.Vec::<u32>.new();
+    name_off.extend_from_slice(&ll1_table.NT_NAME_OFF);
+    let mut names = vec.Vec::<u8>.new();
+    names.extend_from_slice(&ll1_table.NT_NAME);
+    let no = name_off.as_slice();
+    let nm = names.as_slice();
+    let mut buf = vec.Vec::<u8>.with_capacity(tree.nodes() * 24);
+    let file = it.file.as_slice();
+    let ft = t.file_tok.as_slice();
+    let inode = tree.item_node.as_slice();
+    let kind = tree.kind.as_slice();
+    let tok = tree.tok.as_slice();
+    let size = tree.size.as_slice();
+    for i in 0..tree.items() {
+        let lo = inode[i] as usize;
+        let hi = inode[i + 1] as usize;
+        let f0 = ft[file[i] as usize];
+        for g in lo..hi {
+            let k = kind[g] as usize;
+            text.push_u32(&mut buf, i as% u32);
+            buf.push(32);
+            text.push_u32(&mut buf, (g - lo) as% u32);
+            buf.push(32);
+            buf.extend_from_slice(&nm[no[k] as usize..no[k + 1] as usize]);
+            buf.push(32);
+            text.push_u32(&mut buf, tok[g] - f0);
+            buf.push(32);
+            text.push_u32(&mut buf, size[g]);
+            buf.push(10);
+        }
+    }
+    return buf;
+}
+
+pub fn diags(d: &diag.Diags, rows: &[u32], ft: &diag_out.FileTable, set: &source.SourceSet) -> vec.Vec<u8> {
+    return diag_out.render(d, rows, ft, set, true);
 }
