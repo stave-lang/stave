@@ -1,0 +1,60 @@
+// Bracket matching over a depth-coded column.
+//
+// A depth-coded column holds, for each position, the nesting depth after it: depth[i] =
+// depth[i - 1] + step, depth[-1] = 0, step +1 at an opener, -1 at a closer, 0 elsewhere
+// (`depth_of` builds it from the steps; any other step traps `Assert`). Depth may go negative
+// (closers with no opener).
+//
+// Every step is an edge between two depth levels, up or down. The steps across one edge
+// alternate up, down, up, down, ..., so an opener pairs with the next step across its edge,
+// which is a closer, and a closer with the step before it, an opener. That is the stack rule
+// ("a closer matches the latest unmatched opener") and it does not depend on the order the
+// positions are visited in: a parallel version sorts the steps stably by edge and pairs
+// neighbours.
+//
+// Unbalanced input: an opener whose level is never regained after it, a closer with no opener
+// before it, and every position that is no bracket (step 0) have no partner.
+import col;
+import std.debug;
+import std.idx;
+import std.vec;
+
+// The depth-coded column of steps (+1 opener, -1 closer, 0 other).
+pub fn depth_of(steps: &[i8]) -> vec.Vec<i32> {
+    let mut out = vec.Vec::<i32>.with_capacity(steps.len());
+    let mut d: i32 = 0;
+    for i in 0..steps.len() {
+        debug.assert(steps[i] >= -1 && steps[i] <= 1, "depth_of: a step is -1, 0, or 1");
+        d = d + (steps[i] as i32);
+        out.push(d);
+    }
+    return out;
+}
+
+// out[i] is the position of the partner of the bracket at i, `idx.NONE` if it has none. The
+// partner of the partner is the position itself. Steps other than -1, 0, +1 trap `Assert`.
+pub fn mates(depth: &[i32]) -> vec.Vec<u32> {
+    let n = depth.len();
+    let _ = col.ids(n);
+    let mut out = col.filled(n, idx.NONE);
+    let mut open = vec.Vec::<u32>.new();
+    let mut prev: i32 = 0;
+    for i in 0..n {
+        let step = depth[i] - prev;
+        if step == 1 {
+            open.push(i as% u32);
+        } else if step == -1 {
+            match open.pop() {
+                Option.Some(o) => {
+                    out.as_mut_slice()[o as usize] = i as% u32;
+                    out.as_mut_slice()[i] = o;
+                }
+                Option.None => {}
+            }
+        } else {
+            debug.assert(step == 0, "mates: a step is -1, 0, or 1");
+        }
+        prev = depth[i];
+    }
+    return out;
+}

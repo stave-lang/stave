@@ -1,0 +1,82 @@
+// select / indices against the definition: the k-th kept element is the one with k set flags
+// before it.
+import select;
+import test_util;
+import std.debug;
+import std.vec;
+
+fn flags(r: &mut test_util.Rng, n: usize, per_mille: u64) -> vec.Vec<bool> {
+    let mut v = vec.Vec::<bool>.with_capacity(n);
+    for _ in 0..n {
+        v.push(r.below(1000) < per_mille);
+    }
+    return v;
+}
+
+fn check(keep: &[bool], what: &str) {
+    let n = keep.len();
+    let mut xs = vec.Vec::<u32>.new();
+    for i in 0..n {
+        xs.push((i as% u32) * 7 + 1);
+    }
+    let got = select.select(xs.as_slice(), keep);
+    let idx = select.indices(keep);
+    let total = select.count(keep);
+    debug.assert(got.len() == total && idx.len() == total, what);
+    for k in 0..total {
+        // the position with exactly k set flags before it that is itself set
+        let mut seen: usize = 0;
+        let mut at: usize = n;
+        for i in 0..n {
+            if keep[i] {
+                if seen == k { at = i; }
+                seen = seen + 1;
+            }
+        }
+        debug.assert(at < n, what);
+        debug.assert(idx.as_slice()[k] as usize == at, what);
+        debug.assert(got.as_slice()[k] == xs.as_slice()[at], what);
+    }
+}
+
+test fn edge_shapes() {
+    check(&[false; 0], "empty");
+    check(&[true], "one kept");
+    check(&[false], "one dropped");
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        let mut none = vec.Vec::<bool>.new();
+        let mut all = vec.Vec::<bool>.new();
+        let mut alt = vec.Vec::<bool>.new();
+        for i in 0..n {
+            none.push(false);
+            all.push(true);
+            alt.push(i % 2 == 0);
+        }
+        check(none.as_slice(), "none kept");
+        check(all.as_slice(), "all kept");
+        check(alt.as_slice(), "alternating");
+        debug.assert(select.select(all.as_slice(), all.as_slice()).len() == n, "all kept length");
+        debug.assert(select.indices(none.as_slice()).len() == 0, "none kept indices");
+    }
+}
+
+test fn random_flags() {
+    let mut r = test_util.Rng.new(31);
+    let rates = [50u64, 500, 950];
+    for k in 0..test_util.SIZES.len() {
+        for q in 0..rates.len() {
+            let f = flags(&mut r, test_util.SIZES[k], rates[q]);
+            check(f.as_slice(), "random flags");
+        }
+    }
+}
+
+test fn values_keep_their_order_and_type() {
+    let xs = [10u64, 20, 30, 40, 50];
+    let keep = [false, true, true, false, true];
+    debug.assert(select.select(&xs, &keep).as_slice().eq(&[20u64, 30, 50]), "u64 values");
+    let bs = [1u8, 2, 3];
+    let kb = [true, false, true];
+    debug.assert(select.select(&bs, &kb).as_slice().eq(&[1u8, 3]), "u8 values");
+}

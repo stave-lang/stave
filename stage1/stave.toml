@@ -2,3 +2,8 @@
 # `src/`, the generated tables in `src/generated/` included (from contracts/ by the `gen` step).
 name = "stage1"
 kind = "bin"
+
+# The bulk operations of every pass (module map: `prims`); a data-parallel package replaces this
+# one under the same name.
+[dependencies]
+prims = { path = "prims/seq" }

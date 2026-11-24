@@ -1,0 +1,96 @@
+// HashIndex against a linear search of the key column.
+import hindex;
+import test_util;
+import std.debug;
+import std.idx;
+import std.vec;
+
+// The lowest id >= lo holding key, by scanning.
+fn scan_for(keys: &[u64], key: u64, lo: usize) -> u32 {
+    for i in lo..keys.len() {
+        if keys[i] == key { return i as% u32; }
+    }
+    return idx.NONE;
+}
+
+fn check(keys: &[u64], probes: &[u64], what: &str) {
+    let h = hindex.HashIndex.build(keys);
+    debug.assert(h.len() == keys.len(), what);
+    for i in 0..probes.len() {
+        let p = probes[i];
+        debug.assert(h.probe(p) == scan_for(keys, p, 0), what);
+        // the chain of equal keys, in id order
+        let mut at = h.probe(p);
+        while at != idx.NONE {
+            let next = h.probe_after(p, at);
+            debug.assert(next == scan_for(keys, p, (at as usize) + 1), what);
+            at = next;
+        }
+    }
+}
+
+test fn empty() {
+    let none = [0u64; 0];
+    let h = hindex.HashIndex.build(&none);
+    debug.assert(h.len() == 0, "empty");
+    debug.assert(h.probe(0) == idx.NONE && h.probe(12345) == idx.NONE, "nothing found");
+    debug.assert(h.probe_after(0, 0) == idx.NONE, "nothing after");
+}
+
+test fn one_key() {
+    let ks = [42u64];
+    let h = hindex.HashIndex.build(&ks);
+    debug.assert(h.probe(42) == 0, "found");
+    debug.assert(h.probe(41) == idx.NONE && h.probe(43) == idx.NONE, "neighbours absent");
+    debug.assert(h.probe_after(42, 0) == idx.NONE, "no second");
+}
+
+test fn extreme_keys() {
+    let ks = [0u64, 18446744073709551615, 1, 9223372036854775808, 0];
+    let h = hindex.HashIndex.build(&ks);
+    debug.assert(h.probe(0) == 0 && h.probe_after(0, 0) == 4 && h.probe_after(0, 4) == idx.NONE, "zero twice");
+    debug.assert(h.probe(18446744073709551615) == 1, "max");
+    debug.assert(h.probe(9223372036854775808) == 3, "top bit");
+    debug.assert(h.probe(2) == idx.NONE, "absent");
+    debug.assert(h.probe_after(0, idx.NONE) == idx.NONE, "after NONE is NONE");
+    check(&ks, &[0u64, 1, 2, 18446744073709551615, 9223372036854775808, 9223372036854775807], "extremes");
+}
+
+test fn duplicates_in_order() {
+    let ks = [7u64, 3, 7, 7, 3, 9];
+    let h = hindex.HashIndex.build(&ks);
+    debug.assert(h.probe(7) == 0 && h.probe_after(7, 0) == 2 && h.probe_after(7, 2) == 3 && h.probe_after(7, 3) == idx.NONE, "7");
+    debug.assert(h.probe(3) == 1 && h.probe_after(3, 1) == 4, "3");
+    debug.assert(h.probe(9) == 5, "9");
+    debug.assert(h.probe_after(7, 1) == 2, "after an id that holds another key");
+}
+
+test fn random_columns() {
+    let mut r = test_util.Rng.new(1618);
+    for k in 0..test_util.SIZES.len() {
+        let n = test_util.SIZES[k];
+        // distinct-ish (wide range) and heavy duplicates (narrow range)
+        for range in [1u64 << 40, 10, 3] {
+            let ks = test_util.keys_u64(&mut r, n, range, 0);
+            let mut probes = vec.Vec::<u64>.new();
+            probes.extend_from_slice(ks.as_slice());
+            for _ in 0..20usize {
+                probes.push(r.below(range + 5));
+            }
+            check(ks.as_slice(), probes.as_slice(), "random keys");
+        }
+    }
+}
+
+// Keys that agree in the low bits of their hash still find each other: many keys, small steps.
+test fn many_keys() {
+    let mut ks = vec.Vec::<u64>.new();
+    for i in 0..5000u64 {
+        ks.push(i * 4096);
+    }
+    let h = hindex.HashIndex.build(ks.as_slice());
+    for i in 0..5000u64 {
+        debug.assert(h.probe(i * 4096) as u64 == i, "every key finds its id");
+        debug.assert(h.probe(i * 4096 + 1) == idx.NONE, "off-by-one keys are absent");
+    }
+}

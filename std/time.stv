@@ -1,0 +1,21 @@
+// std.time: the monotonic clock.
+//
+// `now_ns()` is CLOCK_MONOTONIC in nanoseconds: it never goes backwards within a run, its zero
+// is unspecified (only differences mean something), and it is not wall-clock time. Two readings
+// are ordered by the order of the calls in one thread. The call is a system call (`io`).
+
+import runtime.os;
+import runtime.panic;
+
+const NS_PER_SEC: u64 = 1_000_000_000;
+
+// A failure of the call is impossible for this clock id and a valid buffer; it traps `Assert`
+// rather than returning a time.
+pub fn now_ns() -> u64 {
+    let mut ts: [i64; 2] = [0; 2];
+    let r = os.clock_gettime(os.CLOCK_MONOTONIC, &mut ts);
+    if r != 0 {
+        panic.trap(panic.KIND_ASSERT, panic.user_site());
+    }
+    return (ts[0] as% u64) * NS_PER_SEC + (ts[1] as% u64);
+}

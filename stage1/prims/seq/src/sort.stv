@@ -1,0 +1,62 @@
+// Stable LSD radix sort, by permutation. The keys are never reordered in place: `sort_perm`
+// returns the order, and `perm.gather` applies it to any column.
+//
+// One pass per key byte, least significant first; a pass whose byte is the same in every key is
+// skipped (it would be the identity). Each pass is a histogram, an exclusive scan of the 256
+// counts, and a scatter that keeps the input order within a bucket: the same three steps a
+// data-parallel pass runs per block, with the same result.
+import col;
+import scan;
+import word;
+import std.mem;
+import std.vec;
+
+// out[k] is the position in `keys` of the k-th smallest key; equal keys keep their input order
+// (a stable sort). `out` is a permutation of 0..keys.len(); `keys` must have at most u32::MAX
+// entries.
+pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
+    let n = keys.len();
+    let _ = col.ids(n);
+    let mut pa = col.iota(n);
+    if n < 2 { return pa; }
+    let mut ka = vec.Vec::<T>.with_capacity(n);
+    ka.extend_from_slice(keys);
+    let mut kb = col.filled(n, T.zero());
+    let mut pb = col.filled(n, 0u32);
+    let passes = T.bits() / 8;
+    let mut pass: u32 = 0;
+    while pass < passes {
+        let mut count = [0u32; 256];
+        {
+            let ks = ka.as_slice();
+            for i in 0..n {
+                let d = ks[i].byte(pass);
+                count[d] = count[d] + 1;
+            }
+        }
+        let mut trivial = false;
+        for d in 0..256usize {
+            if count[d] as usize == n { trivial = true; }
+        }
+        if !trivial {
+            let _ = scan.exclusive_in_place(&mut count);
+            {
+                let ks = ka.as_slice();
+                let ps = pa.as_slice();
+                let kd = kb.as_mut_slice();
+                let pd = pb.as_mut_slice();
+                for i in 0..n {
+                    let d = ks[i].byte(pass);
+                    let o = count[d] as usize;
+                    count[d] = count[d] + 1;
+                    kd[o] = ks[i];
+                    pd[o] = ps[i];
+                }
+            }
+            mem.swap(&mut ka, &mut kb);
+            mem.swap(&mut pa, &mut pb);
+        }
+        pass = pass + 1;
+    }
+    return pa;
+}

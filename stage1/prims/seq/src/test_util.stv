@@ -1,0 +1,47 @@
+// Shared by the tests: a fixed-seed generator (xorshift64*), so every run sees the same data.
+import std.vec;
+
+pub struct Rng {
+    s: u64,
+}
+
+impl Rng {
+    pub fn new(seed: u64) -> Rng {
+        return Rng.{ s: seed | 1 };
+    }
+
+    pub fn next(&mut self) -> u64 {
+        let mut x = self.s;
+        x = x ^ (x >> 12);
+        x = x ^ (x << 25);
+        x = x ^ (x >> 27);
+        self.s = x;
+        return x *% 0x2545F4914F6CDD1D;
+    }
+
+    // Uniform enough in 0..n for tests (n > 0).
+    pub fn below(&mut self, n: u64) -> u64 {
+        return (self.next() >> 11) % n;
+    }
+}
+
+// n keys in 0..range.
+pub fn keys_u32(r: &mut Rng, n: usize, range: u64) -> vec.Vec<u32> {
+    let mut v = vec.Vec::<u32>.with_capacity(n);
+    for _ in 0..n {
+        v.push(r.below(range) as% u32);
+    }
+    return v;
+}
+
+// n keys in 0..range, each shifted left by `sh` bits.
+pub fn keys_u64(r: &mut Rng, n: usize, range: u64, sh: u64) -> vec.Vec<u64> {
+    let mut v = vec.Vec::<u64>.with_capacity(n);
+    for _ in 0..n {
+        v.push(r.below(range) << sh);
+    }
+    return v;
+}
+
+// Lengths that straddle the 16-byte chunk and the radix pass boundaries.
+pub const SIZES: [usize; 14] = [0, 1, 2, 3, 4, 5, 15, 16, 17, 31, 33, 64, 100, 257];
