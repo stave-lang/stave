@@ -62,10 +62,14 @@ where
         remap[old] = FuncId(new as u32);
     }
 
+    // Only reachable blocks count: the body rewrite drops the others, so a name that only dead
+    // code uses would be kept by one pass and dropped by the next.
     let mut used: Vec<&str> = Vec::new();
-    for f in &m.funcs {
-        for op in f.body.iter().flat_map(|b| &b.insts.op) {
-            if let Op::Intrinsic(id) = op
+    for b in m.funcs.iter().filter_map(|f| f.body.as_ref()) {
+        let reach = b.reachable();
+        let kept = b.blocks.iter().zip(&reach).filter(|&(_, &r)| r).map(|(bd, _)| bd);
+        for i in kept.flat_map(|bd| bd.insts.indices()) {
+            if let Some(Op::Intrinsic(id)) = b.insts.op.get(i as usize)
                 && let Some(name) = m.intrinsic_name(*id)
             {
                 used.push(name);
@@ -321,5 +325,39 @@ impl Rewrite<'_> {
             Term::Ret(o) => Term::Ret(o.map(|o| self.operand(o))),
             Term::Unreachable => Term::Unreachable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonicalize;
+    use crate::{FuncBuilder, InstanceId, Module, Op};
+
+    #[test]
+    fn a_name_only_dead_code_uses_is_dropped_by_the_first_pass() {
+        let mut m = Module::new();
+        let i32t = m.types.i32();
+        let us = m.types.usize();
+        let live = m.intrinsic("thread_start_addr");
+        let dead_only = m.intrinsic("stack_table");
+        let f = m.declare(InstanceId(vec![0]), "app.f", vec![i32t], Some(i32t));
+        let mut b = FuncBuilder::new(&[i32t]);
+        let x = b.param(0).unwrap();
+        let dead = b.create_block();
+        b.intrinsic(live, Some(us), &[]);
+        b.ret(Some(x.into()));
+        b.switch_to(dead);
+        b.intrinsic(dead_only, Some(us), &[]);
+        b.ret(Some(x.into()));
+        m.define(f, b.finish().unwrap());
+
+        let mut once = m.clone();
+        canonicalize(&mut once);
+        assert_eq!(once.intrinsics, ["thread_start_addr"]);
+        let mut twice = once.clone();
+        canonicalize(&mut twice);
+        assert!(once == twice);
+        let body = once.funcs[0].body.as_ref().unwrap();
+        assert!(body.insts.op.iter().any(|op| matches!(op, Op::Intrinsic(id) if id.0 == 0)));
     }
 }
