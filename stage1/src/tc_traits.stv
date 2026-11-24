@@ -105,6 +105,17 @@ impl Tq {
         return A_YES;
     }
 
+    // Whether type t implements trait tr (without arguments) in environment e.
+    pub fn holds(&mut self, sg: &sigs.Sigs, e: u32, t: u32, tr: u32) -> u8 {
+        let none = vec.Vec::<u32>.new();
+        let g = self.tr.goal_env(&sg.cx.tab, e, t, tr, none.as_slice());
+        if !self.tr.decided(g) {
+            self.pending = true;
+            return A_WAIT;
+        }
+        return if self.tr.is(g) then A_YES else A_NO;
+    }
+
     // Expands and decides every goal asked so far.
     pub fn solve(&mut self, sg: &mut sigs.Sigs) {
         let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());

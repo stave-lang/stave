@@ -1180,6 +1180,16 @@ impl Traits {
         return ok;
     }
 
+    // A query in environment e: the goal "t implements tr with args" (answered by `decided` and
+    // `is` after the next `expand` and `solve`).
+    pub fn goal_env(&mut self, tab: &types.Table, e: u32, t: u32, tr: u32, args: &[u32]) -> u32 {
+        self.comp.ensure(tab, self.adt_view.as_slice());
+        self.cur_env = e;
+        let g = self.goal(t, tr, args);
+        self.cur_env = 0;
+        return g;
+    }
+
     // Whether goal g has its answer (NONE: it holds).
     pub fn decided(&self, g: u32) -> bool {
         return g == NONE || (g as usize) < self.solved;

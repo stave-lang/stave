@@ -50,6 +50,7 @@ import sigs;
 import source;
 import tc_builtins;
 import tc_chain;
+import tc_ops;
 import tc_pat;
 import tc_rows;
 import tc_traits;
@@ -923,7 +924,7 @@ impl tc_rows.Typeck {
                 self.bad = true;
                 return UNK;
             }
-            return UNK;
+            return self.user_op(sg, tc_ops.OP_NEG, ct);
         }
         if tag == types.TK_INT || tag == types.TK_MASK { return ct; }
         if tag == types.TK_VECTOR {
@@ -935,7 +936,7 @@ impl tc_rows.Typeck {
             self.bad = true;
             return UNK;
         }
-        return UNK;
+        return self.user_op(sg, tc_ops.OP_NOT, ct);
     }
 
     // The value of `l op r` in a chain: the operator is the token before child row c, the left
@@ -972,6 +973,7 @@ impl tc_rows.Typeck {
             }
             return u;
         }
+        if tc_ops.user_ty(tab, u) { return self.user_op(sg, tc_ops.binop_trait(op), u); }
         return self.op_on(tab, op, u);
     }
 
