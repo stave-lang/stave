@@ -15,7 +15,9 @@ use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
-use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, OpKind, PartFix, Place, Proj, StmtKind, TempEnd};
+use crate::cfg::{
+    Body, GuardEffect, LoanId, LocalId, MoveOut, OpKind, PartFix, Place, Proj, StmtKind, TempEnd,
+};
 use crate::check::{Access, Finding, Unfit};
 use crate::ty::Tys;
 
@@ -195,7 +197,7 @@ pub fn diagnostics(
     body: &Body,
     tys: &mut Tys<'_>,
     findings: Vec<Finding>,
-    later_use: &mut dyn FnMut((u32, u32), LoanId) -> Option<(Span, bool)>,
+    later_use: &mut dyn FnMut((u32, u32), LoanId) -> Option<(Span, bool, Option<LocalId>)>,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     // E0502: one per move site, at its first (smallest offset) use
@@ -266,10 +268,11 @@ pub fn diagnostics(
                 let loaned = place_text(body, tys, &loan.place);
                 let mut roles = vec![("loan", loan.span)];
                 let later = later_use((block, stmt), l);
-                if let Some((u, _)) = later {
+                if let Some((u, _, _)) = later {
                     roles.push(("use", u));
                 }
                 let again = later.is_some_and(|x| x.1);
+                let holder = later.and_then(|x| x.2);
                 let holes = [
                     ("access", access.verb()),
                     ("place", &text),
@@ -289,7 +292,22 @@ pub fn diagnostics(
                     ];
                     let all: Vec<(&str, &str)> = holes.iter().chain(&more).copied().collect();
                     out.extend(mk("E0501", Some(case), &all, t.span, &roles));
-                } else if later.is_some_and(|(u, _)| body.joins.iter().any(|j| j.1 == u)) {
+                } else if let Some(h) = holder {
+                    // an exit drops `place` and then `h`, whose drop reads the borrow: the fix is
+                    // to declare `place` before what holds the borrow, so it ends after it
+                    let name = local_name(body, tys, h);
+                    let hl = &body.locals[h as usize];
+                    let before = body.stmt_words.get(&hl.stmt).copied().unwrap_or("the statement");
+                    let mut all: Vec<(&str, &str)> = holes.to_vec();
+                    all.push(("holder", &name));
+                    let case = if hl.temp {
+                        all.push(("before", before));
+                        "exit-temp"
+                    } else {
+                        "exit-local"
+                    };
+                    out.extend(mk("E0501", Some(case), &all, span, &roles));
+                } else if later.is_some_and(|(u, _, _)| body.joins.iter().any(|j| j.1 == u)) {
                     // the later use stands for a thread of the scope, which runs until the scope
                     // is left ([`crate::cfg`] `hold_spawns`): it is named at the spawn
                     out.extend(mk("E0501", Some("thread"), &holes, span, &[("loan", loan.span)]));
@@ -470,6 +488,8 @@ mod tests {
             loops: Vec::new(),
             schedule: Default::default(),
             deep_drops: Default::default(),
+            exit_spans: Vec::new(),
+            stmt_words: Default::default(),
         }
     }
 

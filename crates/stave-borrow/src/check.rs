@@ -1176,8 +1176,10 @@ pub(crate) fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
 /// origin set holds `loan` (E0501 "later use"): the use the fewest statements away on a path from
 /// `at`, the first in source order among those. `true` with it: the path to it goes back to the
 /// head of a loop that holds `at` and the use is in that loop: it is in a later iteration
-/// ([`Body::loops`]).
-pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(Span, bool)> {
+/// ([`Body::loops`]). On an exit path (`at` at an exit's token, [`Body::exit_spans`]) a use that
+/// is the drop of a local on that same path is named by that local, the holder, given third:
+/// every drop there is at the exit's token.
+pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(Span, bool, Option<LocalId>)> {
     use std::cmp::Reverse;
     let body = flow.body;
     let nb = body.blocks.len();
@@ -1185,7 +1187,9 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
     // (statements from `at`, the loop whose head the path went back to, block, first statement)
     let mut work = std::collections::BinaryHeap::new();
     work.push(Reverse((0usize, usize::MAX, at.0, at.1)));
-    let mut best: Option<(usize, Span, bool)> = None;
+    let mut best: Option<(usize, Span, bool, Option<LocalId>)> = None;
+    let at_span = body.blocks.get(at.0 as usize).and_then(|b| b.stmts.get(at.1 as usize)).map(|s| s.span);
+    let exit = at_span.filter(|sp| body.exit_spans.contains(sp));
     let mut st = flow.state();
     // the state at the end of a block walked, for the successor that has no entry state
     let mut handed: FxHashMap<u32, Saved> = FxHashMap::default();
@@ -1210,7 +1214,7 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
             continue;
         }
         let stmts = &body.blocks[b as usize].stmts;
-        let mut found: Option<(usize, Span)> = None;
+        let mut found: Option<(usize, Span, Option<LocalId>)> = None;
         for (i, s) in stmts.iter().enumerate() {
             if i as u32 >= from {
                 let mut here: Option<Span> = None;
@@ -1220,16 +1224,21 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
                     }
                 });
                 if let Some(sp) = here {
-                    found = Some((d + i - from as usize, sp));
+                    let holder = match &s.kind {
+                        StmtKind::Drop(p) if exit == Some(s.span) => Some(p.local),
+                        _ => None,
+                    };
+                    let sp = holder.and_then(|h| body.locals.get(h as usize)).map_or(sp, |l| l.span);
+                    found = Some((d + i - from as usize, sp, holder));
                     break;
                 }
             }
             flow.apply(&s.kind, &mut st);
         }
-        if let Some((dd, sp)) = found {
+        if let Some((dd, sp, holder)) = found {
             let again = body.loops.get(again).is_some_and(|&l| in_loop(l, b));
             if best.is_none_or(|x| (dd, again, sp.offset) < (x.0, x.2, x.1.offset)) {
-                best = Some((dd, sp, again));
+                best = Some((dd, sp, again, holder));
             }
             continue;
         }
@@ -1245,7 +1254,7 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
         }
     }
     flow.recycle(st);
-    best.map(|x| (x.1, x.2))
+    best.map(|x| (x.1, x.2, x.3))
 }
 
 /// The loop whose head the edge `from -> to` goes back to, from inside it (`usize::MAX`: none).

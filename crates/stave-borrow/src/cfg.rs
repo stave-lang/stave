@@ -395,6 +395,12 @@ pub struct Body {
     /// references ([`Tys::drop_reaches_refs`]): their drop, and an assignment through a
     /// dereference that drops one, is an access of what the value reaches.
     pub deep_drops: FxHashSet<TypeId>,
+    /// The tokens of the `return`, `?`, `break`, and `continue` exits: the drops on an exit
+    /// path are at its token, so a drop there that reads a borrow is named by what it drops
+    /// (E0501 cases `exit-temp`, `exit-local`).
+    pub exit_spans: Vec<Span>,
+    /// The statements an exit leaves, by node: how an E0501 fix names one (the `before` hole).
+    pub stmt_words: FxHashMap<u32, &'static str>,
 }
 
 impl Body {
@@ -594,6 +600,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             loops: Vec::new(),
             schedule: Schedule::default(),
             deep_drops: FxHashSet::default(),
+            exit_spans: Vec::new(),
+            stmt_words: FxHashMap::default(),
         };
         Builder {
             icx,
@@ -1328,12 +1336,18 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// inside the statements it leaves. A `scope` statement left on the way joins its threads
     /// before its own locals are dropped. `point`: the exit, for the drop schedule.
     fn exit_path(&mut self, scopes: usize, temps: TempMark, dead: bool, at: Span, point: Point) {
+        if point != Point::End {
+            self.body.exit_spans.push(at);
+        }
         let opened: Vec<usize> = self.stmts.iter().map(|o| o.depth).collect();
         let first = temps.open.min(self.stmts.len());
         let order = stave_sema::drops::exit_order(&opened, first, scopes, self.scopes.len(), !dead);
         for (step, end) in order {
             match step {
                 Leave::Stmt(i) => {
+                    let node = self.stmts[i].node;
+                    let word = self.stmt_word(node);
+                    self.body.stmt_words.insert(node, word);
                     let from = self.stmts[i].mark;
                     let to = self.stmts.get(i + 1).map(|o| o.mark);
                     self.exit_temps(from, to, end, at, point);
@@ -1345,6 +1359,21 @@ impl<'a, 'b> Builder<'a, 'b> {
         // whose end ends it) would end last
         let to = self.stmts.get(first).map(|o| o.mark);
         self.exit_temps(temps, to, dead, at, point);
+    }
+
+    /// How an E0501 fix names statement `s` (a choice of its `before` hole): by the keyword
+    /// of a statement whose temporaries live across the blocks inside it.
+    fn stmt_word(&self, s: u32) -> &'static str {
+        let a = self.icx.a(s);
+        if self.icx.is(a, Term::KwMatch) {
+            "the `match`"
+        } else if self.icx.is(a, Term::KwFor) {
+            "the `for`"
+        } else if self.icx.is(a, Term::KwLet) {
+            "the `let`"
+        } else {
+            "the statement"
+        }
     }
 
     /// The temporaries from mark `from` to mark `to` (the next open statement's; `None`: the
