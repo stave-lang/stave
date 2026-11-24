@@ -16,9 +16,26 @@ jobs:
       CI: "1"
     steps:
       - uses: actions/checkout@v4
+      # A pull request that changes only *.md files skips the build and test steps; the job
+      # still runs and succeeds, because the required status check is this job. Any other
+      # diff, a push, an empty diff, or a diff that cannot be computed runs everything.
+      # LANG.md and contracts/ are read by tests and generators, so they count as code.
+      - id: scope
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git fetch --no-tags --depth=1 origin "$BASE" &&
+            files=$(git -c core.quotepath=off diff --name-only --no-renames "$BASE" HEAD) &&
+            [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qv '\.md$' &&
+            ! printf '%s\n' "$files" | grep -qE '^(LANG\.md$|contracts/)'; then
+            echo docs_only=true >> "$GITHUB_OUTPUT"
+          fi
       # AArch64 programs built by the tests run under user-mode emulation.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user binutils-aarch64-linux-gnu
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user binutils-aarch64-linux-gnu
       # A native test leg that cannot run here (CPU feature, qemu-aarch64) fails instead of skipping.
-      - run: sh tools/ci-step/run.sh check
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: sh tools/ci-step/run.sh check
         env:
           STAVE_REQUIRE_LEGS: v2,v3,aarch64
