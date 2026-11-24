@@ -1,0 +1,314 @@
+//~ STDOUT early_exit_order.stdout
+// `return`, `break`, `continue`, and `?` drop in the order of the normal end, innermost first:
+// the locals of an arm or body before the temporaries of the `match` scrutinee or `for` header
+// around it, scope by scope out to the statement and scope the exit goes to.
+import std.io;
+
+struct D { id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        io.print(f" {self.id}");
+    }
+}
+
+struct It { n: u32, d: D }
+
+impl It {
+    fn next(&mut self) -> Option<u32> {
+        if self.n == 0 {
+            return Option.None;
+        }
+        self.n -= 1;
+        return Option.Some(self.n);
+    }
+}
+
+fn mk(id: u32) -> D {
+    return D.{ id: id };
+}
+
+fn mk_it(id: u32) -> It {
+    return It.{ n: 2, d: D.{ id: id } };
+}
+
+fn tag(d: &D) -> u32 {
+    return d.id;
+}
+
+fn pair(d: &D, x: u32) -> u32 {
+    return d.id + x;
+}
+
+fn fail() -> Result<u32, u32> {
+    return Result.Err(7);
+}
+
+fn match_normal() {
+    match mk(1) {
+        D.{ id: _ } => {
+            let a = mk(2);
+        }
+    }
+    io.print(" |");
+}
+
+fn match_return() {
+    match mk(1) {
+        D.{ id: _ } => {
+            let a = mk(2);
+            return;
+        }
+    }
+}
+
+fn match_break() {
+    loop {
+        match mk(1) {
+            D.{ id: _ } => {
+                let a = mk(2);
+                break;
+            }
+        }
+    }
+    io.print(" |");
+}
+
+fn match_continue() {
+    let mut i: u32 = 0;
+    while i < 2 {
+        i += 1;
+        match mk(1) {
+            D.{ id: _ } => {
+                let a = mk(2);
+                continue;
+            }
+        }
+    }
+    io.print(" |");
+}
+
+fn match_try() -> Result<u32, u32> {
+    match mk(1) {
+        D.{ id: _ } => {
+            let a = mk(2);
+            let _ = fail()?;
+        }
+    }
+    return Result.Ok(0);
+}
+
+fn match_borrowed_temp_return() {
+    match tag(&mk(1)) {
+        _ => {
+            let a = mk(2);
+            return;
+        }
+    }
+}
+
+fn match_outer_local_return() {
+    let o = mk(0);
+    match mk(1) {
+        D.{ id: _ } => {
+            let a = mk(2);
+            {
+                let b = mk(3);
+                return;
+            }
+        }
+    }
+}
+
+fn for_header_normal() {
+    for i in 0u32..tag(&mk(1)) {
+        let a = mk(2);
+    }
+    io.print(" |");
+}
+
+fn for_header_return() {
+    for i in 0u32..tag(&mk(1)) {
+        let a = mk(2);
+        return;
+    }
+}
+
+fn for_header_break() {
+    for i in 0u32..tag(&mk(1)) {
+        let a = mk(2);
+        break;
+    }
+    io.print(" |");
+}
+
+fn for_header_continue() {
+    for i in 0u32..pair(&mk(1), 1) {
+        let a = mk(2);
+        continue;
+    }
+    io.print(" |");
+}
+
+fn for_header_try() -> Result<u32, u32> {
+    for i in 0u32..tag(&mk(1)) {
+        let a = mk(2);
+        let _ = fail()?;
+    }
+    return Result.Ok(0);
+}
+
+fn nested_return() {
+    for i in 0u32..tag(&mk(1)) {
+        let a = mk(2);
+        match mk(3) {
+            D.{ id: _ } => {
+                let b = mk(4);
+                return;
+            }
+        }
+    }
+}
+
+fn nested_break() {
+    for i in 0u32..tag(&mk(1)) {
+        let a = mk(2);
+        match mk(3) {
+            D.{ id: _ } => {
+                let b = mk(4);
+                break;
+            }
+        }
+    }
+    io.print(" |");
+}
+
+fn nested_continue() {
+    for i in 0u32..pair(&mk(1), 1) {
+        let a = mk(2);
+        match mk(3) {
+            D.{ id: _ } => {
+                let b = mk(4);
+                continue;
+            }
+        }
+    }
+    io.print(" |");
+}
+
+fn nested_try() -> Result<u32, u32> {
+    for i in 0u32..tag(&mk(1)) {
+        let a = mk(2);
+        match mk(3) {
+            D.{ id: _ } => {
+                let b = mk(4);
+                let _ = fail()?;
+            }
+        }
+    }
+    return Result.Ok(0);
+}
+
+fn two_matches_return() {
+    match mk(1) {
+        D.{ id: _ } => {
+            let a = mk(2);
+            match mk(3) {
+                D.{ id: _ } => {
+                    let b = mk(4);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn loop_break_in_arm() {
+    let mut n: u32 = 0;
+    loop {
+        let a = mk(2);
+        match mk(3) {
+            D.{ id: _ } => {
+                let b = mk(4);
+                n += 1;
+                if n == 2 {
+                    break;
+                }
+            }
+        }
+    }
+    io.print(" |");
+}
+
+fn try_in_arm_value() -> Result<u32, u32> {
+    let o = mk(0);
+    match mk(1) {
+        D.{ id: _ } => {
+            let a = mk(2);
+            let v = pair(&mk(3), fail()?);
+            io.print(f" {v}");
+        }
+    }
+    return Result.Ok(0);
+}
+
+fn continue_in_arm_in_for() {
+    for x in mk_it(5) {
+        let a = mk(2);
+        match mk(3) {
+            D.{ id: _ } => {
+                let b = mk(4);
+                if x == 1 {
+                    continue;
+                }
+                io.print(" n");
+            }
+        }
+    }
+    io.print(" |");
+}
+
+fn main() -> i32 {
+    io.print("match normal:");
+    match_normal();
+    io.print("\nmatch return:");
+    match_return();
+    io.print("\nmatch break:");
+    match_break();
+    io.print("\nmatch continue:");
+    match_continue();
+    io.print("\nmatch ?:");
+    let _ = match_try();
+    io.print("\nmatch borrowed temp return:");
+    match_borrowed_temp_return();
+    io.print("\nmatch outer local return:");
+    match_outer_local_return();
+    io.print("\nfor header normal:");
+    for_header_normal();
+    io.print("\nfor header return:");
+    for_header_return();
+    io.print("\nfor header break:");
+    for_header_break();
+    io.print("\nfor header continue:");
+    for_header_continue();
+    io.print("\nfor header ?:");
+    let _ = for_header_try();
+    io.print("\nnested return:");
+    nested_return();
+    io.print("\nnested break:");
+    nested_break();
+    io.print("\nnested continue:");
+    nested_continue();
+    io.print("\nnested ?:");
+    let _ = nested_try();
+    io.print("\ntwo matches return:");
+    two_matches_return();
+    io.print("\nloop break in arm:");
+    loop_break_in_arm();
+    io.print("\n? in arm value:");
+    let _ = try_in_arm_value();
+    io.print("\ncontinue in arm in for:");
+    continue_in_arm_in_for();
+    io.print("\n");
+    return 0;
+}

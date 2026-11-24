@@ -1,0 +1,147 @@
+//~ CHECK-ONLY
+// An early exit (`return`, `?`, `break`) drops the locals of an arm or a `for` body before the
+// temporaries of the `match` scrutinee or `for` header around it, as the arm's end does. A
+// borrow of such a local stored into the temporary, which the temporary's drop reads, is E0501
+// on every way out, also from an arm that never reaches its end; so is one stored into a local
+// declared before it. The fix the diagnostic prints: declare the local before the statement (or
+// before the local) that holds the borrow.
+import std.io;
+
+view struct G { r: &u32 }
+
+impl Drop for G {
+    fn drop(&mut self) {
+        let n = *self.r;
+        io.print(f" dropG{n}");
+    }
+}
+
+static Z: u32 = 9;
+
+fn mkg() -> G {
+    return G.{ r: &Z };
+}
+
+fn fail() -> Result<u32, u32> {
+    return Result.Err(7);
+}
+
+fn match_return() {
+    match &mut mkg() {
+        v => {
+            let x: u32 = 5;
+            v.r = &x;
+            return; //~ ERROR E0501
+        }
+    }
+}
+
+fn match_try() -> Result<u32, u32> {
+    match &mut mkg() {
+        v => {
+            let x: u32 = 5;
+            v.r = &x;
+            let _ = fail()?; //~ ERROR E0501
+            return Result.Ok(0); //~ ERROR E0501
+        }
+    }
+}
+
+fn match_break() {
+    loop {
+        match &mut mkg() {
+            v => {
+                let x: u32 = 5;
+                v.r = &x;
+                break; //~ ERROR E0501
+            }
+        }
+    }
+}
+
+fn for_return() {
+    for x in &mut [mkg()] {
+        let y: u32 = 5;
+        x.r = &y;
+        return; //~ ERROR E0501
+    }
+}
+
+fn outer_local_return() {
+    let mut g = mkg();
+    match mkg() {
+        _ => {
+            let x: u32 = 5;
+            g.r = &x;
+            return; //~ ERROR E0501
+        }
+    }
+}
+
+// Each of the above with the fix the diagnostic prints applied.
+
+fn match_return_fixed() {
+    let x: u32 = 5;
+    match &mut mkg() {
+        v => {
+            v.r = &x;
+            return;
+        }
+    }
+}
+
+fn match_try_fixed() -> Result<u32, u32> {
+    let x: u32 = 5;
+    match &mut mkg() {
+        v => {
+            v.r = &x;
+            let _ = fail()?;
+            return Result.Ok(0);
+        }
+    }
+}
+
+fn match_break_fixed() {
+    loop {
+        let x: u32 = 5;
+        match &mut mkg() {
+            v => {
+                v.r = &x;
+                break;
+            }
+        }
+    }
+}
+
+fn for_return_fixed() {
+    let y: u32 = 5;
+    for x in &mut [mkg()] {
+        x.r = &y;
+        return;
+    }
+}
+
+fn outer_local_return_fixed() {
+    let x: u32 = 5;
+    let mut g = mkg();
+    match mkg() {
+        _ => {
+            g.r = &x;
+            return;
+        }
+    }
+}
+
+fn main() {
+    match_return();
+    let _ = match_try();
+    match_break();
+    for_return();
+    outer_local_return();
+    match_return_fixed();
+    let _ = match_try_fixed();
+    match_break_fixed();
+    for_return_fixed();
+    outer_local_return_fixed();
+    io.print("\n");
+}

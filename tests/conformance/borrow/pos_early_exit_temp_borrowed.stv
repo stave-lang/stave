@@ -1,0 +1,159 @@
+//~ STDOUT pos_early_exit_temp_borrowed.stdout
+// A local of an arm or a `for` body that borrows the `match` scrutinee's or the `for` header's
+// temporary, with a drop that reads it, is dropped before the temporary on every way out of
+// the arm or body (`return`, `?`, `break`, `continue`), as at its end. So is a temporary
+// without drop glue: its storage ends after the local's drop. The threads of a `scope` left
+// by `return` are joined before the temporary is dropped.
+import std.io;
+
+struct D { id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        io.print(f" drop{self.id}");
+    }
+}
+
+view struct G { r: &u32 }
+
+impl Drop for G {
+    fn drop(&mut self) {
+        let n = *self.r;
+        io.print(f" dropG{n}");
+    }
+}
+
+fn mk(id: u32) -> D {
+    return D.{ id: id };
+}
+
+fn arr() -> [D; 2] {
+    return [mk(1), mk(2)];
+}
+
+fn num() -> u32 {
+    return 4;
+}
+
+fn fail() -> Result<u32, u32> {
+    return Result.Err(7);
+}
+
+fn match_return(k: bool) {
+    match &mk(1) {
+        d => {
+            let g = G.{ r: &d.id };
+            if k {
+                return;
+            }
+        }
+    }
+    io.print(" |");
+}
+
+fn match_try(k: bool) -> Result<u32, u32> {
+    match &mk(1) {
+        d => {
+            let g = G.{ r: &d.id };
+            if k {
+                let _ = fail()?;
+            }
+        }
+    }
+    io.print(" |");
+    return Result.Ok(0);
+}
+
+fn match_break(k: bool) {
+    loop {
+        match &mk(1) {
+            d => {
+                let g = G.{ r: &d.id };
+                if k {
+                    break;
+                }
+            }
+        }
+        io.print(" |");
+        return;
+    }
+    io.print(" b");
+}
+
+fn match_continue(k: bool) {
+    let mut i: u32 = 0;
+    while i < 2 {
+        i += 1;
+        match &mk(1) {
+            d => {
+                let g = G.{ r: &d.id };
+                if k {
+                    continue;
+                }
+            }
+        }
+        io.print(" |");
+    }
+}
+
+fn for_return(k: bool) {
+    for x in &arr() {
+        let g = G.{ r: &x.id };
+        if k {
+            return;
+        }
+    }
+    io.print(" |");
+}
+
+fn no_glue_break(k: bool) {
+    loop {
+        match &num() {
+            r => {
+                let g = G.{ r: r };
+                if k {
+                    break;
+                }
+            }
+        }
+        io.print(" |");
+        return;
+    }
+    io.print(" b");
+}
+
+fn scope_return(k: bool) {
+    match &mk(1) {
+        d => {
+            scope {
+                spawn {
+                    let n = d.id;
+                    io.print(f" t{n}");
+                }
+                if k {
+                    return;
+                }
+            }
+        }
+    }
+    io.print(" |");
+}
+
+fn all(k: bool) {
+    match_return(k);
+    let _ = match_try(k);
+    match_break(k);
+    match_continue(k);
+    for_return(k);
+    no_glue_break(k);
+    scope_return(k);
+    io.print("\n");
+}
+
+fn main() -> i32 {
+    io.print("end:");
+    all(false);
+    io.print("exit:");
+    all(true);
+    return 0;
+}

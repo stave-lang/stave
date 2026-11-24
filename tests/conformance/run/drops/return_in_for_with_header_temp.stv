@@ -1,5 +1,5 @@
 //~ STDOUT return_in_for_with_header_temp.stdout
-// `return` inside a `for` drops the header's temporary.
+// `return` inside a `for` drops the body's locals, then the header's temporary.
 import std.io;
 import std.env;
 struct D { pub id: u32 }
