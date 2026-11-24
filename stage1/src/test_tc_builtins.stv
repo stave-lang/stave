@@ -8,8 +8,10 @@ import std.mem;
 
 const UNK: u32 = 4294967293;
 const NONE: u32 = 4294967295;
+// The decl of `Option` the tests give the table.
+const OPT: u32 = 7;
 
-const ALL: &str = "len sqrt abs floor ceil round trunc scan_add copysign min_num max_num min_x86 max_x86 fma min max popcount clz scan_add_wrap andnot div_lanes mul_hi lookup abs_wrap reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or reduce_add_ordered split widen_lo widen_hi narrow_wrap narrow_sat compress expand store store_masked scatter ctz mul_wide store_stream to_bits read write write_stream prefetch_read_l1 prefetch_read_l2 prefetch_read_l3 prefetch_read_nta prefetch_write_l1 prefetch_write_l2 prefetch_write_l3 prefetch_write_nta splat load load_masked gather join first_n all none select checked_add load_aligned";
+const ALL: &str = "len sqrt abs floor ceil round trunc scan_add copysign min_num max_num min_x86 max_x86 fma min max popcount clz scan_add_wrap andnot div_lanes mul_hi lookup abs_wrap reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or reduce_add_ordered split widen_lo widen_hi narrow_wrap narrow_sat compress expand store store_masked scatter ctz mul_wide store_stream to_bits read write write_stream prefetch_read_l1 prefetch_read_l2 prefetch_read_l3 prefetch_read_nta prefetch_write_l1 prefetch_write_l2 prefetch_write_l3 prefetch_write_nta splat load load_masked gather join first_n all none select checked_add load_aligned store_aligned permute div_const";
 
 // The strings of a program that uses every name of ALL once.
 fn strings() -> intern.Table {
@@ -45,14 +47,14 @@ fn sig_of(bt: &tc_builtins.Builtins, tab: &mut types.Table, b: u32, c: u32, args
 
 // Method `name` on c.
 fn sig(st: &intern.Table, tab: &mut types.Table, c: u32, name: &str, args: &mut [u32]) -> (u32, u32) {
-    let bt = tc_builtins.table(st);
+    let bt = tc_builtins.table(st, OPT);
     let b = bt.method(tab, c, sid(st, name));
     return sig_of(&bt, tab, b, c, args);
 }
 
 // Type-relative `name` of type c.
 fn rel(st: &intern.Table, tab: &mut types.Table, c: u32, name: &str, args: &mut [u32]) -> (u32, u32) {
-    let bt = tc_builtins.table(st);
+    let bt = tc_builtins.table(st, OPT);
     let b = bt.type_rel(tab, c, sid(st, name));
     return sig_of(&bt, tab, b, c, args);
 }
@@ -66,7 +68,7 @@ fn pair(tab: &mut types.Table, x: u32, y: u32) -> u32 {
 
 test fn type_heads() {
     let st = strings();
-    let bt = tc_builtins.table(&st);
+    let bt = tc_builtins.table(&st, OPT);
     let mut tab = types.Table.new();
     let f32_ = tab.key(types.TK_FLOAT, 1, 0);
     let u8_ = tab.int(false, types.W_8);
@@ -113,8 +115,10 @@ test fn type_relative() {
     debug.assert(n == UNK, "a vector of 2 lanes has no join");
     let (n, _) = rel(&st, &mut tab, m, "splat", &mut a);
     debug.assert(n == UNK, "a mask has no splat");
-    let (n, _) = rel(&st, &mut tab, v, "load_aligned", &mut a);
-    debug.assert(n == UNK, "aligned loads are not in the table");
+    let s32 = tab.key(types.TK_SLICE, f32_, 32);
+    let ra = tab.mk_ref(false, s32);
+    let (n, r) = rel(&st, &mut tab, v, "load_aligned", &mut a);
+    debug.assert(n == 2 && a[0] == ra && a[1] == us && r == v, "load_aligned takes a slice aligned to the vector's bytes");
 }
 
 test fn vector_methods() {
@@ -184,11 +188,51 @@ test fn vector_methods() {
     let (n, r) = sig(&st, &mut tab, vu, "popcount", &mut a);
     debug.assert(n == 0 && r == vu, "vector popcount");
     let (n, _) = sig(&st, &mut tab, vu, "select", &mut a);
-    debug.assert(n == UNK, "select is not in the table");
-    let (n, _) = sig(&st, &mut tab, vu, "checked_add", &mut a);
-    debug.assert(n == UNK, "checked_add is not in the table");
-    let (n, _) = sig(&st, &mut tab, vu, "store_stream", &mut a);
-    debug.assert(n == UNK, "a vector's store_stream is aligned: not in the table");
+    debug.assert(n == UNK, "a vector has no select");
+    tab.begin();
+    tab.push_garg(types.GA_TYPE, vu, 0);
+    let ov = tab.intern(types.TK_ADT, OPT, 0);
+    let (n, r) = sig(&st, &mut tab, vu, "checked_add", &mut a);
+    debug.assert(n == 1 && a[0] == vu && r == ov, "checked_add is an Option of the vector");
+    let (n, _) = sig(&st, &mut tab, vf, "checked_add", &mut a);
+    debug.assert(n == UNK, "float checked_add does not exist");
+    let (n, r) = sig(&st, &mut tab, vu, "div_const", &mut a);
+    debug.assert(n == 1 && a[0] == u32_ && r == vu, "div_const takes a lane");
+    let al = tab.key(types.TK_SLICE, u32_, 32);
+    let mal = tab.mk_ref(true, al);
+    let (n, r) = sig(&st, &mut tab, vu, "store_stream", &mut a);
+    debug.assert(n == 2 && a[0] == mal && a[1] == us && r == unit, "a vector's store_stream is aligned");
+    let (n, r) = sig(&st, &mut tab, vu, "store_aligned", &mut a);
+    debug.assert(n == 2 && a[0] == mal && a[1] == us && r == unit, "store_aligned");
+    let (n, r) = sig(&st, &mut tab, vu, "permute", &mut a);
+    debug.assert(n == 0 && r == vu, "permute");
+}
+
+test fn argument_kinds() {
+    let st = strings();
+    let bt = tc_builtins.table(&st, OPT);
+    let mut tab = types.Table.new();
+    let u32_ = tab.int(false, types.W_32);
+    let f32_ = tab.key(types.TK_FLOAT, 1, 0);
+    let vu = tab.key(types.TK_VECTOR, u32_, 8);
+    let vf = tab.key(types.TK_VECTOR, f32_, 8);
+    let vf4 = tab.key(types.TK_VECTOR, f32_, 4);
+    let m = tab.key(types.TK_MASK, 32, 8);
+    let b = tab.key(types.TK_BOOL, 0, 0);
+    let ms = bt.method(&tab, m, sid(&st, "select"));
+    debug.assert(bt.params(ms, m) == 2 && bt.arg_kind(&tab, ms, m, 0) == tc_builtins.A_FREE && bt.arg_kind(&tab, ms, m, 1) == tc_builtins.A_FREE, "mask select operands take no context");
+    debug.assert(bt.select_ret(&tab, m, vf, vf) == vf && bt.select_ret(&tab, m, vu, vu) == vu, "mask select is its operands' type");
+    debug.assert(bt.select_ret(&tab, m, vf, vu) == NONE, "select operands of two types");
+    debug.assert(bt.select_ret(&tab, m, vf4, vf4) == NONE, "select operands of other lanes");
+    debug.assert(bt.select_ret(&tab, m, m, m) == m, "select of masks");
+    let bs = bt.method(&tab, b, sid(&st, "select"));
+    debug.assert(bt.params(bs, b) == 2 && bt.arg_kind(&tab, bs, b, 1) == tc_builtins.A_SEL, "bool select");
+    let la = bt.type_rel(&tab, vf, sid(&st, "load_aligned"));
+    debug.assert(bt.arg_kind(&tab, la, vf, 0) == tc_builtins.A_ALIGNED && bt.arg_kind(&tab, la, vf, 1) == tc_builtins.A_IS, "an aligned load's slice keeps its type");
+    let g = bt.type_rel(&tab, vf, sid(&st, "gather"));
+    debug.assert(bt.arg_kind(&tab, g, vf, 1) == tc_builtins.A_INDEX, "a gather index");
+    let p = bt.method(&tab, vu, sid(&st, "permute"));
+    debug.assert(bt.takes_targs(p) && !bt.takes_targs(la), "only permute takes a turbofish");
 }
 
 test fn scalar_slice_and_pointer_methods() {
@@ -264,6 +308,6 @@ test fn mask_methods() {
     debug.assert(r == u64_, "64 lanes in a u64");
     let (_, r) = sig(&st, &mut tab, mn, "to_bits", &mut a);
     debug.assert(r == u64_, "a sizeless mask in a u64");
-    let (n, _) = sig(&st, &mut tab, m4, "select", &mut a);
-    debug.assert(n == UNK, "mask select is not in the table");
+    let (n, r) = sig(&st, &mut tab, m4, "select", &mut a);
+    debug.assert(n == 2 && r == UNK, "mask select's result is its operands'");
 }

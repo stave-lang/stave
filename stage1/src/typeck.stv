@@ -1453,6 +1453,9 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
     let t_ref_str = tab.mk_ref(false, t_str);
     let soa_s = modules.lookup(&nm.tab, mem.str_bytes("Soa"));
     let soa = if md.soa_mod == NONE || soa_s == NONE then NONE else ds.module_item(md.soa_mod, soa_s);
+    let opt_s = modules.lookup(&nm.tab, mem.str_bytes("Option"));
+    let opt = if md.core_mod == NONE || opt_s == NONE then NONE else ds.module_item(md.core_mod, opt_s);
+    let (hl_name, hl_imp) = tc_rows.headless_impls(ds);
     let mut tc = tc_rows.Typeck.{
         nty: col.filled(n, NONE),
         hint: col.filled(n, NONE),
@@ -1478,6 +1481,8 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         soa_mod: md.soa_mod,
         args: vec.Vec::<u32>.new(),
         headless: tc_chain.headless_names(ds),
+        hl_name: hl_name,
+        hl_imp: hl_imp,
         pat_row: vec.Vec::<u32>.new(),
         pat_ty: vec.Vec::<u32>.new(),
         pat_mode: vec.Vec::<u8>.new(),
@@ -1490,8 +1495,9 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         mt_new: vec.Vec::<u32>.new(),
         mt_h: vec.Vec::<u32>.new(),
         mt_k: vec.Vec::<u32>.new(),
-        bt: tc_builtins.table(&nm.tab),
+        bt: tc_builtins.table(&nm.tab, opt),
         tq: tc_traits.new(sg, ds, fl, md, nm),
+        opt: opt,
         t_bool: t_bool,
         t_char: t_char,
         t_unit: t_unit,

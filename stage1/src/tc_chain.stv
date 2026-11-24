@@ -317,6 +317,17 @@ impl tc_rows.Typeck {
                     if c == NONE || kind(tree, c as usize) != node_kinds.KIND_GENERIC_ARGS { return self.chain_lost(r); }
                     let u = self.use_at(sg, t, head, seg);
                     if u == NONE {
+                        let recv0 = if self.chain.as_slice()[r] == S_VAL then self.acc.as_slice()[r] else UNK;
+                        let recv = self.force(recv0);
+                        let (m, inst, _) = self.method_of(sg, ds, nm, r, recv, seg);
+                        let v = self.bi_targs(&mut sg.cx.tab, t, set, cut, tree, m, inst, c);
+                        if v != NONE {
+                            // a built-in's generic arguments are followed by its `()`
+                            self.set_chain(r, S_VAL, v);
+                            self.pos.as_mut_slice()[r] = tree.tok_end.as_slice()[c as usize] + 2;
+                            self.pend.as_mut_slice()[r] = P_TARGS;
+                            return false;
+                        }
                         self.set_chain(r, S_ERR, UNK);
                     } else {
                         self.path_state(sg, ds, nm, set, t, cut, tree, r, u as usize, c, false);
@@ -351,7 +362,7 @@ impl tc_rows.Typeck {
                     self.acc.as_mut_slice()[c as usize] = m;
                     self.pos.as_mut_slice()[c as usize] = inst;
                     self.blo.as_mut_slice()[c as usize] = b;
-                    if b != NONE { self.hint.as_mut_slice()[c as usize] = ch; }
+                    self.hint.as_mut_slice()[c as usize] = ch;
                     return true;
                 }
                 if st != S_VAL {
@@ -517,21 +528,7 @@ impl tc_rows.Typeck {
             }
             return sg.cx.tab.x(inst)[np];
         }
-        if tc_builtins.is_builtin(callee) {
-            let np = self.bt.params(callee, inst);
-            if np == UNK {
-                if args != NONE { self.poison_kids(tree, args as usize); }
-                return UNK;
-            }
-            let nb = if args == NONE then 0usize else tree.kids.row(args as usize).len();
-            if nb != np as usize { return self.err(); }
-            for j in 0..nb {
-                let a = self.base + tree.kids.row(args as usize)[j] as usize;
-                let p = self.bt.param(&mut sg.cx.tab, callee, inst, j);
-                self.coerce(&sg.cx.tab, a, p);
-            }
-            return self.bt.ret(&mut sg.cx.tab, callee, inst);
-        }
+        if tc_builtins.is_builtin(callee) { return self.bi_call(&mut sg.cx.tab, tree, callee, inst, args); }
         let skip: usize = if ds.kind.as_slice()[callee as usize] == decls.DK_METHOD then 1 else 0;
         let ps_len = sg.params.row(callee as usize).len() - skip;
         let variadic = sg.sflags.as_slice()[callee as usize] & sigs.SF_VARIADIC != 0;
@@ -936,10 +933,7 @@ impl tc_rows.Typeck {
         let b = self.blo.as_slice()[r];
         if b == UNK { return UNK; }
         if b != NONE { return self.gen_hint(sg, ds, tree, r, j); }
-        if tc_builtins.is_builtin(callee) {
-            let inst = self.pos.as_slice()[r];
-            return self.bt.param(&mut sg.cx.tab, callee, inst, j);
-        }
+        if tc_builtins.is_builtin(callee) { return self.bi_hint(&mut sg.cx.tab, tree, r, j); }
         let skip: usize = if ds.kind.as_slice()[callee as usize] == decls.DK_METHOD then 1 else 0;
         if j + skip < sg.params.row(callee as usize).len() {
             let inst = self.pos.as_slice()[r];
@@ -971,8 +965,9 @@ impl tc_rows.Typeck {
         let ct = sg.cx.tab.tag_of(c);
         if ct == types.TK_PARAM { return self.bound_method(sg, ds, c, s); }
         if ct == types.TK_ADT { return self.adt_method(sg, ds, c, s); }
-        // an impl for the built-in type may have the method; else the built-in table
-        if self.headless_has(s) { return (NONE, NONE, NONE); }
+        // an impl with no struct or enum head that may apply to the built-in type may have the
+        // method (stage0 takes it first); else the built-in table
+        if self.headless_on(sg, c, s) { return (NONE, NONE, NONE); }
         let (b, i) = builtin_callee(self.bt.method(&sg.cx.tab, c, s), c);
         return (b, i, NONE);
     }
