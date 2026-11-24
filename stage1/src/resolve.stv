@@ -4,8 +4,8 @@
 // stage0 walks each item with a task stack that pushes and pops locals. The same answers come
 // from ranges over node ids, with no walk: nodes are numbered in postorder, so a node's subtree
 // is the id range `N - size .. N` and a later sibling's subtree lies above it.
-// - Context per node, top-down (a parent's id is above its children's): whether stage0's walk
-//   visits it, the enclosing fn, closure, contract clause, and impl or trait.
+// - Context per node, one item at a time, top-down (a parent's id is above its children's):
+//   whether stage0's walk visits it, the enclosing fn, closure, contract clause, impl or trait.
 // - A binding is a row (item, class, name, lo, hi, node): visible to the uses at positions
 //   lo..=hi. A `let` binds after its statement up to the end of its block, a parameter after
 //   itself up to the end of its fn or closure, a `for` pattern in its block, a match arm's first
@@ -119,7 +119,8 @@ impl Names {
     }
 }
 
-// Program-wide node context.
+// The node context of one item at a time, in columns sized for the largest item and reused
+// (rows held are global; a row g of the item is at g - base).
 struct Ctx {
     parent: vec.Vec<u32>,
     state: vec.Vec<u8>,
@@ -131,23 +132,61 @@ struct Ctx {
     con: vec.Vec<u32>,
     // `F_*` and `G_*` bits
     flag: vec.Vec<u8>,
+    // per kind, the last row whose children held it: a child is the first of its kind iff that
+    // row is not its parent yet
+    seen: vec.Vec<u32>,
 }
 
 impl Ctx {
-    fn slices(&self) -> CtxV from self {
-        return CtxV.{ parent: self.parent.as_slice(), state: self.state.as_slice(), fnl: self.fnl.as_slice(), clo: self.clo.as_slice(), cla: self.cla.as_slice(), con: self.con.as_slice(), flag: self.flag.as_slice() };
+    fn new(n: usize) -> Ctx {
+        return Ctx.{ parent: col.filled(n, NONE), state: col.filled(n, S_NO), fnl: col.filled(n, NONE), clo: col.filled(n, NONE), cla: col.filled(n, NONE), con: col.filled(n, NONE), flag: col.filled(n, 0u8), seen: col.filled(256, NONE) };
+    }
+
+    fn slices(&self, base: usize) -> CtxV from self {
+        return CtxV.{ base: base, parent_c: self.parent.as_slice(), state_c: self.state.as_slice(), fnl_c: self.fnl.as_slice(), clo_c: self.clo.as_slice(), cla_c: self.cla.as_slice(), con_c: self.con.as_slice(), flag_c: self.flag.as_slice() };
     }
 }
 
-// The columns of a `Ctx`.
+// The context of the item whose rows start at `base`, by row.
 view struct CtxV {
-    parent: &[u32],
-    state: &[u8],
-    fnl: &[u32],
-    clo: &[u32],
-    cla: &[u32],
-    con: &[u32],
-    flag: &[u8],
+    base: usize,
+    parent_c: &[u32],
+    state_c: &[u8],
+    fnl_c: &[u32],
+    clo_c: &[u32],
+    cla_c: &[u32],
+    con_c: &[u32],
+    flag_c: &[u8],
+}
+
+impl CtxV {
+    fn parent(&self, g: usize) -> u32 {
+        return self.parent_c[g - self.base];
+    }
+
+    fn state(&self, g: usize) -> u8 {
+        return self.state_c[g - self.base];
+    }
+
+    fn fnl(&self, g: usize) -> u32 {
+        return self.fnl_c[g - self.base];
+    }
+
+    fn clo(&self, g: usize) -> u32 {
+        return self.clo_c[g - self.base];
+    }
+
+    fn cla(&self, g: usize) -> u32 {
+        return self.cla_c[g - self.base];
+    }
+
+    fn con(&self, g: usize) -> u32 {
+        return self.con_c[g - self.base];
+    }
+
+    fn flag(&self, g: usize) -> u8 {
+        return self.flag_c[g - self.base];
+    }
 }
 
 // Node bits: the first child of its parent, the first child of its kind among its siblings; it
@@ -241,11 +280,13 @@ impl Binds {
 }
 
 // `Uses.flags` bits: a bare head may name a variant (E0103); the head is `Self`; the head's
-// contextual names are those of an `ensures` clause; the token after the head is `(` (`old(..)`).
+// contextual names are those of an `ensures` clause; the token after the head is `(` (`old(..)`);
+// a `Self` head inside an `ImplDecl`.
 const U_VARIANT_OK: u8 = 1;
 const U_SELF_HEAD: u8 = 2;
 const U_ENSURES: u8 = 4;
 const U_CALL: u8 = 8;
+const U_IN_IMPL: u8 = 16;
 
 fn uflags(variant_ok: bool, self_head: bool, ens: bool, call: bool) -> u8 {
     return variant_ok.select(U_VARIANT_OK, 0u8) | self_head.select(U_SELF_HEAD, 0u8) | ens.select(U_ENSURES, 0u8) | call.select(U_CALL, 0u8);
@@ -258,7 +299,8 @@ struct Uses {
     pos: vec.Vec<u32>,
     ns: vec.Vec<u8>,
     flags: vec.Vec<u8>,
-    // the clause row the head's contextual names come from (NONE: outside clauses)
+    // the clause row the head's contextual names come from (NONE: outside clauses); in an
+    // `ensures` clause the row `result` names
     clause: vec.Vec<u32>,
     seg_lo: vec.Vec<u32>,
     seg_sym: vec.Vec<u32>,
@@ -376,18 +418,19 @@ fn kind_rules() -> [u8; 256] {
     return r;
 }
 
-// The visit state of child ch of row p, whose state is ps and rule rule (`parent`, `clo` filled
-// for p and above, `flag` for every row of the item).
-fn child_state(c: &Cols, parent: &[u32], clo: &[u32], flag: &[u8], p: usize, ps: u8, rule: u8, ch: usize) -> u8 {
+// The visit state of child ch of row p (global rows; the item's rows start at base), whose state
+// is ps and rule rule (`parent`, `clo` filled for p and above, `flag` for every row of the item).
+fn child_state(c: &Cols, parent: &[u32], clo: &[u32], flag: &[u8], base: usize, p: usize, ps: u8, rule: u8, ch: usize) -> u8 {
     let ck = c.kind[ch];
-    let first_of_kind = flag[ch] & F_FIRST_OF_KIND != 0;
+    let fch = flag[ch - base];
+    let first_of_kind = fch & F_FIRST_OF_KIND != 0;
     if ps == S_PARAM {
         // the list visits every parameter's `from` clause after binding them all (not in a closure)
-        let pp = parent[p] as usize;
+        let pp = parent[p - base] as usize;
         let pk2 = c.kind[pp];
-        let from_ok = (pk2 == node_kinds.KIND_PARAMS || pk2 == node_kinds.KIND_X_PARAMS) && clo[pp] == NONE;
+        let from_ok = (pk2 == node_kinds.KIND_PARAMS || pk2 == node_kinds.KIND_X_PARAMS) && clo[pp - base] == NONE;
         if from_ok && ck == node_kinds.KIND_PARAM_FROM && first_of_kind { return S_YES; }
-        if flag[p] & G_SELF != 0 { return S_NO; }
+        if flag[p - base] & G_SELF != 0 { return S_NO; }
         return if ck == node_kinds.KIND_TYPE && first_of_kind then S_YES else S_NO;
     }
     if ps != S_YES || rule == K_NONE { return S_NO; }
@@ -396,115 +439,101 @@ fn child_state(c: &Cols, parent: &[u32], clo: &[u32], flag: &[u8], p: usize, ps:
     if rule == K_PARAM {
         // a parameter visited on its own: its type only
         if ck == node_kinds.KIND_PARAM { return S_PARAM; }
-        if flag[p] & G_SELF != 0 { return S_NO; }
+        if flag[p - base] & G_SELF != 0 { return S_NO; }
         return if ck == node_kinds.KIND_TYPE && first_of_kind then S_YES else S_NO;
     }
-    let first = flag[ch] & F_FIRST != 0;
+    let first = fch & F_FIRST != 0;
     if rule == K_STMT {
         if c.tk(c.tok[p] as usize) != T_KW_LET { return S_YES; }
         return if first then S_NO else S_YES;
     }
     if rule == K_FOR {
         // without a `Block` after the first child stage0 visits nothing
-        if flag[p] & G_LATE_BLOCK == 0 { return S_NO; }
+        if flag[p - base] & G_LATE_BLOCK == 0 { return S_NO; }
         return if first then S_NO else S_YES;
     }
     return if first then S_NO else S_YES;
 }
 
-fn context(c: &Cols, items: usize) -> Ctx {
-    let n = c.kind.len();
-    let rules = kind_rules();
-    let mut parent = col.filled(n, NONE);
-    let mut state = col.filled(n, S_NO);
-    let mut fnl_c = col.filled(n, NONE);
-    let mut clo_c = col.filled(n, NONE);
-    let mut cla_c = col.filled(n, NONE);
-    let mut con_c = col.filled(n, NONE);
-    let mut flag_c = col.filled(n, 0u8);
+// The context of the item at rows base..end, into the first end - base rows of cx's columns.
+fn context(c: &Cols, rules: &[u8], base: usize, end: usize, cx: &mut Ctx) {
+    let len = end - base;
     let kind = c.kind;
-    let par = parent.as_mut_slice();
-    let sts = state.as_mut_slice();
-    let fnl_s = fnl_c.as_mut_slice();
-    let clo_s = clo_c.as_mut_slice();
-    let cla_s = cla_c.as_mut_slice();
-    let con_s = con_c.as_mut_slice();
-    let fl = flag_c.as_mut_slice();
-    // per kind, the last row whose children held it: a child is the first of its kind iff that
-    // row is not its parent yet
-    let mut seen_c = col.filled(256, NONE);
-    let seen = seen_c.as_mut_slice();
-    for i in 0..items {
-        let base = c.inode[i] as usize;
-        let end = c.inode[i + 1] as usize;
-        for g in base..end {
-            let lo = c.koff[g] as usize;
-            let gg = g as% u32;
-            for j in lo..c.koff[g + 1] as usize {
-                let ch = base + c.kids[j] as usize;
-                par[ch] = gg;
-                let ck = kind[ch];
-                let mut f = fl[ch];
-                if j == lo { f = f | F_FIRST; }
-                if seen[ck as usize] != gg {
-                    seen[ck as usize] = gg;
-                    f = f | F_FIRST_OF_KIND;
-                }
-                fl[ch] = f;
-                if ck == node_kinds.KIND_SELF_PARAM { fl[g] = fl[g] | G_SELF; }
-                if ck == node_kinds.KIND_BLOCK {
-                    fl[g] = fl[g] | G_BLOCK;
-                    if j != lo { fl[g] = fl[g] | G_LATE_BLOCK; }
-                }
+    let par = cx.parent.as_mut_slice();
+    let sts = cx.state.as_mut_slice();
+    let fnl_s = cx.fnl.as_mut_slice();
+    let clo_s = cx.clo.as_mut_slice();
+    let cla_s = cx.cla.as_mut_slice();
+    let con_s = cx.con.as_mut_slice();
+    let fl = cx.flag.as_mut_slice();
+    let seen = cx.seen.as_mut_slice();
+    par[0..len].fill(NONE);
+    fl[0..len].fill(0);
+    for g in base..end {
+        let r = g - base;
+        let lo = c.koff[g] as usize;
+        let gg = g as% u32;
+        for j in lo..c.koff[g + 1] as usize {
+            let cr = c.kids[j] as usize;
+            par[cr] = gg;
+            let ck = kind[base + cr];
+            let mut f = fl[cr];
+            if j == lo { f = f | F_FIRST; }
+            if seen[ck as usize] != gg {
+                seen[ck as usize] = gg;
+                f = f | F_FIRST_OF_KIND;
+            }
+            fl[cr] = f;
+            if ck == node_kinds.KIND_SELF_PARAM { fl[r] = fl[r] | G_SELF; }
+            if ck == node_kinds.KIND_BLOCK {
+                fl[r] = fl[r] | G_BLOCK;
+                if j != lo { fl[r] = fl[r] | G_LATE_BLOCK; }
             }
         }
     }
-    for i in 0..items {
-        let base = c.inode[i] as usize;
-        let end = c.inode[i + 1] as usize;
-        // parents before children: descending rows
-        let mut g = end;
-        while g > base {
-            g = g - 1;
-            let p = par[g];
-            let mut st = S_YES;
-            let mut fnl = NONE;
-            let mut clo = NONE;
-            let mut cla = NONE;
-            let mut con = NONE;
-            if p != NONE {
-                let pu = p as usize;
-                let ps = sts[pu];
-                let rule = rules[kind[pu] as usize];
-                // the usual cases without the call: a parent not visited, a leaf, a plain parent
-                if ps == S_NO || (ps == S_YES && rule == K_NONE) {
-                    st = S_NO;
-                } else if ps != S_YES || rule != K_ALL {
-                    st = child_state(c, par, clo_s, fl, pu, ps, rule, g);
-                }
-                fnl = fnl_s[pu];
-                clo = clo_s[pu];
-                cla = cla_s[pu];
-                con = con_s[pu];
+    // parents before children: descending rows
+    let mut r = len;
+    while r > 0 {
+        r = r - 1;
+        let g = base + r;
+        let p = par[r];
+        let mut st = S_YES;
+        let mut fnl = NONE;
+        let mut clo = NONE;
+        let mut cla = NONE;
+        let mut con = NONE;
+        if p != NONE {
+            let pu = p as usize;
+            let pr = pu - base;
+            let ps = sts[pr];
+            let rule = rules[kind[pu] as usize];
+            // the usual cases without the call: a parent not visited, a leaf, a plain parent
+            if ps == S_NO || (ps == S_YES && rule == K_NONE) {
+                st = S_NO;
+            } else if ps != S_YES || rule != K_ALL {
+                st = child_state(c, par, clo_s, fl, base, pu, ps, rule, g);
             }
-            let k = kind[g];
-            if k == node_kinds.KIND_FN_DECL || k == node_kinds.KIND_KERNEL_DECL || k == node_kinds.KIND_DISPATCH_DECL || k == node_kinds.KIND_EXTERN_FN || k == node_kinds.KIND_TRAIT_FN || (k == node_kinds.KIND_EXTERN_ITEM && fl[g] & G_BLOCK != 0) {
-                fnl = g as% u32;
-            } else if k == node_kinds.KIND_PRIMARY && c.tk(c.tok[g] as usize) == T_KW_FN {
-                clo = g as% u32;
-            } else if k == node_kinds.KIND_REQUIRES || k == node_kinds.KIND_ENSURES {
-                cla = g as% u32;
-            } else if k == node_kinds.KIND_IMPL_DECL || k == node_kinds.KIND_TRAIT_DECL {
-                con = g as% u32;
-            }
-            sts[g] = st;
-            fnl_s[g] = fnl;
-            clo_s[g] = clo;
-            cla_s[g] = cla;
-            con_s[g] = con;
+            fnl = fnl_s[pr];
+            clo = clo_s[pr];
+            cla = cla_s[pr];
+            con = con_s[pr];
         }
+        let k = kind[g];
+        if k == node_kinds.KIND_FN_DECL || k == node_kinds.KIND_KERNEL_DECL || k == node_kinds.KIND_DISPATCH_DECL || k == node_kinds.KIND_EXTERN_FN || k == node_kinds.KIND_TRAIT_FN || (k == node_kinds.KIND_EXTERN_ITEM && fl[r] & G_BLOCK != 0) {
+            fnl = g as% u32;
+        } else if k == node_kinds.KIND_PRIMARY && c.tk(c.tok[g] as usize) == T_KW_FN {
+            clo = g as% u32;
+        } else if k == node_kinds.KIND_REQUIRES || k == node_kinds.KIND_ENSURES {
+            cla = g as% u32;
+        } else if k == node_kinds.KIND_IMPL_DECL || k == node_kinds.KIND_TRAIT_DECL {
+            con = g as% u32;
+        }
+        sts[r] = st;
+        fnl_s[r] = fnl;
+        clo_s[r] = clo;
+        cla_s[r] = cla;
+        con_s[r] = con;
     }
-    return Ctx.{ parent: parent, state: state, fnl: fnl_c, clo: clo_c, cla: cla_c, con: con_c, flag: flag_c };
 }
 
 // The end of the generic argument list opening at global token lt (a `<`): (next token,
@@ -583,14 +612,21 @@ fn primary(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, t: &le
     let a = c.tok[g] as usize;
     let k = c.tk(a);
     let n = rel(it, g);
-    let cla = x.cla[g];
+    let cla = x.cla(g);
     let ens = cla != NONE && c.kind[cla as usize] == node_kinds.KIND_ENSURES;
+    // the row `result` names in an `ensures` clause: the fn's first one, else the clause
+    let mut rc = cla;
+    if ens {
+        let f = x.fnl(g);
+        let fe = if f == NONE then NONE else c.child(it.base, f as usize, node_kinds.KIND_ENSURES);
+        if fe != NONE { rc = fe; }
+    }
     if k == T_KW_SELF {
         su.add(it.i, n, c.tstart[a]);
         return;
     }
     if k == T_FMT {
-        fmt(u, su, it, c, t, nm, set, a, n, cla, ens);
+        fmt(u, su, it, c, t, nm, set, a, n, rc, ens);
         return;
     }
     let self_head = k == T_KW_SELF_TYPE;
@@ -601,16 +637,19 @@ fn primary(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, t: &le
         let (e, partial) = angle_end(c, a + 2);
         if partial {
             tok_seg(u, c, a);
-            u.end(it.i, n, n, NS_VALUE, uflags(true, false, ens, call), cla);
+            u.end(it.i, n, n, NS_VALUE, uflags(true, false, ens, call), rc);
             return;
         }
         pos = e;
     }
+    let mut in_impl = false;
     if self_head {
-        if x.con[g] == NONE {
+        let con = x.con(g);
+        if con == NONE {
             rows.add(resdiag.E0101, file, c.tstart[a], 4, NONE, 2, NONE);
             return;
         }
+        in_impl = c.kind[con as usize] == node_kinds.KIND_IMPL_DECL;
         u.seg(NONE, c.tstart[a], 4);
     } else {
         tok_seg(u, c, a);
@@ -624,7 +663,7 @@ fn primary(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, t: &le
             pos = e;
         }
     }
-    u.end(it.i, n, n, NS_VALUE, uflags(!self_head, self_head, ens, call), cla);
+    u.end(it.i, n, n, NS_VALUE, uflags(!self_head, self_head, ens, call) | in_impl.select(U_IN_IMPL, 0u8), rc);
 }
 
 // The f-string holes of `FmtLit` token a (a `\` skips the next byte, the first unescaped `"`
@@ -810,10 +849,11 @@ fn work_kinds() -> vec.Vec<bool> {
 }
 
 // Uses, bindings, and E0105 groups of every ok item.
-fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &Cols, x: &CtxV, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, rows: &mut resdiag.Rows) {
+fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &Cols, cx: &mut Ctx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, rows: &mut resdiag.Rows) {
     let mut chain = vec.Vec::<u32>.new();
     let work_c = work_kinds();
     let work = work_c.as_slice();
+    let rules = kind_rules();
     for i in 0..c.ifile.len() {
         if !tree.ok(i) { continue; }
         let base = c.inode[i] as usize;
@@ -822,8 +862,11 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
         if c.kind[end - 1] != node_kinds.KIND_ITEM { continue; }
         let it = Item.{ i: i as% u32, base: base, end: end };
         let file = c.ifile[i];
+        context(c, &rules, base, end, cx);
+        let xv = cx.slices(base);
+        let x = &xv;
         for g in base..end {
-            let st = x.state[g];
+            let st = x.state(g);
             if st == S_PARAM {
                 param(b, dups, it, c, x, g);
                 continue;
@@ -836,7 +879,7 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
             } else if k == node_kinds.KIND_TYPE_BASE {
                 let a = c.tok[g] as usize;
                 if c.tk(a) == T_KW_SELF_TYPE {
-                    if x.con[g] == NONE { rows.add(resdiag.E0101, file, c.tstart[a], 4, NONE, 2, NONE); }
+                    if x.con(g) == NONE { rows.add(resdiag.E0101, file, c.tstart[a], 4, NONE, 2, NONE); }
                 } else {
                     path_use(u, it, c, g, NS_TYPE, &mut chain);
                 }
@@ -853,9 +896,9 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
                     let a = c.tok[ch] as usize;
                     let nt = if c.tk(a) == T_KW_CONST then a + 1 else a;
                     let s = c.tstr[nt];
-                    let owner = x.parent[g] as usize;
+                    let owner = x.parent(g) as usize;
                     b.add(it.i, C_GENERIC, s, sub_lo(c, it, g), rel(it, owner) - 1, rel(it, ch));
-                    dups.add(rel(it, g), s, rel(it, ch), c.tstart[nt], c.str_len(s), it.i, x.fnl[g]);
+                    dups.add(rel(it, g), s, rel(it, ch), c.tstart[nt], c.str_len(s), it.i, x.fnl(g));
                 }
             } else if k == node_kinds.KIND_TAIL_CLAUSE {
                 for j in c.koff[g] as usize..c.koff[g + 1] as usize {
@@ -868,14 +911,14 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
             } else if k == node_kinds.KIND_STMT && c.tk(c.tok[g] as usize) == T_KW_LET {
                 let p = c.first_kid(base, g);
                 if p != NONE {
-                    let blk = x.parent[g] as usize;
-                    pattern(u, b, dups, it, c, p as usize, true, rel(it, g) + 1, rel(it, blk) - 1, x.fnl[g], &mut chain);
+                    let blk = x.parent(g) as usize;
+                    pattern(u, b, dups, it, c, p as usize, true, rel(it, g) + 1, rel(it, blk) - 1, x.fnl(g), &mut chain);
                 }
             } else if k == node_kinds.KIND_FOR_STMT {
                 let p = c.first_kid(base, g);
-                if p != NONE && x.flag[g] & G_LATE_BLOCK != 0 {
+                if p != NONE && x.flag(g) & G_LATE_BLOCK != 0 {
                     let blk = c.child(base, g, node_kinds.KIND_BLOCK) as usize;
-                    pattern(u, b, dups, it, c, p as usize, true, sub_lo(c, it, blk), rel(it, blk), x.fnl[g], &mut chain);
+                    pattern(u, b, dups, it, c, p as usize, true, sub_lo(c, it, blk), rel(it, blk), x.fnl(g), &mut chain);
                 }
             } else if k == node_kinds.KIND_STMT_ARM || k == node_kinds.KIND_EXPR_ARM {
                 let ap = c.first_kid(base, g);
@@ -884,7 +927,7 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
                     let lo = c.koff[apu] as usize;
                     for j in lo..c.koff[apu + 1] as usize {
                         let r = base + c.kids[j] as usize;
-                        pattern(u, b, dups, it, c, r, j == lo, rel(it, apu) + 1, rel(it, g) - 1, x.fnl[g], &mut chain);
+                        pattern(u, b, dups, it, c, r, j == lo, rel(it, apu) + 1, rel(it, g) - 1, x.fnl(g), &mut chain);
                     }
                 }
             }
@@ -894,17 +937,17 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
 
 // The nearest fn or closure holding row g (rows: a closure lies below its fn).
 fn owner_of(x: &CtxV, g: usize) -> u32 {
-    let f = x.fnl[g];
-    let c = x.clo[g];
+    let f = x.fnl(g);
+    let c = x.clo(g);
     return if c < f then c else f;
 }
 
 // A parameter of a visited parameter list: its binding (or the `self` one) and its E0105 group.
 fn param(b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, x: &CtxV, g: usize) {
-    let list = x.parent[g] as usize;
+    let list = x.parent(g) as usize;
     let owner = owner_of(x, g);
-    if x.flag[g] & G_SELF != 0 {
-        let f = x.fnl[g];
+    if x.flag(g) & G_SELF != 0 {
+        let f = x.fnl(g);
         if f != NONE { b.add(it.i, C_SELF, 0, sub_lo(c, it, list), rel(it, f as usize) - 1, rel(it, g)); }
         return;
     }
@@ -912,7 +955,7 @@ fn param(b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, x: &CtxV, g: usize)
     if c.tk(a) != T_IDENT || owner == NONE { return; }
     let s = c.tstr[a];
     b.add(it.i, C_LOCAL, s, rel(it, g) + 1, rel(it, owner as usize) - 1, rel(it, g));
-    dups.add(rel(it, owner as usize), s, rel(it, g), c.tstart[a], c.str_len(s), it.i, x.fnl[g]);
+    dups.add(rel(it, owner as usize), s, rel(it, g), c.tstart[a], c.str_len(s), it.i, x.fnl(g));
 }
 
 // A `from` origin: a local only (or `self`); inside a parameter's clause its position is the
@@ -921,13 +964,13 @@ fn origin(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, g: usiz
     let a = c.tok[g] as usize;
     let tk = if c.tk(a) == T_KW_COPY then a + 1 else a;
     let mut pos = rel(it, g);
-    let mut p = x.parent[g];
+    let mut p = x.parent(g);
     while p != NONE && c.kind[p as usize] == node_kinds.KIND_FROM {
-        p = x.parent[p as usize];
+        p = x.parent(p as usize);
     }
     if p != NONE && c.kind[p as usize] == node_kinds.KIND_PARAM_FROM {
-        let q = x.parent[p as usize];
-        pos = rel(it, x.parent[q as usize] as usize);
+        let q = x.parent(p as usize);
+        pos = rel(it, x.parent(q as usize) as usize);
     }
     if c.tk(tk) == T_KW_SELF {
         su.add(it.i, pos, c.tstart[tk]);
@@ -1199,7 +1242,7 @@ impl Lines {
 }
 
 // Follows chain k from its head; adds a line per segment that resolves to a decl or local.
-fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, c: &Cols, x: &CtxV, k: usize, out: &mut Lines, pend: &mut vec.Vec<u32>, rows: &mut resdiag.Rows) {
+fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, c: &Cols, k: usize, out: &mut Lines, pend: &mut vec.Vec<u32>, rows: &mut resdiag.Rows) {
     let item = v.item[k];
     let node = v.node[k];
     let ns = v.ns[k];
@@ -1218,8 +1261,7 @@ fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &
     let mut self_adt = NONE;
     if fl & U_SELF_HEAD != 0 {
         r = R_SELF_TYPE;
-        let con = x.con[base + node as usize];
-        if con != NONE && c.kind[con as usize] == node_kinds.KIND_IMPL_DECL {
+        if fl & U_IN_IMPL != 0 {
             let d = ds.item_decl.as_slice()[item as usize];
             if d != NONE && ds.kind.as_slice()[d as usize] == decls.DK_IMPL { self_adt = ds.impl_head.as_slice()[d as usize]; }
         }
@@ -1237,9 +1279,7 @@ fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &
                 r = R_BUILTIN;
             } else if txt.eq(mem.str_bytes("result")) && fl & U_ENSURES != 0 {
                 r = R_RESULT;
-                let f = x.fnl[base + node as usize];
-                let fe = if f == NONE then NONE else c.child(base, f as usize, node_kinds.KIND_ENSURES);
-                id = if fe == NONE then cla - base as% u32 else fe - base as% u32;
+                id = cla - base as% u32;
             }
         }
         if r == R_NONE && ns == NS_VALUE && v.local[k] != NONE {
@@ -1383,13 +1423,17 @@ fn dup_rows(d: &Dups, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, cut:
 // Resolves every name use of the build.
 pub fn build(md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, rows: &mut resdiag.Rows) -> Names {
     let c = cols(tree, t, nm, cut, md);
-    let cx = context(&c, cut.len());
-    let x = cx.slices();
+    let mut longest: usize = 0;
+    for i in 0..cut.len() {
+        let len = (c.inode[i + 1] - c.inode[i]) as usize;
+        if len > longest { longest = len; }
+    }
+    let mut cx = Ctx.new(longest);
     let mut u = Uses.new();
     let mut su = SelfUses.{ item: vec.Vec::<u32>.new(), pos: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), len: vec.Vec::<u32>.new() };
     let mut b = Binds.{ item: vec.Vec::<u32>.new(), class: vec.Vec::<u8>.new(), sym: vec.Vec::<u32>.new(), lo: vec.Vec::<u32>.new(), hi: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new() };
     let mut dups = Dups.{ key: vec.Vec::<u64>.new(), ord: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), len: vec.Vec::<u32>.new(), sym: vec.Vec::<u32>.new(), item: vec.Vec::<u32>.new(), fnode: vec.Vec::<u32>.new() };
-    collect(&mut u, &mut su, &mut b, &mut dups, &c, &x, tree, t, nm, set, rows);
+    collect(&mut u, &mut su, &mut b, &mut dups, &c, &mut cx, tree, t, nm, set, rows);
     dup_rows(&dups, tree, t, nm, cut, rows);
     // lookups: a value head asks for a local and a generic, a type head for a generic, an origin
     // for a local, `self` for the self parameter
@@ -1481,7 +1525,7 @@ pub fn build(md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, lx: &
         let v = u.slices();
         let bnode = b.node.as_slice();
         for k in 0..nu {
-            follow(&v, bnode, ds, md, nm, lx, set, t, &c, &x, k, &mut out, &mut pend, rows);
+            follow(&v, bnode, ds, md, nm, lx, set, t, &c, k, &mut out, &mut pend, rows);
         }
     }
     unresolved_heads(&u, ds, md, cut, pend.as_slice(), rows);
