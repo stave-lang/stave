@@ -1,0 +1,8 @@
+name = "manifest_dep_forms"
+kind = "bin"
+
+[dependencies]
+"quoted key" = { git = "x" } #~ ERROR E1002
+a = { path = 3 } #~ ERROR E1002
+b = 4 #~ ERROR E1002
+c.path = "c_dir" #~ ERROR E1002

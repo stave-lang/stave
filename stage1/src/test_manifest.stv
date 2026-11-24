@@ -1,0 +1,291 @@
+// manifest, manifest_check: the spans of the reader, the located errors, and the rows of the
+// validation (stage0's package.rs and toml.rs tests, on the same texts).
+import diag;
+import diag_manifest;
+import diag_out;
+import files;
+import manifest;
+import manifest_check;
+import source;
+import text;
+import std.debug;
+import std.mem;
+import std.string;
+import std.vec;
+
+fn push_str(out: &mut vec.Vec<u8>, s: &str) {
+    out.extend_from_slice(mem.str_bytes(s));
+}
+
+// The rows of manifest text `src` other than `missing-name`, one per line: `case|key|extra|lo-hi`.
+fn rows(src: &str) -> vec.Vec<u8> {
+    let mut is = manifest_check.Issues.new();
+    let _ = manifest_check.read(mem.str_bytes(src), 0, &mut is);
+    let mut out = vec.Vec::<u8>.new();
+    for k in 0..is.len() {
+        let case = is.case.as_slice()[k];
+        if case == manifest_check.C_MISSING_NAME { continue; }
+        push_str(&mut out, manifest_check.case_name(case));
+        out.push(124);
+        out.extend_from_slice(is.key.get_ref(k).as_slice());
+        out.push(124);
+        out.extend_from_slice(is.extra.get_ref(k).as_slice());
+        out.push(124);
+        text.push_u32(&mut out, is.lo.as_slice()[k]);
+        out.push(45);
+        text.push_u32(&mut out, is.hi.as_slice()[k]);
+        out.push(10);
+    }
+    return out;
+}
+
+fn expect(src: &str, want: &str) {
+    let got = rows(src);
+    debug.assert(text.eq_str(got.as_slice(), want), src);
+}
+
+// The entry of `t` named `key`.
+fn entry(d: &manifest.Doc, t: u32, key: &str) -> usize {
+    return match d.find(t, mem.str_bytes(key)) {
+        Option.Some(e) => e,
+        Option.None => 999999,
+    };
+}
+
+fn table_of(d: &manifest.Doc, t: u32, key: &str) -> u32 {
+    return match d.sub_table(entry(d, t, key)) {
+        Option.Some(x) => x,
+        Option.None => 999999,
+    };
+}
+
+fn span_is(got: (u32, u32), lo: u32, hi: u32, what: &str) {
+    debug.assert(got.0 == lo && got.1 == hi, what);
+}
+
+test fn spans_of_keys_and_values() {
+    let src = "name = \"app\" # c\nkind = 'bin'\n\n[dependencies]\nprims = { path = \"prims/cpu\", }\n[target.\"aarch64-linux+sve\".dependencies]\nx = { path = \"x\" }\n[run]\nn = 1_000\nf = 1.5\nb = true\na = [1, 2,\n 3]\n";
+    let (d, err) = manifest.read(mem.str_bytes(src));
+    debug.assert(err.is_none(), "no error");
+    let name = entry(&d, 0, "name");
+    span_is(d.value_span(name), 7, 12, "a basic string, its quotes included");
+    span_is((d.e_klo.as_slice()[name], d.e_khi.as_slice()[name]), 0, 4, "a bare key");
+    span_is(d.value_span(entry(&d, 0, "kind")), 24, 29, "a literal string");
+    let deps = table_of(&d, 0, "dependencies");
+    let prims = entry(&d, deps, "prims");
+    span_is(d.value_span(prims), 54, 77, "an inline table, braces included");
+    span_is((d.e_klo.as_slice()[prims], d.e_khi.as_slice()[prims]), 46, 51, "the key of an inline table");
+    let dep = table_of(&d, deps, "prims");
+    span_is(d.value_span(entry(&d, dep, "path")), 63, 74, "a string inside an inline table");
+    let header = entry(&d, 0, "dependencies");
+    span_is(d.value_span(header), 32, 44, "a header table: its last key");
+    let target = table_of(&d, 0, "target");
+    let sve = entry(&d, target, "aarch64-linux+sve");
+    span_is((d.e_klo.as_slice()[sve], d.e_khi.as_slice()[sve]), 86, 105, "a quoted key, quotes included");
+    let run = table_of(&d, 0, "run");
+    span_is(d.value_span(entry(&d, run, "n")), 149, 154, "an integer");
+    span_is(d.value_span(entry(&d, run, "f")), 159, 162, "a float");
+    span_is(d.value_span(entry(&d, run, "b")), 167, 171, "a boolean");
+    span_is(d.value_span(entry(&d, run, "a")), 176, 186, "an array over lines");
+    debug.assert(d.e_kind.as_slice()[entry(&d, run, "n")] == manifest.V_OTHER, "a number is no string");
+}
+
+test fn implicit_tables_take_the_first_key_and_headers_the_last() {
+    let (d, err) = manifest.read(mem.str_bytes("a.b = 1\n[x.y]\n[x]\nz = 1\n"));
+    debug.assert(err.is_none(), "an implicit table may later be a header");
+    span_is(d.value_span(entry(&d, 0, "a")), 0, 1, "implicit: the key that made it");
+    span_is(d.value_span(entry(&d, 0, "x")), 15, 16, "a header made after its child: the header's key");
+}
+
+fn located(src: &str, at: u32, dup: bool) {
+    let (d, err) = manifest.read(mem.str_bytes(src));
+    match &err {
+        Option.Some(e) => { debug.assert(e.offset == at && e.dup == dup, src); }
+        Option.None => { debug.assert(false, src); }
+    }
+}
+
+test fn errors_are_located() {
+    located("name = \n", 7, false);
+    located("a = 1\na = 2\n", 6, true);
+    located("[d]\nx = 1\n[d]\n", 11, true);
+    located("t = { a = 1, a = 2 }\n", 13, true);
+    located("[[x]]\n", 1, false);
+    located("x = \"open\n", 9, false);
+    located("x = 1 y\n", 6, false);
+    located("x = 09\n", 4, false);
+    located("x = \"\"\"a\"\"\"\n", 5, false);
+    located("a = 1\na.b = 2\n", 6, true);
+    located("a = { b = 1 }\na.c = 2\n", 14, true);
+}
+
+test fn nesting_is_bounded() {
+    let mut s = vec.Vec::<u8>.new();
+    push_str(&mut s, "x = ");
+    for k in 0..100usize { s.push(91); }
+    for k in 0..100usize { s.push(93); }
+    s.push(10);
+    let (d, err) = manifest.read(s.as_slice());
+    match &err {
+        Option.Some(e) => { debug.assert(e.offset == 69 && !e.dup, "the 65th bracket"); }
+        Option.None => { debug.assert(false, "too deep"); }
+    }
+}
+
+test fn the_tables_before_an_error_stay() {
+    let (d, err) = manifest.read(mem.str_bytes("name = \"a\"\nkind = ?\n"));
+    debug.assert(err.is_some(), "an error");
+    debug.assert(d.find(0, mem.str_bytes("name")).is_some(), "the line before it");
+    debug.assert(d.find(0, mem.str_bytes("kind")).is_none(), "not the line with it");
+}
+
+test fn never_panics_on_odd_bytes() {
+    let a = [255u8, 254, 32, 61, 32, 49];
+    let (d, err) = manifest.read(&a[0..6]);
+    debug.assert(err.is_some(), "a byte that starts no key");
+    let (d, err) = manifest.read(mem.str_bytes("["));
+    debug.assert(err.is_some(), "a header cut short");
+    let (d, err) = manifest.read(mem.str_bytes("a."));
+    debug.assert(err.is_some(), "a dotted key cut short");
+    let (d, err) = manifest.read(mem.str_bytes("a = {"));
+    debug.assert(err.is_some(), "an inline table cut short");
+    let (d, err) = manifest.read(mem.str_bytes("a = \"\\u12\""));
+    debug.assert(err.is_some(), "a short escape");
+    let (d, err) = manifest.read(mem.str_bytes("a = 'x"));
+    debug.assert(err.is_some(), "an open literal");
+}
+
+test fn rows_of_the_manifest() {
+    expect("name = \"a\"\nkind = \"bin\"\nversion = \"0.1.0\"\n", "");
+    expect("name = \"a\"\ncolour = \"blue\"\n[dependencies]\nprims = { git = \"x\" }\n", "|colour||11-17\nnon-path-dependency|prims||42-47\n");
+    expect("name = 3\n", "wrong-type|name|string|7-8\n");
+    expect("[dependencies]\np = \"1.0\"\n", "non-path-dependency|p||15-16\n");
+    expect("[target.foo.dependencies]\n[target.gpu-sm86.dependencies]\nx = { path = \"x\" }\n", "unknown-target|foo||8-11\n");
+    expect("[target.\"foo\".dependencies]\n", "unknown-target|foo||8-13\n");
+    expect("[target.x86_64-linux.deps]\n", "|deps||21-25\n");
+    expect("[target.x86_64-linux]\ndependencies = 1\n", "wrong-type|dependencies|table|37-38\n");
+    expect("[run]\nstack = \"8MiB\"\n[gpu]\n[compiler]\n", "");
+    expect("run = 1\n", "wrong-type|run|table|6-7\n");
+    expect("gpu = true\ncompiler = \"x\"\n", "wrong-type|gpu|table|6-10\nwrong-type|compiler|table|22-25\n");
+    expect("[dependencies]\nd = { path = 3 }\n", "wrong-type|path|string|28-29\n");
+    expect("[dependencies]\nd = { path = \"x\", branch = \"b\" }\n", "|branch||33-39\n");
+    expect("[dependencies]\nd = { branch = \"b\" }\n", "non-path-dependency|d||15-16\n");
+    expect("name = \n", "syntax|<end of line>||7-7\n");
+    expect("name = \"a\"\nname = \"b\"\n", "duplicate-key|name||11-15\n");
+    expect("[d]\nx = 1\n[d]\n", "|d||1-2\nduplicate-key|d||11-12\n");
+    expect("x = 1 y  \r\nz = 2\n", "syntax|y||6-10\n");
+    expect("name = \"a\"\nkind = \"exe\"\n", "bad-kind|\"exe\"||18-23\n");
+    expect("name = \"a\"\nkind = 3\n", "wrong-type|kind|string|18-19\n");
+    expect("name = \"\"\n", "bad-name|\"\"||7-9\n");
+    expect("name = \"-o\"\n", "bad-name|\"-o\"||7-11\n");
+    expect("name = \"a/b\"\n", "bad-name|\"a/b\"||7-12\n");
+    expect("name = \"my-pkg.2\"\n", "");
+    expect("kind = \"bin\"\n", "");
+    expect("[run]\nstack = \"1KiB\"\n", "stack|stack||14-20\n");
+}
+
+test fn the_missing_name_row() {
+    let mut is = manifest_check.Issues.new();
+    let _ = manifest_check.read(mem.str_bytes("kind = \"bin\"\n"), 3, &mut is);
+    debug.assert(is.len() == 1 && is.case.as_slice()[0] == manifest_check.C_MISSING_NAME, "no name");
+    debug.assert(is.man.as_slice()[0] == 3 && is.lo.as_slice()[0] == 0 && is.hi.as_slice()[0] == 0, "at offset 0");
+    let mut with_error = manifest_check.Issues.new();
+    let _ = manifest_check.read(mem.str_bytes("kind = ?\n"), 0, &mut with_error);
+    debug.assert(with_error.len() == 1 && with_error.case.as_slice()[0] == manifest_check.C_SYNTAX, "a syntax error: no missing-name row");
+    let mut wrong = manifest_check.Issues.new();
+    let _ = manifest_check.read(mem.str_bytes("name = 3\n"), 0, &mut wrong);
+    debug.assert(wrong.len() == 1 && wrong.case.as_slice()[0] == manifest_check.C_WRONG_TYPE, "a name that is no string is not missing");
+}
+
+fn stack_rows(v: &str) -> usize {
+    let mut is = manifest_check.Issues.new();
+    let mut src = vec.Vec::<u8>.new();
+    push_str(&mut src, "name = \"a\"\n[run]\nstack = ");
+    push_str(&mut src, v);
+    push_str(&mut src, "\n");
+    let _ = manifest_check.read(src.as_slice(), 0, &mut is);
+    let mut n: usize = 0;
+    for k in 0..is.len() {
+        if is.code.as_slice()[k] == 1203 && is.case.as_slice()[k] == manifest_check.C_STACK { n = n + 1; }
+    }
+    return n;
+}
+
+test fn run_stack_sizes() {
+    debug.assert(stack_rows("\"64KiB\"") == 0 && stack_rows("\"4096B\"") == 0, "a size of at least 4 KiB");
+    debug.assert(stack_rows("\"8MiB\"") == 0 && stack_rows("\"1TiB\"") == 0, "other units");
+    debug.assert(stack_rows("\"1KiB\"") == 1 && stack_rows("\"0B\"") == 1, "too small");
+    debug.assert(stack_rows("\"08MiB\"") == 1 && stack_rows("\"8MB\"") == 1 && stack_rows("\"8 MiB\"") == 1, "not the grammar");
+    debug.assert(stack_rows("\"1.5GiB\"") == 1 && stack_rows("8") == 1 && stack_rows("\"\"") == 1, "not a size");
+    debug.assert(stack_rows("\"16777216TiB\"") == 1 && stack_rows("\"99999999999999999999B\"") == 1, "over u64");
+    debug.assert(stack_rows("\"16777215TiB\"") == 0, "the largest");
+}
+
+test fn lossy_and_trim() {
+    let a = [97u8, 255, 98, 226, 130, 99, 240, 159];
+    let l = text.lossy(&a[0..8]);
+    let want = [97u8, 239, 191, 189, 98, 239, 191, 189, 99, 239, 191, 189];
+    debug.assert(l.as_slice().eq(&want[0..12]), "each maximal invalid sequence is one U+FFFD");
+    let (lo, hi) = text.trim_range(mem.str_bytes(" \t a b \r\n"));
+    debug.assert(lo == 3 && hi == 6, "ASCII white space");
+    let u = [194u8, 160, 120, 226, 128, 168, 227, 128, 128];
+    let (lo, hi) = text.trim_range(&u[0..9]);
+    debug.assert(lo == 2 && hi == 3, "no-break space, line separator, ideographic space");
+    let (lo, hi) = text.trim_range(mem.str_bytes("   "));
+    debug.assert(lo == hi, "all white space");
+}
+
+test fn the_dependencies_carry_their_spans() {
+    let m = manifest.parse(mem.str_bytes("name = \"a\"\n[dependencies]\nq = { path = \"../q\" }\nr = 1\n"));
+    debug.assert(m.deps.len() == 2, "two entries");
+    let q = m.deps.get_ref(0);
+    debug.assert(q.key_lo == 26 && q.key_hi == 27 && q.path_lo == 39 && q.path_hi == 45, "key and path spans");
+    let r = m.deps.get_ref(1);
+    debug.assert(r.path.is_none() && r.path_lo == manifest.NO_SPAN, "a dependency without a path");
+    debug.assert(m.name_lo == 7 && m.name_hi == 10 && m.kind_lo == manifest.NO_SPAN, "name and kind spans");
+}
+
+fn has(hay: &[u8], needle: &str) -> bool {
+    let n = mem.str_bytes(needle);
+    if n.len() > hay.len() { return false; }
+    for i in 0..hay.len() - n.len() + 1 {
+        if hay[i..i + n.len()].eq(n) { return true; }
+    }
+    return false;
+}
+
+// The human text of one row `case` of manifest `p`/stave.toml (ten bytes of text, no newline).
+fn render_row(case: u8, key: &str, extra: &str) -> (bool, vec.Vec<u8>) {
+    let mut fl = files.FileList.empty();
+    let code = if case == manifest_check.C_STACK then 1203u16 else 1002u16;
+    fl.issues.add(0, code, case, 2, 5, mem.str_bytes(key), mem.str_bytes(extra));
+    fl.man_pkg.push(string.String.from_str("p"));
+    fl.man_abs.push(string.String.from_str("stave.toml"));
+    fl.man_bytes.extend_from_slice(mem.str_bytes("0123456789"));
+    fl.man_off.push(10);
+    let mut set = source.SourceSet.{ bytes: vec.Vec::<u8>.new(), file_off: vec.Vec::<u64>.new(), read_err: vec.Vec::<u8>.new() };
+    set.file_off.push(0);
+    let mut d = diag.Diags.new();
+    diag_manifest.manifests(&mut d, &fl, 0);
+    let ft = diag_out.file_table(&fl, "");
+    let rows = d.order(ft.rank.as_slice());
+    let out = diag_out.render(&d, rows.as_slice(), &ft, &set, false);
+    return (!d.bad.get(), out);
+}
+
+test fn every_case_builds_from_its_template() {
+    for c in 0..15u8 {
+        let want_root = c == manifest_check.C_MISSING_ROOT;
+        let (ok, out) = render_row(c, "k", if want_root then "src/main.stv" else "string");
+        debug.assert(ok && out.len() > 0, "the row is built from the registry");
+        debug.assert(has(out.as_slice(), "stave.toml:1:3: error[E"), "located at offset 2 of the manifest");
+    }
+    let (ok, out) = render_row(manifest_check.C_WRONG_TYPE, "k", "string");
+    debug.assert(has(out.as_slice(), "`k` in `stave.toml` must be a string\n"), "wrong-type message");
+    let (ok, out) = render_row(manifest_check.C_NON_PATH, "k", "");
+    debug.assert(has(out.as_slice(), "write `k = { path = \"<dir>\" }`"), "braces in a fix");
+    let (ok, out) = render_row(manifest_check.C_MISSING_ROOT, "", "src/lib.stv");
+    debug.assert(has(out.as_slice(), "the package has no root module `src/lib.stv`\n"), "missing-root message");
+    let (ok, out) = render_row(99, "k", "");
+    debug.assert(!ok, "a number that is no case is an internal error");
+}

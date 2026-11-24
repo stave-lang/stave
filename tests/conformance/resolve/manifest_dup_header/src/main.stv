@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// E1002 case `duplicate-key` for a table header written twice, at its last key.
+fn main() -> i32 {
+    return 0;
+}
