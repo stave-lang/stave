@@ -1,0 +1,54 @@
+// Prefix sums over unsigned columns. Sums trap `Overflow` like `+`; for unsigned values that
+// happens iff the total does not fit, whatever order the parts are added in.
+import word;
+import std.vec;
+
+// xs[i] becomes the sum of xs[0..i] (xs[0] becomes zero); returns the total of all of xs.
+pub fn exclusive_in_place<T: word.Word + Copy>(xs: &mut [T]) -> T {
+    let mut acc = T.zero();
+    for i in 0..xs.len() {
+        let x = xs[i];
+        xs[i] = acc;
+        acc = acc.plus(x);
+    }
+    return acc;
+}
+
+// xs[i] becomes the sum of xs[0..=i]; returns the total (zero for an empty column).
+pub fn inclusive_in_place<T: word.Word + Copy>(xs: &mut [T]) -> T {
+    let mut acc = T.zero();
+    for i in 0..xs.len() {
+        acc = acc.plus(xs[i]);
+        xs[i] = acc;
+    }
+    return acc;
+}
+
+// out[i] = sum of xs[0..i]; the same length as xs.
+pub fn exclusive<T: word.Word + Copy>(xs: &[T]) -> vec.Vec<T> {
+    let mut out = vec.Vec::<T>.with_capacity(xs.len());
+    out.extend_from_slice(xs);
+    let _ = exclusive_in_place(out.as_mut_slice());
+    return out;
+}
+
+// out[i] = sum of xs[0..=i]; the same length as xs.
+pub fn inclusive<T: word.Word + Copy>(xs: &[T]) -> vec.Vec<T> {
+    let mut out = vec.Vec::<T>.with_capacity(xs.len());
+    out.extend_from_slice(xs);
+    let _ = inclusive_in_place(out.as_mut_slice());
+    return out;
+}
+
+// Row offsets from row lengths: n + 1 entries, out[0] = 0, out[i + 1] = out[i] + counts[i]; row i
+// is out[i]..out[i + 1] and out[n] is the total.
+pub fn offsets<T: word.Word + Copy>(counts: &[T]) -> vec.Vec<T> {
+    let mut out = vec.Vec::<T>.with_capacity(counts.len() + 1);
+    let mut acc = T.zero();
+    out.push(acc);
+    for i in 0..counts.len() {
+        acc = acc.plus(counts[i]);
+        out.push(acc);
+    }
+    return out;
+}

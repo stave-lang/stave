@@ -1,0 +1,52 @@
+// Binary search in a column sorted ascending. Both bounds are counts, so a data-parallel
+// version (each query on its own thread) gives the same answers. On a column that is not sorted
+// the result is the position the search ends at, unspecified but never out of range.
+import col;
+import word;
+import std.vec;
+
+// The number of elements less than x: the first position whose element is not below x
+// (xs.len() when all are).
+pub fn lower_bound<T: word.Word + Copy>(xs: &[T], x: T) -> usize {
+    let mut lo: usize = 0;
+    let mut hi = xs.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if xs[mid].less(x) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// The number of elements not above x: the first position whose element is above x.
+pub fn upper_bound<T: word.Word + Copy>(xs: &[T], x: T) -> usize {
+    let mut lo: usize = 0;
+    let mut hi = xs.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if x.less(xs[mid]) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    return lo;
+}
+
+// lower_bound of every query, in query order. Positions must fit a u32 (`Assert`).
+pub fn lower_bounds<T: word.Word + Copy>(xs: &[T], queries: &[T]) -> vec.Vec<u32> {
+    let mut out = vec.Vec::<u32>.with_capacity(queries.len());
+    for i in 0..queries.len() {
+        out.push(col.ids(lower_bound(xs, queries[i])));
+    }
+    return out;
+}
+
+// The two u32 halves as one u64 key that sorts by `hi`, then `lo`: tables sorted by a pair are
+// searched through this key.
+pub fn pair(hi: u32, lo: u32) -> u64 {
+    return ((hi as u64) << 32) | (lo as u64);
+}

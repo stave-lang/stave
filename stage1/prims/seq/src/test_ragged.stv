@@ -1,0 +1,84 @@
+// Ragged<T>: rows built by append, read back as slices.
+import ragged;
+import test_util;
+import std.debug;
+import std.vec;
+
+test fn empty() {
+    let r = ragged.Ragged::<u32>.new();
+    debug.assert(r.rows() == 0, "no rows");
+    debug.assert(r.data().len() == 0, "no data");
+    debug.assert(r.offsets().eq(&[0u32]), "offsets of nothing");
+}
+
+test fn rows_by_push_and_end_row() {
+    let mut r = ragged.Ragged::<u32>.new();
+    r.push(1);
+    r.push(2);
+    r.end_row();
+    r.end_row();
+    r.push(3);
+    r.end_row();
+    debug.assert(r.rows() == 3, "three rows");
+    debug.assert(r.row(0).eq(&[1u32, 2]), "row 0");
+    debug.assert(r.row(1).len() == 0 && r.row_len(1) == 0, "an empty row in the middle");
+    debug.assert(r.row(2).eq(&[3u32]), "row 2");
+    debug.assert(r.offsets().eq(&[0u32, 2, 2, 3]), "offsets");
+    debug.assert(r.data().eq(&[1u32, 2, 3]), "data");
+    debug.assert(r.start(2) == 2 && r.row_len(0) == 2, "start and length");
+}
+
+test fn the_open_row_is_not_a_row() {
+    let mut r = ragged.Ragged::<u8>.new();
+    r.push(9);
+    debug.assert(r.rows() == 0 && r.data().len() == 1, "pushed but not closed");
+    r.end_row();
+    debug.assert(r.rows() == 1 && r.row(0).eq(&[9u8]), "closed");
+}
+
+test fn rows_of_slices() {
+    let mut r = ragged.Ragged::<u64>.new();
+    let a = [10u64, 20, 30];
+    let none = [0u64; 0];
+    r.push_row(&a);
+    r.push_row(&none);
+    r.push_row(&a[1..2]);
+    debug.assert(r.rows() == 3, "three rows");
+    debug.assert(r.row(0).eq(&a) && r.row_len(1) == 0 && r.row(2).eq(&[20u64]), "rows");
+}
+
+test fn many_rows_of_growing_length() {
+    let mut r = ragged.Ragged::<u32>.new();
+    let mut total: usize = 0;
+    for i in 0..40usize {
+        for j in 0..i {
+            r.push((i * 100 + j) as% u32);
+        }
+        r.end_row();
+        total = total + i;
+    }
+    debug.assert(r.rows() == 40 && r.data().len() == total, "sizes");
+    for i in 0..40usize {
+        debug.assert(r.row_len(i) == i, "row length");
+        let row = r.row(i);
+        for j in 0..i {
+            debug.assert(row[j] as usize == i * 100 + j, "row content");
+        }
+    }
+    debug.assert(r.offsets().len() == 41, "offsets length");
+}
+
+struct Span {
+    pub lo: u32,
+    pub hi: u32,
+}
+
+impl Copy for Span {}
+
+test fn struct_rows() {
+    let mut r = ragged.Ragged::<Span>.new();
+    r.push(Span.{ lo: 1, hi: 2 });
+    r.push(Span.{ lo: 3, hi: 4 });
+    r.end_row();
+    debug.assert(r.row(0)[1].lo == 3 && r.row(0)[0].hi == 2, "struct elements");
+}

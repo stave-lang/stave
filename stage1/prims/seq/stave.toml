@@ -1,0 +1,5 @@
+# Sequence primitives of stage1: flat arrays and u32 ids, each with one result whatever the
+# order the elements are visited in, so a data-parallel package can replace this one under the
+# same name (`prims`).
+name = "prims"
+kind = "lib"

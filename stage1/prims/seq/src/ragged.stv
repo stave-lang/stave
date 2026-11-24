@@ -1,0 +1,71 @@
+// Ragged rows in two columns: row i is data[off[i]..off[i + 1]]. A row list as one offsets
+// column and one data column instead of a column per row.
+//
+// Built by appending: `push` adds to the open row, `end_row` closes it. The rows read back are
+// the closed ones; elements of the open row are in `data()` but in no row.
+import col;
+import std.vec;
+
+pub struct Ragged<T> {
+    off: vec.Vec<u32>,
+    data: vec.Vec<T>,
+}
+
+impl<T> Ragged<T> {
+    pub fn new() -> Ragged<T> {
+        let mut off = vec.Vec::<u32>.new();
+        off.push(0);
+        return Ragged.{ off: off, data: vec.Vec::<T>.new() };
+    }
+
+    // The number of closed rows.
+    pub fn rows(&self) -> usize {
+        return self.off.len() - 1;
+    }
+
+    // Appends x to the open row.
+    pub fn push(&mut self, x: T) {
+        self.data.push(x);
+    }
+
+    // Closes the open row (empty if nothing was pushed since the last close).
+    pub fn end_row(&mut self) {
+        self.off.push(col.ids(self.data.len()));
+    }
+
+    // The elements of all rows and of the open row, in order.
+    pub fn data(&self) -> &[T] from self {
+        return self.data.as_slice();
+    }
+
+    // rows() + 1 offsets: row i is data()[offsets()[i]..offsets()[i + 1]].
+    pub fn offsets(&self) -> &[u32] from self {
+        return self.off.as_slice();
+    }
+
+    // Position of the first element of row i in data() (`Bounds` unless i <= rows()).
+    pub fn start(&self, i: usize) -> usize {
+        return self.off.as_slice()[i] as usize;
+    }
+
+    pub fn row_len(&self, i: usize) -> usize {
+        let o = self.off.as_slice();
+        return (o[i + 1] - o[i]) as usize;
+    }
+
+    // Row i (`Bounds` unless i < rows()).
+    pub fn row(&self, i: usize) -> &[T] from self {
+        let o = self.off.as_slice();
+        let a = o[i] as usize;
+        let b = o[i + 1] as usize;
+        return &self.data.as_slice()[a..b];
+    }
+}
+
+impl<T: Copy> Ragged<T> {
+    // Appends a whole row.
+    pub fn push_row(&mut self, xs: &[T]) {
+        self.data.extend_from_slice(xs);
+        self.end_row();
+    }
+}

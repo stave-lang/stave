@@ -1,0 +1,86 @@
+// A lookup-only hash index: built once from a column of u64 keys, id i is the position of key i;
+// `probe` returns the id of a key or `idx.NONE`. Open addressing with linear probing, no
+// deletion, no growth. The table has at least twice as many slots as keys, so a probe always
+// reaches an empty slot.
+//
+// Keys need not be distinct. `probe` returns the lowest id holding the key and `probe_after`
+// the next higher one, so a caller whose key is a hash can compare the real values of each
+// candidate. Both are functions of the key column alone: equal keys sit on one probe path and
+// the build places them in id order, so the order along the path is the order of ids, and a
+// build in any other order (a parallel one) answers the same.
+import col;
+import std.debug;
+import std.idx;
+import std.vec;
+
+pub struct HashIndex {
+    keys: vec.Vec<u64>,
+    slots: vec.Vec<u32>,
+    mask: usize,
+}
+
+// The 64-bit finalizer of MurmurHash3.
+fn mix(k: u64) -> u64 {
+    let mut x = k;
+    x = x ^ (x >> 33);
+    x = x *% 0xff51afd7ed558ccd;
+    x = x ^ (x >> 33);
+    x = x *% 0xc4ceb9fe1a85ec53;
+    return x ^ (x >> 33);
+}
+
+impl HashIndex {
+    // The index of `keys` (fewer than u32::MAX of them: `idx.NONE` is no id).
+    pub fn build(keys: &[u64]) -> HashIndex {
+        let n = keys.len();
+        debug.assert(n < 4294967295, "hindex: too many keys for u32 ids");
+        let mut cap: usize = 8;
+        while cap < 2 * n {
+            cap = cap * 2;
+        }
+        let mask = cap - 1;
+        let mut slots = col.filled(cap, idx.NONE);
+        let mut own = vec.Vec::<u64>.with_capacity(n);
+        own.extend_from_slice(keys);
+        {
+            let s = slots.as_mut_slice();
+            for i in 0..n {
+                let mut at = (mix(keys[i]) as usize) & mask;
+                while s[at] != idx.NONE {
+                    at = (at + 1) & mask;
+                }
+                s[at] = i as% u32;
+            }
+        }
+        return HashIndex.{ keys: own, slots: slots, mask: mask };
+    }
+
+    // The number of keys.
+    pub fn len(&self) -> usize {
+        return self.keys.len();
+    }
+
+    // The lowest id whose key is `key`, else `idx.NONE`.
+    pub fn probe(&self, key: u64) -> u32 {
+        return self.find(key, 0);
+    }
+
+    // The lowest id above `after` whose key is `key`, else `idx.NONE`.
+    pub fn probe_after(&self, key: u64, after: u32) -> u32 {
+        if after == idx.NONE { return idx.NONE; }
+        return self.find(key, after + 1);
+    }
+
+    // The first id >= lo on the probe path of `key` whose key is `key`.
+    fn find(&self, key: u64, lo: u32) -> u32 {
+        let s = self.slots.as_slice();
+        let ks = self.keys.as_slice();
+        let mut at = (mix(key) as usize) & self.mask;
+        while s[at] != idx.NONE {
+            let id = s[at];
+            if id >= lo && ks[id as usize] == key { return id; }
+            at = (at + 1) & self.mask;
+        }
+        return idx.NONE;
+    }
+}

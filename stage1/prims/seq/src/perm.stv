@@ -1,0 +1,51 @@
+// Gather and scatter through a column of u32 positions, and the inverse of a permutation. An
+// index past the end of the data traps `Bounds`; two columns that must agree in length trap
+// `Assert` if they do not.
+import col;
+import std.debug;
+import std.idx;
+import std.vec;
+
+// out[i] = src[idx[i]].
+pub fn gather<T: Copy>(src: &[T], idx: &[u32]) -> vec.Vec<T> {
+    let mut out = vec.Vec::<T>.with_capacity(idx.len());
+    for i in 0..idx.len() {
+        out.push(src[idx[i] as usize]);
+    }
+    return out;
+}
+
+// dst[idx[i]] = vals[i] for every i. When several positions name one slot, the highest i wins,
+// so the result is a function of the three columns alone (a parallel version resolves a slot
+// to its highest writer).
+pub fn scatter<T: Copy>(dst: &mut [T], idx: &[u32], vals: &[T]) {
+    debug.assert(idx.len() == vals.len(), "scatter: idx and vals differ in length");
+    for i in 0..idx.len() {
+        dst[idx[i] as usize] = vals[i];
+    }
+}
+
+// out[p[i]] = i. For a permutation p of 0..n this is its inverse (the rank of each element when
+// p is the order of a sort). A slot no entry of p names holds `idx.NONE`; a slot named twice
+// holds the highest i.
+pub fn invert(p: &[u32]) -> vec.Vec<u32> {
+    let _ = col.ids(p.len());
+    let mut out = col.filled(p.len(), idx.NONE);
+    for i in 0..p.len() {
+        out.as_mut_slice()[p[i] as usize] = i as% u32;
+    }
+    return out;
+}
+
+// Whether p holds each of 0..p.len() exactly once.
+pub fn is_perm(p: &[u32]) -> bool {
+    let n = p.len();
+    let mut seen = col.filled(n, false);
+    for i in 0..n {
+        let k = p[i] as usize;
+        if k >= n { return false; }
+        if seen.as_slice()[k] { return false; }
+        seen.as_mut_slice()[k] = true;
+    }
+    return true;
+}
