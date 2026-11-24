@@ -47,8 +47,7 @@ pub(crate) fn faults(m: &Module, stack: Option<&StackInput>) -> Vec<VerifyError>
         }
     }
     for name in &m.intrinsics {
-        if name.is_empty() || !name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
-        {
+        if !super::lex::is_intrinsic_word(name.as_bytes()) {
             errs.push(module_err(format!("intrinsic name {name:?} is not of `[a-z0-9_]+`")));
         }
     }

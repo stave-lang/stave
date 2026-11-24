@@ -21,6 +21,7 @@
 //! - [`traps`]: the instructions that give a function the `trap` effect.
 //! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
 //! - [`known`]: the compiler-known items ([`Known`]) functions are stamped with.
+//! - [`intrinsics`]: the intrinsic names, arches, and signatures (front end and verifier).
 
 pub mod arith;
 pub mod borrowtrack;
@@ -34,6 +35,7 @@ pub mod fence;
 pub mod generated;
 pub mod host;
 pub mod interp;
+pub mod intrinsics;
 pub mod ir;
 pub mod known;
 pub mod layout;

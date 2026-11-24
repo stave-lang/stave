@@ -1,0 +1,235 @@
+// The item cut: the bracket check and the items of every file, as stage0's `items` pass.
+//
+// - Bracket depth is a prefix sum over +1 (`( [ { .{`), -1 (`) ] }`), and 0 (every other token),
+//   per file (`bracket.depth_of`). A file is balanced iff the sum never goes below 0, ends at 0,
+//   and every bracket pair (`bracket.mates`) has matching kinds. An unbalanced file, a balanced
+//   one deeper than `MAX_DEPTH`, and one the lexer stopped (E0001, E0002) have no items.
+// - A token starts an item iff its depth is 0, it is an item keyword, and it is the first token
+//   of the file or follows `;` or `}`: a mark per token, the starts are the marked tokens in
+//   order (`select.indices`). The tokens before the first start are an item (kind `ITEM_PRE`);
+//   an `import` after the first start that is no `import` is `ITEM_LATE_IMPORT`. An item ends
+//   where the next starts, the last one before the file's EOF.
+// - Whether an item is dropped is the parser's verdict (`parse`).
+// - Item ids are the ranks of (file, start): files in order, an item's id is its row.
+//
+// Token and item columns are program-wide; a token index is the global index into `Tokens`.
+import generated.terminals;
+import lex;
+import prims.bracket;
+import prims.scan;
+import prims.select;
+import source;
+import std.vec;
+
+pub const ITEM_PRE: u8 = 0;
+pub const ITEM_IMPORT: u8 = 1;
+pub const ITEM_LATE_IMPORT: u8 = 2;
+pub const ITEM_ITEM: u8 = 3;
+
+// Why a file has no items.
+pub const FILE_OK: u8 = 0;
+pub const FILE_LEX_STOP: u8 = 1;
+pub const FILE_UNBALANCED: u8 = 2;
+pub const FILE_TOO_DEEP: u8 = 3;
+
+pub const MAX_DEPTH: i32 = 10000;
+pub const NONE: u32 = 4294967295;
+
+const T_SEMI: u8 = terminals.T_SEMI as% u8;
+const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
+const T_KW_IMPORT: u8 = terminals.T_KW_IMPORT as% u8;
+
+// The items of every file, and the bracket structure they came from. `depth` and `mate` are
+// per token (`mate`: the paired bracket, `NONE` for another token; `depth` and `mate` are
+// meaningful only in files with items). File F's items are `file_item[F]..file_item[F + 1]`;
+// item I is the token run `tok_lo[I]..tok_hi[I]` of file `file[I]` (the file's EOF belongs to no
+// item), the bytes `off_start[I]..off_end[I]` of that file, of kind `kind[I]`.
+pub struct Items {
+    pub depth: vec.Vec<i32>,
+    pub mate: vec.Vec<u32>,
+    pub file_state: vec.Vec<u8>,
+    pub file_item: vec.Vec<u32>,
+    pub file: vec.Vec<u32>,
+    pub tok_lo: vec.Vec<u32>,
+    pub tok_hi: vec.Vec<u32>,
+    pub off_start: vec.Vec<u32>,
+    pub off_end: vec.Vec<u32>,
+    pub kind: vec.Vec<u8>,
+}
+
+impl Items {
+    pub fn len(&self) -> usize {
+        return self.file.len();
+    }
+}
+
+// Token classes by kind.
+struct Classes {
+    step: [i8; 256],
+    closer: [u8; 256],
+    item_kw: [bool; 256],
+}
+
+fn classes() -> Classes {
+    let mut c = Classes.{ step: [0i8; 256], closer: [0u8; 256], item_kw: [false; 256] };
+    let open = [terminals.T_L_PAREN, terminals.T_L_BRACKET, terminals.T_L_BRACE, terminals.T_DOT_L_BRACE];
+    let shut = [terminals.T_R_PAREN, terminals.T_R_BRACKET, terminals.T_R_BRACE, terminals.T_R_BRACE];
+    for k in 0usize..4 {
+        c.step[open[k] as usize] = 1;
+        c.closer[open[k] as usize] = shut[k] as% u8;
+        c.step[shut[k] as usize] = -1;
+    }
+    let kws = [
+        terminals.T_KW_IMPORT,
+        terminals.T_KW_PUB,
+        terminals.T_KW_TEST,
+        terminals.T_KW_UNSAFE,
+        terminals.T_KW_REC,
+        terminals.T_KW_FN,
+        terminals.T_KW_STRUCT,
+        terminals.T_KW_ENUM,
+        terminals.T_KW_VIEW,
+        terminals.T_KW_TRAIT,
+        terminals.T_KW_IMPL,
+        terminals.T_KW_CONST,
+        terminals.T_KW_STATIC,
+        terminals.T_KW_DISPATCH,
+        terminals.T_KW_EXTERN,
+        terminals.T_KW_TYPE,
+        terminals.T_KW_ALLOCATOR,
+        terminals.T_KW_KERNEL,
+    ];
+    for k in 0usize..18 {
+        c.item_kw[kws[k] as usize] = true;
+    }
+    return c;
+}
+
+// The bracket structure of the file of tokens kind[lo..hi] (its EOF included), appended to
+// out.depth and out.mate; returns the file's state.
+fn brackets(cls: &Classes, kind: &[u8], lo: usize, hi: usize, out: &mut Items) -> u8 {
+    let mut steps = vec.Vec::<i8>.with_capacity(hi - lo);
+    for i in lo..hi {
+        steps.push(cls.step[kind[i] as usize]);
+    }
+    let depth = bracket.depth_of(steps.as_slice());
+    let mates = bracket.mates(depth.as_slice());
+    let d = depth.as_slice();
+    let m = mates.as_slice();
+    let st = steps.as_slice();
+    let mut mn: i32 = 0;
+    let mut mx: i32 = 0;
+    for k in 0..d.len() {
+        if d[k] < mn { mn = d[k]; }
+        if d[k] > mx { mx = d[k]; }
+    }
+    let mut state = FILE_OK;
+    if mn < 0 || d[d.len() - 1] != 0 {
+        state = FILE_UNBALANCED;
+    } else {
+        // balanced, so every opener has a mate
+        for k in 0..m.len() {
+            if st[k] == 1 && cls.closer[kind[lo + k] as usize] != kind[lo + (m[k] as usize)] { state = FILE_UNBALANCED; }
+        }
+        if state == FILE_OK && mx > MAX_DEPTH { state = FILE_TOO_DEEP; }
+    }
+    out.depth.extend_from_slice(d);
+    let base = lo as% u32;
+    for k in 0..m.len() {
+        out.mate.push(if m[k] == NONE then NONE else m[k] + base);
+    }
+    return state;
+}
+
+fn push_item(out: &mut Items, f: usize, lo: usize, hi: usize, k: u8) {
+    out.file.push(f as% u32);
+    out.tok_lo.push(lo as% u32);
+    out.tok_hi.push(hi as% u32);
+    out.kind.push(k);
+}
+
+// The cut of every file of `t`; `lx` and `set` give the byte offsets of the items.
+pub fn build(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens) -> Items {
+    let nt = t.kind.len();
+    let nf = t.files();
+    let cls = classes();
+    let kind = t.kind.as_slice();
+    let start = t.start.as_slice();
+    let ft = t.file_tok.as_slice();
+    let mut out = Items.{
+        depth: vec.Vec::<i32>.with_capacity(nt),
+        mate: vec.Vec::<u32>.with_capacity(nt),
+        file_state: vec.Vec::<u8>.with_capacity(nf),
+        file_item: vec.Vec::<u32>.new(),
+        file: vec.Vec::<u32>.new(),
+        tok_lo: vec.Vec::<u32>.new(),
+        tok_hi: vec.Vec::<u32>.new(),
+        off_start: vec.Vec::<u32>.new(),
+        off_end: vec.Vec::<u32>.new(),
+        kind: vec.Vec::<u8>.new(),
+    };
+    let mut counts = vec.Vec::<u32>.with_capacity(nf);
+    let mut keep = vec.Vec::<bool>.new();
+    for f in 0..nf {
+        let lo = ft[f] as usize;
+        let hi = ft[f + 1] as usize;
+        // the file's EOF token
+        let eof = hi - 1;
+        let mut state = FILE_LEX_STOP;
+        if t.stop.as_slice()[f] == lex.STOP_NONE {
+            state = brackets(&cls, kind, lo, hi, &mut out);
+        } else {
+            for _ in lo..hi {
+                out.depth.push(0);
+                out.mate.push(NONE);
+            }
+        }
+        out.file_state.push(state);
+        if state != FILE_OK {
+            counts.push(0);
+            continue;
+        }
+        keep.clear();
+        {
+            let depth = out.depth.as_slice();
+            for i in lo..eof {
+                let prev_ends = i == lo || kind[i - 1] == T_SEMI || kind[i - 1] == T_R_BRACE;
+                keep.push(depth[i] == 0 && cls.item_kw[kind[i] as usize] && prev_ends);
+            }
+        }
+        // the starts, as offsets from lo
+        let starts = select.indices(keep.as_slice());
+        let sl = starts.as_slice();
+        let ns = sl.len();
+        let first = if ns == 0 then eof else lo + (sl[0] as usize);
+        // the first start that is no `import`: a later `import` is late
+        let mut first_other = eof;
+        for k in 0..ns {
+            if kind[lo + (sl[k] as usize)] != T_KW_IMPORT {
+                first_other = lo + (sl[k] as usize);
+                break;
+            }
+        }
+        let first_item = out.file.len();
+        if first > lo { push_item(&mut out, f, lo, first, ITEM_PRE); }
+        for k in 0..ns {
+            let s = lo + (sl[k] as usize);
+            let e = if k + 1 < ns then lo + (sl[k + 1] as usize) else eof;
+            let kd = if kind[s] != T_KW_IMPORT then ITEM_ITEM else if s > first_other then ITEM_LATE_IMPORT else ITEM_IMPORT;
+            push_item(&mut out, f, s, e, kd);
+        }
+        // byte offsets of the new items
+        let src = set.file(f);
+        let fkind = &kind[lo..hi];
+        let fstart = &start[lo..hi];
+        for r in first_item..out.file.len() {
+            let a = out.tok_lo.as_slice()[r] as usize;
+            let b = out.tok_hi.as_slice()[r] as usize;
+            out.off_start.push(start[a]);
+            out.off_end.push(lx.token_end(src, fkind, fstart, b - 1 - lo) as% u32);
+        }
+        counts.push((out.file.len() - first_item) as% u32);
+    }
+    out.file_item = scan.offsets(counts.as_slice());
+    return out;
+}

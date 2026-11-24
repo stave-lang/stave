@@ -1,0 +1,620 @@
+// The lexer: token kinds and start offsets of every file, token for token those of stage0's
+// reference scanner (the same rules, the same error tokens, the same stop points).
+//
+// - The lexical grammar is regular and no state crosses a newline (string, f-string, and char
+//   literals end at a raw newline, E0015), so every newline is a restart point; this pass is the
+//   sequential form.
+// - Whitespace is ` \t\r\n`; `//` comments run to the newline; `/*` is one error token (E0029)
+//   ending after the first `*/` on its line, else at the line end.
+// - A file starting `#!` begins with a comment line (offset 0 only). A byte-order mark at offset
+//   0 is E0017 and lexing resumes after it.
+// - Identifiers are `[A-Za-z_][A-Za-z0-9_]*`; the text picks a keyword, `_`, or `Ident`. `as`
+//   directly followed by `%`, `|`, `?`, `~` is one token.
+// - Numbers: directly after a `.` token, `[0-9] idcont*` is an `IntLit` (tuple steps); `0x`,
+//   `0b`, `0o` + `idcont*` is an `IntLit`; else digits, an optional `.digit` fraction and
+//   exponent, then `idcont*`: a `FloatLit` iff it has a fraction or an exponent.
+// - `"…"`, `'…'`, `f"…"` with `\` escapes (never escaping a newline). A bad f-string hole is
+//   E0006 and makes the literal an error token. A raw newline ends a literal (E0015), the end of
+//   the file too (E0003). `'` plus an identifier not closed by `'` is a lifetime (E0024).
+// - Punctuation is the longest match over the grammar's fixed spellings; a run of bytes that
+//   start no token is one error token (E0018).
+// - Invalid UTF-8 stops the file (E0001): only tokens ending at or before the first invalid byte
+//   stay. A file over u32::MAX bytes is E0002 and has no tokens.
+//
+// Kinds are the terminal ids of generated/terminals.stv (`KIND_ERROR` = NTERM for an error
+// token). Fixed spellings (keywords, punctuation) are read from its TERM_TEXT table, which is
+// sorted by spelling, so the terminals starting with one byte are a contiguous id range.
+import generated.terminals;
+import text;
+import std.mem;
+import std.vec;
+
+pub const KIND_ERROR: u8 = terminals.NTERM as% u8;
+pub const T_EOF: u8 = terminals.T_EOF as% u8;
+const T_DOT: u8 = terminals.T_DOT as% u8;
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_INT: u8 = terminals.T_INT_LIT as% u8;
+const T_FLOAT: u8 = terminals.T_FLOAT_LIT as% u8;
+const T_STR: u8 = terminals.T_STR_LIT as% u8;
+const T_FMT: u8 = terminals.T_FMT_LIT as% u8;
+const T_CHAR: u8 = terminals.T_CHAR_LIT as% u8;
+const T_UNDERSCORE: u8 = terminals.T_UNDERSCORE as% u8;
+const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
+const T_AS_PERCENT: u8 = terminals.T_AS_PERCENT as% u8;
+const T_AS_PIPE: u8 = terminals.T_AS_PIPE as% u8;
+const T_AS_QUESTION: u8 = terminals.T_AS_QUESTION as% u8;
+const T_AS_TILDE: u8 = terminals.T_AS_TILDE as% u8;
+// no terminal (keyword lookup miss)
+const NO_KIND: u8 = 255;
+
+// Lexical diagnostics, by code number (E0001 is 1).
+pub const E_INVALID_UTF8: u16 = 1;
+pub const E_TOO_LARGE: u16 = 2;
+pub const E_EOF_IN_LITERAL: u16 = 3;
+pub const E_BAD_HOLE: u16 = 6;
+pub const E_NEWLINE_IN_LITERAL: u16 = 15;
+pub const E_BOM: u16 = 17;
+pub const E_BAD_CHAR: u16 = 18;
+pub const E_LIFETIME: u16 = 24;
+pub const E_BLOCK_COMMENT: u16 = 29;
+
+// Why a file was not lexed to its end.
+pub const STOP_NONE: u8 = 0;
+pub const STOP_TOO_LARGE: u8 = 1;
+pub const STOP_INVALID_UTF8: u8 = 2;
+
+const MAX_FILE_LEN: usize = 4294967295;
+
+// Byte classes.
+const C_IDCONT: u8 = 1;
+const C_IDSTART: u8 = 2;
+const C_DIGIT: u8 = 4;
+const C_WS: u8 = 8;
+// starts no token: not whitespace, an identifier or digit byte, a quote, or punctuation
+const C_BAD: u8 = 16;
+
+const B_TAB: u8 = 9;
+const B_NL: u8 = 10;
+const B_CR: u8 = 13;
+const B_SPACE: u8 = 32;
+const B_BANG: u8 = 33;
+const B_DQUOTE: u8 = 34;
+const B_HASH: u8 = 35;
+const B_PERCENT: u8 = 37;
+const B_QUOTE: u8 = 39;
+const B_STAR: u8 = 42;
+const B_PLUS: u8 = 43;
+const B_MINUS: u8 = 45;
+const B_DOT: u8 = 46;
+const B_SLASH: u8 = 47;
+const B_0: u8 = 48;
+const B_9: u8 = 57;
+const B_QUESTION: u8 = 63;
+const B_UPPER_E: u8 = 69;
+const B_BACKSLASH: u8 = 92;
+const B_UNDERSCORE: u8 = 95;
+const B_A: u8 = 97;
+const B_B: u8 = 98;
+const B_E: u8 = 101;
+const B_F: u8 = 102;
+const B_O: u8 = 111;
+const B_S: u8 = 115;
+const B_X: u8 = 120;
+const B_LBRACE: u8 = 123;
+const B_PIPE: u8 = 124;
+const B_RBRACE: u8 = 125;
+const B_TILDE: u8 = 126;
+
+// The tokens of every file, file after file (file order = F), as columns. File F's tokens are
+// `file_tok[F]..file_tok[F + 1]`; the last one is its `EOF` token. `start` is the offset of the
+// token's first byte in its file. Lexical errors: `file_err` ranges like `file_tok`, each with
+// its code and span `[err_start, err_end)` in offset order (E0001 last).
+pub struct Tokens {
+    pub kind: vec.Vec<u8>,
+    pub start: vec.Vec<u32>,
+    pub file_tok: vec.Vec<u32>,
+    pub stop: vec.Vec<u8>,
+    pub err_code: vec.Vec<u16>,
+    pub err_start: vec.Vec<u32>,
+    pub err_end: vec.Vec<u32>,
+    pub file_err: vec.Vec<u32>,
+}
+
+impl Tokens {
+    pub fn new() -> Tokens {
+        let mut ft = vec.Vec::<u32>.new();
+        ft.push(0);
+        let mut fe = vec.Vec::<u32>.new();
+        fe.push(0);
+        return Tokens.{
+            kind: vec.Vec::<u8>.new(),
+            start: vec.Vec::<u32>.new(),
+            file_tok: ft,
+            stop: vec.Vec::<u8>.new(),
+            err_code: vec.Vec::<u16>.new(),
+            err_start: vec.Vec::<u32>.new(),
+            err_end: vec.Vec::<u32>.new(),
+            file_err: fe,
+        };
+    }
+
+    pub fn files(&self) -> usize {
+        return self.stop.len();
+    }
+
+    fn push(&mut self, kind: u8, start: usize) {
+        self.kind.push(kind);
+        self.start.push(start as% u32);
+    }
+}
+
+// The lexical errors of one file while it is scanned.
+struct Errs {
+    code: vec.Vec<u16>,
+    start: vec.Vec<u32>,
+    end: vec.Vec<u32>,
+}
+
+impl Errs {
+    fn new() -> Errs {
+        return Errs.{ code: vec.Vec::<u16>.new(), start: vec.Vec::<u32>.new(), end: vec.Vec::<u32>.new() };
+    }
+
+    fn len(&self) -> usize {
+        return self.code.len();
+    }
+
+    fn push(&mut self, code: u16, start: usize, end: usize) {
+        self.code.push(code);
+        self.start.push(start as% u32);
+        self.end.push(end as% u32);
+    }
+
+    fn truncate(&mut self, n: usize) {
+        self.code.truncate(n);
+        self.start.truncate(n);
+        self.end.truncate(n);
+    }
+}
+
+pub struct Lexer {
+    class: [u8; 256],
+    // fixed-spelling candidates for first byte b: terminal ids first_lo[b]..first_hi[b]
+    first_lo: [u16; 256],
+    first_hi: [u16; 256],
+    text: vec.Vec<u8>,
+    text_off: vec.Vec<u32>,
+    is_class: vec.Vec<bool>,
+}
+
+fn is_punct(b: u8) -> bool {
+    return match b {
+        33 | 37 | 38 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 58 | 59 | 60 | 61 | 62 | 63 | 91 | 93 | 94 | 123 | 124 | 125 | 126 => true,
+        _ => false,
+    };
+}
+
+fn class_table() -> [u8; 256] {
+    let mut t = [0u8; 256];
+    for i in 0usize..256 {
+        let b = i as% u8;
+        let mut c: u8 = 0;
+        if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == B_UNDERSCORE { c = c | C_IDSTART | C_IDCONT; }
+        if b >= B_0 && b <= B_9 { c = c | C_DIGIT | C_IDCONT; }
+        if b == B_SPACE || b == B_TAB || b == B_CR || b == B_NL { c = c | C_WS; }
+        if c == 0 && !is_punct(b) && b != B_DQUOTE && b != B_QUOTE { c = c | C_BAD; }
+        t[i] = c;
+    }
+    return t;
+}
+
+// The byte at j, or 0 past the end (0 is in no class but C_BAD, and matches no spelling).
+fn at(src: &[u8], j: usize) -> u8 {
+    return if j < src.len() then src[j] else 0;
+}
+
+fn is_digit(b: u8) -> bool {
+    return b >= B_0 && b <= B_9;
+}
+
+// Offset of the first `\n` at or after j, or the end of src.
+fn line_end(src: &[u8], j: usize) -> usize {
+    let n = src.len();
+    if j >= n { return n; }
+    return match src[j..n].find_byte(B_NL) {
+        Option.Some(p) => j + p,
+        Option.None => n,
+    };
+}
+
+// The end of the shebang line when src starts with `#!`, else 0.
+fn shebang_end(src: &[u8]) -> usize {
+    if src.len() >= 2 && src[0] == B_HASH && src[1] == B_BANG { return line_end(src, 2); }
+    return 0;
+}
+
+fn skip_digits(src: &[u8], j0: usize) -> usize {
+    let mut j = j0;
+    while j < src.len() && (is_digit(src[j]) || src[j] == B_UNDERSCORE) { j = j + 1; }
+    return j;
+}
+
+// After the first `*/` on the line of the `/*` at i, else the line end.
+fn block_comment_end(src: &[u8], i: usize) -> usize {
+    let e = line_end(src, i + 2);
+    let mut k = i + 2;
+    while k + 1 < e {
+        if src[k] == B_STAR && src[k + 1] == B_SLASH { return k + 2; }
+        k = k + 1;
+    }
+    return e;
+}
+
+impl Lexer {
+    pub fn new() -> Lexer {
+        let mut text = vec.Vec::<u8>.new();
+        text.extend_from_slice(&terminals.TERM_TEXT);
+        let mut off = vec.Vec::<u32>.new();
+        off.extend_from_slice(&terminals.TERM_TEXT_OFF);
+        let mut cls = vec.Vec::<bool>.new();
+        cls.extend_from_slice(&terminals.TERM_IS_CLASS);
+        let mut lo = [0u16; 256];
+        let mut hi = [0u16; 256];
+        for id in 0..terminals.NTERM {
+            let a = off.as_slice()[id] as usize;
+            let f = text.as_slice()[a] as usize;
+            if hi[f] == 0 { lo[f] = id as% u16; }
+            hi[f] = (id + 1) as% u16;
+        }
+        return Lexer.{ class: class_table(), first_lo: lo, first_hi: hi, text: text, text_off: off, is_class: cls };
+    }
+
+    // The fixed spelling (or class name) of terminal id.
+    pub fn spelling(&self, id: usize) -> &[u8] from self {
+        let o = self.text_off.as_slice();
+        let a = o[id] as usize;
+        let b = o[id + 1] as usize;
+        return &self.text.as_slice()[a..b];
+    }
+
+    // The `tokens` dump spelling of a kind: the terminal's text or name, `ERROR` for an error token.
+    pub fn kind_name(&self, kind: u8) -> &[u8] from self {
+        if kind >= KIND_ERROR { return mem.str_bytes("ERROR"); }
+        return self.spelling(kind as usize);
+    }
+
+    fn is_idcont(&self, b: u8) -> bool {
+        return self.class[b as usize] & C_IDCONT != 0;
+    }
+
+    fn is_idstart(&self, b: u8) -> bool {
+        return self.class[b as usize] & C_IDSTART != 0;
+    }
+
+    fn is_bad(&self, b: u8) -> bool {
+        return self.class[b as usize] & C_BAD != 0;
+    }
+
+    fn skip_idcont(&self, src: &[u8], j0: usize) -> usize {
+        let mut j = j0;
+        while j < src.len() && self.is_idcont(src[j]) { j = j + 1; }
+        return j;
+    }
+
+    // The keyword terminal spelled s, or NO_KIND (`_` is not a keyword; s is a nonempty word).
+    fn keyword(&self, s: &[u8]) -> u8 {
+        let f = s[0] as usize;
+        let cls = self.is_class.as_slice();
+        for id in self.first_lo[f]..self.first_hi[f] {
+            let k = id as usize;
+            if !cls[k] && text.eq(self.spelling(k), s) { return id as% u8; }
+        }
+        return NO_KIND;
+    }
+
+    // Lexes src (file F = out.files()) and appends its tokens, errors, and stop reason to out.
+    pub fn lex_file(&self, src: &[u8], out: &mut Tokens) {
+        let n = src.len();
+        let mut errs = Errs.new();
+        let mut stop = STOP_NONE;
+        if n > MAX_FILE_LEN {
+            errs.push(E_TOO_LARGE, 0, 0);
+            out.push(T_EOF, 0);
+            finish(out, &mut errs, STOP_TOO_LARGE);
+            return;
+        }
+        let (limit, bad_len) = text.utf8_valid_up_to(src);
+        let stopped = limit < n;
+        // past limit when the shebang line holds the invalid byte: nothing is lexed then
+        let mut i = shebang_end(src);
+        if n >= 3 && src[0] == 239 && src[1] == 187 && src[2] == 191 {
+            errs.push(E_BOM, 0, 3);
+            i = 3;
+        }
+        // the end of the last token when it was a `.`, else n + 1 (no offset)
+        let mut dot_end = n + 1;
+        while i < limit {
+            let c = src[i];
+            if self.class[c as usize] & C_WS != 0 {
+                i = i + 1;
+                continue;
+            }
+            if c == B_SLASH && at(src, i + 1) == B_SLASH {
+                let e = line_end(src, i + 2);
+                // the comment holds the invalid byte
+                if e > limit { break; }
+                i = e;
+                continue;
+            }
+            let mark = errs.len();
+            let (kind, end) = self.scan(src, i, dot_end == i, &mut errs);
+            if end > limit {
+                // the token holds the invalid byte: not listed, except a run of bad bytes, which
+                // ends at it (the invalid byte is no character)
+                errs.truncate(mark);
+                if self.is_bad(c) {
+                    errs.push(E_BAD_CHAR, i, limit);
+                    out.push(kind, i);
+                }
+                break;
+            }
+            out.push(kind, i);
+            dot_end = if kind == T_DOT then end else n + 1;
+            i = end;
+        }
+        let eof = if stopped then limit else n;
+        out.push(T_EOF, eof);
+        sort_errs(&mut errs);
+        if stopped {
+            errs.push(E_INVALID_UTF8, limit, limit + bad_len);
+            stop = STOP_INVALID_UTF8;
+        }
+        finish(out, &mut errs, stop);
+    }
+
+    // The end offset of token i of a file (`kind` and `start` are the file's columns): the token
+    // scanned again, cut at the start of the next one. EOF ends where it starts.
+    pub fn token_end(&self, src: &[u8], kind: &[u8], start: &[u32], i: usize) -> usize {
+        let s = start[i] as usize;
+        if kind[i] == T_EOF || s >= src.len() { return s; }
+        let after_dot = i > 0 && kind[i - 1] == T_DOT && start[i - 1] as usize + 1 == s;
+        let mut errs = Errs.new();
+        let (_, end) = self.scan(src, s, after_dot, &mut errs);
+        if i + 1 < kind.len() && start[i + 1] as usize >= s {
+            let next = start[i + 1] as usize;
+            return if end < next then end else next;
+        }
+        return end;
+    }
+
+    // The token starting at i (not whitespace, not a comment): its kind and end.
+    fn scan(&self, src: &[u8], i: usize, after_dot: bool, errs: &mut Errs) -> (u8, usize) {
+        let c = src[i];
+        let cls = self.class[c as usize];
+        if cls & C_DIGIT != 0 { return self.scan_number(src, i, after_dot); }
+        if cls & C_IDSTART != 0 {
+            if c == B_F && at(src, i + 1) == B_DQUOTE { return self.scan_fmt(src, i, errs); }
+            return self.scan_word(src, i);
+        }
+        if cls & C_BAD != 0 {
+            let mut j = i + 1;
+            while j < src.len() && self.is_bad(src[j]) { j = j + 1; }
+            errs.push(E_BAD_CHAR, i, j);
+            return (KIND_ERROR, j);
+        }
+        if c == B_DQUOTE { return scan_quoted(src, i, false, errs); }
+        if c == B_QUOTE {
+            if self.is_idstart(at(src, i + 1)) {
+                let j = self.skip_idcont(src, i + 2);
+                if at(src, j) != B_QUOTE {
+                    errs.push(E_LIFETIME, i, j);
+                    return (KIND_ERROR, j);
+                }
+            }
+            return scan_quoted(src, i, true, errs);
+        }
+        if c == B_SLASH && at(src, i + 1) == B_STAR {
+            errs.push(E_BLOCK_COMMENT, i, i + 2);
+            return (KIND_ERROR, block_comment_end(src, i));
+        }
+        return self.scan_punct(src, i);
+    }
+
+    fn scan_word(&self, src: &[u8], i: usize) -> (u8, usize) {
+        let j = self.skip_idcont(src, i + 1);
+        if j == i + 1 && src[i] == B_UNDERSCORE { return (T_UNDERSCORE, j); }
+        if j == i + 2 && src[i] == B_A && src[i + 1] == B_S {
+            let op = match at(src, j) {
+                37 => T_AS_PERCENT,
+                124 => T_AS_PIPE,
+                63 => T_AS_QUESTION,
+                126 => T_AS_TILDE,
+                _ => NO_KIND,
+            };
+            if op != NO_KIND { return (op, j + 1); }
+        }
+        let k = self.keyword(&src[i..j]);
+        return (if k == NO_KIND then T_IDENT else k, j);
+    }
+
+    fn scan_number(&self, src: &[u8], i: usize, after_dot: bool) -> (u8, usize) {
+        if after_dot { return (T_INT, self.skip_idcont(src, i + 1)); }
+        let b1 = at(src, i + 1);
+        if src[i] == B_0 && (b1 == B_X || b1 == B_B || b1 == B_O) { return (T_INT, self.skip_idcont(src, i + 2)); }
+        let mut j = skip_digits(src, i + 1);
+        let mut float = false;
+        if at(src, j) == B_DOT && is_digit(at(src, j + 1)) {
+            float = true;
+            j = skip_digits(src, j + 2);
+        }
+        let e = at(src, j);
+        if e == B_E || e == B_UPPER_E {
+            let s = at(src, j + 1);
+            if is_digit(s) {
+                float = true;
+                j = skip_digits(src, j + 2);
+            } else if (s == B_PLUS || s == B_MINUS) && is_digit(at(src, j + 2)) {
+                float = true;
+                j = skip_digits(src, j + 3);
+            }
+        }
+        let end = self.skip_idcont(src, j);
+        return (if float then T_FLOAT else T_INT, end);
+    }
+
+    // `f"…"` at i (the `f`).
+    fn scan_fmt(&self, src: &[u8], i: usize, errs: &mut Errs) -> (u8, usize) {
+        let n = src.len();
+        let mut j = i + 2;
+        let mut bad = false;
+        loop {
+            if j >= n {
+                errs.push(E_EOF_IN_LITERAL, i, n);
+                return (KIND_ERROR, n);
+            }
+            let b = src[j];
+            if b == B_DQUOTE { return (if bad then KIND_ERROR else T_FMT, j + 1); }
+            if b == B_NL {
+                errs.push(E_NEWLINE_IN_LITERAL, i, j);
+                return (KIND_ERROR, j);
+            }
+            if b == B_BACKSLASH {
+                j = j + (if j + 1 < n && src[j + 1] != B_NL then 2 else 1);
+            } else if b == B_LBRACE {
+                let after = self.valid_hole(src, j);
+                if after != 0 {
+                    j = after;
+                } else {
+                    bad = true;
+                    j = bad_hole(src, j, errs);
+                }
+            } else {
+                j = j + 1;
+            }
+        }
+    }
+
+    // A hole `{` at h: `(Ident | self) ('.' Ident)* '}'`. The offset after its `}`, or 0 if bad.
+    fn valid_hole(&self, src: &[u8], h: usize) -> usize {
+        let mut k = h + 1;
+        let mut head = true;
+        loop {
+            if !self.is_idstart(at(src, k)) { return 0; }
+            let s = k;
+            k = self.skip_idcont(src, k + 1);
+            if k == s + 1 && src[s] == B_UNDERSCORE { return 0; }
+            let kw = self.keyword(&src[s..k]);
+            if kw != NO_KIND && !(head && kw == T_KW_SELF) { return 0; }
+            head = false;
+            let b = at(src, k);
+            if b == B_DOT {
+                k = k + 1;
+            } else if b == B_RBRACE {
+                return k + 1;
+            } else {
+                return 0;
+            }
+        }
+    }
+
+    // Longest fixed spelling at i (a byte of class C_BAD never reaches here).
+    fn scan_punct(&self, src: &[u8], i: usize) -> (u8, usize) {
+        let n = src.len();
+        let f = src[i] as usize;
+        let cls = self.is_class.as_slice();
+        let mut best = KIND_ERROR;
+        let mut best_len: usize = 0;
+        for id in self.first_lo[f]..self.first_hi[f] {
+            let k = id as usize;
+            if cls[k] { continue; }
+            let sp = self.spelling(k);
+            let l = sp.len();
+            if l > best_len && i + l <= n && text.eq(&src[i..i + l], sp) {
+                best = id as% u8;
+                best_len = l;
+            }
+        }
+        if best_len == 0 { return (KIND_ERROR, i + 1); }
+        return (best, i + best_len);
+    }
+}
+
+// `"…"` (is_char false) or `'…'` at i.
+fn scan_quoted(src: &[u8], i: usize, is_char: bool, errs: &mut Errs) -> (u8, usize) {
+    let quote = if is_char then B_QUOTE else B_DQUOTE;
+    let ok = if is_char then T_CHAR else T_STR;
+    let n = src.len();
+    let mut j = i + 1;
+    loop {
+        if j >= n {
+            errs.push(E_EOF_IN_LITERAL, i, n);
+            return (KIND_ERROR, n);
+        }
+        let b = src[j];
+        if b == quote { return (ok, j + 1); }
+        if b == B_NL {
+            errs.push(E_NEWLINE_IN_LITERAL, i, j);
+            return (KIND_ERROR, j);
+        }
+        j = j + (if b == B_BACKSLASH && j + 1 < n && src[j + 1] != B_NL then 2 else 1);
+    }
+}
+
+// Where the hole whose `{` is at h ends: (the end of its text, where the literal scan resumes).
+// The hole runs to its `}`, or to the `"`, newline, or end of the file that comes first.
+pub fn hole_end(src: &[u8], h: usize) -> (usize, usize) {
+    let n = src.len();
+    let mut e = h + 1;
+    let mut text_end = n;
+    let mut resume = n;
+    loop {
+        if e >= n { break; }
+        let b = src[e];
+        if b == B_RBRACE {
+            text_end = e;
+            resume = e + 1;
+            break;
+        }
+        if b == B_DQUOTE || b == B_NL {
+            text_end = e;
+            resume = e;
+            break;
+        }
+        e = e + (if b == B_BACKSLASH && e + 1 < n && src[e + 1] != B_NL then 2 else 1);
+    }
+    return (text_end, resume);
+}
+
+// Records the bad hole at h (E0006, from its `{` to where the scan resumes) and returns where the
+// literal scan resumes.
+fn bad_hole(src: &[u8], h: usize, errs: &mut Errs) -> usize {
+    let (_, resume) = hole_end(src, h);
+    errs.push(E_BAD_HOLE, h, resume);
+    return resume;
+}
+
+// Stable insertion sort by start offset (errors of a token come out of order only around an
+// f-string's holes).
+fn sort_errs(e: &mut Errs) {
+    let n = e.len();
+    let mut i: usize = 1;
+    while i < n {
+        let mut j = i;
+        while j > 0 && e.start.as_slice()[j] < e.start.as_slice()[j - 1] {
+            e.code.swap(j, j - 1);
+            e.start.swap(j, j - 1);
+            e.end.swap(j, j - 1);
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+}
+
+fn finish(out: &mut Tokens, errs: &mut Errs, stop: u8) {
+    out.err_code.extend_from_slice(errs.code.as_slice());
+    out.err_start.extend_from_slice(errs.start.as_slice());
+    out.err_end.extend_from_slice(errs.end.as_slice());
+    out.file_tok.push(out.kind.len() as% u32);
+    out.file_err.push(out.err_code.len() as% u32);
+    out.stop.push(stop);
+}

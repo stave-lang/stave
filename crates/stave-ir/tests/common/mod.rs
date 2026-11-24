@@ -18,6 +18,15 @@ pub fn host() -> BufferHost {
     BufferHost::new(SyscallAbi::X86_64)
 }
 
+/// Gives `m` placeholder site-table rows `0..n`: tests use sites as labels a trap reports, and a
+/// module that verifies names only rows of its site table.
+pub fn site_rows(m: &mut Module, n: usize) {
+    while m.sites.len() < n {
+        let line = m.sites.len() as u32 + 1;
+        m.sites.push(stave_ir::SiteInfo { file: "t.stv".into(), line, col: 1, func: "t".into() });
+    }
+}
+
 /// Runs `f` with the default config; panics (test failure) on an interpreter error.
 pub fn run(m: &Module, f: FuncId, args: Vec<Val>) -> Outcome {
     let (r, _) = interp::run(m, f, args, host(), Config::default());
@@ -48,6 +57,7 @@ pub fn define_known(
 ) -> FuncId {
     let f = define(m, id, &k.path(), params, ret, body);
     m.funcs[f.index()].known = Some(k);
+    m.funcs[f.index()].alt_stack = stave_ir::known::reports_on_alt_stack(k);
     f
 }
 

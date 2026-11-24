@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use stave_ir::intrinsics::Kind as IKind;
 use stave_ir::layout::Layouts;
 use stave_ir::{FuncId, Known, Module, Op, Operand, TypeId};
 use stave_obj::{
@@ -56,87 +57,13 @@ pub struct Symbols {
     pub lines: Vec<Option<(FileId, u32, u32)>>,
 }
 
-/// What an intrinsic lowers to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Intr {
-    Syscall(u8),
-    Ccall(u8),
-    CallOnStack,
-    MainAddr,
-    SignalAddr,
-    ThreadAddr,
-    SiteTable,
-    PcTable,
-    StackTable,
-    StaticAddr,
-    ThreadClone,
-    CpuInit,
-    /// `bl std.slice.copy_raw` with the intrinsic's three operands.
-    CopyBytes,
-    /// `mrs x0, tpidr_el0`.
-    ThreadBlock,
-    /// `msr tpidr_el0, x0`.
-    SetThreadBlock,
-    /// `atomic_<op>_u32/u64`: op 0 load, 1 xchg, 2 add, 3 cas; wide = u64.
-    Atomic {
-        op: u8,
-        wide: bool,
-    },
-    X86Only,
-    Unknown,
-}
-
-fn intr_kind(name: &str) -> Intr {
-    let num =
-        |p: &str, max: u8| name.strip_prefix(p).and_then(|d| d.parse::<u8>().ok()).filter(|&k| k <= max);
-    if let Some(k) = num("syscall", 6) {
-        return Intr::Syscall(k);
-    }
-    if let Some(k) = num("ccall", 12) {
-        return Intr::Ccall(k);
-    }
-    match name {
-        "call_on_stack" => Intr::CallOnStack,
-        "main_addr" => Intr::MainAddr,
-        "signal_handler_addr" => Intr::SignalAddr,
-        "thread_start_addr" => Intr::ThreadAddr,
-        "site_table" => Intr::SiteTable,
-        "pc_table" => Intr::PcTable,
-        "stack_table" => Intr::StackTable,
-        "static_addr" => Intr::StaticAddr,
-        "thread_clone" => Intr::ThreadClone,
-        "cpu_init" => Intr::CpuInit,
-        "copy_bytes" => Intr::CopyBytes,
-        "thread_block" => Intr::ThreadBlock,
-        "set_thread_block" => Intr::SetThreadBlock,
-        "cpuid" | "xgetbv" => Intr::X86Only,
-        _ if name.starts_with("atomic_") => {
-            let rest = &name["atomic_".len()..];
-            let (op, wide) = match rest.rsplit_once('_') {
-                Some((op, "u32")) => (op, false),
-                Some((op, "u64")) => (op, true),
-                _ => return Intr::Unknown,
-            };
-            let op = match op {
-                "load" => 0,
-                "xchg" => 1,
-                "add" => 2,
-                "cas" => 3,
-                _ => return Intr::Unknown,
-            };
-            Intr::Atomic { op, wide }
-        }
-        _ => Intr::Unknown,
-    }
-}
-
 /// Per-module code generation context (shared by all threads; [`Codegen::compile`] is `&self`).
 pub struct Codegen<'a> {
     pub(crate) m: &'a Module,
     pub(crate) syms: &'a Symbols,
     pub(crate) layouts: Layouts,
     pub(crate) tys: Vec<Ty>,
-    pub(crate) intr: Vec<Intr>,
+    pub(crate) intr: Vec<Option<IKind>>,
     pub(crate) release: bool,
     /// Per `FuncId`: the reserve-table slot of a function that probes its reserve at entry
     /// ([`Codegen::reserve_slots`]).
@@ -154,7 +81,7 @@ impl<'a> Codegen<'a> {
     pub fn new(m: &'a Module, syms: &'a Symbols) -> Codegen<'a> {
         let layouts = Layouts::compute(&m.types);
         let tys = (0..m.types.len()).map(|i| classify(&m.types, &layouts, TypeId(i as u32))).collect();
-        let intr = m.intrinsics.iter().map(|n| intr_kind(n)).collect();
+        let intr = m.intrinsics.iter().map(|n| stave_ir::intrinsics::kind(n)).collect();
         Codegen { m, syms, layouts, tys, intr, release: false, reserve_slots: &[] }
     }
 
@@ -206,7 +133,7 @@ impl<'a> Codegen<'a> {
     fn below_frame(&self, f: FuncId) -> u64 {
         let on_stack = self.m.func(f).and_then(|x| x.body.as_ref()).is_some_and(|b| {
             b.insts.op.iter().any(
-                |op| matches!(op, Op::Intrinsic(id) if self.intr.get(id.index()) == Some(&Intr::CallOnStack)),
+                |op| matches!(op, Op::Intrinsic(id) if self.intr.get(id.index()) == Some(&Some(IKind::CallOnStack))),
             )
         });
         if on_stack { 16 } else { 0 }

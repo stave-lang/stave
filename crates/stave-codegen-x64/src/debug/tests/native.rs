@@ -227,6 +227,10 @@ fn tables_and_sites() {
         p.print(b, r.into(), t.i32);
     });
     let nfuncs = p.m.funcs.iter().filter(|f| f.body.is_some()).count();
+    // the rows of `o.sites` are the ones the image gets; the module names the same ids
+    p.m.sites = (3..5)
+        .map(|line| stave_ir::SiteInfo { file: "src/main.stv".into(), line, col: 1, func: "t.main".into() })
+        .collect();
     let mut o = Options {
         files: vec![SourceFile { dir: "src".into(), name: "main.stv".into() }],
         sites: vec![
@@ -308,6 +312,7 @@ fn parallel_deterministic_and_lines() {
         p.print(b, r.into(), t.u32);
     });
     let _ = last;
+    p.m.sites = vec![stave_ir::SiteInfo { file: "m.stv".into(), line: 42, col: 9, func: "t.main".into() }];
     let o = Options {
         files: vec![SourceFile { dir: ".".into(), name: "m.stv".into() }],
         sites: vec![SiteRow { file: 0, line: 42, col: 9, func: main }],

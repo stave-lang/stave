@@ -1,4 +1,4 @@
-// std.io: console output and whole-file reads, over runtime.os.
+// std.io: console output, whole-file reads and writes, and directories, over runtime.os.
 //
 // `print` / `eprint` write their bytes to fd 1 / fd 2 at once (no buffering, so output order
 // with a panic report is the program order). They take `&str`: an f-string argument is an
@@ -115,9 +115,9 @@ pub fn read_all(fd: i32) -> Result<vec.Vec<u8>, Error> {
     return Result.Ok(v);
 }
 
-// Opens path read-only (relative to the working directory). A path with a NUL byte is
-// `InvalidInput`: the kernel would see only the part before it.
-fn open_read(path: &str) -> Result<i32, Error> {
+// The NUL-terminated copy of path for the kernel. A path with a NUL byte is `InvalidInput`: the
+// kernel would see only the part before it.
+fn c_path(path: &str) -> Result<vec.Vec<u8>, Error> {
     let pb = mem.str_bytes(path);
     for i in 0..pb.len() {
         if pb[i] == 0 { return Result.Err(made(Error.InvalidInput)); }
@@ -125,10 +125,20 @@ fn open_read(path: &str) -> Result<i32, Error> {
     let mut z = vec.Vec::<u8>.with_capacity(pb.len() + 1);
     z.extend_from_slice(pb);
     z.push(0);
+    return Result.Ok(z);
+}
+
+// Opens path (relative to the working directory) with flags and, for O_CREAT, mode.
+fn open_with(path: &str, flags: u32, mode: u32) -> Result<i32, Error> {
+    let z = c_path(path)?;
     let zp = mem.slice_ptr(z.as_slice());
-    let fd = unsafe("z is NUL-terminated and alive during the call") os.openat(os.AT_FDCWD, zp, os.O_RDONLY | os.O_CLOEXEC, 0);
+    let fd = unsafe("z is NUL-terminated and alive during the call") os.openat(os.AT_FDCWD, zp, flags | os.O_CLOEXEC, mode);
     if fd < 0 { return Result.Err(made(error_of(fd))); }
     return Result.Ok(fd as% i32);
+}
+
+fn open_read(path: &str) -> Result<i32, Error> {
+    return open_with(path, os.O_RDONLY, 0);
 }
 
 // The whole file at path (openat, read, close).
@@ -146,4 +156,170 @@ pub fn read_to_string(path: &str) -> Result<string.String, Error> {
         Result.Ok(s) => Result.Ok(s),
         Result.Err(_) => Result.Err(made(Error.InvalidData)),
     };
+}
+
+// Writes bytes as the whole file at path: created with mode 0644 if missing, else truncated first.
+pub fn write_file(path: &str, bytes: &[u8]) -> Result<(), Error> {
+    let fd = open_with(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 420)?;
+    let r = write_all(fd, bytes);
+    let c = os.close(fd);
+    return r;
+}
+
+pub enum Kind {
+    File,
+    Dir,
+    // a FIFO, socket, or device
+    Other,
+}
+
+impl core.Copy for Kind {}
+
+impl Kind {
+    pub fn is_dir(self) -> bool {
+        return match self {
+            Kind.Dir => true,
+            _ => false,
+        };
+    }
+
+    pub fn is_file(self) -> bool {
+        return match self {
+            Kind.File => true,
+            _ => false,
+        };
+    }
+}
+
+fn kind_of_mode(mode: u32) -> Kind {
+    let t = mode & os.S_IFMT;
+    if t == os.S_IFDIR { return Kind.Dir; }
+    if t == os.S_IFREG { return Kind.File; }
+    return Kind.Other;
+}
+
+// What path names, following symlinks (a dangling one is `NotFound`).
+pub fn kind(path: &str) -> Result<Kind, Error> {
+    let fd = open_with(path, os.O_PATH, 0)?;
+    let mut st = [0u8; 144];
+    let r = unsafe("st is a writable 144-byte buffer, alive during the call") os.fstat(fd, mem.slice_ptr_mut(&mut st));
+    let c = os.close(fd);
+    if r < 0 { return Result.Err(made(error_of(r))); }
+    let o = os.STAT_MODE_OFF;
+    let mode = (st[o] as u32) | ((st[o + 1] as u32) << 8) | ((st[o + 2] as u32) << 16) | ((st[o + 3] as u32) << 24);
+    return Result.Ok(kind_of_mode(mode));
+}
+
+// One directory entry: its name (the kernel's bytes, not always UTF-8) and kind (symlinks
+// followed; a dangling one is `Other`).
+pub struct DirEntry {
+    pub name: vec.Vec<u8>,
+    pub kind: Kind,
+}
+
+const DIR_CHUNK: usize = 32768;
+
+fn u16_at(b: &[u8], i: usize) -> usize {
+    return (b[i] as usize) | ((b[i + 1] as usize) << 8);
+}
+
+// The entries of directory path except `.` and `..`, in the kernel's order (unsorted). The open
+// never waits: a FIFO path fails at the read instead.
+pub fn read_dir(path: &str) -> Result<vec.Vec<DirEntry>, Error> {
+    let fd = open_with(path, os.O_RDONLY | os.O_NONBLOCK, 0)?;
+    let r = read_entries(fd, path);
+    let c = os.close(fd);
+    return r;
+}
+
+fn read_entries(fd: i32, path: &str) -> Result<vec.Vec<DirEntry>, Error> {
+    let mut out = vec.Vec::<DirEntry>.new();
+    let mut buf = vec.Vec::<u8>.with_capacity(DIR_CHUNK);
+    loop {
+        buf.clear();
+        let r = unsafe("spare_ptr..spare_ptr+DIR_CHUNK is the vector's uninitialized capacity") os.getdents64(fd, buf.spare_ptr(), DIR_CHUNK);
+        if r == -os.EINTR { continue; }
+        if r < 0 { return Result.Err(made(error_of(r))); }
+        if r == 0 { break; }
+        unsafe("the kernel initialized r bytes, at most DIR_CHUNK = capacity") { buf.set_len(r as% usize); }
+        let b = buf.as_slice();
+        let mut at: usize = 0;
+        while at + os.DIRENT_NAME_OFF < b.len() {
+            let len = u16_at(b, at + os.DIRENT_RECLEN_OFF);
+            if len == 0 { break; }
+            let t = b[at + os.DIRENT_TYPE_OFF];
+            let mut name = vec.Vec::<u8>.new();
+            let mut j = at + os.DIRENT_NAME_OFF;
+            while j < at + len && b[j] != 0 {
+                name.push(b[j]);
+                j = j + 1;
+            }
+            at = at + len;
+            let n = name.as_slice();
+            if n.len() == 1 && n[0] == 46 { continue; }
+            if n.len() == 2 && n[0] == 46 && n[1] == 46 { continue; }
+            let k = if t == os.DT_DIR then Kind.Dir else if t == os.DT_REG then Kind.File else if t == os.DT_LNK || t == os.DT_UNKNOWN then entry_kind(path, n) else Kind.Other;
+            out.push(DirEntry.{ name: name, kind: k });
+        }
+    }
+    return Result.Ok(out);
+}
+
+// The kind of entry name of directory dir, following symlinks; `Other` if it cannot be told.
+fn entry_kind(dir: &str, name: &[u8]) -> Kind {
+    let mut p = vec.Vec::<u8>.new();
+    p.extend_from_slice(mem.str_bytes(dir));
+    p.push(47);
+    p.extend_from_slice(name);
+    match string.String.from_utf8(p) {
+        Result.Ok(s) => {
+            return match kind(s.as_str()) {
+                Result.Ok(k) => k,
+                Result.Err(_) => Kind.Other,
+            };
+        }
+        Result.Err(_) => { return Kind.Other; }
+    }
+}
+
+// Creates directory path and every missing parent (mode 0755). An existing directory is fine;
+// an existing non-directory is `Os(EEXIST)`.
+pub fn create_dir_all(path: &str) -> Result<(), Error> {
+    let _ = c_path(path)?;
+    let pb = mem.str_bytes(path);
+    let mut end: usize = 0;
+    while end < pb.len() {
+        end = end + 1;
+        while end < pb.len() && pb[end] != 47 { end = end + 1; }
+        let mut part = vec.Vec::<u8>.with_capacity(end + 1);
+        part.extend_from_slice(&pb[0..end]);
+        part.push(0);
+        let r = unsafe("part is NUL-terminated and alive during the call") os.mkdirat(os.AT_FDCWD, mem.slice_ptr(part.as_slice()), 493);
+        // an existing prefix, or a parent this process may pass but not create (EACCES), is
+        // left to the final check
+        let parent_denied = r == -os.EACCES && end < pb.len();
+        if r < 0 && r != -os.EEXIST && !parent_denied { return Result.Err(made(error_of(r))); }
+    }
+    return match kind(path) {
+        Result.Ok(Kind.Dir) => Result.Ok(()),
+        Result.Ok(_) => Result.Err(made(Error.Os(os.EEXIST as% i32))),
+        Result.Err(e) => Result.Err(e),
+    };
+}
+
+// Removes the file (or symlink) at path.
+pub fn remove_file(path: &str) -> Result<(), Error> {
+    return unlink(path, 0);
+}
+
+// Removes the empty directory at path.
+pub fn remove_dir(path: &str) -> Result<(), Error> {
+    return unlink(path, os.AT_REMOVEDIR);
+}
+
+fn unlink(path: &str, flags: u32) -> Result<(), Error> {
+    let z = c_path(path)?;
+    let r = unsafe("z is NUL-terminated and alive during the call") os.unlinkat(os.AT_FDCWD, mem.slice_ptr(z.as_slice()), flags);
+    if r < 0 { return Result.Err(made(error_of(r))); }
+    return Result.Ok(());
 }

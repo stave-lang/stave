@@ -1,0 +1,26 @@
+src: dir
+src/main.stv: file
+/dev/null: other
+missing: err not found
+  expected.stdout file
+  src dir
+  stave.toml file
+write src: err is a directory
+mkdir stave.toml: err os error
+mkdir src: ok
+list file: err os error
+list nul: err path contains a NUL byte
+mkdir: ok
+mkdir again: ok
+write: ok
+rewrite: ok
+hi
+  b dir
+  f.txt file
+rmdir full: err os error
+rm: ok
+rmdir b: ok
+rmdir a: ok
+rmdir d: ok
+gone true
+unset true nul true

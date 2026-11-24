@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+import inner;
+
+fn main() -> i32 {
+    return inner.one();
+}

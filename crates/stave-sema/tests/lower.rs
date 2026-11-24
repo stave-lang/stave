@@ -75,8 +75,8 @@ fn run(m: &mut Module, abi: SyscallAbi, files: &[(String, Vec<u8>)]) -> Run {
     let entry = m.find_func("runtime.start.entry").expect("runtime.start.entry");
     let trap = m.find_func("runtime.panic.trap").expect("runtime.panic.trap");
     let mut host = BufferHost::new(abi);
-    host.values.insert("main_addr".into(), stub.0 as u64);
-    host.values.insert("signal_handler_addr".into(), 0);
+    host.values.insert(stave_ir::intrinsics::Kind::MainAddr, stub.0 as u64);
+    host.values.insert(stave_ir::intrinsics::Kind::SignalHandlerAddr, 0);
     for (k, v) in files {
         host.files.insert(k.as_bytes().to_vec(), v.clone());
     }
@@ -88,8 +88,8 @@ fn run(m: &mut Module, abi: SyscallAbi, files: &[(String, Vec<u8>)]) -> Run {
     let bytes = stave_sema::lower::site_table_bytes(m, st);
     it.mem.write(st, &bytes).expect("site table write");
     let pc = it.mem.alloc(8, 8).expect("pc table");
-    it.host.values.insert("site_table".into(), st);
-    it.host.values.insert("pc_table".into(), pc);
+    it.host.values.insert(stave_ir::intrinsics::Kind::SiteTable, st);
+    it.host.values.insert(stave_ir::intrinsics::Kind::PcTable, pc);
     let sp = it.process_stack(&[b"prog"], &[]).expect("process stack");
     let mut out = it.run(entry, vec![Val::S(sp)]).unwrap_or_else(|e| panic!("run: {e:?}"));
     if let Outcome::Trap(t) = out {

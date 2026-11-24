@@ -1,0 +1,18 @@
+// A diagnostic quotes the source text of an expression; a quoted text that spans lines is shown
+// on one line (whitespace runs become one space), never an internal error. E0503 `temporary`
+// names the assignment target; its primary span starts on the line before the annotation
+// (`//~^`).
+struct S {
+    pub a: [u32; 4],
+}
+
+fn mk() -> [u32; 4] {
+    return [1u32; 4];
+}
+
+fn main() -> i32 {
+    S.{
+        a: [0u32; 4],
+    }.a = mk(); //~^^ ERROR E0503
+    return 0;
+}

@@ -1,0 +1,156 @@
+// The diagnostic registry as stage1 reads it: the tables of generated/diag_templates.stv copied
+// into columns once (a const is copied at each use, so the tables are read here and nowhere
+// else). Rows are in code order; `*_first` columns are row ranges of the next table, one entry
+// more than their rows.
+import generated.diag_templates;
+import prims.search;
+import std.debug;
+import std.vec;
+
+// Strings in one byte pool: string j is `bytes[off[j]..off[j + 1]]`.
+pub struct Strs {
+    pub bytes: vec.Vec<u8>,
+    pub off: vec.Vec<u32>,
+}
+
+impl Strs {
+    pub fn new() -> Strs {
+        let mut off = vec.Vec::<u32>.new();
+        off.push(0);
+        return Strs.{ bytes: vec.Vec::<u8>.new(), off: off };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.off.len() - 1;
+    }
+
+    pub fn push(&mut self, b: &[u8]) {
+        self.bytes.extend_from_slice(b);
+        self.off.push(self.bytes.len() as% u32);
+    }
+
+    pub fn get(&self, j: usize) -> &[u8] from self {
+        let o = self.off.as_slice();
+        return &self.bytes.as_slice()[(o[j] as usize)..(o[j + 1] as usize)];
+    }
+}
+
+fn strs(bytes: &[u8], off: &[u32]) -> Strs {
+    let mut s = Strs.new();
+    s.bytes.extend_from_slice(bytes);
+    s.off = column(off);
+    return s;
+}
+
+fn column<T: Copy>(xs: &[T]) -> vec.Vec<T> {
+    let mut v = vec.Vec::<T>.with_capacity(xs.len());
+    v.extend_from_slice(xs);
+    return v;
+}
+
+// Hole kinds (`HOLE_KIND`).
+pub const KIND_SOURCE: u8 = 6;
+
+// Fix applicability (`SHAPE_FIX_APPLICABILITY`).
+pub const APPLICABILITY_PLACEHOLDER: u8 = 2;
+
+pub struct Registry {
+    pub number: vec.Vec<u16>,
+    pub code: Strs,
+    pub severity: vec.Vec<u8>,
+    pub located: vec.Vec<bool>,
+    pub hole_first: vec.Vec<u32>,
+    pub shape_first: vec.Vec<u32>,
+    pub hole_name: Strs,
+    pub hole_kind: vec.Vec<u8>,
+    pub shape_case: Strs,
+    pub shape_message: Strs,
+    pub shape_has_fix: vec.Vec<bool>,
+    pub shape_fix: Strs,
+    pub shape_applicability: vec.Vec<u8>,
+    pub label_first: vec.Vec<u32>,
+    pub label_at: Strs,
+    pub label_text: Strs,
+    pub edit_first: vec.Vec<u32>,
+    pub edit_at: Strs,
+    pub edit_replacement: Strs,
+}
+
+impl Registry {
+    pub fn load() -> Registry {
+        return Registry.{
+            number: column(&diag_templates.DIAG_NUMBER),
+            code: strs(&diag_templates.DIAG_CODE, &diag_templates.DIAG_CODE_OFF),
+            severity: column(&diag_templates.DIAG_SEVERITY),
+            located: column(&diag_templates.DIAG_LOCATED),
+            hole_first: column(&diag_templates.DIAG_HOLE_FIRST),
+            shape_first: column(&diag_templates.DIAG_SHAPE_FIRST),
+            hole_name: strs(&diag_templates.HOLE_NAME, &diag_templates.HOLE_NAME_OFF),
+            hole_kind: column(&diag_templates.HOLE_KIND),
+            shape_case: strs(&diag_templates.SHAPE_CASE, &diag_templates.SHAPE_CASE_OFF),
+            shape_message: strs(&diag_templates.SHAPE_MESSAGE, &diag_templates.SHAPE_MESSAGE_OFF),
+            shape_has_fix: column(&diag_templates.SHAPE_HAS_FIX),
+            shape_fix: strs(&diag_templates.SHAPE_FIX, &diag_templates.SHAPE_FIX_OFF),
+            shape_applicability: column(&diag_templates.SHAPE_FIX_APPLICABILITY),
+            label_first: column(&diag_templates.SHAPE_LABEL_FIRST),
+            label_at: strs(&diag_templates.LABEL_AT, &diag_templates.LABEL_AT_OFF),
+            label_text: strs(&diag_templates.LABEL_TEXT, &diag_templates.LABEL_TEXT_OFF),
+            edit_first: column(&diag_templates.SHAPE_EDIT_FIRST),
+            edit_at: strs(&diag_templates.EDIT_AT, &diag_templates.EDIT_AT_OFF),
+            edit_replacement: strs(&diag_templates.EDIT_REPLACEMENT, &diag_templates.EDIT_REPLACEMENT_OFF),
+        };
+    }
+
+    // Whether `number` is a code of the registry.
+    pub fn has_code(&self, number: u16) -> bool {
+        let n = self.number.as_slice();
+        let r = search.lower_bound(n, number);
+        return r < n.len() && n[r] == number;
+    }
+
+    // Whether the code at `row` has a shape named `case`.
+    pub fn has_case(&self, row: usize, case: &[u8]) -> bool {
+        for k in (self.shape_first.as_slice()[row] as usize)..(self.shape_first.as_slice()[row + 1] as usize) {
+            if self.shape_case.get(k).eq(case) { return true; }
+        }
+        return false;
+    }
+
+    // Whether the code at `row` declares a hole `name`.
+    pub fn has_hole(&self, row: usize, name: &[u8]) -> bool {
+        for k in (self.hole_first.as_slice()[row] as usize)..(self.hole_first.as_slice()[row + 1] as usize) {
+            if self.hole_name.get(k).eq(name) { return true; }
+        }
+        return false;
+    }
+
+    // The row of a code number (`E0018` is 18); the code must be in the registry.
+    pub fn row(&self, number: u16) -> usize {
+        let n = self.number.as_slice();
+        let r = search.lower_bound(n, number);
+        debug.assert(r < n.len() && n[r] == number, "diagnostic code is not in the registry");
+        return r;
+    }
+
+    // The shape of a code, as a row of the shape tables: the base shape for an empty case.
+    pub fn shape(&self, row: usize, case: &[u8]) -> usize {
+        let lo = self.shape_first.as_slice()[row] as usize;
+        let hi = self.shape_first.as_slice()[row + 1] as usize;
+        for k in lo..hi {
+            if self.shape_case.get(k).eq(case) { return k; }
+        }
+        debug.assert(false, "diagnostic case is not in the registry");
+        return lo;
+    }
+
+    // A declared hole of a code, as a row of the hole tables.
+    pub fn hole(&self, row: usize, name: &[u8]) -> usize {
+        let lo = self.hole_first.as_slice()[row] as usize;
+        let hi = self.hole_first.as_slice()[row + 1] as usize;
+        for k in lo..hi {
+            if self.hole_name.get(k).eq(name) { return k; }
+        }
+        debug.assert(false, "diagnostic hole is not in the registry");
+        return lo;
+    }
+}

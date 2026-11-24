@@ -96,8 +96,8 @@ pub fn run(
     let entry = find(Known::StartEntry)?;
     let trap = find(Known::Trap)?;
     let mut host = BufferHost::new(abi);
-    host.values.insert("main_addr".into(), u64::from(stub.0));
-    host.values.insert("signal_handler_addr".into(), 0);
+    host.values.insert(stave_ir::intrinsics::Kind::MainAddr, u64::from(stub.0));
+    host.values.insert(stave_ir::intrinsics::Kind::SignalHandlerAddr, 0);
     for (k, v) in files {
         host.files.insert(k.as_bytes().to_vec(), v.clone());
     }
@@ -114,8 +114,8 @@ pub fn run(
     let bytes = stave_sema::lower::site_table_bytes(&m, st);
     it.mem.write(st, &bytes).map_err(|e| format!("interp: site table: {e:?}"))?;
     let pc = it.mem.alloc(8, 8).ok_or("interp: no memory for the PC table")?;
-    it.host.values.insert("site_table".into(), st);
-    it.host.values.insert("pc_table".into(), pc);
+    it.host.values.insert(stave_ir::intrinsics::Kind::SiteTable, st);
+    it.host.values.insert(stave_ir::intrinsics::Kind::PcTable, pc);
     let mut argv: Vec<&[u8]> = vec![b"prog"];
     argv.extend_from_slice(args);
     let sp = it.process_stack(&argv, &[]).map_err(|e| format!("interp: process stack: {e:?}"))?;

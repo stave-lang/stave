@@ -992,6 +992,12 @@ impl Module {
         self.intrinsics.get(i.index()).map(|s| s.as_str())
     }
 
+    /// The family of an intrinsic ([`crate::intrinsics::kind`]); `None`: the id is out of range or
+    /// the name is not in the table.
+    pub fn intrinsic_kind(&self, i: IntrinsicId) -> Option<crate::intrinsics::Kind> {
+        self.intrinsic_name(i).and_then(crate::intrinsics::kind)
+    }
+
     /// Renumbers the type table canonically ([`TypeTable::canonicalize`]) and rewrites every type
     /// id in the functions and statics.
     pub fn canonicalize_types(&mut self) -> Result<(), crate::types::CanonError> {

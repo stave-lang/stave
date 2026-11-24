@@ -94,7 +94,10 @@ fn stave_table_is_const_items_only() {
             continue;
         }
         assert!(!t.contains('"') && !t.contains("&str"), "no strings or references in consts: {line}");
-        assert!(t.starts_with("const ") && t.contains(": ") && t.contains(" = "), "not a const item: {line}");
+        assert!(
+            t.starts_with("pub const ") && t.contains(": ") && t.contains(" = "),
+            "not a const item: {line}"
+        );
         in_array = t.ends_with('[');
         assert!(in_array || t.ends_with(';'), "{line}");
         assert!(!t.contains('\t'));

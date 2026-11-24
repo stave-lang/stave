@@ -336,3 +336,14 @@ fn push_collapsed(out: &mut String, value: &str) {
         first = false;
     }
 }
+
+/// Source text as the value of a hole whose kind is not `source` (a place, name, path, or type
+/// spelled as written): every whitespace run becomes one space and the ends are trimmed, as a
+/// `source` hole is in one-line text, so an expression or type that spans lines is a valid value.
+/// Text that is empty after this stays empty: the builder rejects it as a value, which is then a
+/// compiler bug.
+pub fn spelled(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    push_collapsed(&mut out, text);
+    out
+}

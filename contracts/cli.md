@@ -51,6 +51,9 @@ Outputs and statuses of the code-generating commands:
   its `test fn`s run too, each as its own executable from the package directory, passing iff it
   exits 0; their summary line is `test fns: P passed, F failed, N not run`. A `test fn` with
   parameters runs over its inputs (below).
+  A directory below DIR with its own `stave.toml` is another package (a path dependency): its
+  `test fn`s and its directives (a library's `CHECK-ONLY`) belong to `stave test` of that
+  package, which also reads them; `stave test DIR` runs and reads only DIR's own.
 - **Test fn inputs.** A `test fn` with parameters is a harness: one process calls it once per
   input, in input order, and passes iff it exits 0. The runner is the caller: it passes only
   inputs within the ranges below, and the test fn evaluates all its `requires` clauses at entry,

@@ -145,12 +145,17 @@ pub(crate) fn unescape(raw: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Whether `name` can follow `intrinsic.` in the text: `[a-z0-9_]+` (contracts/ir-text.ebnf
+/// `Intr`). Whether it names an intrinsic is the verifier's question ([`crate::intrinsics::kind`]).
+pub(crate) fn is_intrinsic_word(name: &[u8]) -> bool {
+    !name.is_empty() && name.iter().all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+}
+
 /// The terminal of a `Word`, classified by shape first, then by keyword (contracts/ir-text.ebnf
 /// `Word`).
 pub(crate) fn classify(w: &[u8]) -> Term {
     if let Some(r) = w.strip_prefix(b"intrinsic.")
-        && !r.is_empty()
-        && r.iter().all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        && is_intrinsic_word(r)
     {
         return Term::Intr;
     }

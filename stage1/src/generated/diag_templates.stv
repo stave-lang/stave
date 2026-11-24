@@ -19,14 +19,14 @@
 //   EDIT_*   fix edits of each shape.
 // Templates: {hole} inserts a hole's value; {{ and }} are literal braces.
 
-const DIAG_COUNT: usize = 169;
-const HOLE_COUNT: usize = 301;
-const CHOICE_COUNT: usize = 177;
-const SHAPE_COUNT: usize = 357;
-const LABEL_COUNT: usize = 498;
-const EDIT_COUNT: usize = 20;
+pub const DIAG_COUNT: usize = 169;
+pub const HOLE_COUNT: usize = 301;
+pub const CHOICE_COUNT: usize = 177;
+pub const SHAPE_COUNT: usize = 357;
+pub const LABEL_COUNT: usize = 498;
+pub const EDIT_COUNT: usize = 20;
 
-const DIAG_CODE: [u8; 845] = [
+pub const DIAG_CODE: [u8; 845] = [
     // 0: "E0001"
     69, 48, 48, 48, 49,
     // 1: "E0002"
@@ -367,7 +367,7 @@ const DIAG_CODE: [u8; 845] = [
     69, 49, 52, 49, 49,
 ];
 
-const DIAG_CODE_OFF: [u32; 170] = [
+pub const DIAG_CODE_OFF: [u32; 170] = [
     0,
     5,
     10,
@@ -540,7 +540,7 @@ const DIAG_CODE_OFF: [u32; 170] = [
     845, // end
 ];
 
-const DIAG_NUMBER: [u16; 169] = [
+pub const DIAG_NUMBER: [u16; 169] = [
     1,    // E0001
     2,    // E0002
     3,    // E0003
@@ -712,7 +712,7 @@ const DIAG_NUMBER: [u16; 169] = [
     1411, // E1411
 ];
 
-const DIAG_SEVERITY: [u8; 169] = [
+pub const DIAG_SEVERITY: [u8; 169] = [
     0, // E0001
     0, // E0002
     0, // E0003
@@ -884,7 +884,7 @@ const DIAG_SEVERITY: [u8; 169] = [
     1, // E1411
 ];
 
-const DIAG_RETIRED: [bool; 169] = [
+pub const DIAG_RETIRED: [bool; 169] = [
     false, // E0001
     false, // E0002
     false, // E0003
@@ -1056,7 +1056,7 @@ const DIAG_RETIRED: [bool; 169] = [
     false, // E1411
 ];
 
-const DIAG_LOCATED: [bool; 169] = [
+pub const DIAG_LOCATED: [bool; 169] = [
     true,  // E0001
     true,  // E0002
     true,  // E0003
@@ -1228,7 +1228,7 @@ const DIAG_LOCATED: [bool; 169] = [
     true,  // E1411
 ];
 
-const DIAG_HOLE_FIRST: [u32; 170] = [
+pub const DIAG_HOLE_FIRST: [u32; 170] = [
     0,   // E0001
     0,   // E0002
     1,   // E0003
@@ -1401,7 +1401,7 @@ const DIAG_HOLE_FIRST: [u32; 170] = [
     301, // end
 ];
 
-const DIAG_SHAPE_FIRST: [u32; 170] = [
+pub const DIAG_SHAPE_FIRST: [u32; 170] = [
     0,   // E0001
     1,   // E0002
     2,   // E0003
@@ -1574,7 +1574,7 @@ const DIAG_SHAPE_FIRST: [u32; 170] = [
     357, // end
 ];
 
-const HOLE_NAME: [u8; 1382] = [
+pub const HOLE_NAME: [u8; 1382] = [
     // 0 E0002: "size"
     115, 105, 122, 101,
     // 1 E0003: "what"
@@ -2179,7 +2179,7 @@ const HOLE_NAME: [u8; 1382] = [
     110, 97, 109, 101,
 ];
 
-const HOLE_NAME_OFF: [u32; 302] = [
+pub const HOLE_NAME_OFF: [u32; 302] = [
     0,    // E0002
     4,    // E0003
     8,    // E0004
@@ -2484,7 +2484,7 @@ const HOLE_NAME_OFF: [u32; 302] = [
     1382, // end
 ];
 
-const HOLE_KIND: [u8; 301] = [
+pub const HOLE_KIND: [u8; 301] = [
     4, // E0002 size
     7, // E0003 what
     3, // E0004 expected
@@ -2788,7 +2788,7 @@ const HOLE_KIND: [u8; 301] = [
     1, // E1411 name
 ];
 
-const HOLE_CHOICE_FIRST: [u32; 302] = [
+pub const HOLE_CHOICE_FIRST: [u32; 302] = [
     0,   // E0002 size
     0,   // E0003 what
     3,   // E0004 expected
@@ -3093,7 +3093,7 @@ const HOLE_CHOICE_FIRST: [u32; 302] = [
     177, // end
 ];
 
-const CHOICE_TEXT: [u8; 2603] = [
+pub const CHOICE_TEXT: [u8; 2603] = [
     // 0 E0003 what: "string"
     115, 116, 114, 105, 110, 103,
     // 1 E0003 what: "f-string"
@@ -3529,7 +3529,7 @@ const CHOICE_TEXT: [u8; 2603] = [
     114, 111, 122, 101, 110, 96, 32, 98, 111, 117, 110, 100,
 ];
 
-const CHOICE_TEXT_OFF: [u32; 178] = [
+pub const CHOICE_TEXT_OFF: [u32; 178] = [
     0,    // E0003 what
     6,    // E0003 what
     14,   // E0003 what
@@ -3710,7 +3710,7 @@ const CHOICE_TEXT_OFF: [u32; 178] = [
     2603, // end
 ];
 
-const SHAPE_CASE: [u8; 1518] = [
+pub const SHAPE_CASE: [u8; 1518] = [
     // 0 E0001: ""
     // 1 E0002: ""
     // 2 E0003: ""
@@ -4264,7 +4264,7 @@ const SHAPE_CASE: [u8; 1518] = [
     // 356 E1411: ""
 ];
 
-const SHAPE_CASE_OFF: [u32; 358] = [
+pub const SHAPE_CASE_OFF: [u32; 358] = [
     0,    // E0001
     0,    // E0002
     0,    // E0003
@@ -4625,7 +4625,7 @@ const SHAPE_CASE_OFF: [u32; 358] = [
     1518, // end
 ];
 
-const SHAPE_MESSAGE: [u8; 20980] = [
+pub const SHAPE_MESSAGE: [u8; 20980] = [
     // 0 E0001: "source is not valid UTF-8"
     115, 111, 117, 114, 99, 101, 32, 105, 115, 32, 110, 111, 116, 32, 118, 97,
     108, 105, 100, 32, 85, 84, 70, 45, 56,
@@ -6462,7 +6462,7 @@ const SHAPE_MESSAGE: [u8; 20980] = [
     99, 108, 101,
 ];
 
-const SHAPE_MESSAGE_OFF: [u32; 358] = [
+pub const SHAPE_MESSAGE_OFF: [u32; 358] = [
     0,     // E0001
     25,    // E0002
     74,    // E0003
@@ -6823,7 +6823,7 @@ const SHAPE_MESSAGE_OFF: [u32; 358] = [
     20980, // end
 ];
 
-const SHAPE_HAS_FIX: [bool; 357] = [
+pub const SHAPE_HAS_FIX: [bool; 357] = [
     true, // E0001
     true, // E0002
     true, // E0003
@@ -7183,7 +7183,7 @@ const SHAPE_HAS_FIX: [bool; 357] = [
     true, // E1411
 ];
 
-const SHAPE_FIX: [u8; 31698] = [
+pub const SHAPE_FIX: [u8; 31698] = [
     // 0 E0001: "re-encode the file as UTF-8 (without byte-order mark), or remove the invalid bytes"
     114, 101, 45, 101, 110, 99, 111, 100, 101, 32, 116, 104, 101, 32, 102, 105,
     108, 101, 32, 97, 115, 32, 85, 84, 70, 45, 56, 32, 40, 119, 105, 116,
@@ -9709,7 +9709,7 @@ const SHAPE_FIX: [u8; 31698] = [
     114, 115, 105, 118, 101,
 ];
 
-const SHAPE_FIX_OFF: [u32; 358] = [
+pub const SHAPE_FIX_OFF: [u32; 358] = [
     0,     // E0001
     82,    // E0002
     142,   // E0003
@@ -10070,7 +10070,7 @@ const SHAPE_FIX_OFF: [u32; 358] = [
     31698, // end
 ];
 
-const SHAPE_FIX_APPLICABILITY: [u8; 357] = [
+pub const SHAPE_FIX_APPLICABILITY: [u8; 357] = [
     2, // E0001
     2, // E0002
     2, // E0003
@@ -10430,7 +10430,7 @@ const SHAPE_FIX_APPLICABILITY: [u8; 357] = [
     2, // E1411
 ];
 
-const SHAPE_LABEL_FIRST: [u32; 358] = [
+pub const SHAPE_LABEL_FIRST: [u32; 358] = [
     0,   // E0001
     1,   // E0002
     2,   // E0003
@@ -10791,7 +10791,7 @@ const SHAPE_LABEL_FIRST: [u32; 358] = [
     498, // end
 ];
 
-const LABEL_AT: [u8; 3208] = [
+pub const LABEL_AT: [u8; 3208] = [
     // 0 E0001: "primary"
     112, 114, 105, 109, 97, 114, 121,
     // 1 E0002: "primary"
@@ -11790,7 +11790,7 @@ const LABEL_AT: [u8; 3208] = [
     112, 114, 105, 109, 97, 114, 121,
 ];
 
-const LABEL_AT_OFF: [u32; 499] = [
+pub const LABEL_AT_OFF: [u32; 499] = [
     0,    // E0001
     7,    // E0002
     14,   // E0003
@@ -12292,7 +12292,7 @@ const LABEL_AT_OFF: [u32; 499] = [
     3208, // end
 ];
 
-const LABEL_TEXT: [u8; 12694] = [
+pub const LABEL_TEXT: [u8; 12694] = [
     // 0 E0001: "invalid UTF-8 byte sequence starts here"
     105, 110, 118, 97, 108, 105, 100, 32, 85, 84, 70, 45, 56, 32, 98, 121,
     116, 101, 32, 115, 101, 113, 117, 101, 110, 99, 101, 32, 115, 116, 97, 114,
@@ -13809,7 +13809,7 @@ const LABEL_TEXT: [u8; 12694] = [
     104, 105, 115, 32, 102, 110, 32, 114, 101, 99, 117, 114, 115, 101, 115,
 ];
 
-const LABEL_TEXT_OFF: [u32; 499] = [
+pub const LABEL_TEXT_OFF: [u32; 499] = [
     0,     // E0001
     39,    // E0002
     53,    // E0003
@@ -14311,7 +14311,7 @@ const LABEL_TEXT_OFF: [u32; 499] = [
     12694, // end
 ];
 
-const SHAPE_EDIT_FIRST: [u32; 358] = [
+pub const SHAPE_EDIT_FIRST: [u32; 358] = [
     0,  // E0001
     0,  // E0002
     0,  // E0003
@@ -14672,7 +14672,7 @@ const SHAPE_EDIT_FIRST: [u32; 358] = [
     20, // end
 ];
 
-const EDIT_AT: [u8; 130] = [
+pub const EDIT_AT: [u8; 130] = [
     // 0 E0014: "primary"
     112, 114, 105, 109, 97, 114, 121,
     // 1 E0017: "primary"
@@ -14715,7 +14715,7 @@ const EDIT_AT: [u8; 130] = [
     99, 117, 116,
 ];
 
-const EDIT_AT_OFF: [u32; 21] = [
+pub const EDIT_AT_OFF: [u32; 21] = [
     0,   // E0014
     7,   // E0017
     14,  // E0023
@@ -14739,7 +14739,7 @@ const EDIT_AT_OFF: [u32; 21] = [
     130, // end
 ];
 
-const EDIT_REPLACEMENT: [u8; 201] = [
+pub const EDIT_REPLACEMENT: [u8; 201] = [
     // 0 E0014: ".{{"
     46, 123, 123,
     // 1 E0017: ""
@@ -14783,7 +14783,7 @@ const EDIT_REPLACEMENT: [u8; 201] = [
     // 19 E0907: ""
 ];
 
-const EDIT_REPLACEMENT_OFF: [u32; 21] = [
+pub const EDIT_REPLACEMENT_OFF: [u32; 21] = [
     0,   // E0014
     3,   // E0017
     3,   // E0023

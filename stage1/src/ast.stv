@@ -1,0 +1,145 @@
+// The AST of every item, as program-wide columns (one row per node), and the parse verdict of
+// every item.
+//
+// The nodes of item I are rows `item_node[I]..item_node[I + 1]`, in postorder; N (the node id in
+// dumps and in `kids`) is the row minus `item_node[I]`. One node per expansion of a named grammar
+// rule, except a pass-through rule's expansion (the expression levels `Expr` .. `Postfix`) that
+// holds exactly one child node and no terminal of its own: its child stands in its place. A
+// dropped item has no nodes.
+//
+// Per node: `kind` (the rule's node kind, generated `node_kinds`), `tok` (the global token index
+// of its first token; for a node that matched no token, the next token), `tok_end` (just past its
+// last token, a token split by the parser included; `tok` for a node that matched none), `size`
+// (the number of nodes of its subtree without itself: the descendants of N are `N - size .. N`
+// and its last child is `N - 1`), and `kids` row (its direct children, in source order).
+//
+// Per item: `status` (`ITEM_OK` or why it was dropped) and a `fail` row: the state the parser
+// stopped in, for the diagnostic of a dropped item (all `NONE` for an ok item).
+import prims.ragged;
+import std.soa;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+
+pub const ITEM_OK: u8 = 0;
+// An error token in the item: the lexer reports it, the parser does not run.
+pub const DROP_ERROR_TOKEN: u8 = 1;
+// The tokens before the first item start: an unexpected token where an item starts.
+pub const DROP_PRE_ITEM: u8 = 2;
+// An `import` after the first item that is no import.
+pub const DROP_LATE_IMPORT: u8 = 3;
+// The item's tokens do not derive from `Item` / `Import`.
+pub const DROP_SYNTAX: u8 = 4;
+// The item parses but an `unsafe(` is followed by the empty string.
+pub const DROP_EMPTY_OBLIGATION: u8 = 5;
+// An item with no tokens.
+pub const DROP_EMPTY: u8 = 6;
+
+// Where and how the parser stopped in a dropped item.
+// - `tok`: the global token index of the lookahead (the virtual EOF after the item is the item's
+//   end); for a pre-item or late import its first token; for an empty obligation the `unsafe`.
+// - `expected`: the expected-set id: a terminal id (that terminal alone), `NT_BIT | nt` (every
+//   terminal with an entry in nonterminal nt's table row, in terminal order; for a late import
+//   without `import`), or `NONE16`.
+// - `top`: the stack entry on top (`expected` plus the producing rule in bits 16..28, flags);
+//   `la_kind`: the lookahead's terminal after splits; `shift`: parts of a split token already
+//   consumed; `d2_lt`: the `<` of the innermost generic argument list after a cast type;
+//   `open_kind` / `open_tok`: the innermost open named node and its first token.
+pub struct Fail {
+    pub tok: u32,
+    pub expected: u32,
+    pub top: u32,
+    pub la_kind: u32,
+    pub shift: u32,
+    pub d2_lt: u32,
+    pub open_kind: u32,
+    pub open_tok: u32,
+}
+
+impl Copy for Fail {}
+
+pub const NONE16: u32 = 65535;
+
+pub fn no_fail() -> Fail {
+    return Fail.{ tok: NONE, expected: NONE16, top: NONE, la_kind: NONE16, shift: 0, d2_lt: NONE, open_kind: NONE16, open_tok: NONE };
+}
+
+pub struct Ast {
+    pub kind: vec.Vec<u8>,
+    pub tok: vec.Vec<u32>,
+    pub tok_end: vec.Vec<u32>,
+    pub size: vec.Vec<u32>,
+    pub kids: ragged.Ragged<u32>,
+    pub item_node: vec.Vec<u32>,
+    pub status: vec.Vec<u8>,
+    pub fail: soa.Soa<Fail>,
+}
+
+impl Ast {
+    pub fn new() -> Ast {
+        let mut item_node = vec.Vec::<u32>.new();
+        item_node.push(0);
+        return Ast.{
+            kind: vec.Vec::<u8>.new(),
+            tok: vec.Vec::<u32>.new(),
+            tok_end: vec.Vec::<u32>.new(),
+            size: vec.Vec::<u32>.new(),
+            kids: ragged.Ragged::<u32>.new(),
+            item_node: item_node,
+            status: vec.Vec::<u8>.new(),
+            fail: soa.Soa::<Fail>.new(),
+        };
+    }
+
+    // The number of items.
+    pub fn items(&self) -> usize {
+        return self.status.len();
+    }
+
+    pub fn nodes(&self) -> usize {
+        return self.kind.len();
+    }
+
+    pub fn ok(&self, i: usize) -> bool {
+        return self.status.as_slice()[i] == ITEM_OK;
+    }
+
+    // Drops the nodes past row n (the nodes of an item that failed).
+    pub fn truncate(&mut self, n: usize) {
+        self.kind.truncate(n);
+        self.tok.truncate(n);
+        self.tok_end.truncate(n);
+        self.size.truncate(n);
+    }
+
+    // Closes the current item: its nodes are those added since the previous close.
+    pub fn end_item(&mut self, status: u8, f: Fail) {
+        self.item_node.push(self.kind.len() as% u32);
+        self.status.push(status);
+        self.fail.push(f);
+    }
+
+    // Appends the `kids` rows of the nodes from row `base` on (the current item's): row N lists
+    // the direct children of N, item-relative, in source order. They are found from the last
+    // child N - 1 back over subtree sizes.
+    pub fn add_kids(&mut self, base: usize, tmp: &mut vec.Vec<u32>) {
+        let n = self.kind.len() - base;
+        let size = &self.size.as_slice()[base..base + n];
+        for v in 0..n {
+            tmp.clear();
+            let lo = v - (size[v] as usize);
+            let mut c = v;
+            while c > lo {
+                c = c - 1;
+                tmp.push(c as% u32);
+                c = c - (size[c] as usize);
+            }
+            let ts = tmp.as_slice();
+            let m = ts.len();
+            for k in 0..m {
+                self.kids.push(ts[m - 1 - k]);
+            }
+            self.kids.end_row();
+        }
+    }
+}

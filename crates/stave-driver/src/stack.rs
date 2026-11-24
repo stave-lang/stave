@@ -74,6 +74,7 @@
 //! reserve. A stack that reaches an unresolved node gets `[run] stack`. The runtime rounds up to
 //! the page size. No error comes from the bound: frame sizes differ between debug and release.
 
+use stave_ir::intrinsics::Kind as IntrKind;
 use stave_ir::text::{EdgeKind, StackEdge, StackInput};
 use stave_ir::{FuncId, Known, Module, Op, Operand, Term};
 use stave_obj::{DataObj, StackUse, SymbolId};
@@ -386,11 +387,31 @@ fn calls_of(m: &Module, f: FuncId, called: &IntrinsicCalls, made: &mut [bool]) -
                     c.direct.push(g);
                 }
                 (Some(Op::CallInd), None) => c.indirect = true,
-                (Some(Op::Intrinsic(id)), _) => match m.intrinsic_name(id) {
-                    Some("cpu_init") => c.direct.extend(called.cpu_init),
-                    Some("copy_bytes") => c.direct.extend(called.copy_raw),
-                    Some(name) if name.starts_with("ccall") => c.foreign = true,
-                    _ => {}
+                (Some(Op::Intrinsic(id)), _) => match m.intrinsic_kind(id) {
+                    Some(IntrKind::CpuInit) => c.direct.extend(called.cpu_init),
+                    Some(IntrKind::CopyBytes) => c.direct.extend(called.copy_raw),
+                    Some(IntrKind::Ccall(_)) => c.foreign = true,
+                    // a name outside the table has no known frame size
+                    None => c.foreign = true,
+                    Some(
+                        IntrKind::Syscall(_)
+                        | IntrKind::Cpuid
+                        | IntrKind::Xgetbv
+                        | IntrKind::ThreadStartAddr
+                        | IntrKind::MainAddr
+                        | IntrKind::SignalHandlerAddr
+                        | IntrKind::SiteTable
+                        | IntrKind::PcTable
+                        | IntrKind::StackTable
+                        | IntrKind::ThreadBlock
+                        | IntrKind::SetThreadBlock
+                        | IntrKind::CallOnStack
+                        | IntrKind::CpuBaseline
+                        | IntrKind::ThreadClone
+                        | IntrKind::Atomic { .. }
+                        | IntrKind::StaticAddr
+                        | IntrKind::Ptx,
+                    ) => {}
                 },
                 _ => {}
             }

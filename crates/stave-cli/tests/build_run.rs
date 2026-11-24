@@ -744,6 +744,41 @@ fn test_fns_of_a_package() {
     assert!(out.ends_with("test fns: 1 passed, 1 failed, 0 not run\n"), "{out}");
 }
 
+/// A directory with its own `stave.toml` below a package is another package (a path dependency):
+/// `stave test OUTER` neither reads its directives nor runs its `test fn`s; `stave test INNER`
+/// does both, and a malformed annotation in it fails only that run.
+#[test]
+fn test_of_a_package_stops_at_a_nested_package() {
+    let outer = run_prog("nested_package");
+    let inner = format!("{outer}/prims");
+    let d = tmp("nested_package");
+    let (c, out, err) = stave_in(&d, &["test", &outer]);
+    if !host_runs() {
+        return;
+    }
+    assert_eq!(c, 0, "{out}{err}");
+    assert!(out.contains("ok        nested_package\n"), "{out}");
+    assert!(out.contains("ok        test main.outer_uses_inner\n"), "{out}");
+    assert!(out.ends_with("test fns: 1 passed, 0 failed, 0 not run\n"), "{out}");
+    let (c, out, err) = stave_in(&d, &["test", &inner]);
+    assert_eq!(c, 0, "{out}{err}");
+    assert!(out.contains("ok        prims\n"), "{out}");
+    assert!(out.ends_with("test fns: 2 passed, 0 failed, 0 not run\n"), "{out}");
+    // A malformed annotation in the nested package is that package's own.
+    let copy = d.join("copy");
+    copy_tree(Path::new(&outer), &copy);
+    let lib = copy.join("prims/src/lib.stv");
+    let mut text = std::fs::read_to_string(&lib).unwrap();
+    text.push_str("//~ BOGUS\n");
+    std::fs::write(&lib, text).unwrap();
+    let (c, out, err) = stave_in(&d, &["test", &copy.display().to_string()]);
+    assert_eq!(c, 0, "{out}{err}");
+    assert!(!out.contains("MALFORMED"), "{out}");
+    let (c, out, _) = stave_in(&d, &["test", &copy.join("prims").display().to_string()]);
+    assert_eq!(c, 1, "{out}");
+    assert!(out.contains("MALFORMED prims"), "{out}");
+}
+
 /// The `test fn` lines of a `stave test` output.
 fn test_lines(out: &str) -> Vec<String> {
     out.lines().filter(|l| l.contains(" test main.")).map(String::from).collect()
