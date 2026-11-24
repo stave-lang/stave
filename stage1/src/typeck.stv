@@ -403,7 +403,8 @@ impl tc_rows.Typeck {
             }
             return self.chain_steps(sg, ds, nm, set, t, cut, tree, r, c as% u32);
         }
-        if pk == K_ARGS {
+        // a call's arguments and a struct literal's field expressions
+        if pk == K_ARGS || pk == K_STRUCT_LIT {
             let ah = self.arg_hint(sg, ds, tree, r, k);
             self.set_hint(c, ah);
             return true;
