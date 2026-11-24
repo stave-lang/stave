@@ -8,6 +8,9 @@
 // `ast`: one line `I N KIND a b` per node of every item not dropped, by (I, N): KIND is the rule
 // name, `a` the node's first token as an index into its file's tokens, `b` its subtree size.
 //
+// `names`: one line `I N -> decl D` or `I N -> local I N2` per resolving identifier use, by
+// (I, N), then by the identifier's byte offset.
+//
 // `strings`: one line `S hash32 "escaped-bytes"` per interned string, by S: the hash as 8
 // lowercase hex digits, the bytes 0x20..0x7E as themselves except `\` and `"` (backslash
 // escaped), `\n`, `\t`, and `\xHH` for every other byte.
@@ -16,6 +19,7 @@ import generated.ll1_table;
 import intern;
 import items;
 import lex;
+import resolve;
 import text;
 import std.mem;
 import std.vec;
@@ -134,6 +138,27 @@ pub fn strings_txt(tab: &intern.Table) -> vec.Vec<u8> {
         buf.push(34);
         push_escaped(&mut buf, tab.text(s));
         buf.push(34);
+        buf.push(10);
+    }
+    return buf;
+}
+
+pub fn names_txt(r: &resolve.Names) -> vec.Vec<u8> {
+    let n = r.len();
+    let mut buf = vec.Vec::<u8>.with_capacity(n * 20);
+    for k in 0..n {
+        let i = r.item.as_slice()[k];
+        text.push_u32(&mut buf, i);
+        buf.push(32);
+        text.push_u32(&mut buf, r.node.as_slice()[k]);
+        if r.tag.as_slice()[k] == resolve.TAG_LOCAL {
+            buf.extend_from_slice(mem.str_bytes(" -> local "));
+            text.push_u32(&mut buf, i);
+            buf.push(32);
+        } else {
+            buf.extend_from_slice(mem.str_bytes(" -> decl "));
+        }
+        text.push_u32(&mut buf, r.target.as_slice()[k]);
         buf.push(10);
     }
     return buf;

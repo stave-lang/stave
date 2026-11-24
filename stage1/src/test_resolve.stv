@@ -1,0 +1,121 @@
+// Tests of `resolve`: which binding each use names (scopes as stage0's walk builds them), chain
+// steps, contextual names, and the uses that resolve to nothing.
+import decls;
+import generated.node_kinds;
+import resdiag;
+import resolve;
+import test_kit;
+import std.debug;
+
+const NONE: u32 = 4294967295;
+
+// The use at the k-th `pat` in the root file is the local bound at the j-th `bind`.
+fn local_is(o: &test_kit.Out, pat: &str, k: usize, bind: &str, j: usize) -> bool {
+    let off = o.at(0, pat, k);
+    let i = o.item_at(0, off);
+    let (tag, n2) = o.name_at(i, off);
+    if tag != resolve.TAG_LOCAL { return false; }
+    return o.node_off(i, n2) == o.at(0, bind, j);
+}
+
+fn decl_of(o: &test_kit.Out, pat: &str, k: usize) -> u32 {
+    let (tag, d) = o.res_of(0, pat, k);
+    return if tag == resolve.TAG_DECL then d else NONE;
+}
+
+fn unresolved(o: &test_kit.Out, pat: &str, k: usize) -> bool {
+    let (tag, _) = o.res_of(0, pat, k);
+    return tag == 255;
+}
+
+test fn let_scopes_and_shadowing() {
+    let o = test_kit.single("fn f(x: u32) -> u32 {\n    let x = x + 1;\n    let y = x;\n    { let y = 0u32; let z = y; }\n    return y;\n}\n");
+    debug.assert(local_is(&o, "x + 1", 0, "x: u32", 0), "an initializer sees the parameter, not its own binding");
+    debug.assert(local_is(&o, "x;", 0, "x = x", 0), "the later let shadows");
+    debug.assert(local_is(&o, "y;", 0, "y = 0u32", 0), "an inner block shadows");
+    debug.assert(local_is(&o, "y;", 1, "y = x", 0), "and ends with its block");
+}
+
+test fn for_tail_arms_closures() {
+    let src = "fn f(xs: &[u32]) -> u32 {\n    let mut n: u32 = 0;\n    for v in xs { n = n + *v; }\n    let w = v;\n    match n { a | a => { n = a; } }\n    let c = fn(q: u32) -> u32 { return q + n; };\n    return c(n);\n}\n";
+    let o = test_kit.single(src);
+    debug.assert(local_is(&o, "v; }", 0, "v in", 0), "a for pattern in its block");
+    debug.assert(unresolved(&o, "v;\n", 0), "not after the loop");
+    debug.assert(local_is(&o, "a; }", 0, "a |", 0), "an or-pattern's names are the first alternative's");
+    debug.assert(local_is(&o, "q + n", 0, "q: u32", 0), "a closure parameter");
+    debug.assert(local_is(&o, "n; }", 0, "mut n", 0), "a closure sees the enclosing locals");
+}
+
+test fn params_from_and_contracts() {
+    let src = "view struct V { r: &u32 }\nfn set(v: &mut V from x, x: &u32) { v.r = x; }\nfn g(a: u32) -> u32 requires(a < 10) ensures(result > a && old(a) == a) { return a; }\nfn main() {}\n";
+    let o = test_kit.single(src);
+    debug.assert(local_is(&o, "x, x", 0, "x: &u32", 0), "a from clause names a later parameter");
+    let off = o.at(0, "result", 0);
+    let i = o.item_at(0, off);
+    let (tag, n2) = o.name_at(i, off);
+    debug.assert(tag == resolve.TAG_LOCAL && o.node_kind(i, n2) == node_kinds.KIND_ENSURES, "`result` is the fn's first ensures clause");
+    debug.assert(unresolved(&o, "old", 0), "`old(..)` is built in");
+    debug.assert(local_is(&o, "a) ==", 0, "a: u32", 0), "inside old the parameter");
+}
+
+test fn generics_and_types() {
+    let src = "struct W<T> { v: T }\nfn id<T>(x: T) -> T { let y: T = x; return y; }\nfn n<const N: usize>() -> usize { return N; }\nfn main() { let w: W<u32> = W.{ v: 1u32 }; }\n";
+    let o = test_kit.single(src);
+    let off = o.at(0, "T = x", 0);
+    let i = o.item_at(0, off);
+    let (tag, n2) = o.name_at(i, off);
+    debug.assert(tag == resolve.TAG_LOCAL && o.node_kind(i, n2) == node_kinds.KIND_GENERIC_PARAM, "a generic param is a local line");
+    debug.assert(local_is(&o, "N; }", 0, "const N", 0), "a const param, its node starting at `const`");
+    let w = o.item(o.module("main"), "W");
+    debug.assert(decl_of(&o, "W<u32>", 0) == w && decl_of(&o, "W.{", 0) == w, "a type and a struct literal");
+    debug.assert(unresolved(&o, "u32>", 0), "built-in type names have no line");
+}
+
+test fn chains() {
+    let src = "enum E { A, B }\nstruct S {}\nimpl S { pub fn new() -> S { return S.{}; } fn mk() -> S { return Self.new(); } }\nfn f() -> u32 { let e = E.A; let s = S.new(); let x = E.Z; return 0u32; }\nfn g() { let q = A; }\nfn main() {}\n";
+    let o = test_kit.single(src);
+    let m = o.module("main");
+    let e = o.item(m, "E");
+    debug.assert(decl_of(&o, "E.A", 0) == e, "the enum");
+    debug.assert(decl_of(&o, "A;", 0) == o.ds.step_member(e, o.sym("A")), "the variant step");
+    let (new, _) = o.ds.method(o.item(m, "S"), o.sym("new"));
+    debug.assert(decl_of(&o, "new();", 1) == new, "an inherent method step");
+    debug.assert(decl_of(&o, "new();", 0) == new, "through Self in the impl");
+    debug.assert(unresolved(&o, "Z;", 0), "no such variant");
+    debug.assert(unresolved(&o, "A; }\nfn main", 0), "a bare variant name");
+    debug.assert(o.rows.count(resdiag.E0103) == 1, "E0103 names the enum of the bare variant");
+    debug.assert(o.rows.count(resdiag.E0101) == 1, "E0101 for E.Z");
+}
+
+test fn modules_and_visibility() {
+    let mut k = test_kit.kit();
+    let app = k.package("app", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(app, "std", s);
+    k.file(app, "main", "import m;\nimport std.core;\nfn main() { m.f(); m.g(); let o: core.Option<u32> = Option.None; }\n");
+    k.file(app, "m", "pub fn f() {}\nfn g() {}\n");
+    k.file(s, "core", "pub enum Option<T> { Some(T), None }\n");
+    let o = k.run();
+    let mm = o.module("m");
+    debug.assert(decl_of(&o, "m;", 0) == o.ds.mod_decl.as_slice()[mm as usize], "an import segment names the module");
+    debug.assert(decl_of(&o, "m.f", 0) == o.ds.mod_decl.as_slice()[mm as usize], "the import binding");
+    debug.assert(decl_of(&o, "f()", 0) == o.item(mm, "f"), "a module step");
+    debug.assert(decl_of(&o, "g()", 0) == o.item(mm, "g"), "a private item still resolves");
+    debug.assert(o.rows.count(resdiag.E0106) == 1, "and is E0106");
+    let opt = o.item(o.module("std.core"), "Option");
+    debug.assert(decl_of(&o, "Option<u32>", 0) == opt, "through the imported module");
+    debug.assert(decl_of(&o, "Option.None", 0) == opt, "through the prelude");
+}
+
+test fn rows_are_sorted() {
+    let o = test_kit.single("fn f(a: u32, b: u32) -> u32 { let c = a + b; return c; }\nfn g() { f(1u32, 2u32); }\nfn main() {}\n");
+    for k in 1..o.res.len() {
+        let pi = o.res.item.as_slice()[k - 1];
+        let ci = o.res.item.as_slice()[k];
+        let pn = o.res.node.as_slice()[k - 1];
+        let cn = o.res.node.as_slice()[k];
+        let ok = pi < ci || (pi == ci && (pn < cn || (pn == cn && o.res.off.as_slice()[k - 1] < o.res.off.as_slice()[k])));
+        debug.assert(ok, "rows by (item, node, offset)");
+    }
+    debug.assert(o.ds.kind.as_slice()[decl_of(&o, "f(1u32", 0) as usize] == decls.DK_FN, "a call of a fn");
+}

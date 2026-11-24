@@ -1,8 +1,8 @@
 #!/bin/sh
-# stage1 `tokens`, `items`, `ast`, and `strings` equivalence gate (contracts/stage-gates.md): builds stage0 (the
+# stage1 `tokens`, `items`, `ast`, `strings`, and `names` equivalence gate (contracts/stage-gates.md): builds stage0 (the
 # debug build `test` leaves, or STAVE_GATE_PROFILE=release), builds stage1 with it, then runs both
-# with `build --dump=tokens,items,ast,strings` on every root of the corpus (one run each) and compares
-# the two `tokens.txt`, `items.txt`, `ast.txt`, and `strings.txt` byte for byte. Every dump covers the whole program, so
+# with `build --dump=tokens,items,ast,strings,names` on every root of the corpus (one run each) and compares
+# the two `tokens.txt`, `items.txt`, `ast.txt`, `strings.txt`, and `names.txt` byte for byte. Every dump covers the whole program, so
 # each root also compares std, runtime, and the arch package.
 #
 # Roots: every package directory (a `stave.toml`, not descending into it) and every other `.stv`
@@ -24,14 +24,14 @@ export STAVE_STD_DIR="$ROOT"
 if [ "${1:-}" = "--one" ]; then
   d="$OUT/w/$2"
   mkdir -p "$d"
-  rm -f "$d/0/tokens.txt" "$d/1/tokens.txt" "$d/0/items.txt" "$d/1/items.txt" "$d/0/ast.txt" "$d/1/ast.txt" "$d/0/strings.txt" "$d/1/strings.txt"
+  rm -f "$d/0/tokens.txt" "$d/1/tokens.txt" "$d/0/items.txt" "$d/1/items.txt" "$d/0/ast.txt" "$d/1/ast.txt" "$d/0/strings.txt" "$d/1/strings.txt" "$d/0/names.txt" "$d/1/names.txt"
   if [ -n "${4:-}" ]; then set -- "$2" "$3" --target "$4"; else set -- "$2" "$3"; fi
   root="$2"
   shift 2
-  "$S0" build "$root" "$@" -o "$d/exe" --dump=tokens,items,ast,strings --dump-dir "$d/0" >/dev/null 2>&1 || true
-  if ! "$S1" build "$root" "$@" --dump=tokens,items,ast,strings --dump-dir "$d/1" >"$d/stage1.err" 2>&1; then
+  "$S0" build "$root" "$@" -o "$d/exe" --dump=tokens,items,ast,strings,names --dump-dir "$d/0" >/dev/null 2>&1 || true
+  if ! "$S1" build "$root" "$@" --dump=tokens,items,ast,strings,names --dump-dir "$d/1" >"$d/stage1.err" 2>&1; then
     echo "FAIL stage1 exit: $root $* ($(head -c 200 "$d/stage1.err"))"
-  elif [ ! -f "$d/0/tokens.txt" ] || [ ! -f "$d/0/items.txt" ] || [ ! -f "$d/0/ast.txt" ] || [ ! -f "$d/0/strings.txt" ]; then
+  elif [ ! -f "$d/0/tokens.txt" ] || [ ! -f "$d/0/items.txt" ] || [ ! -f "$d/0/ast.txt" ] || [ ! -f "$d/0/strings.txt" ] || [ ! -f "$d/0/names.txt" ]; then
     echo "FAIL no stage0 dump: $root $*"
   elif ! cmp -s "$d/0/tokens.txt" "$d/1/tokens.txt"; then
     echo "DIFF tokens $root $* (first: $(cmp "$d/0/tokens.txt" "$d/1/tokens.txt" 2>&1 | head -1))"
@@ -41,8 +41,10 @@ if [ "${1:-}" = "--one" ]; then
     echo "DIFF ast $root $* (first: $(cmp "$d/0/ast.txt" "$d/1/ast.txt" 2>&1 | head -1))"
   elif ! cmp -s "$d/0/strings.txt" "$d/1/strings.txt"; then
     echo "DIFF strings $root $* (first: $(cmp "$d/0/strings.txt" "$d/1/strings.txt" 2>&1 | head -1))"
+  elif ! cmp -s "$d/0/names.txt" "$d/1/names.txt"; then
+    echo "DIFF names $root $* (first: $(cmp "$d/0/names.txt" "$d/1/names.txt" 2>&1 | head -1))"
   else
-    echo "SAME $(wc -l < "$d/0/tokens.txt") $(wc -l < "$d/0/items.txt") $(wc -l < "$d/0/ast.txt") $(wc -l < "$d/0/strings.txt")"
+    echo "SAME $(wc -l < "$d/0/tokens.txt") $(wc -l < "$d/0/items.txt") $(wc -l < "$d/0/ast.txt") $(wc -l < "$d/0/strings.txt") $(wc -l < "$d/0/names.txt")"
   fi
   exit 0
 fi
@@ -76,7 +78,8 @@ tlines=$(awk '$1 == "SAME" { s += $2 } END { print s + 0 }' "$OUT/result.txt")
 ilines=$(awk '$1 == "SAME" { s += $3 } END { print s + 0 }' "$OUT/result.txt")
 alines=$(awk '$1 == "SAME" { s += $4 } END { print s + 0 }' "$OUT/result.txt")
 slines=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
-echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines, ast $alines lines, strings $slines lines), $((end - start)) s"
+nlines=$(awk '$1 == "SAME" { s += $6 } END { print s + 0 }' "$OUT/result.txt")
+echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines, ast $alines lines, strings $slines lines, names $nlines lines), $((end - start)) s"
 if grep -v '^SAME' "$OUT/result.txt"; then
   echo "stage1-gate: FAILED" >&2
   exit 1

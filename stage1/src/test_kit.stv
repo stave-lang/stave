@@ -1,4 +1,4 @@
-// A build in memory for the tests of `modules` and `decls`: packages and files are
+// A build in memory for the tests of `modules`, `decls`, and `resolve`: packages and files are
 // added in rank order (packages by name, files by package name then path), then every stage
 // runs on them as `main` runs them on a discovered build.
 import decls;
@@ -9,6 +9,7 @@ import lex;
 import modules;
 import parse;
 import resdiag;
+import resolve;
 import source;
 import ast;
 import text;
@@ -31,6 +32,7 @@ pub struct Out {
     pub nm: intern.Interned,
     pub md: modules.Modules,
     pub ds: decls.Decls,
+    pub res: resolve.Names,
     pub rows: resdiag.Rows,
 }
 
@@ -92,8 +94,9 @@ impl Kit {
         let mut rows = resdiag.Rows.new();
         let md = modules.build(&k.fl, &nm, &lx, &k.set, &toks, &cut, &tree, &mut rows);
         let ds = decls.build(&md, &nm, &lx, &k.set, &toks, &cut, &tree, &mut rows);
+        let res = resolve.build(&md, &ds, &nm, &lx, &k.set, &toks, &cut, &tree, &mut rows);
         let Kit.{ fl: _, set, dep_counts: _ } = k;
-        return Out.{ set: set, lx: lx, toks: toks, cut: cut, tree: tree, nm: nm, md: md, ds: ds, rows: rows };
+        return Out.{ set: set, lx: lx, toks: toks, cut: cut, tree: tree, nm: nm, md: md, ds: ds, res: res, rows: rows };
     }
 }
 
@@ -132,12 +135,26 @@ impl Out {
         return modules.NONE;
     }
 
+    // The names row whose identifier is at byte offset off of item i: (tag, target), or (255, NONE).
+    pub fn name_at(&self, i: u32, off: u32) -> (u8, u32) {
+        for k in 0..self.res.len() {
+            if self.res.item.as_slice()[k] == i && self.res.off.as_slice()[k] == off { return (self.res.tag.as_slice()[k], self.res.target.as_slice()[k]); }
+        }
+        return (255, modules.NONE);
+    }
+
     // The item of file f holding byte offset off.
     pub fn item_at(&self, f: usize, off: u32) -> u32 {
         for i in 0..self.cut.len() {
             if self.cut.file.as_slice()[i] as usize == f && self.cut.off_start.as_slice()[i] <= off && off < self.cut.off_end.as_slice()[i] { return i as% u32; }
         }
         return modules.NONE;
+    }
+
+    // The resolution of the identifier at the k-th occurrence of `pat` in file f.
+    pub fn res_of(&self, f: usize, pat: &str, k: usize) -> (u8, u32) {
+        let off = self.at(f, pat, k);
+        return self.name_at(self.item_at(f, off), off);
     }
 
     // The node kind of item-relative node n of item i.
