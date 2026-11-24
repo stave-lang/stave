@@ -7,8 +7,6 @@ type t3 ref t0
 type t4 ref mut t0
 type t5 ref mut t6
 type t6 adt d23
-type t7 int u 8
-type t8 int u size
 shape t6 struct t0
 site 0 "src/main.stv" 14 4 main.read
 site 1 "src/main.stv" 10 4 main.bump

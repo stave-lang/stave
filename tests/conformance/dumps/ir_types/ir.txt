@@ -24,9 +24,8 @@ type t19 tuple t8 t7
 type t20 adt d22
 type t21 adt d29 t0
 type t22 fntype t1 -> t1
-type t23 int u 8
-type t24 char
-shape t20 enum | | t24
+type t23 char
+shape t20 enum | | t23
 shape t21 struct t0 t0
 site 0 "src/main.stv" 16 4 main.twice
 site 1 "src/main.stv" 8 4 main.take

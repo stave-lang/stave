@@ -2,8 +2,6 @@ stave.ir 4 "x86_64-linux-v2" debug checked
 type t0 int u 64
 type t1 int s 32
 type t2 bool
-type t3 int u 8
-type t4 int u size
 site 0 "src/main.stv" 3 4 main.first_pow
 site 1 "src/main.stv" 9 15 main.first_pow
 site 2 "src/main.stv" 14 4 main.main

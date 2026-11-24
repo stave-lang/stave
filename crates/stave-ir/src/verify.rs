@@ -504,6 +504,25 @@ impl<'a> FnVerifier<'a> {
         }
     }
 
+    /// Checks that `o` can stand where the op rules name a scalar type by its key (`bool` for a
+    /// condition, `int u size` for a length or index). The table need not hold the type: a
+    /// module whose only operand there is a constant has no value of it, and a canonical type
+    /// table holds only the types something reaches.
+    pub(crate) fn check_scalar_operand(&self, b: &Body, o: Operand, want: &TypeKey) -> Result<(), String> {
+        if let Some(t) = self.m.types.find(want) {
+            return self.check_operand(b, o, t);
+        }
+        let fits = match (o, want) {
+            (Operand::Const(c), TypeKey::Bool) => matches!(b.konst(c), Some(Const::Int(0 | 1))),
+            (Operand::Const(c), TypeKey::Int { signed, bits }) => {
+                let width = if *bits == IntBits::Size { 64 } else { bits.width() };
+                matches!(b.konst(c), Some(Const::Int(x)) if IntTy::new(width, *signed).fits(x))
+            }
+            _ => false,
+        };
+        if fits { Ok(()) } else { Err(format!("operand cannot have type {}", crate::types::key_text(want))) }
+    }
+
     /// Checks that `o` can stand where a value of type `want` is expected.
     fn check_operand(&self, b: &Body, o: Operand, want: TypeId) -> Result<(), String> {
         let key = self.key(want).ok_or("expected type out of range")?;
@@ -630,8 +649,7 @@ impl<'a> FnVerifier<'a> {
         }
         match bd.term {
             Term::Cbr { cond, .. } => {
-                let bt = self.m.types.find(&TypeKey::Bool).ok_or("cbr condition: no bool type")?;
-                self.check_operand(b, cond, bt).map_err(|e| format!("cbr condition: {e}"))
+                self.check_scalar_operand(b, cond, &TypeKey::Bool).map_err(|e| format!("cbr condition: {e}"))
             }
             Term::Switch { scrut, cases, .. } => {
                 let t = self.operand_ty(b, scrut).ok_or("switch scrutinee must be a value")?;
@@ -777,8 +795,12 @@ impl<'a> FnVerifier<'a> {
             Op::Select => {
                 arity(3)?;
                 let t = res()?;
-                let bt = types.find(&TypeKey::Bool).ok_or("no bool type")?;
-                self.check_args(b, args, &[bt, t, t])
+                self.check_scalar_operand(b, args[0], &TypeKey::Bool)
+                    .map_err(|e| format!("argument 0: {e}"))?;
+                for k in 1..3 {
+                    self.check_operand(b, args[k], t).map_err(|e| format!("argument {k}: {e}"))?;
+                }
+                Ok(())
             }
             Op::Cast(kind) => {
                 arity(1)?;
@@ -979,21 +1001,19 @@ impl<'a> FnVerifier<'a> {
                 arity(2)?;
                 let t = res()?;
                 let inner = pointee(types, t).ok_or("slice.make result must be a pointer")?;
-                let et = match self.key(inner) {
-                    Some(TypeKey::Slice { elem, .. }) => *elem,
-                    Some(TypeKey::Str) => {
-                        types.find(&TypeKey::Int { signed: false, bits: IntBits::B8 }).ok_or("no u8 type")?
+                let pt = self.operand_ty(b, args[0]).ok_or("slice.make pointer must be a value")?;
+                let elem_ok = match (self.key(inner), pointee(types, pt)) {
+                    (Some(TypeKey::Slice { elem, .. }), Some(p)) => p == *elem,
+                    (Some(TypeKey::Str), Some(p)) => {
+                        self.key(p) == Some(&TypeKey::Int { signed: false, bits: IntBits::B8 })
                     }
+                    (Some(TypeKey::Slice { .. } | TypeKey::Str), None) => false,
                     _ => return Err("slice.make result must point to a slice or str".into()),
                 };
-                let pt = self.operand_ty(b, args[0]).ok_or("slice.make pointer must be a value")?;
-                if pointee(types, pt) != Some(et) || self.cls(pt) != Cls::Ptr {
+                if !elem_ok || self.cls(pt) != Cls::Ptr {
                     return Err("slice.make pointer must point to the element type".into());
                 }
-                let us = types
-                    .find(&TypeKey::Int { signed: false, bits: IntBits::Size })
-                    .ok_or("no usize type")?;
-                self.check_operand(b, args[1], us)
+                self.check_scalar_operand(b, args[1], &TypeKey::Int { signed: false, bits: IntBits::Size })
             }
             Op::SliceLen | Op::SlicePtr => {
                 arity(1)?;

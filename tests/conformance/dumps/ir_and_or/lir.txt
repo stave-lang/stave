@@ -1,8 +1,6 @@
 stave.ir 4 "x86_64-linux-v2" debug lowered
 type t0 int s 32
 type t1 bool
-type t2 int u 8
-type t3 int u size
 site 0 "src/main.stv" 3 4 main.between
 site 1 "src/main.stv" 7 4 main.outside
 site 2 "src/main.stv" 11 4 main.main

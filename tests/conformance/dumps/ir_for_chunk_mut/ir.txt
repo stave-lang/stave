@@ -10,7 +10,6 @@ type t7 array t1 8
 type t8 slice t1
 type t9 vec t1 4
 type t10 mask 32 4
-type t11 int u 8
 site 0 "src/main.stv" 10 4 main.add
 site 1 "src/main.stv" 14 7 main.add
 site 2 "src/main.stv" 19 4 main.main

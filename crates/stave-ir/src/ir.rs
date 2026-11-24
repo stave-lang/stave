@@ -921,32 +921,48 @@ impl Module {
     }
 
     /// Renumbers the type table canonically ([`TypeTable::canonicalize`]) and rewrites every type
-    /// id in the functions.
+    /// id in the functions and statics.
     pub fn canonicalize_types(&mut self) -> Result<(), crate::types::CanonError> {
         let remap = self.types.canonicalize()?;
         let m = |t: TypeId| remap.get(t.index()).copied().unwrap_or(t);
         for f in &mut self.funcs {
-            for a in &mut f.type_args {
-                if let GenericArg::Type(t) = a {
-                    *t = m(*t);
-                }
-            }
-            f.params.iter_mut().for_each(|t| *t = m(*t));
-            f.ret = f.ret.map(m);
-            if let Some(b) = &mut f.body {
-                b.values.iter_mut().for_each(|v| v.ty = m(v.ty));
-                b.insts.ty.iter_mut().for_each(|t| *t = t.map(m));
-                for o in &mut b.operands {
-                    if let Operand::Type(t) = o {
-                        *t = m(*t);
-                    }
-                }
-            }
+            f.map_types(m);
         }
         for st in &mut self.statics {
             st.ty = m(st.ty);
         }
         Ok(())
+    }
+}
+
+impl Func {
+    /// Rewrites every type id of the function, its signature and its body, through `m`.
+    pub fn map_types(&mut self, m: impl Fn(TypeId) -> TypeId) {
+        for a in &mut self.type_args {
+            if let GenericArg::Type(t) = a {
+                *t = m(*t);
+            }
+        }
+        self.params.iter_mut().for_each(|t| *t = m(*t));
+        self.ret = self.ret.map(&m);
+        if let Some(b) = &mut self.body {
+            b.values.iter_mut().for_each(|v| v.ty = m(v.ty));
+            b.insts.ty.iter_mut().for_each(|t| *t = t.map(&m));
+            for o in &mut b.operands {
+                if let Operand::Type(t) = o {
+                    *t = m(*t);
+                }
+            }
+        }
+    }
+
+    /// Every type id of the function's signature (type arguments, params, result).
+    pub fn signature_types(&self) -> impl Iterator<Item = TypeId> + '_ {
+        let targs = self.type_args.iter().filter_map(|a| match a {
+            GenericArg::Type(t) => Some(*t),
+            GenericArg::Const(_) => None,
+        });
+        targs.chain(self.params.iter().copied()).chain(self.ret)
     }
 }
 

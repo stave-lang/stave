@@ -5,7 +5,6 @@ type t1 int u 32
 type t2 int s 32
 type t3 bool
 type t4 adt d24
-type t5 int u size
 shape t4 enum | | t1 | t1 t1
 site 0 "src/main.stv" 6 4 main.area
 site 1 "src/main.stv" 10 41 main.area

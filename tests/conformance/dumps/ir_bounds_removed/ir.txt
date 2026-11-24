@@ -9,7 +9,6 @@ type t6 ref t9
 type t7 ref mut t8
 type t8 array t0 4
 type t9 slice t0
-type t10 int u 8
 site 0 "src/main.stv" 5 4 main.sum
 site 1 "src/main.stv" 8 11 main.sum
 site 2 "src/main.stv" 8 16 main.sum

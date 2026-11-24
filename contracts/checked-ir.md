@@ -203,9 +203,11 @@ except `d<D>`.
 - `t<T>`: dense from `t0` over every type of the module. The *P* set comes first: the closure over
   key components of the types the fns with a body use (their signatures and type arguments, block
   param and value types, instruction result types, type operands), ranked in the canonical
-  type-key order. The *S* set follows: the module's other types (those only shapes, statics, or
-  bodiless fns' signatures reach), ranked the same way. A module holds no type outside P and S.
-  Instance types such as `Pair<u16>` exist only here. `d<D>` in `adt` keys is the canonical decl
+  type-key order. The *S* set follows: the other types that the shapes of P and S types, the
+  statics, and the bodiless fns' signatures reach over key components and shapes, ranked the
+  same way. A module holds no type outside P and S. An op rule that names a scalar type (`bool`
+  for a condition, `int u size` for a length) checks a constant operand by that key, so the
+  table need not hold a type that no value has. Instance types such as `Pair<u16>` exist only here. `d<D>` in `adt` keys is the canonical decl
   id D.
 - `@<inst>`: the rank of the instance among the build's instances (the root set's closure,
   below), ordered by (decl D, generic args by `t<T>`), drop glue after every decl instance, ordered
@@ -238,7 +240,10 @@ At every printed point the driver canonicalizes the module before it prints, bui
 it: fns in instance-id order (a fn's index is its rank), unreachable blocks deleted, blocks and
 values numbered densely in print order, each body's constant pool holding one entry per
 distinct constant, numbered by first use in print order, the module's intrinsic names listed once
-each, sorted by bytes. The interpreter and the back ends get this module. Then `read(print(m))`
+each, sorted by bytes, and the type table holding exactly the P and S sets of that point ("Ids"),
+renumbered (types that removed checks or the release passes left unreached are dropped; types
+the release passes add are ranked like the others), with the decls its `adt` keys and `cell`
+name. The interpreter and the back ends get this module. Then `read(print(m))`
 equals `m`, and `print(read(t))` equals `t` for every printed `t`.
 
 - Two constants are the same constant when they have the same kind (`int`, `f16`, `bf16`, `f32`,

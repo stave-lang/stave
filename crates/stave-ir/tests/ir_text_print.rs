@@ -76,7 +76,7 @@ fn header(level: Level) -> Header {
     Header { target: Triple::X86_64(X86Level::V2), mode: Mode::Debug, level }
 }
 
-/// Every key form, in intern order (ids are the order). Returns the ids by name.
+/// Every key form (the canonical module renumbers them). Returns the ids by name.
 struct Ty {
     i32: TypeId,
     bool: TypeId,
@@ -211,6 +211,10 @@ fn sink() -> (Module, FuncId, StackInput) {
     // @4: a bodiless fn whose path needs quotes, no params, no result.
     let quoted = m.declare(inst(&[4]), "my-pkg.f", vec![], None);
     m.func_mut(quoted).unwrap().unbuilt = true;
+    // @5: a bodiless fn whose signature reaches every type: a canonical module keeps only the
+    // types something reaches, those of no body after the others (the S set).
+    let every: Vec<TypeId> = (0..m.types.len() as u32).map(TypeId).collect();
+    m.declare(inst(&[5]), "app.every_type", every, None);
 
     // main's body.
     let mut b = FuncBuilder::new(&[t.i32, t.bool]);
@@ -290,7 +294,7 @@ fn sink() -> (Module, FuncId, StackInput) {
         ],
         ..Summary::default()
     };
-    m.stated = vec![None, Some(Arc::new(s)), None, None, None, None, None];
+    m.stated = vec![None, Some(Arc::new(s)), None, None, None, None, None, None];
     let stack = StackInput {
         run_stack: Some(65536),
         truncated: true,
@@ -300,7 +304,7 @@ fn sink() -> (Module, FuncId, StackInput) {
             StackEdge { from: 0, to: 2, kind: EdgeKind::Indirect },
             StackEdge { from: 1, to: 2, kind: EdgeKind::Spawn },
         ],
-        nodes_of_func: vec![vec![], vec![0, 1], vec![2], vec![], vec![], vec![], vec![]],
+        nodes_of_func: vec![vec![], vec![0, 1], vec![2], vec![], vec![], vec![], vec![], vec![]],
     };
     (m, main, stack)
 }
@@ -332,7 +336,7 @@ const WHERE: &[(&str, &[&str])] = &[
     // lexical; `Comment` is never printed (`text_discipline`)
     ("Space", &[" "]),
     ("Comment", &[]),
-    ("Num", &["type t0 int s 8\n"]),
+    ("Num", &["type t0 int u 8\n"]),
     ("Word", &["fn @1 app.main("]),
     ("Val", &["  %2 = slot t"]),
     ("FnRef", &["call t2 @0 ", "fn @1.0 app.main", "fn @1.u app.main"]),
@@ -358,7 +362,7 @@ const WHERE: &[(&str, &[&str])] = &[
         &["decl d0 struct app.Pair\n", "decl d1 enum app.Opt\n", "decl d7 struct \"my-pkg.Cell\"\n"],
     ),
     ("DeclKind", &[" struct ", " enum "]),
-    ("TypeLine", &["type t0 int s 8\n"]),
+    ("TypeLine", &["type t0 int u 8\n"]),
     (
         "Key",
         &[
@@ -367,7 +371,7 @@ const WHERE: &[(&str, &[&str])] = &[
             "float 16\n",
             "float 64\n",
             "float b16\n",
-            "type t14 bool\n",
+            "type t3 bool\n",
             "char\n",
             "str\n",
             "ref t",

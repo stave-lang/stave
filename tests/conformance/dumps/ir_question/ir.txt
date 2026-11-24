@@ -4,8 +4,6 @@ type t0 int u 32
 type t1 int s 32
 type t2 bool
 type t3 adt d5 t0
-type t4 int u 8
-type t5 int u size
 shape t3 enum | | t0
 site 0 "src/main.stv" 3 4 main.half
 site 1 "src/main.stv" 4 10 main.half

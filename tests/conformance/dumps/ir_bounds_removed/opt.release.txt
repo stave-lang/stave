@@ -4,13 +4,12 @@ type t1 int u size
 type t2 int s 32
 type t3 bool
 type t4 ref t0
-type t5 ref t8
-type t6 ref t9
-type t7 ref mut t8
-type t8 array t0 4
-type t9 slice t0
-type t10 int u 8
-type t11 ptr mut t0
+type t5 ref t9
+type t6 ref t10
+type t7 ref mut t9
+type t8 ptr mut t0
+type t9 array t0 4
+type t10 slice t0
 site 0 "src/main.stv" 5 4 main.sum
 site 1 "src/main.stv" 8 11 main.sum
 site 2 "src/main.stv" 8 16 main.sum
@@ -43,7 +42,7 @@ site 28 "src/main.stv" 45 53 main.main
 main @4
 fn @0 main.sum(t6) -> t0 site 0 {
 b0(%0: t6):
-  %1 = slice.ptr t11 %0
+  %1 = slice.ptr t8 %0
   %2 = slice.len t1 %0
   br b1(0, 0)
 b1(%3: t1, %4: t0):
@@ -60,7 +59,7 @@ b3(%10: t0):
 }
 fn @1 main.pair_sum(t6) -> t0 site 3 {
 b0(%0: t6):
-  %1 = slice.ptr t11 %0
+  %1 = slice.ptr t8 %0
   %2 = slice.len t1 %0
   br b1(0, 0)
 b1(%3: t0, %4: t1):
@@ -81,7 +80,7 @@ b3(%14: t0):
 }
 fn @2 main.rises(t6) -> t0 site 11 {
 b0(%0: t6):
-  %1 = slice.ptr t11 %0
+  %1 = slice.ptr t8 %0
   %2 = slice.len t1 %0
   br b1(1, 0)
 b1(%3: t1, %4: t0):
@@ -102,8 +101,8 @@ b3(%14: t0):
 }
 fn @3 main.dot(t6, t6) -> t0 site 16 {
 b0(%0: t6, %1: t6):
-  %2 = slice.ptr t11 %0
-  %3 = slice.ptr t11 %1
+  %2 = slice.ptr t8 %0
+  %3 = slice.ptr t8 %1
   %4 = slice.len t1 %0
   %5 = slice.len t1 %1
   %6 = ne t3 %4 %5
@@ -131,9 +130,9 @@ fn @4 main.main() -> t2 site 21 {
 b0():
   %0 = slot t7
   %1 = slot t7
-  %2 = make t8 1 3 6 10
+  %2 = make t9 1 3 6 10
   store () %0 %2
-  %3 = make t8 2 2 2 2
+  %3 = make t9 2 2 2 2
   store () %1 %3
   %4 = cast t5 %0
   %5 = addr.elem t4 %4 0

@@ -2,8 +2,6 @@ stave.ir 4 "x86_64-linux-v2" debug lowered
 type t0 int u 8
 type t1 int u 32
 type t2 int s 32
-type t3 int u size
-type t4 bool
 site 0 "src/main.stv" 29 13 main.pick
 site 1 "src/main.stv" 31 4 main.for_export
 site 2 "src/main.stv" 21 4 main.pick_v3

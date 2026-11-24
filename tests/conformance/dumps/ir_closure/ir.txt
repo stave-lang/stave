@@ -6,9 +6,6 @@ type t3 ref mut t2
 type t4 ref mut t5
 type t5 tuple t2 t2
 type t6 fntype t0 -> t0
-type t7 int u 8
-type t8 int u size
-type t9 bool
 site 0 "src/main.stv" 6 4 main.twice
 site 1 "src/main.stv" 7 14 main.twice
 site 2 "src/main.stv" 10 4 main.apply

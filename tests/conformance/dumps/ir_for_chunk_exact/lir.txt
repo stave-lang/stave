@@ -6,7 +6,6 @@ type t3 bool
 type t4 ref t5
 type t5 slice t0
 type t6 vec t0 4
-type t7 int u 8
 site 0 "src/main.stv" 3 4 main.total
 site 1 "src/main.stv" 7 7 main.total
 site 2 "src/main.stv" 11 4 main.main

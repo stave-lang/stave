@@ -3,8 +3,6 @@ type t0 int u 32
 type t1 int s 32
 type t2 int s 64
 type t3 bool
-type t4 int u 8
-type t5 int u size
 site 0 "src/main.stv" 4 4 main.clamp
 site 1 "src/main.stv" 14 15 main.clamp
 site 2 "src/main.stv" 16 23 main.clamp

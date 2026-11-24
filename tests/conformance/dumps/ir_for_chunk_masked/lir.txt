@@ -7,7 +7,6 @@ type t4 ref t5
 type t5 slice t2
 type t6 vec t2 4
 type t7 mask 32 4
-type t8 int u 8
 site 0 "src/main.stv" 3 4 main.sum
 site 1 "src/main.stv" 7 7 main.sum
 site 2 "src/main.stv" 13 4 main.main

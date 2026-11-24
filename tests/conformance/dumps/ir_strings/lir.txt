@@ -3,8 +3,6 @@ type t0 int s 32
 type t1 bool
 type t2 str
 type t3 ref t2
-type t4 int u 8
-type t5 int u size
 str s0 ""
 str s1 "HELLO\n"
 str s2 "hello\n"

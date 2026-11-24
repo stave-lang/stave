@@ -4,13 +4,12 @@ type t1 int u size
 type t2 int s 32
 type t3 bool
 type t4 ref t0
-type t5 ref t8
-type t6 ref t9
-type t7 ref mut t8
-type t8 array t0 3
-type t9 slice t0
-type t10 int u 8
-type t11 ptr mut t0
+type t5 ref t9
+type t6 ref t10
+type t7 ref mut t9
+type t8 ptr mut t0
+type t9 array t0 3
+type t10 slice t0
 site 0 "src/main.stv" 14 4 main.pairs
 site 1 "src/main.stv" 17 11 main.pairs
 site 2 "src/main.stv" 17 16 main.pairs
@@ -26,7 +25,7 @@ site 11 "src/main.stv" 27 13 main.main
 main @2
 fn @0 main.pairs(t6) -> t0 site 0 {
 b0(%0: t6):
-  %1 = slice.ptr t11 %0
+  %1 = slice.ptr t8 %0
   %2 = slice.len t1 %0
   br b1(0, 0)
 b1(%3: t1, %4: t0):
@@ -48,7 +47,7 @@ b3(%14: t0):
 }
 fn @1 main.first_n(t6, t1) -> t0 site 6 {
 b0(%0: t6, %1: t1):
-  %2 = slice.ptr t11 %0
+  %2 = slice.ptr t8 %0
   %3 = slice.len t1 %0
   br b1(0, 0)
 b1(%4: t1, %5: t0):
@@ -67,7 +66,7 @@ b3(%11: t0):
 fn @2 main.main() -> t2 site 9 {
 b0():
   %0 = slot t7
-  %1 = make t8 7 8 9
+  %1 = make t9 7 8 9
   store () %0 %1
   %2 = cast t5 %0
   %3 = addr.elem t4 %2 0
