@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use stave_sema::Fs;
 use stave_target::Triple;
 
 use super::annot::{Annot, Code, Directive, Severity, Syntax, scan};
@@ -155,26 +156,32 @@ fn read_text(p: &Path, errs: &mut Vec<String>) -> Option<String> {
     }
 }
 
-/// Files of a package test: every `.stv` and every `stave.toml` below it, as (key, path, syntax).
-fn package_files(dir: &Path) -> io::Result<Vec<(String, PathBuf, Syntax)>> {
-    fn go(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf, Syntax)>) -> io::Result<()> {
-        for (name, path, ty) in sorted_entries(dir)? {
-            if name.starts_with('.') {
-                continue;
-            }
-            if ty.is_dir() {
-                go(base, &path, out)?;
-            } else if ty.is_file() && name.ends_with(".stv") {
-                out.push((rel_key(base, &path), path, Syntax::Stave));
-            } else if ty.is_file() && name == "stave.toml" {
-                out.push((rel_key(base, &path), path, Syntax::Toml));
-            }
-        }
-        Ok(())
-    }
-    let mut out = Vec::new();
-    go(dir, dir, &mut out)?;
-    Ok(out)
+/// A file of a package test.
+pub struct PackageFile {
+    /// Relative to the package directory, `/`-separated.
+    pub key: String,
+    pub path: PathBuf,
+    pub syntax: Syntax,
+    /// Inside a nested package (a directory with its own `stave.toml`): that package's own test
+    /// run reads its directives, not this one.
+    pub nested: bool,
+}
+
+/// Files of a package test: every `.stv` and every `stave.toml` below it, hidden names excluded.
+/// Which of them belong to a nested package is decided by [`Fs::tree_files`].
+pub fn package_files(dir: &Path) -> io::Result<Vec<PackageFile>> {
+    fs::read_dir(dir)?;
+    Ok(Fs::Disk
+        .tree_files(dir)
+        .into_iter()
+        .filter(|f| !f.rel.split('/').any(|c| c.starts_with('.')))
+        .map(|f| PackageFile {
+            path: dir.join(&f.rel),
+            syntax: if f.manifest { Syntax::Toml } else { Syntax::Stave },
+            key: f.rel,
+            nested: f.nested,
+        })
+        .collect())
 }
 
 /// Read a test's annotations. `Err` lists why it is malformed. `known_codes`: if given, every
@@ -185,11 +192,16 @@ pub fn load_spec(case: &TestCase, known_codes: Option<&BTreeSet<Code>>) -> Resul
     let files = if case.package {
         package_files(&case.path).map_err(|e| vec![format!("{}: cannot list: {e}", case.path.display())])?
     } else {
-        vec![(file_name(&case.path), case.path.clone(), Syntax::Stave)]
+        vec![PackageFile {
+            key: file_name(&case.path),
+            path: case.path.clone(),
+            syntax: Syntax::Stave,
+            nested: false,
+        }]
     };
     let mut spec = TestSpec::default();
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
-    for (key, path, syntax) in &files {
+    for PackageFile { key, path, syntax, nested } in &files {
         let Some(text) = read_text(path, &mut errs) else { continue };
         // an empty single-file test cannot hold an annotation: it is a PARSE-ONLY positive
         // (contracts/conformance-annotations.md "Syntax")
@@ -197,7 +209,9 @@ pub fn load_spec(case: &TestCase, known_codes: Option<&BTreeSet<Code>>) -> Resul
             spec.parse_only = true;
         }
         let (annots, bad) = scan(&text, *syntax);
-        for b in bad {
+        // A nested package's own annotations (directives, malformed lines) are its own run's
+        // business; only the diagnostics it expects of this build count here.
+        for b in bad.into_iter().filter(|_| !nested) {
             errs.push(format!("{key}:{}: malformed annotation: {}", b.line, b.message));
         }
         let is_root = !case.package || key == "src/main.stv" || key == "src/lib.stv";
@@ -212,6 +226,7 @@ pub fn load_spec(case: &TestCase, known_codes: Option<&BTreeSet<Code>>) -> Resul
                     }
                     spec.expected.push(ExpectedDiag { severity, code, loc: line.map(|l| (key.clone(), l)) });
                 }
+                Annot::Directive(_) if *nested => {}
                 Annot::Directive(d) => {
                     let kw = d.keyword();
                     if !is_root {

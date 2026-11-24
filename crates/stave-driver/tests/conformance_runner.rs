@@ -144,6 +144,7 @@ fn discovery() {
         ("parse_only.stv", false),
         ("pkg_bad_directive", true),
         ("pkg_manifest", true),
+        ("pkg_nested", true),
         ("pkg_run", true),
         ("pos_plain.stv", false),
         ("run_directives.stv", false),
@@ -256,6 +257,38 @@ fn code_outside_registry_is_malformed() {
 fn directive_outside_root_module_is_malformed() {
     let o = outcome("pkg_bad_directive", &mut Fake::new(0, vec![]));
     assert_malformed(&o, "src/other.stv:1: EXIT is allowed only in the root module");
+}
+
+#[test]
+fn nested_package_is_not_scanned_for_directives() {
+    // The outer package's own `CHECK-ONLY` counts once; the nested package's marker and its
+    // malformed annotation are the nested package's own, but its located diagnostic is expected
+    // of this build.
+    let s = load_spec(&case("pkg_nested"), Some(&registry())).unwrap();
+    assert!(s.check_only);
+    assert_eq!(s.expected, [exp(E, 201, Some(("inner/src/lib.stv", 3)))]);
+    // Run by itself, the nested package is the root and reads its own annotations.
+    let inner = TestCase {
+        path: root().join("pkg_nested/inner"),
+        name: "pkg_nested/inner".to_string(),
+        package: true,
+    };
+    let why = load_spec(&inner, Some(&registry())).unwrap_err();
+    assert!(why.iter().any(|w| w.contains("src/other.stv:1: malformed annotation")), "{why:?}");
+    // One definition of a package's files: the nested package's are flagged.
+    let files: Vec<(String, bool)> = stave_driver::conformance::package_files(&root().join("pkg_nested"))
+        .unwrap()
+        .into_iter()
+        .map(|f| (f.key, f.nested))
+        .collect();
+    let want = [
+        ("inner/src/lib.stv", true),
+        ("inner/src/other.stv", true),
+        ("inner/stave.toml", true),
+        ("src/main.stv", false),
+        ("stave.toml", false),
+    ];
+    assert_eq!(files, want.map(|(k, n)| (k.to_string(), n)));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -483,11 +516,11 @@ fn non_runnable_target_is_not_run_never_passed() {
 fn suite_counts_and_filter() {
     let mut fake = Fake::new(0, vec![]);
     let r = run_suite(&root(), &config(), &mut fake).unwrap();
-    // negative: neg_basic, neg_located, pkg_manifest; malformed: malformed_registry,
+    // negative: neg_basic, neg_located, pkg_manifest, pkg_nested; malformed: malformed_registry,
     // malformed_unknown, pkg_bad_directive; positive: the other seven.
-    assert_eq!((r.negative, r.positive, r.malformed()), (3, 7, 3));
+    assert_eq!((r.negative, r.positive, r.malformed()), (4, 7, 3));
     let summary = r.summary();
-    assert!(summary.starts_with("conformance: 3 negative, 7 positive; "), "{summary}");
+    assert!(summary.starts_with("conformance: 4 negative, 7 positive; "), "{summary}");
     assert!(r.render().ends_with(&format!("{summary}\n")));
     let filtered =
         run_suite(&root(), &Config { filter: Some("neg_".into()), ..config() }, &mut fake).unwrap();

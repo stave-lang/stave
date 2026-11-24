@@ -1,0 +1,5 @@
+name = "pkg_nested"
+kind = "bin"
+
+[dependencies]
+inner = { path = "inner" }
