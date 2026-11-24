@@ -13,6 +13,7 @@
 //! - [`exec`]: running built executables (natively or through a `--runner`); `test fn` discovery.
 //! - [`harness`]: the `test fn` harness of `stave test PKG_DIR`.
 //! - [`interp`]: runs a lowered program in the stave-ir reference interpreter (the oracle).
+//! - [`ir_cmd`]: `stave ir VERB FILE`: loading IR text, then fmt, opt, build, run.
 //! - [`dump`]: `--dump=STAGE --dump-dir DIR` printers.
 //! - [`conformance`]: the `stave test` runner and its stage0 compiler.
 //! - [`select`]: `--compiler auto|cpu|gpu` and the stage1 probe (contracts/cli.md).
@@ -26,6 +27,7 @@ pub mod effects;
 pub mod exec;
 pub mod harness;
 pub mod interp;
+pub mod ir_cmd;
 pub mod package;
 pub mod pipeline;
 pub mod prof;

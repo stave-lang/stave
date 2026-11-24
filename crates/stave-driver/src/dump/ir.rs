@@ -11,8 +11,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use stave_ir::text::{EdgeKind, Header, Level, Mode, StackEdge, StackInput};
-use stave_sema::callgraph::EdgeKind as GraphEdge;
+use stave_ir::text::{Header, Level, Mode, StackInput};
 
 use super::{DumpError, DumpStage};
 use crate::pipeline::Output;
@@ -65,37 +64,9 @@ fn mode(out: &Output) -> Mode {
     if out.release { Mode::Release } else { Mode::Debug }
 }
 
-/// The stack section of `out`: the call graph and the run stack of the front end, the nodes each
-/// fn stands for (those that are nodes of the graph, ascending).
+/// The stack section of `out` ([`crate::stack::input`]): what its build's stack bound read.
 pub fn stack_input(out: &Output) -> Option<StackInput> {
     let g = &out.typeck.as_ref()?.call_graph;
-    let n = g.nodes.len();
-    let mut edges = Vec::new();
-    for from in 0..n as u32 {
-        for e in g.succ(from) {
-            let kind = match e.kind {
-                GraphEdge::Spawn => EdgeKind::Spawn,
-                GraphEdge::Indirect => EdgeKind::Indirect,
-                _ => EdgeKind::Call,
-            };
-            edges.push(StackEdge { from, to: e.to, kind });
-        }
-    }
-    let nodes_of_func = out
-        .nodes_of_func
-        .iter()
-        .map(|v| {
-            let mut v: Vec<u32> = v.iter().copied().filter(|&x| (x as usize) < n).collect();
-            v.sort_unstable();
-            v.dedup();
-            v
-        })
-        .collect();
-    Some(StackInput {
-        run_stack: out.program.packages.iter().find(|p| p.is_root).and_then(|p| p.run_stack),
-        truncated: g.truncated,
-        nodes: g.nodes.iter().map(|x| x.rec()).collect(),
-        edges,
-        nodes_of_func,
-    })
+    let run_stack = out.program.packages.iter().find(|p| p.is_root).and_then(|p| p.run_stack);
+    Some(crate::stack::input(g, &out.nodes_of_func, run_stack))
 }

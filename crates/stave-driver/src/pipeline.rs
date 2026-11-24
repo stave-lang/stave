@@ -702,11 +702,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
                 let run_stack = out.program.packages.iter().find(|p| p.is_root).and_then(|p| p.run_stack);
                 let built = match &out.typeck {
                     Some(tc) => {
-                        let input = crate::stack::Input {
-                            graph: &tc.call_graph,
-                            nodes_of_func: &nodes_of_func,
-                            run_stack,
-                        };
+                        let input = crate::stack::input(&tc.call_graph, &nodes_of_func, run_stack);
                         build::codegen_link(&module, t, opts.release, opts.threads, Some(&input))
                     }
                     None => build::codegen_link(&module, t, opts.release, opts.threads, None),

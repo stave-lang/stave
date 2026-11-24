@@ -74,9 +74,10 @@
 //! reserve. A stack that reaches an unresolved node gets `[run] stack`. The runtime rounds up to
 //! the page size. No error comes from the bound: frame sizes differ between debug and release.
 
+use stave_ir::text::{EdgeKind, StackEdge, StackInput};
 use stave_ir::{FuncId, Known, Module, Op, Operand, Term};
 use stave_obj::{DataObj, StackUse, SymbolId};
-use stave_sema::callgraph::{CallGraph, EdgeKind, NodeKind};
+use stave_sema::callgraph::{CallGraph, EdgeKind as GraphEdge, NodeKind};
 
 /// `[run] stack` when the manifest has none (contracts/gpu-program.md; `runtime.config.RUN_STACK`).
 pub const DEFAULT_RUN_STACK: u64 = 8 << 20;
@@ -93,13 +94,45 @@ const MAIN_STUB: u64 = 16;
 /// The `__stave_thread_start` stub and the thread's start-up code before `runtime.thread.entry`.
 const THREAD_STUB: u64 = 16;
 
-/// What the bound reads besides the module and the frame sizes.
-pub struct Input<'a> {
-    pub graph: &'a CallGraph,
-    /// Per function of the module: the call-graph nodes it stands for.
-    pub nodes_of_func: &'a [Vec<u32>],
-    /// `[run] stack` of the root package.
-    pub run_stack: Option<u64>,
+/// What the bound reads besides the module and the frame sizes: the stack section of the IR
+/// text (contracts/checked-ir.md), so a build from the emit form computes the same bound.
+pub type Input = StackInput;
+
+/// The stack section of a program: the front end's call graph `g` (a `rec fn` mark per node; the
+/// edges, a dispatch, member or drop edge as a call), `[run] stack` of the root package, and the
+/// call-graph nodes each fn of the module stands for (`nodes_of_func`, by fn; those that are
+/// nodes of `g`, ascending).
+pub fn input(g: &CallGraph, nodes_of_func: &[Vec<u32>], run_stack: Option<u64>) -> Input {
+    let n = g.nodes.len();
+    let mut edges = Vec::new();
+    for from in 0..n as u32 {
+        for e in g.succ(from) {
+            let kind = match e.kind {
+                GraphEdge::Spawn => EdgeKind::Spawn,
+                GraphEdge::Indirect => EdgeKind::Indirect,
+                GraphEdge::Call | GraphEdge::Dispatch { .. } | GraphEdge::Member | GraphEdge::Drop => {
+                    EdgeKind::Call
+                }
+            };
+            edges.push(StackEdge { from, to: e.to, kind });
+        }
+    }
+    let nodes_of_func = nodes_of_func
+        .iter()
+        .map(|v| {
+            let mut v: Vec<u32> = v.iter().copied().filter(|&x| (x as usize) < n).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        })
+        .collect();
+    StackInput {
+        run_stack,
+        truncated: g.truncated,
+        nodes: g.nodes.iter().map(|x| x.rec()).collect(),
+        edges,
+        nodes_of_func,
+    }
 }
 
 /// A node of the bound's graph.
@@ -550,8 +583,8 @@ fn components(start: &[u32], to: &[u32]) -> Vec<u32> {
 
 /// The bound's graph of module `m` (the module code generation compiles: release builds after
 /// the optimizer).
-pub fn graph(m: &Module, input: &Input<'_>) -> Graph {
-    let g = input.graph;
+pub fn graph(m: &Module, input: &Input) -> Graph {
+    let g = input;
     let n = g.nodes.len();
     let nf = m.funcs.len();
     let has_body = |f: usize| m.funcs[f].body.is_some();
@@ -691,8 +724,8 @@ pub fn graph(m: &Module, input: &Input<'_>) -> Graph {
 
 /// The bound of every stack of graph `bg` of module `m`, with `uses` the backend's report per
 /// function.
-pub fn compute(bg: &Graph, m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -> Report {
-    let g = input.graph;
+pub fn compute(bg: &Graph, m: &Module, input: &Input, uses: &[StackUse], main: FuncId) -> Report {
+    let g = input;
     let Graph {
         n, total, ref ids, ref start, ref to, ref ind, ref poison, ref comp, ref cycle, ref alt, ..
     } = *bg;
@@ -719,7 +752,7 @@ pub fn compute(bg: &Graph, m: &Module, input: &Input<'_>, uses: &[StackUse], mai
             None => {
                 // a cycle through a `rec fn` is reported as that fn
                 let cycle = on_cycle(start, to, done, x);
-                match cycle.iter().find(|&&c| (c as usize) < n && g.nodes[c as usize].rec()) {
+                match cycle.iter().find(|&&c| (c as usize) < n && g.nodes[c as usize]) {
                     Some(&c) => Err(Why::Rec(at(c))),
                     None => Err(Why::Cycle(at(cycle[0]))),
                 }

@@ -352,15 +352,47 @@ pub fn image_options(machine: Machine, release: bool) -> stave_obj::Options {
 /// `stack`, the stack table holds the computed bound; without, it is empty (every stack gets the
 /// `[run] stack` default). `m` is canonical ([`canonical`]), as [`lower`] returns it: the code
 /// generators read functions, blocks and values in id order, so only the canonical numbering
-/// makes the image a function of the module's content. A module whose functions are out of
-/// instance order is refused.
+/// makes the image a function of the module's content. A module whose functions are out of instance order is refused.
 pub fn codegen_link(
     m: &Module,
     triple: Triple,
     release: bool,
     threads: Option<usize>,
-    stack: Option<&stack::Input<'_>>,
+    stack: Option<&stack::Input>,
 ) -> Result<Built, Failure> {
+    generate(m, triple, if release { Passes::Run } else { Passes::Debug }, threads, stack)
+}
+
+/// [`codegen_link`] of a release build whose module is already the output of the release passes
+/// (level `opt`, verified and audited): the passes do not run again.
+pub fn codegen_link_optimized(
+    m: &Module,
+    triple: Triple,
+    threads: Option<usize>,
+    stack: Option<&stack::Input>,
+) -> Result<Built, Failure> {
+    generate(m, triple, Passes::Done, threads, stack)
+}
+
+/// The build mode of [`generate`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Passes {
+    /// A debug build: no release passes, the debug layout.
+    Debug,
+    /// A release build of a checked module: the release passes first.
+    Run,
+    /// A release build of their output.
+    Done,
+}
+
+fn generate(
+    m: &Module,
+    triple: Triple,
+    passes: Passes,
+    threads: Option<usize>,
+    stack: Option<&stack::Input>,
+) -> Result<Built, Failure> {
+    let release = passes != Passes::Debug;
     // A backend without vector code generation: a vector value or op stops the build here.
     if !generates_vector_code(triple)
         && let Some(f) = stave_ir::simd::first_vector_func(m)
@@ -378,7 +410,7 @@ pub fn codegen_link(
         return Err(Failure::Internal { stage: Stage::Codegen, message });
     }
     let owned;
-    let m = if release {
+    let m = if passes == Passes::Run {
         owned = release_passes(m)?;
         &owned
     } else {
@@ -431,7 +463,7 @@ fn x64(
     release: bool,
     threads: Option<usize>,
     funcs: u64,
-    stack: Option<&stack::Input<'_>>,
+    stack: Option<&stack::Input>,
 ) -> Result<Built, Failure> {
     use stave_codegen_x64::Error as E;
     let classify = |stage: Stage, e: E| match e {
@@ -475,7 +507,7 @@ fn a64(
     main: FuncId,
     release: bool,
     funcs: u64,
-    stack: Option<&stack::Input<'_>>,
+    stack: Option<&stack::Input>,
 ) -> Result<Built, Failure> {
     use stave_codegen_a64::debug::{Codegen, Error, ErrorKind, FuncScratch, prepare};
     let classify = |stage: Stage, e: Error| match e.kind {

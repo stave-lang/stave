@@ -302,8 +302,9 @@ step stops before the next.
    text the verifier also requires every `intrinsic.<name>` to be an intrinsic of intrinsics.md
    with its operand and result types, and a `known` fn to have its item's signature.
 4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds
-   checks"); it computes the summaries. A contract check that fails whenever reached is reported
-   as in step 3.
+   checks"); it computes the summaries. A contract check that fails whenever reached, and a call
+   that fails a `requires` whenever reached, are reported as in step 3 where a build reports them
+   as errors (E0215, E0217, E0218: not in an instance of a generic fn).
 5. **Audit.** The bounds audit of every fn, reading calls by the loaded `claim` rows (level
    `checked` or `opt`) or the computed ones (`lowered`); an unguarded access is reported as in
    step 3.

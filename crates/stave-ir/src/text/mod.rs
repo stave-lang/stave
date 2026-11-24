@@ -124,6 +124,15 @@ pub struct StackInput {
     pub nodes_of_func: Vec<Vec<u32>>,
 }
 
+impl StackInput {
+    /// The out-edges of node `n`, ascending by target.
+    pub fn succ(&self, n: u32) -> &[StackEdge] {
+        let a = self.edges.partition_point(|e| e.from < n);
+        let b = self.edges.partition_point(|e| e.from <= n);
+        &self.edges[a..b.max(a)]
+    }
+}
+
 /// The lines of one fn's parts, 1-based.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FnLines {
