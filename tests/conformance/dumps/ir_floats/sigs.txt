@@ -35,5 +35,5 @@ d18 field d3 d17 2 10 2 0 - ty t0
 d19 impl d3 - - 11 14 0 trait-impl gen[] self t12 trait d11
 d20 method d3 d19 25 11 13 0 trait-impl,has-self gen[] params[t8 t6] ret t11 self ref-mut abi stave needs[] deny[] from[] pfrom[]
 d21 fn d4 - 35 8 7 0 pub gen[] params[t6] ret t11 self - abi stave needs[] deny[] from[] pfrom[]
-d22 fn d0 - 27 0 58 0 - gen[] params[t3 t2] ret t3 self - abi stave needs[] deny[] from[] pfrom[]
+d22 fn d0 - 27 0 65 0 - gen[] params[t3 t2] ret t3 self - abi stave needs[] deny[] from[] pfrom[]
 d23 fn d0 - 31 1 19 0 - gen[] params[] ret t1 self - abi stave needs[] deny[] from[] pfrom[]
