@@ -29,7 +29,9 @@
 //! - `lowering --target T [--op OP]`: the lowering table of the target's tier ([`lowering`]).
 //! - `ir emit [PKG_DIR] [--release] [--target T] [-o FILE]`: the program's IR text with its
 //!   stack section, as a build up to the removal of proven checks (diagnostics, exit codes, and
-//!   summary line of `build`). The other `ir` verbs read IR text and are not implemented yet.
+//!   summary line of `build`).
+//! - `ir check|fmt|opt|run|build FILE`: load IR text and check, reprint, optimize, interpret, or
+//!   build it ([`ir`]).
 //!
 //! `--features` beyond the target's baseline and `--cache` are parsed and validated, then refused
 //! as not implemented (exit 2): no flag is accepted and ignored.
@@ -41,6 +43,7 @@ pub mod args;
 pub mod effects_report;
 pub mod fix;
 pub mod fmt;
+pub mod ir;
 pub mod lowering;
 pub mod unsafe_report;
 
@@ -104,8 +107,7 @@ fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     if let (Cmd::Ir, Some(verb)) = (a.cmd, a.ir)
         && verb != IrVerb::Emit
     {
-        let what = format!("ir {}", verb.name());
-        return not_implemented(&what, "stage0 has no IR text reader yet", err);
+        return ir::run(a, verb, out, err);
     }
     if let Some(command) = a.cmd.compile_command() {
         if a.target.features != a.target.triple.baseline() {

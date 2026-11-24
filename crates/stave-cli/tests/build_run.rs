@@ -606,18 +606,107 @@ fn ir_emit_prints_the_emit_form() {
 }
 
 #[test]
-fn ir_emit_of_a_program_without_main_is_e0108_and_the_other_verbs_wait_for_the_reader() {
+fn ir_emit_of_a_program_without_main_is_e0108() {
     let d = tmp("ir_emit_nomain");
     let src = d.join("nomain.stv");
     std::fs::write(&src, "fn f() -> i32 {\n    return 1;\n}\n").unwrap();
     let (c, out, err) = stave_in(&d, &["ir", "emit", "nomain.stv"]);
     assert_eq!(c, 1, "{err}");
     assert!(out.is_empty() && err.contains("E0108"), "{err}");
-    for verb in ["check", "fmt", "opt", "run", "build"] {
-        let (c, out, err) = stave_in(&d, &["ir", verb, "x.ir"]);
-        assert_eq!(c, 2, "ir {verb}: {err}");
-        assert!(out.is_empty() && err.contains(&format!("`ir {verb}` is not implemented yet")), "{err}");
+}
+
+/// `stave ir check|fmt|build|run` on the emit form: it loads, reprints unchanged, builds the
+/// image `stave build` makes (the stack section gives the same stack table), and runs as the
+/// built program does. A file that cannot be read is exit 2, a bad line exit 1 at its line.
+#[test]
+fn ir_verbs_load_the_emit_form() {
+    let d = tmp("ir_verbs");
+    let fib = run_prog("fib");
+    let (c, _, err) = stave_in(&d, &["ir", "emit", &fib, "-o", "fib.ir"]);
+    assert_eq!(c, 0, "{err}");
+    let text = std::fs::read_to_string(d.join("fib.ir")).unwrap();
+
+    let (c, out, err) = stave_in(&d, &["ir", "check", "fib.ir"]);
+    assert_eq!((c, out.as_str(), err.as_str()), (0, "", ""));
+    let (c, out, err) = stave_in(&d, &["ir", "fmt", "fib.ir"]);
+    assert_eq!(c, 0, "{err}");
+    assert!(out == text && err.is_empty(), "fmt of a printed file is that file");
+
+    let (c, _, err) = stave_in(&d, &["build", &fib, "-o", "direct"]);
+    assert_eq!(c, 0, "{err}");
+    let (c, out, err) = stave_in(&d, &["ir", "build", "fib.ir"]);
+    assert!(c == 0 && out.is_empty() && err.is_empty(), "{c} {err}");
+    let (direct, from_ir) = (std::fs::read(d.join("direct")).unwrap(), std::fs::read(d.join("fib")).unwrap());
+    assert!(direct == from_ir, "`stave ir build` of the emit form is the image `stave build` makes");
+    let (c, _, err) = stave_in(&d, &["ir", "build", "fib.ir", "-o", "other"]);
+    assert_eq!(c, 0, "{err}");
+    assert_eq!(std::fs::read(d.join("other")).unwrap(), direct);
+
+    let (c, out, err) = stave_in(&d, &["ir", "run", "fib.ir"]);
+    if host_runs() {
+        assert_eq!((c, out, err), run_bin(&d.join("direct")), "`stave ir run` runs as the program");
     }
+
+    // `opt` needs a release file
+    let (c, out, err) = stave_in(&d, &["ir", "opt", "fib.ir"]);
+    assert!(c == 1 && out.is_empty() && err.contains("needs a `release` file"), "{c} {err}");
+
+    // errors: unreadable (2), a bad line (1, located), no `main` line (1)
+    let (c, _, err) = stave_in(&d, &["ir", "check", "missing.ir"]);
+    assert!(c == 2 && err.contains("cannot read missing.ir"), "{c} {err}");
+    let bad = text.replacen("\ntype t0 ", "\ntype t0 nonsense ", 1);
+    std::fs::write(d.join("bad.ir"), bad).unwrap();
+    let (c, out, err) = stave_in(&d, &["ir", "fmt", "bad.ir"]);
+    assert!(c == 1 && out.is_empty() && err.starts_with("bad.ir:"), "{c} {err}");
+    let no_main: String = text.lines().filter(|l| !l.starts_with("main @")).flat_map(|l| [l, "\n"]).collect();
+    std::fs::write(d.join("lib.ir"), no_main).unwrap();
+    let (c, _, err) = stave_in(&d, &["ir", "check", "lib.ir"]);
+    assert_eq!(c, 0, "a file without `main` loads: {err}");
+    for verb in ["build", "run"] {
+        let (c, _, err) = stave_in(&d, &["ir", verb, "lib.ir"]);
+        assert!(c == 1 && err.contains("no `main` line"), "ir {verb}: {c} {err}");
+    }
+}
+
+/// A release file: `opt` prints level `opt`, which loads and builds; `build` of the `checked`
+/// emit form is `stave build --release`'s image; the `lowered` dump loads through the removal of
+/// proven checks and reprints unchanged.
+#[test]
+fn ir_opt_and_the_levels_of_a_release_file() {
+    let d = tmp("ir_opt");
+    let fib = run_prog("fib");
+    let (c, _, err) = stave_in(&d, &["ir", "emit", &fib, "--release", "-o", "rel.ir"]);
+    assert_eq!(c, 0, "{err}");
+    let (c, opt, err) = stave_in(&d, &["ir", "opt", "rel.ir"]);
+    assert_eq!(c, 0, "{err}");
+    assert!(opt.lines().next().unwrap().ends_with(" release opt"), "{}", &opt[..opt.len().min(200)]);
+    std::fs::write(d.join("rel.opt.ir"), &opt).unwrap();
+    let (c, again, err) = stave_in(&d, &["ir", "fmt", "rel.opt.ir"]);
+    assert!(c == 0 && again == opt, "{err}");
+    let (c, out, err) = stave_in(&d, &["ir", "opt", "rel.opt.ir"]);
+    assert!(c == 1 && out.is_empty() && err.contains("needs a `release` file"), "{c} {err}");
+    let (c, _, err) = stave_in(&d, &["ir", "build", "rel.opt.ir", "-o", "from_opt"]);
+    assert_eq!(c, 0, "{err}");
+
+    let (c, _, err) = stave_in(&d, &["build", &fib, "--release", "-o", "direct"]);
+    assert_eq!(c, 0, "{err}");
+    let (c, _, err) = stave_in(&d, &["ir", "build", "rel.ir", "-o", "from_checked"]);
+    assert_eq!(c, 0, "{err}");
+    let direct = std::fs::read(d.join("direct")).unwrap();
+    assert!(std::fs::read(d.join("from_checked")).unwrap() == direct, "release image differs");
+    if host_runs() {
+        let want = run_bin(&d.join("direct"));
+        assert_eq!(run_bin(&d.join("from_opt")), want, "the image built from `opt` runs the same");
+    }
+
+    let dd = d.join("dumps").display().to_string();
+    let (c, _, err) = stave_in(&d, &["check", &fib, "--release", "--dump=lir", "--dump-dir", &dd]);
+    assert_eq!(c, 0, "{err}");
+    let lir = std::fs::read_to_string(d.join("dumps/lir.txt")).unwrap();
+    let (c, out, err) = stave_in(&d, &["ir", "fmt", "dumps/lir.txt"]);
+    assert!(c == 0 && out == lir, "{err}");
+    let (c, _, err) = stave_in(&d, &["ir", "build", "dumps/lir.txt", "-o", "from_lowered"]);
+    assert_eq!(c, 0, "{err}");
 }
 
 #[test]
