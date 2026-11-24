@@ -485,12 +485,12 @@ fn lower_in_pool(
     let m = assemble(prog, sigs, &mut table, &jobs, &cache, outs, &statics_list, &inherited, &glue_features);
     tm.assemble = t1.elapsed();
     tm.n_funcs = m.as_ref().map_or(0, |m| m.0.funcs.len());
-    let r = m.map(|(mut module, order, site_pos)| {
+    let r = m.and_then(|(mut module, order, site_pos)| {
         // Also without the borrow side table: the bounds pass reads a field behind a `&` as one
         // value only outside an `UnsafeCell`.
         if !sigs.lang.unsafe_cell.is_none() {
             module.cell = Some(IrDecl(sigs.lang.unsafe_cell.0));
-            record_decl(&mut module, prog, sigs, sigs.lang.unsafe_cell);
+            record_decl(&mut module, prog, sigs, sigs.lang.unsafe_cell)?;
         }
         if borrows {
             let frozen = |d: &DeclId| prog.decl(*d).is_some_and(|x| !x.flags.has(DeclFlags::MUT));
@@ -498,7 +498,7 @@ fn lower_in_pool(
         } else {
             module.clauses = Vec::new();
         }
-        Assembled { module, jobs, order, table, site_pos }
+        Ok(Assembled { module, jobs, order, table, site_pos })
     });
     (r.map_err(|e| vec![e]), tm)
 }
@@ -509,20 +509,39 @@ fn lower_in_pool(
 /// that check does not follow.
 const LOWER_INST_DEPTH: u32 = 4 * crate::mono::INST_DEPTH;
 
-/// How many instances of `decl` are on the request chain ending at job `j`.
-fn adt_kind(sigs: &crate::sigs::Sigs, d: DeclId) -> AdtKind {
-    if sigs.adt(d).is_some_and(|a| a.is_enum) { AdtKind::Enum } else { AdtKind::Struct }
+/// The kind of ADT declaration `d`: its signature's, or, for `UnsafeCell` (a struct of std), a
+/// struct. Any other declaration without an ADT signature is an internal error.
+fn adt_kind(prog: &Program, sigs: &crate::sigs::Sigs, d: DeclId) -> Result<AdtKind, LowerError> {
+    match sigs.adt(d) {
+        Some(a) if a.is_enum => Ok(AdtKind::Enum),
+        Some(_) => Ok(AdtKind::Struct),
+        None if d == sigs.lang.unsafe_cell => Ok(AdtKind::Struct),
+        None => Err(LowerError {
+            kind: LowerErrorKind::Internal,
+            func: prog.decl_path(d),
+            at: String::new(),
+            msg: "a type's declaration has no ADT signature".to_string(),
+        }),
+    }
 }
 
 /// Records the path and kind of an ADT declaration the module refers to (`Module.decls`,
 /// ascending by id, one entry per id).
-fn record_decl(module: &mut Module, prog: &Program, sigs: &crate::sigs::Sigs, d: DeclId) {
+fn record_decl(
+    module: &mut Module,
+    prog: &Program,
+    sigs: &crate::sigs::Sigs,
+    d: DeclId,
+) -> Result<(), LowerError> {
     let id = IrDecl(d.0);
     if let Err(at) = module.decls.binary_search_by_key(&id, |x| x.id) {
-        module.decls.insert(at, DeclInfo { id, kind: adt_kind(sigs, d), path: prog.decl_path(d) });
+        let kind = adt_kind(prog, sigs, d)?;
+        module.decls.insert(at, DeclInfo { id, kind, path: prog.decl_path(d) });
     }
+    Ok(())
 }
 
+/// How many instances of `decl` are on the request chain ending at job `j`.
 fn same_decl_depth(jobs: &[Job], parent: &[Option<usize>], j: usize, decl: DeclId) -> u32 {
     let mut n = 0;
     let mut cur = Some(j);
@@ -1013,7 +1032,7 @@ fn assemble(
         adts.sort();
         for (i, s) in adts {
             let is_enum = match table.kind(s) {
-                TypeKind::Adt { def, .. } => adt_kind(sigs, *def) == AdtKind::Enum,
+                TypeKind::Adt { def, .. } => adt_kind(prog, sigs, *def)? == AdtKind::Enum,
                 _ => false,
             };
             let vs = crate::mono::adt_fields(sigs, table, s).unwrap_or_default();
@@ -1354,7 +1373,7 @@ fn assemble(
         })
         .collect();
     for d in defs {
-        record_decl(&mut module, prog, sigs, d);
+        record_decl(&mut module, prog, sigs, d)?;
     }
     module.sites = sites;
     // 7. statics
