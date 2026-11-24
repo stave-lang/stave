@@ -8,9 +8,9 @@
 // covers it, its path dependencies, and the shipped `std` and `runtime` from the library
 // directory (`$STAVE_STD_DIR`, else next to the binary as for stage0). It writes the requested dumps as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for
 // byte stage0's for the stages stage1 has, and prints its diagnostics to stderr in stage0's text
-// (or JSON lines). `-o` is accepted and unused: no code is generated yet. A `sigs` dump whose
-// signatures need a type layout or a const form stage1 does not evaluate yet is not written;
-// one line on stderr says which. Exit codes: 0 done,
+// (or JSON lines). `-o` is accepted and unused: no code is generated yet. A `sigs` or `kinds`
+// dump whose signatures need a const form stage1 does not evaluate yet is not written; one line
+// on stderr says so. Exit codes: 0 done,
 // 1 diagnostics, 2 usage, 3 internal error (a diagnostic the registry cannot build).
 import consteval;
 import decls;
@@ -332,9 +332,7 @@ fn main() -> i32 {
             if code != EXIT_OK { return code; }
         }
         if cli.want_sigs {
-            if sg.cx.skip == consteval.CV_LAYOUT {
-                io.eprint("stage1: sigs.txt not written: a signature needs a type layout\n");
-            } else if sg.cx.skip != consteval.CV_NONE {
+            if sg.cx.skip != consteval.CV_NONE {
                 io.eprint("stage1: sigs.txt not written: a signature needs a const form stage1 does not evaluate\n");
             } else {
                 let out = dump.sigs_txt(&sg, &ds, &md);

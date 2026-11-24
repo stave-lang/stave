@@ -15,10 +15,7 @@
 # a message of their own (LATER) are cut from stage0's lines; a private field or method reached
 # by a value has E0106's plain message, so the E0106 lines of stage1 need only be among stage0's.
 #
-# `sigs`: stage1 writes no `sigs.txt` for a root whose signatures need a type layout (`size_of` /
-# `align_of` in an array length or const argument; layouts are a later stage), and says so with
-# one fixed stderr line. Those roots are counted, and the count must be SIGS_LAYOUT_SKIPS exactly,
-# so it cannot grow unnoticed; every other root's `sigs.txt` must be stage0's.
+# Every root's `sigs.txt` and `kinds.txt` must be stage0's.
 #
 # Exit status: stage1 exits 1 exactly when it printed a diagnostic, else 0 (a root with an error
 # of a stage stage1 lacks still exits 0 there). Where stage0's diagnostics are all stage1's and
@@ -43,9 +40,6 @@ export STAVE_STD_DIR="$ROOT"
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
 S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0410|E0514|E0515|E0520|E0521|E0708|E0709|E0811|E1003|E1404'
 # Messages of the shapes of those codes that later stages raise.
-# Roots whose `sigs` stage1 does not write because a signature needs a layout.
-SIGS_LAYOUT_SKIPS=1
-SIGS_LAYOUT_LINE='stage1: sigs.txt not written: a signature needs a type layout'
 LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)'
 
 if [ "${1:-}" = "--one" ]; then
@@ -78,14 +72,14 @@ if [ "${1:-}" = "--one" ]; then
     echo "DIFF strings $root $* (first: $(cmp "$d/0/strings.txt" "$d/1/strings.txt" 2>&1 | head -1))"
   elif ! cmp -s "$d/0/names.txt" "$d/1/names.txt"; then
     echo "DIFF names $root $* (first: $(cmp "$d/0/names.txt" "$d/1/names.txt" 2>&1 | head -1))"
-  elif [ ! -f "$d/1/sigs.txt" ] && ! grep -qxF "$SIGS_LAYOUT_LINE" "$d/stage1.err"; then
-    echo "FAIL no stage1 sigs: $root $* ($(grep '^stage1: ' "$d/stage1.err" | head -c 200))"
-  elif [ -f "$d/1/sigs.txt" ] && ! cmp -s "$d/0/sigs.txt" "$d/1/sigs.txt"; then
+  elif [ ! -f "$d/1/sigs.txt" ] || [ ! -f "$d/1/kinds.txt" ]; then
+    echo "FAIL no stage1 sigs or kinds: $root $* ($(grep '^stage1: ' "$d/stage1.err" | head -c 200))"
+  elif ! cmp -s "$d/0/sigs.txt" "$d/1/sigs.txt"; then
     echo "DIFF sigs $root $* (first: $(cmp "$d/0/sigs.txt" "$d/1/sigs.txt" 2>&1 | head -1))"
-  elif [ -f "$d/1/sigs.txt" ] && ! cmp -s "$d/0/kinds.txt" "$d/1/kinds.txt"; then
+  elif ! cmp -s "$d/0/kinds.txt" "$d/1/kinds.txt"; then
     echo "DIFF kinds $root $* (first: $(cmp "$d/0/kinds.txt" "$d/1/kinds.txt" 2>&1 | head -1))"
   else
-    if [ -f "$d/1/sigs.txt" ]; then sigs="$(wc -l < "$d/0/sigs.txt") - $(wc -l < "$d/0/kinds.txt")"; else sigs="0 L 0"; fi
+    sigs="$(wc -l < "$d/0/sigs.txt") $(wc -l < "$d/0/kinds.txt")"
     grep -E "^\{\"kind\":\"diagnostic\",\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)" "$d/0/diags.txt" | grep -vE "$LATER" > "$d/0/diags.in" || true
     priv='^{"kind":"diagnostic","code":"E0106"'
     grep -v "$priv" "$d/0/diags.in" > "$d/0/diags.rest" || true
@@ -142,15 +136,9 @@ slines=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
 nlines=$(awk '$1 == "SAME" { s += $6 } END { print s + 0 }' "$OUT/result.txt")
 dlines=$(awk '$1 == "SAME" { s += $7 } END { print s + 0 }' "$OUT/result.txt")
 glines=$(awk '$1 == "SAME" { s += $8 } END { print s + 0 }' "$OUT/result.txt")
-gsame=$(awk '$1 == "SAME" && $9 == "-" { s += 1 } END { print s + 0 }' "$OUT/result.txt")
-gskip=$(awk '$1 == "SAME" && $9 == "L" { s += 1 } END { print s + 0 }' "$OUT/result.txt")
-klines=$(awk '$1 == "SAME" { s += $10 } END { print s + 0 }' "$OUT/result.txt")
-echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines, ast $alines lines, strings $slines lines, names $nlines lines, sigs $gsame roots $glines lines, kinds $gsame roots $klines lines, sigs skipped (layout) $gskip, diags $dlines lines), $((end - start)) s"
+klines=$(awk '$1 == "SAME" { s += $9 } END { print s + 0 }' "$OUT/result.txt")
+echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines, ast $alines lines, strings $slines lines, names $nlines lines, sigs $same roots $glines lines, kinds $same roots $klines lines, diags $dlines lines), $((end - start)) s"
 if grep -v '^SAME' "$OUT/result.txt"; then
   echo "stage1-gate: FAILED" >&2
-  exit 1
-fi
-if [ "$gskip" != "$SIGS_LAYOUT_SKIPS" ]; then
-  echo "stage1-gate: sigs skipped (layout) $gskip, expected $SIGS_LAYOUT_SKIPS" >&2
   exit 1
 fi

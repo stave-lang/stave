@@ -182,9 +182,15 @@ test fn const_cycles() {
     debug.assert(sg.cx.skip == consteval.CV_NONE, "nothing undecided");
 }
 
-test fn layout_is_not_guessed() {
-    let (_, sg) = build("fn f(a: [u8; size_of::<u64>()]) {}\nfn main() -> i32 { return 0; }\n");
-    debug.assert(sg.cx.skip == consteval.CV_LAYOUT, "a size_of length needs a layout");
+test fn size_of_in_signatures() {
+    let src = "const W: usize = size_of::<u64>();\nconst P: usize = align_of::<(u8, u32)>();\nstruct S { a: u8, b: [u16; size_of::<T2>()] }\nstruct T2 { x: u32 }\nconst SS: usize = size_of::<S>();\nconst AS: usize = align_of::<S>();\nfn f(a: [u8; size_of::<u64>()]) {}\nfn main() -> i32 { return 0; }\n";
+    let (o, sg) = build(src);
+    debug.assert(sg.cx.skip == consteval.CV_NONE, "every layout decided");
+    debug.assert(value_is(&o, &sg, "W", false, 8) && value_is(&o, &sg, "P", false, 4), "a built-in type's size and alignment");
+    debug.assert(value_is(&o, &sg, "SS", false, 10) && value_is(&o, &sg, "AS", false, 2), "a struct whose field length is another's size: rounds");
+    let (oc, c) = build("struct A { x: [u8; size_of::<B>()] }\nstruct B { y: [u8; size_of::<A>()] }\nconst CA: usize = size_of::<A>();\nconst UN: usize = size_of::<str>();\nfn main() -> i32 { return 0; }\n");
+    debug.assert(c.cx.skip == consteval.CV_NONE, "a cycle of layouts ends");
+    debug.assert(fails(&oc, &c, "CA") && fails(&oc, &c, "UN"), "a layout on a cycle, or of an unsized type, fails");
     let (_, g) = build("fn f<T>(a: [u8; size_of::<T>()]) {}\nfn main() -> i32 { return 0; }\n");
     debug.assert(g.cx.skip == consteval.CV_NONE, "size_of of a type with params fails without a layout");
 }
