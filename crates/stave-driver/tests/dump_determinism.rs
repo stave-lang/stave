@@ -93,8 +93,8 @@ fn dumps_identical_across_threads_shuffles_and_runs() {
     assert!(base[9].len() > 100_000, "ir dump unexpectedly small");
     let ir = String::from_utf8_lossy(&base[9]);
     assert!(ir.contains("fn.make"), "the m2 corpus lowers closures with environments");
-    assert!(base[8].len() > 100_000, "lir dump unexpectedly small");
-    assert!(base[8].starts_with(b"stave.ir 4 "), "lir header");
+    assert!(base[10].len() > 100_000, "lir dump unexpectedly small");
+    assert!(base[10].starts_with(b"stave.ir 4 "), "lir header");
     let differs = |got: &[Vec<u8>], what: &str| {
         for (k, s) in STAGES.iter().enumerate() {
             assert!(got[k] == base[k], "{} differs {what}", s.name());
