@@ -196,6 +196,59 @@ pub fn scalar_layout(
     })
 }
 
+/// What a [`NoLayout::Unknown`] answer of [`type_bytes`] stems from: the first part, in layout
+/// order, that has no layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unlaid {
+    /// A generic param, `Self`, or an array whose length is a const param.
+    Param,
+    /// `str`, a slice, or a sizeless vector or mask by value.
+    Unsized,
+    /// A type that holds itself by value, one nested past the type depth limit, or an ADT
+    /// without a definition.
+    Other,
+}
+
+/// Why `t`, for which [`type_bytes`] is [`NoLayout::Unknown`], has no layout: the walk of
+/// [`type_bytes`] (variants, fields, and components in order) down to the first part without
+/// one.
+pub fn unlaid<E: LayoutEnv + ?Sized>(env: &mut E, t: TypeId) -> Unlaid {
+    let mut memo = FxHashMap::default();
+    let mut t = t;
+    let mut depth = 0;
+    loop {
+        if depth >= crate::typedepth::MAX_TYPE_DEPTH {
+            return Unlaid::Other;
+        }
+        let parts: Vec<TypeId> = match env.kind(t).clone() {
+            TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => return Unlaid::Param,
+            TypeKind::Str | TypeKind::Slice { .. } => return Unlaid::Unsized,
+            TypeKind::Vector { n: crate::prim::Lanes::Native, .. }
+            | TypeKind::Mask { n: crate::prim::Lanes::Native, .. } => return Unlaid::Unsized,
+            TypeKind::Array { len: ConstArg::Param(_), .. } => return Unlaid::Param,
+            TypeKind::Array { elem, len: ConstArg::Value(_) } | TypeKind::Range { elem, .. } => vec![elem],
+            TypeKind::Vector { lane, .. } => vec![lane],
+            TypeKind::Tuple(ts) => ts.to_vec(),
+            TypeKind::Adt { def, args } => match env.adt_shape(def) {
+                None => return Unlaid::Other,
+                Some((_, variants)) => {
+                    variants.into_iter().flatten().map(|f| env.subst(f, &args, None)).collect()
+                }
+            },
+            _ => return Unlaid::Other,
+        };
+        let next =
+            parts.into_iter().find(|&p| bytes_memo(env, p, depth + 1, &mut memo) == Err(NoLayout::Unknown));
+        match next {
+            Some(p) => {
+                t = p;
+                depth += 1;
+            }
+            None => return Unlaid::Other,
+        }
+    }
+}
+
 /// Layout of `t` in table `cx` (concrete types only): [`type_bytes`] without the reason.
 pub fn layout_of<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId) -> Option<(u64, u64)> {
     type_bytes(&mut WithSigs { cx, sigs }, t).ok()

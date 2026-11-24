@@ -1,0 +1,268 @@
+//~ STDOUT for_mut_iter_exits.stdout
+// A `for` over a `&mut` to an iterator whose items have drop glue: each iteration's item is
+// dropped after the body's locals, at the body's end and on every exit (`break`, `continue`,
+// `return`, `?`), innermost first; the iterator is the caller's and is dropped where its own
+// scope ends. The `Option` that `next` returns is taken apart at the head: it is dropped
+// neither with the loop nor on an exit. An owned iterator is dropped with its loop.
+import std.io;
+
+struct D { id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        io.print(f" {self.id}");
+    }
+}
+
+// reads the borrowed id in its drop
+view struct G { r: &u32 }
+
+impl Drop for G {
+    fn drop(&mut self) {
+        let n = *self.r;
+        io.print(f" G{n}");
+    }
+}
+
+// two items, 11 then 10; its field `d` is dropped with it
+struct It { n: u32, d: D }
+
+impl It {
+    fn next(&mut self) -> Option<D> {
+        if self.n == 0 {
+            return Option.None;
+        }
+        self.n -= 1;
+        return Option.Some(D.{ id: 10 + self.n });
+    }
+}
+
+fn mk(id: u32) -> D {
+    return D.{ id: id };
+}
+
+fn mk_it(id: u32) -> It {
+    return It.{ n: 2, d: D.{ id: id } };
+}
+
+fn tag(d: &D) -> u32 {
+    return d.id;
+}
+
+fn eat(d: D) {
+    io.print(" eat");
+}
+
+fn check(id: u32, k: u32) -> Result<u32, u32> {
+    if id == k {
+        return Result.Err(7);
+    }
+    return Result.Ok(id);
+}
+
+fn normal() {
+    let mut it = mk_it(9);
+    for x in &mut it {
+        let d = mk(2);
+    }
+    io.print(" |");
+}
+
+fn no_local() {
+    let mut it = mk_it(9);
+    for x in &mut it {
+        io.print(" b");
+    }
+    io.print(" |");
+}
+
+fn brk() {
+    let mut it = mk_it(9);
+    for x in &mut it {
+        let d = mk(2);
+        break;
+    }
+    io.print(" |");
+}
+
+fn cont() {
+    let mut it = mk_it(9);
+    for x in &mut it {
+        let d = mk(2);
+        if x.id == 11 {
+            continue;
+        }
+        io.print(" c");
+    }
+    io.print(" |");
+}
+
+fn ret(k: u32) {
+    let mut it = mk_it(9);
+    for x in &mut it {
+        let d = mk(2);
+        if x.id == k {
+            return;
+        }
+    }
+    io.print(" |");
+}
+
+fn try_(k: u32) -> Result<u32, u32> {
+    let mut it = mk_it(9);
+    for x in &mut it {
+        let d = mk(2);
+        let _ = check(x.id, k)?;
+    }
+    io.print(" |");
+    return Result.Ok(0);
+}
+
+fn drain(it: &mut It, k: u32) {
+    for x in it {
+        let d = mk(2);
+        if x.id == k {
+            break;
+        }
+    }
+    io.print(" |");
+}
+
+fn param_source() {
+    let mut it = mk_it(9);
+    drain(&mut it, 11);
+    drain(&mut it, 0);
+}
+
+fn view_of_item(k: u32) {
+    let mut it = mk_it(9);
+    for x in &mut it {
+        let g = G.{ r: &x.id };
+        if x.id == k {
+            return;
+        }
+        if x.id == 10 {
+            break;
+        }
+    }
+    io.print(" |");
+}
+
+fn moved_item() {
+    let mut it = mk_it(9);
+    for x in &mut it {
+        if x.id == 11 {
+            eat(x);
+            break;
+        }
+    }
+    io.print(" |");
+}
+
+fn in_arm(k: u32) -> u32 {
+    let mut it = mk_it(9);
+    match tag(&mk(1)) {
+        _ => {
+            for x in &mut it {
+                let d = mk(2);
+                if x.id == k {
+                    return 1;
+                }
+                if x.id == 10 {
+                    break;
+                }
+            }
+        }
+    }
+    io.print(" |");
+    return 0;
+}
+
+fn nested_loops() {
+    let mut a = mk_it(8);
+    let mut b = mk_it(9);
+    for x in &mut a {
+        for y in &mut b {
+            let d = mk(2);
+            if y.id == 11 {
+                continue;
+            }
+            break;
+        }
+    }
+    io.print(" |");
+}
+
+fn owned(k: u32) -> Result<u32, u32> {
+    for x in mk_it(9) {
+        let d = mk(2);
+        if x.id == k {
+            return Result.Ok(1);
+        }
+        let _ = check(x.id, k + 1)?;
+    }
+    io.print(" |");
+    return Result.Ok(0);
+}
+
+fn nl() {
+    io.print("\n");
+}
+
+fn main() -> i32 {
+    io.print("normal:");
+    normal();
+    nl();
+    io.print("no local:");
+    no_local();
+    nl();
+    io.print("break:");
+    brk();
+    nl();
+    io.print("continue:");
+    cont();
+    nl();
+    io.print("return first:");
+    ret(11);
+    nl();
+    io.print("return second:");
+    ret(10);
+    nl();
+    io.print("? first:");
+    let _ = try_(11);
+    nl();
+    io.print("? none:");
+    let _ = try_(0);
+    nl();
+    io.print("param source:");
+    param_source();
+    nl();
+    io.print("view return:");
+    view_of_item(11);
+    nl();
+    io.print("view break:");
+    view_of_item(0);
+    nl();
+    io.print("moved item:");
+    moved_item();
+    nl();
+    io.print("in arm return:");
+    let _ = in_arm(11);
+    nl();
+    io.print("in arm break:");
+    let _ = in_arm(0);
+    nl();
+    io.print("nested loops:");
+    nested_loops();
+    nl();
+    io.print("owned return:");
+    let _ = owned(11);
+    nl();
+    io.print("owned ?:");
+    let _ = owned(9);
+    nl();
+    io.print("owned normal:");
+    let _ = owned(0);
+    nl();
+    return 0;
+}

@@ -1,0 +1,15 @@
+t2 int u 32
+t7 int s 32
+t16 str
+t18 ref t16
+t21 ref mut t26
+t23 tuple
+t26 param 0
+1 5 -
+1 6 -
+1 7 -
+2 9 t2
+3 3 t7
+9 16 t21
+9 17 t18
+9 19 t23

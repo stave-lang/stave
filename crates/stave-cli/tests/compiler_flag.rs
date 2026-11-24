@@ -132,7 +132,7 @@ fn summary_line_is_never_in_a_dump() {
     let (c, _, err) = stave(&[
         "build",
         &hello(),
-        "--dump=tokens,items,ast,strings,names,types,ir,diags,stats",
+        "--dump=tokens,items,ast,strings,names,sigs,kinds,types,ir,diags,stats",
         "--dump-dir",
         &d,
         "--timings",
@@ -145,5 +145,5 @@ fn summary_line_is_never_in_a_dump() {
         assert!(!text.contains("compiled on") && !text.contains("compiler: cpu"), "{}", p.display());
         n += 1;
     }
-    assert_eq!(n, 9);
+    assert_eq!(n, 11);
 }

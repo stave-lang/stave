@@ -53,6 +53,11 @@ struct Walk<'a, 'g> {
     /// [`Walk::parts`] left out a field whose type after substitution would be taller than the
     /// type table holds ([`crate::types::MAX_TYPE_HEIGHT`]): the holder is too deep.
     tall_part: bool,
+    /// Types whose depth met a type in progress, or such a type: each reaches, through parts, a
+    /// type that holds itself by value.
+    cyclic: FxHashSet<TypeId>,
+    /// The depth being computed met a type in progress or a cyclic type.
+    met_cycle: bool,
 }
 
 impl<'a, 'g> Walk<'a, 'g> {
@@ -67,6 +72,8 @@ impl<'a, 'g> Walk<'a, 'g> {
             queue: Vec::new(),
             causes: FxHashSet::default(),
             tall_part: false,
+            cyclic: FxHashSet::default(),
+            met_cycle: false,
         }
     }
 
@@ -135,6 +142,7 @@ impl<'a, 'g> Walk<'a, 'g> {
     /// arguments, so its term height passes the limit.
     fn depth(&mut self, t: TypeId) -> u32 {
         if let Some(&d) = self.depth.get(&t) {
+            self.met_cycle |= self.cyclic.contains(&t);
             return d;
         }
         let (k, _) = self.term(t);
@@ -145,8 +153,10 @@ impl<'a, 'g> Walk<'a, 'g> {
             return k;
         }
         if !self.active.insert(t) {
+            self.met_cycle = true;
             return k;
         }
+        let outer_met = std::mem::take(&mut self.met_cycle);
         let mut d = k;
         let mut part_too_deep = false;
         self.tall_part = false;
@@ -161,6 +171,10 @@ impl<'a, 'g> Walk<'a, 'g> {
         }
         self.active.remove(&t);
         self.depth.insert(t, d);
+        if self.met_cycle {
+            self.cyclic.insert(t);
+        }
+        self.met_cycle |= outer_met;
         if d > MAX_TYPE_DEPTH {
             if !part_too_deep {
                 self.causes.insert(t);
@@ -204,6 +218,21 @@ impl<'a, 'g> Walk<'a, 'g> {
     fn has_params(&mut self, t: TypeId) -> bool {
         self.term(t).1
     }
+}
+
+/// The depth of each of `ts` (module docs), `None` for a type that reaches, through parts, a
+/// type holding itself by value (it has no depth and no layout). Whatever the order of `ts`,
+/// the walk of such a type meets either a type in progress or one already found cyclic, and the
+/// walk of any other type meets neither, so the answer is per type.
+pub(crate) fn depths(sigs: &Sigs, table: &TypeTable, ts: &[TypeId]) -> Vec<Option<u32>> {
+    let mut w = Walk::new(Overlay::new(table), sigs);
+    ts.iter()
+        .map(|&t| {
+            let d = w.depth(t);
+            w.met_cycle = false;
+            (!w.cyclic.contains(&t)).then_some(d)
+        })
+        .collect()
 }
 
 /// E0005 case `type` diagnostics (module docs). `bodies` sorted by decl.

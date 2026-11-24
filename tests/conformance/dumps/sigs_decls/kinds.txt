@@ -1,0 +1,54 @@
+t0 copy,sized depth 1 size 1 align 1
+t1 copy,sized depth 1 size 2 align 2
+t2 copy,sized depth 1 size 4 align 4
+t3 copy,sized depth 1 size 8 align 8
+t4 copy,sized depth 1 size 8 align 8
+t5 copy,sized depth 1 size 4 align 4
+t6 copy,sized depth 1 size 4 align 4
+t7 - depth 1 size unsized
+t8 copy,view,sized depth 2 size 8 align 8
+t9 copy,view,sized depth 2 size 16 align 8
+t10 copy,view,sized depth 3 size 16 align 8
+t11 copy,view,sized depth 3 size 16 align 8
+t12 copy,view,sized depth 3 size 8 align 8
+t13 copy,view,sized depth 3 size 8 align 8
+t14 copy,view,sized depth 2 size 8 align 8
+t15 copy,view,sized depth 2 size 8 align 8
+t16 copy,view,sized depth 2 size 8 align 8
+t17 copy,view,sized depth 2 size 8 align 8
+t18 view,sized depth 2 size 8 align 8
+t19 view,sized depth 2 size 8 align 8
+t20 view,sized depth 2 size 8 align 8
+t21 view,sized depth 2 size 8 align 8
+t22 view,sized depth 2 size 8 align 8
+t23 copy,sized depth 2 size 8 align 1
+t24 copy,sized depth 2 size param
+t25 copy,sized depth 2 size 16 align 2
+t26 copy,sized depth 2 size 16 align 4
+t27 sized,drop depth 2 size param
+t28 - depth 2 size unsized
+t29 - depth 2 size unsized
+t30 copy,sized depth 1 size 0 align 1 fields[]
+t31 sized depth 2 size 8 align 8 fields[0]
+t32 sized depth 5 size param
+t33 sized,drop depth 3 size param
+t34 sized depth 2 size 8 align 4 fields[0 4]
+t35 view,sized depth 3 size 24 align 8 fields[0 16]
+t36 sized depth 3 size 20 align 4 tag 4 variants[[] [4 12] [4 12]]
+t37 copy,view,sized depth 2 size 16 align 8
+t38 copy,view,sized depth 2 size 16 align 8
+t39 copy,sized depth 2 size 32 align 32
+t40 sized,drop depth 1 size param
+t41 sized depth 1 size param
+impl d55 trait - head d25 gen 2 methods[d56]
+impl d57 trait - head d39 gen 0 methods[d58 d59]
+impl d13 trait d9 head i32 gen 0 methods[d14]
+impl d15 trait d9 head str gen 0 methods[d16]
+impl d19 trait d11 head d17 gen 0 methods[d20]
+impl d53 trait d22 head d36 gen 0 methods[d54]
+impl d51 trait d48 head d42 gen 0 methods[d52]
+apply t5 d9 [d13]
+apply t7 d9 [d15]
+apply t31 d11 [d19]
+apply t34 d22 [d53]
+apply t36 d48 [d51]

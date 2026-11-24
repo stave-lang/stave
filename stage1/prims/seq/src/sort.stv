@@ -2,9 +2,10 @@
 // returns the order, and `perm.gather` applies it to any column.
 //
 // One pass per key byte, least significant first; a pass whose byte is the same in every key is
-// skipped (it would be the identity). Each pass is a histogram, an exclusive scan of the 256
-// counts, and a scatter that keeps the input order within a bucket: the same three steps a
-// data-parallel pass runs per block, with the same result.
+// skipped (it would be the identity): the bits that differ between keys come from one OR and one
+// AND reduction. Each pass is a histogram, an exclusive scan of the 256 counts, and a scatter that
+// keeps the input order within a bucket: the same three steps a data-parallel pass runs per
+// block, with the same result.
 import col;
 import scan;
 import word;
@@ -19,34 +20,51 @@ pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
     let _ = col.ids(n);
     let mut pa = col.iota(n);
     if n < 2 { return pa; }
-    let mut ka = vec.Vec::<T>.with_capacity(n);
-    ka.extend_from_slice(keys);
-    let mut kb = col.filled(n, T.zero());
+    // the keys widened once: a digit is then a shift and a mask, not a call per element and pass
+    let mut ka = col.filled(n, 0u64);
+    // the bits that differ between keys: a pass whose byte has none of them is the identity
+    let mut any: u64 = 0;
+    let mut all: u64 = 18446744073709551615;
+    {
+        let kw = ka.as_mut_slice();
+        for i in 0..n {
+            let w = keys[i].wide();
+            kw[i] = w;
+            any = any | w;
+            all = all & w;
+        }
+    }
+    let vary = any ^ all;
+    if vary == 0 { return pa; }
+    let mut kb = col.filled(n, 0u64);
     let mut pb = col.filled(n, 0u32);
+    let mut cnt = col.filled(256, 0u32);
     let passes = T.bits() / 8;
     let mut pass: u32 = 0;
     while pass < passes {
-        let mut count = [0u32; 256];
+        let sh = (pass * 8) as u64;
+        if (vary >> sh) & 255 == 0 {
+            pass = pass + 1;
+            continue;
+        }
+        let count = cnt.as_mut_slice();
+        count.fill(0);
         {
             let ks = ka.as_slice();
             for i in 0..n {
-                let d = ks[i].byte(pass);
+                let d = ((ks[i] >> sh) & 255) as usize;
                 count[d] = count[d] + 1;
             }
         }
-        let mut trivial = false;
-        for d in 0..256usize {
-            if count[d] as usize == n { trivial = true; }
-        }
-        if !trivial {
-            let _ = scan.exclusive_in_place(&mut count);
+        {
+            let _ = scan.exclusive_in_place(count);
             {
                 let ks = ka.as_slice();
                 let ps = pa.as_slice();
                 let kd = kb.as_mut_slice();
                 let pd = pb.as_mut_slice();
                 for i in 0..n {
-                    let d = ks[i].byte(pass);
+                    let d = ((ks[i] >> sh) & 255) as usize;
                     let o = count[d] as usize;
                     count[d] = count[d] + 1;
                     kd[o] = ks[i];

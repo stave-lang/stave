@@ -1,0 +1,3 @@
+name = "sigs_decls"
+kind = "bin"
+version = "0.1.0"

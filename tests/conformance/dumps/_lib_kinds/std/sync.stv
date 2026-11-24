@@ -1,0 +1,23 @@
+// Stand-in for std/sync.stv (`kinds_` dump goldens): the lock and its guard, with the shipped
+// impls of Sync and Drop.
+import std.core;
+import std.cell;
+
+pub struct Mutex<T, const R: u32> {
+    word: cell.UnsafeCell<u32>,
+    v: cell.UnsafeCell<T>,
+}
+
+unsafe("the lock serializes every access to the value") impl<T: core.Send, const R: u32> core.Sync for Mutex<T, R> {}
+
+pub view struct MutexGuard<T, const R: u32> {
+    m: &Mutex<T, R>,
+    marker: *const u8,
+}
+
+unsafe("a shared guard only gives out &T") impl<T: core.Sync, const R: u32> core.Sync for MutexGuard<T, R> {}
+
+impl<T, const R: u32> core.Drop for MutexGuard<T, R> {
+    fn drop(&mut self) {
+    }
+}

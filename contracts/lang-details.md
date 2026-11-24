@@ -331,8 +331,24 @@ when that owner ends.
   temporary of the statement, made when the `select` is evaluated. Which operand that is is
   known only when the program runs: what either operand borrows stays borrowed to the end of
   the statement, and the temporary's drop is checked as either operand's.
-- **Leaving early.** `return`, `break`, `continue`, and `?` drop the temporaries of the
-  statements they leave, then the locals of the scopes they leave. `?` also drops the operands
+- **Leaving early.** `return`, `break`, `continue`, and `?` drop what they leave in the order
+  of its normal end, innermost first: scope by scope from the innermost, the temporaries of the
+  statements opened in it (each statement's after the scopes inside it), then its locals. So a
+  `match` scrutinee's or a `for` header's temporaries are dropped after the locals of the arm or
+  body that is left. The locals of every block inside a statement the exit leaves end there
+  (`return` and `?` too), before anything outside that block is dropped: a borrow of such a
+  local held by what is dropped after it on the way out (a temporary of the statement, or a
+  local declared before the block), read by its drop, is E0501 on every way out, as at the
+  block's end; the fix is to declare the borrowed local first (E0501 cases `exit-temp`,
+  `exit-local`), or, for one a `match` arm, `for`, or tail pattern binds (it is bound where its
+  block begins), to copy or move it into a local declared first and borrow that
+  (`exit-temp-binding`, `exit-local-binding`). The exception is the fn's or closure's own body block, which is inside no
+  statement: on `return` and `?` its locals and the params are dropped in order but not ended
+  (the frame ends them), so `let mut k = mkg(); let x: u32 = 5; k.r = &x; return;` is accepted
+  (`k`'s drop reads `x`, whose slot is still there), and so is `.. return 1;` ending a non-unit
+  fn, while the same body reaching the end of a unit fn, or wrapped in a `{ }` block, is E0501. A droppable `x` is E0501 either way: its drop
+  runs before `k`'s. A `break` or `continue` leaves only the statements inside the loop's body,
+  so the temporaries of a `for` header are dropped after the loop. `?` also drops the operands
   of the enclosing expressions that were already evaluated (earlier arguments, a by-value
   receiver, earlier fields of a literal), the last evaluated first.
 - **One schedule.** Where each drop runs is decided once per body, as its drop schedule

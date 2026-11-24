@@ -1,0 +1,86 @@
+//~ CHECK-ONLY
+// Dump golden (kinds): kind flags, depth, and layout of the signature types, the impl table, and
+// the impls that apply. Zero-sized types, a padded struct, enums with payloads (`Maybe` would
+// have a niche: there is none, every enum has a `u32` tag), a generic struct and its instances,
+// a view struct, a type with a `Drop` impl, lock types, a fn type, a vector, and a trait with
+// impls on two heads plus a generic impl.
+import std.sync;
+
+struct Unit {}
+
+struct Pair { a: u8, b: u64, c: u16 }
+
+impl Copy for Pair {}
+
+view enum Maybe { Nothing, Just(&u32) }
+
+enum Shape { Dot, Circle(u8, f64), Rect { lo: Pair, hi: u32 } }
+
+struct Wrap<T> { inner: T, n: u32 }
+
+view struct Cursor { src: &str, pos: usize }
+
+struct Res { fd: i32 }
+
+impl Drop for Res {
+    fn drop(&mut self) {
+    }
+}
+
+view struct Held { g: sync.MutexGuard<u32, 1>, n: u8 }
+
+trait Area {
+    fn area(&self) -> u64;
+}
+
+impl Area for Pair {
+    fn area(&self) -> u64 {
+        return 0;
+    }
+}
+
+impl Area for u32 {
+    fn area(&self) -> u64 {
+        return 0;
+    }
+}
+
+impl<T: Area> Area for Wrap<T> {
+    fn area(&self) -> u64 {
+        return 0;
+    }
+}
+
+impl<T> Wrap<T> {
+    fn count(&self) -> u32 {
+        return self.n;
+    }
+}
+
+fn zeros(u: Unit, e: [u8; 0], t: ()) -> u32 {
+    return 0;
+}
+
+fn records(p: Pair, x: (u8, u32, u16), m: Maybe, s: Shape) -> u32 {
+    return 0;
+}
+
+fn instances(a: Wrap<u32>, b: Wrap<Pair>, c: Wrap<Res>) -> u32 {
+    return 0;
+}
+
+fn views(c: Cursor, h: &Held, mu: &sync.Mutex<u32, 1>, f: fn(u32) -> u32, ps: *const Pair) -> u32 {
+    return 0;
+}
+
+fn generic<T>(w: &Wrap<T>, xs: &[T], s: &str) -> u32 {
+    return 0;
+}
+
+fn lanes(v: f32x8) -> f32x8 needs(avx2) {
+    return v;
+}
+
+fn main() -> i32 {
+    return 0;
+}

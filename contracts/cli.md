@@ -264,8 +264,8 @@ Common flags come after the subcommand (`stave build --release`, not `stave --re
   several would apply, E1303 (step 1) comes before E1304 (step 1a), and both before E1302. The
   memory estimate (cli-stage1.md, E1301) runs after a passing probe.
 - `--dump=STAGE[,STAGE...] --dump-dir DIR`: writes `DIR/STAGE.txt` per stage (`tokens items ast
-  strings names types borrow lir ir opt diags stats`). `--dump` without `--dump-dir`, or
-  `--dump-dir` without `--dump`, is a usage error (exit 2), and so is `--dump=opt` without
+  strings names sigs kinds types borrow lir ir opt diags stats`). `--dump` without `--dump-dir`,
+  or `--dump-dir` without `--dump`, is a usage error (exit 2), and so is `--dump=opt` without
   `--release`. Formats and order: [stage-gates.md](stage-gates.md); `lir`, `ir`, and `opt` are the
   IR text at the levels `lowered`, `checked`, and `opt` of [checked-ir.md](checked-ir.md). stage0
   implements every stage.

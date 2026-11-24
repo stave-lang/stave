@@ -1,0 +1,353 @@
+// The manifest diagnostics, E1002 and E1203 `stack`, as rows: stage0's validation of `stave.toml`
+// (stave-sema package.rs) on the tables of `manifest.read`. A row names the manifest, the case,
+// the primary span, and the hole texts (`key`; `expected` or `root` in `extra`). Checks that need
+// the package graph (a missing dependency directory, a name or path that is a built-in package's,
+// a missing root module, an unreadable manifest) add their rows from `files`.
+//
+// A syntax error or a redefined key ends the parse; the tables before it are validated all the
+// same, and the error is the last row. `name` is required unless the parse failed.
+import manifest;
+import text;
+import std.mem;
+import std.vec;
+
+// The cases of E1002 (`UNKNOWN_KEY` is the base shape) and E1203.
+pub const C_UNKNOWN_KEY: u8 = 0;
+pub const C_WRONG_TYPE: u8 = 1;
+pub const C_NON_PATH: u8 = 2;
+pub const C_UNKNOWN_TARGET: u8 = 3;
+pub const C_SYNTAX: u8 = 4;
+pub const C_DUPLICATE: u8 = 5;
+pub const C_BAD_KIND: u8 = 6;
+pub const C_MISSING_NAME: u8 = 7;
+pub const C_BAD_NAME: u8 = 8;
+pub const C_MISSING_ROOT: u8 = 9;
+pub const C_MISSING_DEP: u8 = 10;
+pub const C_BUILTIN_DEP: u8 = 11;
+pub const C_BUILTIN_NAME: u8 = 12;
+pub const C_UNREADABLE: u8 = 13;
+pub const C_STACK: u8 = 14;
+
+// The registry's name of a case ("" for the base shape). A number that is no case has no name
+// the registry knows, so its row is an internal error, not a diagnostic.
+pub fn case_name(c: u8) -> &str {
+    if c == C_UNKNOWN_KEY { return ""; }
+    if c == C_WRONG_TYPE { return "wrong-type"; }
+    if c == C_NON_PATH { return "non-path-dependency"; }
+    if c == C_UNKNOWN_TARGET { return "unknown-target"; }
+    if c == C_SYNTAX { return "syntax"; }
+    if c == C_DUPLICATE { return "duplicate-key"; }
+    if c == C_BAD_KIND { return "bad-kind"; }
+    if c == C_MISSING_NAME { return "missing-name"; }
+    if c == C_BAD_NAME { return "bad-name"; }
+    if c == C_MISSING_ROOT { return "missing-root"; }
+    if c == C_MISSING_DEP { return "missing-dependency"; }
+    if c == C_BUILTIN_DEP { return "builtin-dependency"; }
+    if c == C_BUILTIN_NAME { return "builtin-name"; }
+    if c == C_UNREADABLE { return "unreadable"; }
+    if c == C_STACK { return "stack"; }
+    return "no such case";
+}
+
+// Whether the case has a `key` hole.
+pub fn has_key(c: u8) -> bool {
+    return c != C_MISSING_NAME && c != C_UNREADABLE && c != C_MISSING_ROOT;
+}
+
+// The rows: `man` is the manifest's number, `code` 1002 or 1203, `[lo, hi)` the primary span.
+pub struct Issues {
+    pub man: vec.Vec<u32>,
+    pub code: vec.Vec<u16>,
+    pub case: vec.Vec<u8>,
+    pub lo: vec.Vec<u32>,
+    pub hi: vec.Vec<u32>,
+    pub key: vec.Vec<vec.Vec<u8>>,
+    pub extra: vec.Vec<vec.Vec<u8>>,
+}
+
+impl Issues {
+    pub fn new() -> Issues {
+        return Issues.{
+            man: vec.Vec::<u32>.new(),
+            code: vec.Vec::<u16>.new(),
+            case: vec.Vec::<u8>.new(),
+            lo: vec.Vec::<u32>.new(),
+            hi: vec.Vec::<u32>.new(),
+            key: vec.Vec::<vec.Vec<u8>>.new(),
+            extra: vec.Vec::<vec.Vec<u8>>.new(),
+        };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.man.len();
+    }
+
+    pub fn add(&mut self, man: u32, code: u16, case: u8, lo: u32, hi: u32, key: &[u8], extra: &[u8]) {
+        let mut k = vec.Vec::<u8>.new();
+        k.extend_from_slice(key);
+        let mut x = vec.Vec::<u8>.new();
+        x.extend_from_slice(extra);
+        self.man.push(man);
+        self.code.push(code);
+        self.case.push(case);
+        self.lo.push(lo);
+        self.hi.push(hi);
+        self.key.push(k);
+        self.extra.push(x);
+    }
+
+    fn e1002(&mut self, man: u32, case: u8, lo: u32, hi: u32, key: &[u8], extra: &[u8]) {
+        self.add(man, 1002, case, lo, hi, key, extra);
+    }
+}
+
+// The manifest being checked: its text and number.
+view struct Ctx {
+    src: &[u8],
+    man: u32,
+}
+
+// The source text of a span, as stage0 shows it (invalid UTF-8 replaced).
+fn src_text(c: &Ctx, lo: u32, hi: u32) -> vec.Vec<u8> {
+    if (lo as usize) > (hi as usize) || (hi as usize) > c.src.len() { return vec.Vec::<u8>.new(); }
+    return text.lossy(&c.src[(lo as usize)..(hi as usize)]);
+}
+
+fn unknown(d: &manifest.Doc, c: &Ctx, out: &mut Issues, e: usize) {
+    let (lo, hi) = (d.e_klo.as_slice()[e], d.e_khi.as_slice()[e]);
+    let key = src_text(c, lo, hi);
+    out.e1002(c.man, C_UNKNOWN_KEY, lo, hi, key.as_slice(), mem.str_bytes(""));
+}
+
+fn wrong_type(d: &manifest.Doc, c: &Ctx, out: &mut Issues, e: usize, expected: &str) {
+    let key = src_text(c, d.e_klo.as_slice()[e], d.e_khi.as_slice()[e]);
+    let (lo, hi) = d.value_span(e);
+    out.e1002(c.man, C_WRONG_TYPE, lo, hi, key.as_slice(), mem.str_bytes(expected));
+}
+
+fn non_path(d: &manifest.Doc, c: &Ctx, out: &mut Issues, e: usize) {
+    let (lo, hi) = (d.e_klo.as_slice()[e], d.e_khi.as_slice()[e]);
+    let key = src_text(c, lo, hi);
+    out.e1002(c.man, C_NON_PATH, lo, hi, key.as_slice(), mem.str_bytes(""));
+}
+
+// Whether entry e holds a string; else the row `wrong-type`.
+fn expect_string(d: &manifest.Doc, c: &Ctx, out: &mut Issues, e: usize) -> bool {
+    if d.e_kind.as_slice()[e] == manifest.V_STR { return true; }
+    wrong_type(d, c, out, e, "string");
+    return false;
+}
+
+// The table entry e holds, else the row `wrong-type`.
+fn expect_table(d: &manifest.Doc, c: &Ctx, out: &mut Issues, e: usize) -> Option<u32> {
+    match d.sub_table(e) {
+        Option.Some(t) => { return Option.Some(t); }
+        Option.None => {
+            wrong_type(d, c, out, e, "table");
+            return Option.None;
+        }
+    }
+}
+
+// The entries of a dependency table: a `{ path = ".." }` table, whose other keys are unknown.
+fn deps(d: &manifest.Doc, c: &Ctx, out: &mut Issues, t: u32) {
+    let es = d.entries(t);
+    for i in 0..es.len() {
+        let e = es.as_slice()[i];
+        match d.sub_table(e) {
+            Option.Some(dt) => {
+                let has_path = d.find(dt, mem.str_bytes("path")).is_some();
+                if !has_path { non_path(d, c, out, e); }
+                let ks = d.entries(dt);
+                for j in 0..ks.len() {
+                    let k = ks.as_slice()[j];
+                    if text.eq_str(d.e_key.get_ref(k).as_slice(), "path") {
+                        let _ = expect_string(d, c, out, k);
+                    } else if has_path {
+                        unknown(d, c, out, k);
+                    }
+                }
+            }
+            Option.None => { non_path(d, c, out, e); }
+        }
+    }
+}
+
+// A size: decimal digits without a leading zero, then directly one of `B KiB MiB GiB TiB`; more
+// than 0 and within u64. Returns 0 for anything else.
+fn parse_size(s: &[u8]) -> u64 {
+    let mut digits: usize = 0;
+    while digits < s.len() && s[digits] >= 48 && s[digits] <= 57 { digits = digits + 1; }
+    if digits == 0 || s[0] == 48 { return 0; }
+    let unit = &s[digits..s.len()];
+    let mut shift: u64 = 0;
+    if text.eq_str(unit, "B") {
+        shift = 0;
+    } else if text.eq_str(unit, "KiB") {
+        shift = 10;
+    } else if text.eq_str(unit, "MiB") {
+        shift = 20;
+    } else if text.eq_str(unit, "GiB") {
+        shift = 30;
+    } else if text.eq_str(unit, "TiB") {
+        shift = 40;
+    } else {
+        return 0;
+    }
+    let max: u64 = 18446744073709551615;
+    let mut n: u64 = 0;
+    for k in 0..digits {
+        let dv = (s[k] - 48) as u64;
+        if n > (max - dv) / 10 { return 0; }
+        n = n * 10 + dv;
+    }
+    if n > (max >> shift) { return 0; }
+    return n << shift;
+}
+
+// `stack` of a `[run]` table: a size of at least 4 KiB; E1203 at the value otherwise.
+fn run_stack(d: &manifest.Doc, c: &Ctx, out: &mut Issues, t: u32) {
+    match d.find(t, mem.str_bytes("stack")) {
+        Option.Some(e) => {
+            let ok = d.e_kind.as_slice()[e] == manifest.V_STR && parse_size(d.e_str.get_ref(e).as_slice()) >= 4096;
+            if !ok {
+                let (lo, hi) = d.value_span(e);
+                out.add(c.man, 1203, C_STACK, lo, hi, mem.str_bytes("stack"), mem.str_bytes(""));
+            }
+        }
+        Option.None => {}
+    }
+}
+
+// One plain path component: not empty, `.`, or `..`, no `/`, `\`, or NUL, no leading `-`.
+fn valid_name(n: &[u8]) -> bool {
+    if n.len() == 0 || text.eq_str(n, ".") || text.eq_str(n, "..") || n[0] == 45 { return false; }
+    for k in 0..n.len() {
+        if n[k] == 47 || n[k] == 92 || n[k] == 0 { return false; }
+    }
+    return true;
+}
+
+// `s` without the quote characters at both ends.
+fn trim_quotes(s: &[u8]) -> &[u8] from s {
+    let mut lo: usize = 0;
+    let mut hi = s.len();
+    while lo < hi && (s[lo] == 34 || s[lo] == 39) { lo = lo + 1; }
+    while hi > lo && (s[hi - 1] == 34 || s[hi - 1] == 39) { hi = hi - 1; }
+    return &s[lo..hi];
+}
+
+// The keys of the root table, in order.
+fn root(d: &manifest.Doc, c: &Ctx, out: &mut Issues) {
+    let es = d.entries(0);
+    for i in 0..es.len() {
+        let e = es.as_slice()[i];
+        let key = d.e_key.get_ref(e).as_slice();
+        if text.eq_str(key, "name") {
+            if expect_string(d, c, out, e) {
+                if !valid_name(d.e_str.get_ref(e).as_slice()) {
+                    let (lo, hi) = d.value_span(e);
+                    let v = src_text(c, lo, hi);
+                    out.e1002(c.man, C_BAD_NAME, lo, hi, v.as_slice(), mem.str_bytes(""));
+                }
+            }
+        } else if text.eq_str(key, "version") {
+            let _ = expect_string(d, c, out, e);
+        } else if text.eq_str(key, "kind") {
+            if expect_string(d, c, out, e) {
+                let k = d.e_str.get_ref(e).as_slice();
+                if !text.eq_str(k, "bin") && !text.eq_str(k, "lib") {
+                    let (lo, hi) = d.value_span(e);
+                    let v = src_text(c, lo, hi);
+                    out.e1002(c.man, C_BAD_KIND, lo, hi, v.as_slice(), mem.str_bytes(""));
+                }
+            }
+        } else if text.eq_str(key, "dependencies") {
+            match expect_table(d, c, out, e) {
+                Option.Some(t) => { deps(d, c, out, t); }
+                Option.None => {}
+            }
+        } else if text.eq_str(key, "target") {
+            match expect_table(d, c, out, e) {
+                Option.Some(t) => { targets(d, c, out, t); }
+                Option.None => {}
+            }
+        } else if text.eq_str(key, "run") {
+            match expect_table(d, c, out, e) {
+                Option.Some(t) => { run_stack(d, c, out, t); }
+                Option.None => {}
+            }
+        } else if text.eq_str(key, "gpu") || text.eq_str(key, "compiler") {
+            let _ = expect_table(d, c, out, e);
+        } else {
+            unknown(d, c, out, e);
+        }
+    }
+}
+
+// The `[target.<t>]` tables: each names a target and may hold `dependencies`.
+fn targets(d: &manifest.Doc, c: &Ctx, out: &mut Issues, t: u32) {
+    let es = d.entries(t);
+    for i in 0..es.len() {
+        let te = es.as_slice()[i];
+        if !manifest.known_target(d.e_key.get_ref(te).as_slice()) {
+            let (lo, hi) = (d.e_klo.as_slice()[te], d.e_khi.as_slice()[te]);
+            let raw = src_text(c, lo, hi);
+            out.e1002(c.man, C_UNKNOWN_TARGET, lo, hi, trim_quotes(raw.as_slice()), mem.str_bytes(""));
+            continue;
+        }
+        match expect_table(d, c, out, te) {
+            Option.Some(tt) => {
+                let ds = d.entries(tt);
+                for j in 0..ds.len() {
+                    let de = ds.as_slice()[j];
+                    if text.eq_str(d.e_key.get_ref(de).as_slice(), "dependencies") {
+                        match expect_table(d, c, out, de) {
+                            Option.Some(dt) => { deps(d, c, out, dt); }
+                            Option.None => {}
+                        }
+                    } else {
+                        unknown(d, c, out, de);
+                    }
+                }
+            }
+            Option.None => {}
+        }
+    }
+}
+
+// True for the bytes that end a redefined key.
+fn ends_key(b: u8) -> bool {
+    return b == 61 || b == 93 || b == 10 || b == 32 || b == 9 || b == 46;
+}
+
+// Reads and validates manifest `man` (text `src`): the rows go to `out`, and what discovery
+// needs comes back.
+pub fn read(src: &[u8], man: u32, out: &mut Issues) -> manifest.Manifest {
+    let (d, err) = manifest.read(src);
+    let c = Ctx.{ src: src, man: man };
+    root(&d, &c, out);
+    match &err {
+        Option.Some(e) => {
+            let lo = e.offset as usize;
+            let mut end = lo;
+            if e.dup {
+                while end < src.len() && !ends_key(src[end]) { end = end + 1; }
+                let key = src_text(&c, e.offset, end as% u32);
+                out.e1002(man, C_DUPLICATE, e.offset, end as% u32, key.as_slice(), mem.str_bytes(""));
+            } else {
+                while end < src.len() && src[end] != 10 { end = end + 1; }
+                let raw = src_text(&c, e.offset, end as% u32);
+                let (a, b) = text.trim_range(raw.as_slice());
+                let shown = if a == b then mem.str_bytes("<end of line>") else &raw.as_slice()[a..b];
+                out.e1002(man, C_SYNTAX, e.offset, end as% u32, shown, mem.str_bytes(""));
+            }
+        }
+        Option.None => {
+            if d.find(0, mem.str_bytes("name")).is_none() {
+                out.e1002(man, C_MISSING_NAME, 0, 0, mem.str_bytes(""), mem.str_bytes(""));
+            }
+        }
+    }
+    return manifest.read_back(&d);
+}

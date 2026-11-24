@@ -1128,18 +1128,29 @@ fn display_into<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId, s: &
     }
 }
 
+/// The checked-IR text of a const in a type key: the value, `constparam <i>`, or `_` (an error).
+pub(crate) fn const_arg_text(c: ConstArg) -> String {
+    match c {
+        ConstArg::Value(v) => v.to_string(),
+        ConstArg::Param(i) => format!("constparam {i}"),
+        ConstArg::Error => "_".to_string(),
+    }
+}
+
 /// The checked-IR `TypeKey` text of `t` (canonical ids must be final): `int s 32`, `ref mut t4`.
 pub fn type_key_text(table: &TypeTable, t: TypeId) -> String {
-    let tid = |x: &TypeId| format!("t{}", x.0);
+    type_key_text_as(table, t, &|x| x.0)
+}
+
+/// [`type_key_text`] with every component type printed as `t<num(component)>` (a dump that
+/// numbers a subset of the table by rank).
+pub fn type_key_text_as(table: &TypeTable, t: TypeId, num: &dyn Fn(TypeId) -> u32) -> String {
+    let tid = |x: &TypeId| format!("t{}", num(*x));
     let lanes = |n: &Lanes| match n {
         Lanes::Fixed(k) => k.to_string(),
         Lanes::Native => "n".to_string(),
     };
-    let carg = |c: &ConstArg| match c {
-        ConstArg::Value(v) => v.to_string(),
-        ConstArg::Param(i) => format!("constparam {i}"),
-        ConstArg::Error => "_".to_string(),
-    };
+    let carg = |c: &ConstArg| const_arg_text(*c);
     match table.kind(t) {
         TypeKind::Int { signed, bits } => {
             let b = match bits {
