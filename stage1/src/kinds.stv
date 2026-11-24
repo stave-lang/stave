@@ -1,0 +1,370 @@
+// Kinds (types/kinds): per type of the signature table its kind flags, depth, and layout, the
+// impl table, and which impls apply to each type, from the signatures alone (the `kinds` dump).
+// Every answer is taken in the empty environment: a generic param has no bound and is not
+// `view`, nor is `Self`.
+//
+// Flags (`K_*`): `copy` (built in, or an applying `impl Copy`), `view` (holds a reference, fn
+// value, or `view` ADT), `send` `sync` (an explicit impl decides for its ADT, else structural),
+// `sized` (not `str` or a slice), `flat` `frozen` (derived), `drop-impl` (an ADT whose `Drop`
+// impl of its own package applies; with params: the ADT has one), `drop` (a `drop-impl` type or
+// a generic param reached by value through fields, payloads, tuple and array elements), `lock`
+// (a `std.sync.MutexGuard` reached so, or through the pointee of an ADT's raw-pointer field).
+//
+// Passes: layouts and depths over the closure of the printed types (`layout`); the trait goals
+// and the impl-applies queries of every printed type (`traits`), expanded and solved; the
+// `drop-impl` impl of each ADT instance (the first applying `Drop` impl); `drop` and `lock` as
+// reachability rounds over the reversed containment edges.
+import decls;
+import files;
+import intern;
+import layout;
+import modules;
+import sigs;
+import traits;
+import types;
+import prims.col;
+import prims.ragged;
+import prims.search;
+import prims.sort;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+const NO_GOAL: u32 = 4294967292;
+
+pub const K_COPY: u16 = 1;
+pub const K_VIEW: u16 = 2;
+pub const K_SEND: u16 = 4;
+pub const K_SYNC: u16 = 8;
+pub const K_SIZED: u16 = 16;
+pub const K_FLAT: u16 = 32;
+pub const K_FROZEN: u16 = 64;
+pub const K_DROP_IMPL: u16 = 128;
+pub const K_DROP: u16 = 256;
+pub const K_LOCK: u16 = 512;
+
+pub const SZ_OK: u8 = 0;
+pub const SZ_OVER: u8 = 1;
+pub const SZ_PARAM: u8 = 2;
+pub const SZ_UNSIZED: u8 = 3;
+pub const SZ_NONE: u8 = 4;
+
+pub const REC_NONE: u8 = 0;
+pub const REC_FIELDS: u8 = 1;
+pub const REC_ENUM: u8 = 2;
+
+// A depth past which no type is measured: `depth -`.
+pub const D_CYCLIC: u32 = 4294967295;
+
+pub struct Kinds {
+    // per printed type k (the `sigs` order)
+    pub bits: vec.Vec<u16>,
+    pub depth: vec.Vec<u32>,
+    pub sz: vec.Vec<u8>,
+    pub size: vec.Vec<u64>,
+    pub aln: vec.Vec<u64>,
+    pub rk: vec.Vec<u8>,
+    // per printed type: the field offsets of each variant (row of `offs` per type, the field
+    // counts per variant a row of `vcnt`)
+    pub offs: ragged.Ragged<u64>,
+    pub vcnt: ragged.Ragged<u32>,
+    // impl lines: the impl decls in line order, their trait, head spelling, generic count, and
+    // methods in declaration order
+    pub line: vec.Vec<u32>,
+    pub l_trait: vec.Vec<u32>,
+    pub l_head: ragged.Ragged<u8>,
+    pub l_gen: vec.Vec<u32>,
+    pub l_methods: ragged.Ragged<u32>,
+    // apply lines: printed type, trait, the impls that apply
+    pub ap_t: vec.Vec<u32>,
+    pub ap_tr: vec.Vec<u32>,
+    pub ap_impls: ragged.Ragged<u32>,
+}
+
+fn own_package(ds: &decls.Decls, md: &modules.Modules, a: u32, b: u32) -> bool {
+    let ma = ds.module.as_slice()[a as usize];
+    let mb = ds.module.as_slice()[b as usize];
+    if ma == NONE || mb == NONE { return ma == mb; }
+    return md.mod_pkg.as_slice()[ma as usize] == md.mod_pkg.as_slice()[mb as usize];
+}
+
+// The methods of every impl in declaration order: (sorted keys (impl, index), method decls).
+fn impl_methods(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
+    let mut keys = vec.Vec::<u64>.new();
+    let mut ids = vec.Vec::<u32>.new();
+    for e in 0..ds.decls() {
+        let p = ds.parent.as_slice()[e];
+        if ds.kind.as_slice()[e] != decls.DK_METHOD || p == NONE || ds.kind.as_slice()[p as usize] != decls.DK_IMPL { continue; }
+        keys.push(search.pair(p, ds.index.as_slice()[e]));
+        ids.push(e as% u32);
+    }
+    let perm = sort.sort_perm(keys.as_slice());
+    let mut sk = vec.Vec::<u64>.new();
+    let mut si = vec.Vec::<u32>.new();
+    for j in 0..perm.len() {
+        sk.push(keys.as_slice()[perm.as_slice()[j] as usize]);
+        si.push(ids.as_slice()[perm.as_slice()[j] as usize]);
+    }
+    return (sk, si);
+}
+
+fn real(t: u32) -> bool {
+    return t != types.ERR && t != layout.TALL && t != NONE;
+}
+
+// The kinds of the printed types `order` (the `sigs` table by T), the impl lines, and the apply
+// lines. The type table grows (substituted fields, trait arguments) and is put back.
+pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned, order: &[u32]) -> Kinds {
+    let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());
+    let kd = build_in(&mut tab, sg, ds, fl, md, nm, order);
+    sg.cx.tab = tab;
+    return kd;
+}
+
+fn build_in(tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned, order: &[u32]) -> Kinds {
+    let n = ds.decls();
+    let nopend = col.filled(n, false);
+    let sh = layout.shapes(ds, sg.cx.ty.as_slice(), &sg.params, nopend.as_slice());
+    let mut pa = layout.Parts.new();
+    let w = layout.closure(tab, &sh, &mut pa, order);
+    let ly = layout.layouts(tab, &sh, &pa, w.as_slice());
+    let (dep, cyc) = layout.depths(tab, &sh, &pa, w.as_slice());
+    let mut tr = traits.new(sg, tab, ds, fl, md, nm);
+    tr.ensure_comp(tab);
+    let lang_copy = tr.lang.copy_tr;
+    let markers = [tr.lang.send, tr.lang.sync, tr.lang.flat, tr.lang.frozen];
+    let nk = order.len();
+    // the goals of the flags: copy, then the four markers
+    let mut gs = vec.Vec::<u32>.with_capacity(nk * 5);
+    let empty = vec.Vec::<u32>.new();
+    for k in 0..nk {
+        let t = order[k];
+        gs.push(tr.goal(t, lang_copy, empty.as_slice()));
+        let fn_ty = tab.tag_of(t) == types.TK_FN;
+        for m in 0..4usize {
+            let x = markers[m];
+            gs.push(if x == NONE || fn_ty then NO_GOAL else tr.goal(t, x, empty.as_slice()));
+        }
+    }
+    // the apply queries: per printed type and trait with a candidate
+    let mut kd = Kinds.{
+        bits: vec.Vec::<u16>.new(),
+        depth: vec.Vec::<u32>.new(),
+        sz: vec.Vec::<u8>.new(),
+        size: vec.Vec::<u64>.new(),
+        aln: vec.Vec::<u64>.new(),
+        rk: vec.Vec::<u8>.new(),
+        offs: ragged.Ragged::<u64>.new(),
+        vcnt: ragged.Ragged::<u32>.new(),
+        line: vec.Vec::<u32>.new(),
+        l_trait: vec.Vec::<u32>.new(),
+        l_head: ragged.Ragged::<u8>.new(),
+        l_gen: vec.Vec::<u32>.new(),
+        l_methods: ragged.Ragged::<u32>.new(),
+        ap_t: vec.Vec::<u32>.new(),
+        ap_tr: vec.Vec::<u32>.new(),
+        ap_impls: ragged.Ragged::<u32>.new(),
+    };
+    let mut ap_q = ragged.Ragged::<u32>.new();
+    let mut cands = vec.Vec::<u32>.new();
+    let ntr = tr.im.traits.len();
+    for k in 0..nk {
+        let t = order[k];
+        for p in 0..ntr {
+            tr.candidates_at(tab, p as% u32, t, &mut cands);
+            if cands.len() == 0 { continue; }
+            kd.ap_t.push(k as% u32);
+            kd.ap_tr.push(tr.im.traits.as_slice()[p]);
+            for j in 0..cands.len() {
+                let i = cands.as_slice()[j];
+                kd.ap_impls.push(i);
+                ap_q.push(tr.applies_q(tab, sg, i, t));
+            }
+            kd.ap_impls.end_row();
+            ap_q.end_row();
+        }
+    }
+    // the `Drop` impl of each ADT instance of the closure: without params, the first applying
+    // impl (queries); with params, any impl of its ADT in its package
+    let drop_k = tr.im.trait_pos(tr.lang.drop);
+    let nt0 = tab.len();
+    let mut dimpl = col.filled(nt0, false);
+    let mut dq_t = vec.Vec::<u32>.new();
+    let mut dq = ragged.Ragged::<u32>.new();
+    let mut dq_i = ragged.Ragged::<u32>.new();
+    for j in 0..w.len() {
+        let t = w.as_slice()[j];
+        if tab.tag_of(t) != types.TK_ADT || drop_k == NONE { continue; }
+        let d = tab.a_of(t);
+        if tr.comp.hasp.as_slice()[t as usize] {
+            let is = tr.im.of(drop_k);
+            for x in 0..is.len() {
+                let i = is[x];
+                if tr.im.head_of.as_slice()[i as usize] == traits.head(tab, t) && own_package(ds, md, i, d) { dimpl.as_mut_slice()[t as usize] = true; }
+            }
+            continue;
+        }
+        tr.candidates_at(tab, drop_k, t, &mut cands);
+        dq_t.push(t);
+        for x in 0..cands.len() {
+            let i = cands.as_slice()[x];
+            dq_i.push(i);
+            dq.push(tr.applies_q(tab, sg, i, t));
+        }
+        dq.end_row();
+        dq_i.end_row();
+    }
+    tr.expand(tab, sg, &sh, &mut pa);
+    tr.solve();
+    let (mk, mi) = impl_methods(ds);
+    for j in 0..dq_t.len() {
+        let t = dq_t.as_slice()[j];
+        let qs = dq.row(j);
+        let is = dq_i.row(j);
+        for x in 0..qs.len() {
+            if !tr.holds(qs[x]) { continue; }
+            let i = is[x];
+            let (lo, hi) = run_of(mk.as_slice(), i);
+            dimpl.as_mut_slice()[t as usize] = own_package(ds, md, i, tab.a_of(t)) && hi > lo;
+            break;
+        }
+    }
+    // drop glue and held locks: reachability over containment edges
+    let nt = tab.len();
+    let mut dmark = col.filled(nt, false);
+    let mut lmark = col.filled(nt, false);
+    let mut ds_src = vec.Vec::<u32>.new();
+    let mut ds_dst = vec.Vec::<u32>.new();
+    let mut ls_src = vec.Vec::<u32>.new();
+    let mut ls_dst = vec.Vec::<u32>.new();
+    let guard = tr.lang.guard;
+    for j in 0..w.len() {
+        let t = w.as_slice()[j];
+        let tag = tab.tag_of(t);
+        if tag == types.TK_PARAM {
+            dmark.as_mut_slice()[t as usize] = true;
+        } else if tag == types.TK_TUPLE || tag == types.TK_ARRAY {
+            let mut es = vec.Vec::<u32>.new();
+            if tag == types.TK_ARRAY { es.push(tab.a_of(t)); } else { es.extend_from_slice(tab.x(t)); }
+            for x in 0..es.len() {
+                ds_src.push(t);
+                ds_dst.push(es.as_slice()[x]);
+                ls_src.push(t);
+                ls_dst.push(es.as_slice()[x]);
+            }
+        } else if tag == types.TK_ADT {
+            let d = tab.a_of(t);
+            let fs = pa.fields(t);
+            if dimpl.as_slice()[t as usize] {
+                dmark.as_mut_slice()[t as usize] = true;
+            } else {
+                for x in 0..fs.len() {
+                    if real(fs[x]) {
+                        ds_src.push(t);
+                        ds_dst.push(fs[x]);
+                    }
+                }
+            }
+            if guard != NONE && d == guard {
+                let xs = tab.x(t);
+                if xs.len() >= 6 && xs[3] != types.GA_TYPE { lmark.as_mut_slice()[t as usize] = true; }
+            } else {
+                for x in 0..fs.len() {
+                    let f = fs[x];
+                    if !real(f) { continue; }
+                    ls_src.push(t);
+                    ls_dst.push(f);
+                    // an ADT owns what a raw-pointer field points to
+                    if tab.tag_of(f) == types.TK_PTR {
+                        ls_src.push(t);
+                        ls_dst.push(tab.b_of(f));
+                    }
+                }
+            }
+        }
+    }
+    let drop = layout.reach(nt, ds_src.as_slice(), ds_dst.as_slice(), dmark.as_slice());
+    let lock = layout.reach(nt, ls_src.as_slice(), ls_dst.as_slice(), lmark.as_slice());
+    // the type lines
+    let mut offs = vec.Vec::<u64>.new();
+    let mut counts = vec.Vec::<u32>.new();
+    for k in 0..nk {
+        let t = order[k];
+        let i = t as usize;
+        let tag = tab.tag_of(t);
+        let mut b: u16 = 0;
+        if tr.is(gs.as_slice()[5 * k]) { b = b | K_COPY; }
+        if tr.comp.is_view.as_slice()[i] { b = b | K_VIEW; }
+        let bits = [K_SEND, K_SYNC, K_FLAT, K_FROZEN];
+        for m in 0..4usize {
+            let g = gs.as_slice()[5 * k + 1 + m];
+            if g != NO_GOAL && tr.is(g) { b = b | bits[m]; }
+        }
+        if tag != types.TK_STR && tag != types.TK_SLICE { b = b | K_SIZED; }
+        if i < dimpl.len() && dimpl.as_slice()[i] { b = b | K_DROP_IMPL; }
+        if drop.as_slice()[i] { b = b | K_DROP; }
+        if lock.as_slice()[i] { b = b | K_LOCK; }
+        kd.bits.push(b);
+        kd.depth.push(if cyc.as_slice()[i] then D_CYCLIC else dep.as_slice()[i]);
+        let st = ly.at(t, 0);
+        offs.clear();
+        counts.clear();
+        let mut rk = REC_NONE;
+        if st == layout.LS_OK {
+            kd.sz.push(SZ_OK);
+            kd.size.push(ly.size.as_slice()[i]);
+            kd.aln.push(ly.aln.as_slice()[i]);
+            if tag == types.TK_TUPLE {
+                rk = REC_FIELDS;
+            } else if tag == types.TK_ADT {
+                let sk = sh.kind_of(tab.a_of(t));
+                rk = if sk == layout.SK_STRUCT then REC_FIELDS else if sk == layout.SK_ENUM then REC_ENUM else REC_NONE;
+            }
+            if rk != REC_NONE { layout.offsets(tab, &sh, &pa, &ly, t, &mut offs, &mut counts); }
+        } else {
+            let mut why = SZ_OVER;
+            if st != layout.LS_OVER {
+                let u = layout.unlaid(tab, &sh, &pa, &ly, t);
+                why = if u == layout.NL_PARAM then SZ_PARAM else if u == layout.NL_UNSIZED then SZ_UNSIZED else SZ_NONE;
+            }
+            kd.sz.push(why);
+            kd.size.push(0);
+            kd.aln.push(0);
+        }
+        kd.rk.push(rk);
+        kd.offs.push_row(offs.as_slice());
+        kd.vcnt.push_row(counts.as_slice());
+    }
+    // the impl lines
+    let mut head = vec.Vec::<u8>.new();
+    for j in 0..tr.im.line.len() {
+        let i = tr.im.line.as_slice()[j];
+        kd.line.push(i);
+        kd.l_trait.push(tr.im.trait_of.as_slice()[i as usize]);
+        head.clear();
+        traits.head_text(tab, tr.im.head_of.as_slice()[i as usize], &mut head);
+        kd.l_head.push_row(head.as_slice());
+        kd.l_gen.push(sg.cx.gens.lo.as_slice()[i as usize + 1] - sg.cx.gens.lo.as_slice()[i as usize]);
+        let (lo, hi) = run_of(mk.as_slice(), i);
+        kd.l_methods.push_row(&mi.as_slice()[lo..hi]);
+    }
+    // the apply lines: the candidates that apply
+    let mut keep = ragged.Ragged::<u32>.new();
+    for r in 0..kd.ap_t.len() {
+        let is = kd.ap_impls.row(r);
+        let qs = ap_q.row(r);
+        for x in 0..qs.len() {
+            if tr.holds(qs[x]) { keep.push(is[x]); }
+        }
+        keep.end_row();
+    }
+    kd.ap_impls = keep;
+    return kd;
+}
+
+// The run of keys of parent p in keys sorted by (parent, index).
+fn run_of(keys: &[u64], p: u32) -> (usize, usize) {
+    let lo = search.lower_bound(keys, search.pair(p, 0));
+    let hi = search.lower_bound(keys, search.pair(p + 1, 0));
+    return (lo, hi);
+}

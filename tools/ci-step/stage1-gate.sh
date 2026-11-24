@@ -1,9 +1,10 @@
 #!/bin/sh
-# stage1 `tokens`, `items`, `ast`, `strings`, `names`, `sigs`, and `diags` equivalence gate
+# stage1 `tokens`, `items`, `ast`, `strings`, `names`, `sigs`, `kinds`, and `diags` equivalence gate
 # (contracts/stage-gates.md): builds stage0 (the debug build `test` leaves, or
 # STAVE_GATE_PROFILE=release), builds stage1 with it, then runs both once per root of the corpus
-# with `build --dump=tokens,items,ast,strings,names,sigs,diags` and compares the `tokens.txt`,
-# `items.txt`, `ast.txt`, `strings.txt`, `names.txt`, and `sigs.txt` of the two byte for byte,
+# with `build --dump=tokens,items,ast,strings,names,sigs,kinds,diags` and compares the `tokens.txt`,
+# `items.txt`, `ast.txt`, `strings.txt`, `names.txt`, `sigs.txt`, and `kinds.txt` of the two byte
+# for byte,
 # and stage1's `diags.txt` with stage0's restricted to the codes of the stages stage1 has
 # (S1_CODES: read, lex, item cut, parse, modules, decls, resolve, signatures). Every dump covers
 # the whole program, so each root
@@ -51,19 +52,19 @@ if [ "${1:-}" = "--one" ]; then
   d="$OUT/w/$2"
   mkdir -p "$d"
   for k in 0 1; do
-    rm -f "$d/$k/tokens.txt" "$d/$k/items.txt" "$d/$k/ast.txt" "$d/$k/strings.txt" "$d/$k/names.txt" "$d/$k/sigs.txt" "$d/$k/diags.txt"
+    rm -f "$d/$k/tokens.txt" "$d/$k/items.txt" "$d/$k/ast.txt" "$d/$k/strings.txt" "$d/$k/names.txt" "$d/$k/sigs.txt" "$d/$k/kinds.txt" "$d/$k/diags.txt"
   done
   if [ -n "${4:-}" ]; then set -- "$2" "$3" --target "$4"; else set -- "$2" "$3"; fi
   root="$2"
   shift 2
   s0=0
   s1=0
-  dumps=tokens,items,ast,strings,names,sigs,diags
+  dumps=tokens,items,ast,strings,names,sigs,kinds,diags
   "$S0" build "$root" "$@" -o "$d/exe" --dump=$dumps --dump-dir "$d/0" >/dev/null 2>&1 || s0=$?
   "$S1" build "$root" "$@" --dump=$dumps --dump-dir "$d/1" >"$d/stage1.err" 2>&1 || s1=$?
   if [ "$s1" -gt 1 ]; then
     echo "FAIL stage1 exit $s1: $root $* ($(head -c 200 "$d/stage1.err"))"
-  elif [ ! -f "$d/0/tokens.txt" ] || [ ! -f "$d/0/items.txt" ] || [ ! -f "$d/0/ast.txt" ] || [ ! -f "$d/0/strings.txt" ] || [ ! -f "$d/0/names.txt" ] || [ ! -f "$d/0/sigs.txt" ] || [ ! -f "$d/0/diags.txt" ]; then
+  elif [ ! -f "$d/0/tokens.txt" ] || [ ! -f "$d/0/items.txt" ] || [ ! -f "$d/0/ast.txt" ] || [ ! -f "$d/0/strings.txt" ] || [ ! -f "$d/0/names.txt" ] || [ ! -f "$d/0/sigs.txt" ] || [ ! -f "$d/0/kinds.txt" ] || [ ! -f "$d/0/diags.txt" ]; then
     echo "FAIL no stage0 dump: $root $*"
   elif [ ! -f "$d/1/strings.txt" ] || [ ! -f "$d/1/names.txt" ] || [ ! -f "$d/1/diags.txt" ]; then
     echo "FAIL no stage1 dump: $root $* ($(head -c 200 "$d/stage1.err"))"
@@ -81,8 +82,10 @@ if [ "${1:-}" = "--one" ]; then
     echo "FAIL no stage1 sigs: $root $* ($(grep '^stage1: ' "$d/stage1.err" | head -c 200))"
   elif [ -f "$d/1/sigs.txt" ] && ! cmp -s "$d/0/sigs.txt" "$d/1/sigs.txt"; then
     echo "DIFF sigs $root $* (first: $(cmp "$d/0/sigs.txt" "$d/1/sigs.txt" 2>&1 | head -1))"
+  elif [ -f "$d/1/sigs.txt" ] && ! cmp -s "$d/0/kinds.txt" "$d/1/kinds.txt"; then
+    echo "DIFF kinds $root $* (first: $(cmp "$d/0/kinds.txt" "$d/1/kinds.txt" 2>&1 | head -1))"
   else
-    if [ -f "$d/1/sigs.txt" ]; then sigs="$(wc -l < "$d/0/sigs.txt") -"; else sigs="0 L"; fi
+    if [ -f "$d/1/sigs.txt" ]; then sigs="$(wc -l < "$d/0/sigs.txt") - $(wc -l < "$d/0/kinds.txt")"; else sigs="0 L 0"; fi
     grep -E "^\{\"kind\":\"diagnostic\",\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)" "$d/0/diags.txt" | grep -vE "$LATER" > "$d/0/diags.in" || true
     priv='^{"kind":"diagnostic","code":"E0106"'
     grep -v "$priv" "$d/0/diags.in" > "$d/0/diags.rest" || true
@@ -141,7 +144,8 @@ dlines=$(awk '$1 == "SAME" { s += $7 } END { print s + 0 }' "$OUT/result.txt")
 glines=$(awk '$1 == "SAME" { s += $8 } END { print s + 0 }' "$OUT/result.txt")
 gsame=$(awk '$1 == "SAME" && $9 == "-" { s += 1 } END { print s + 0 }' "$OUT/result.txt")
 gskip=$(awk '$1 == "SAME" && $9 == "L" { s += 1 } END { print s + 0 }' "$OUT/result.txt")
-echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines, ast $alines lines, strings $slines lines, names $nlines lines, sigs $gsame roots $glines lines, sigs skipped (layout) $gskip, diags $dlines lines), $((end - start)) s"
+klines=$(awk '$1 == "SAME" { s += $10 } END { print s + 0 }' "$OUT/result.txt")
+echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines, ast $alines lines, strings $slines lines, names $nlines lines, sigs $gsame roots $glines lines, kinds $gsame roots $klines lines, sigs skipped (layout) $gskip, diags $dlines lines), $((end - start)) s"
 if grep -v '^SAME' "$OUT/result.txt"; then
   echo "stage1-gate: FAILED" >&2
   exit 1
