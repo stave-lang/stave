@@ -1,0 +1,240 @@
+// Tests of `types`, `consteval`, and `sigs`: the canonical key order (tags, then fields; a
+// component by its rank, lists element by element with a prefix first, a type argument before a
+// const one, a value before a const param before an unknown value), and const evaluation as
+// signature building does it (literal typing, overflow, division by zero, shifts, casts, cycles),
+// and the E0709 shape of a fn the compiler knows by path.
+import consteval;
+import diag;
+import diag_out;
+import diag_reg;
+import diag_sigs;
+import files;
+import sigs;
+import test_kit;
+import text;
+import types;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+
+fn tuple(tab: &mut types.Table, xs: &[u32]) -> u32 {
+    tab.begin();
+    for k in 0..xs.len() {
+        tab.push(xs[k]);
+    }
+    return tab.intern(types.TK_TUPLE, 0, 0);
+}
+
+fn adt(tab: &mut types.Table, d: u32, k: u32, x: u32, y: u32) -> u32 {
+    tab.begin();
+    tab.push_garg(k, x, y);
+    return tab.intern(types.TK_ADT, d, 0);
+}
+
+fn fn_ty(tab: &mut types.Table, p: u32, r: u32, feats: u32, deny: u32) -> u32 {
+    tab.begin();
+    tab.push(p);
+    tab.push(r);
+    tab.push(0);
+    tab.push(feats);
+    tab.push(deny);
+    return tab.intern(types.TK_FN, 1, 0);
+}
+
+// Whether the ranks of xs ascend strictly.
+fn ascending(num: &[u32], xs: &[u32]) -> bool {
+    for k in 1..xs.len() {
+        if num[xs[k - 1] as usize] >= num[xs[k] as usize] { return false; }
+    }
+    return true;
+}
+
+test fn scalar_and_pointer_keys() {
+    let mut tab = types.Table.new();
+    let u8_ = tab.int(false, types.W_8);
+    let us = tab.usize_t();
+    let i8_ = tab.int(true, types.W_8);
+    let f32_ = tab.key(types.TK_FLOAT, 1, 0);
+    let bf16 = tab.key(types.TK_FLOAT, 3, 0);
+    let b = tab.key(types.TK_BOOL, 0, 0);
+    let r = tab.mk_ref(false, i8_);
+    let rm = tab.mk_ref(true, u8_);
+    let p = tab.mk_ptr(false, u8_);
+    debug.assert(tab.mk_ref(false, i8_) == r, "an equal key is the same id");
+    debug.assert(tab.mk_ref(false, types.ERR) == types.ERR, "a key never holds the error type");
+    let xs = [u8_, us, i8_, f32_, bf16, b, r, rm, p];
+    let (num, order) = tab.rank(&xs);
+    debug.assert(order.len() == 9, "every root is ranked");
+    debug.assert(ascending(num.as_slice(), &xs), "unsigned before signed by width, size last; floats with bf16 last; a shared ref before a mut one");
+}
+
+test fn list_keys_and_heights() {
+    let mut tab = types.Table.new();
+    let u8_ = tab.int(false, types.W_8);
+    let i8_ = tab.int(true, types.W_8);
+    let unit = tab.unit();
+    let one = tuple(&mut tab, &[u8_]);
+    let two = tuple(&mut tab, &[u8_, u8_]);
+    let other = tuple(&mut tab, &[i8_]);
+    let nested = tuple(&mut tab, &[one]);
+    let a = adt(&mut tab, 3, types.GA_TYPE, u8_, 0);
+    let r = tab.mk_ref(false, nested);
+    // a ref (taller) ranks before a tuple and an adt (lower) by its tag
+    let xs = [u8_, i8_, r, unit, one, two, other, nested, a];
+    let (num, _) = tab.rank(&xs);
+    debug.assert(ascending(num.as_slice(), &xs), "tags first, then elements by rank, a prefix first");
+    debug.assert(tab.height.as_slice()[r as usize] == 4, "a type is one above its tallest component");
+}
+
+test fn argument_keys() {
+    let mut tab = types.Table.new();
+    let u8_ = tab.int(false, types.W_8);
+    let ty = adt(&mut tab, 5, types.GA_TYPE, u8_, 0);
+    let v3 = adt(&mut tab, 5, types.GA_VALUE, 0, 3);
+    let big = adt(&mut tab, 5, types.GA_VALUE, 1, 0);
+    let p0 = adt(&mut tab, 5, types.GA_PARAM, 0, 0);
+    let e = adt(&mut tab, 5, types.GA_ERROR, 0, 0);
+    let lower = adt(&mut tab, 4, types.GA_ERROR, 0, 0);
+    let xs = [u8_, lower, ty, v3, big, p0, e];
+    let (num, _) = tab.rank(&xs);
+    debug.assert(ascending(num.as_slice(), &xs), "decl first; a type before a const; a value (by its 64 bits) before a const param before an unknown value");
+}
+
+test fn fn_keys_differ_by_deny() {
+    let mut tab = types.Table.new();
+    let u32_ = tab.int(false, types.W_32);
+    let plain = fn_ty(&mut tab, u32_, u32_, 0, 0);
+    let deny = fn_ty(&mut tab, u32_, u32_, 0, 1);
+    let feat = fn_ty(&mut tab, u32_, u32_, 4, 0);
+    debug.assert(plain != deny, "fn types that differ only in `without` are two types");
+    let xs = [u32_, plain, deny, feat];
+    let (num, _) = tab.rank(&xs);
+    debug.assert(ascending(num.as_slice(), &xs), "params, then return, then features, then deny");
+}
+
+test fn features_print_maximal() {
+    let v3 = sigs.feature_closure(60);
+    debug.assert(v3 & 2 == 2 && v3 & 1 == 1, "avx2 implies avx and sse42");
+    debug.assert(sigs.feature_maximal(v3) == 60, "v3 prints its own members");
+    debug.assert(sigs.feature_maximal(sigs.feature_closure(4)) == 4, "avx2 alone prints avx2");
+}
+
+// The const named `name` of the root module: (state, neg, mag).
+fn const_of(o: &test_kit.Out, sg: &sigs.Sigs, name: &str) -> (u8, bool, u64) {
+    let d = o.item(o.module("main"), name);
+    if d == NONE { return (255u8, false, 0); }
+    let c = &sg.cx.consts;
+    return (c.state.as_slice()[d as usize], c.neg.as_slice()[d as usize], c.mag.as_slice()[d as usize]);
+}
+
+fn value_is(o: &test_kit.Out, sg: &sigs.Sigs, name: &str, neg: bool, mag: u64) -> bool {
+    let (st, n, m) = const_of(o, sg, name);
+    return st == consteval.CV_OK && n == neg && m == mag;
+}
+
+fn fails(o: &test_kit.Out, sg: &sigs.Sigs, name: &str) -> bool {
+    let (st, _, _) = const_of(o, sg, name);
+    return st == consteval.CV_FAIL;
+}
+
+fn build(src: &str) -> (test_kit.Out, sigs.Sigs) {
+    let o = test_kit.single(src);
+    let fl = files.FileList.empty();
+    let sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    return (o, sg);
+}
+
+test fn const_values_and_typing() {
+    let src = "const LEN: usize = 4;\nconst TWICE: usize = LEN * 2;\nconst HEX: u32 = 0xff + 1;\nconst NEG: i8 = -128i8;\nconst ARS: i32 = -7 >> 1;\nconst REM: i32 = -7 % 3;\nconst BITS: u16 = (0xf0 | 0x0f) & 0x3c ^ 1;\nconst WRAP: u8 = 300u32 as% u8;\nconst SAT: u8 = 300u32 as| u8;\nconst WADD: u8 = 250u8 +% 10;\nconst SSUB: i8 = -100i8 -| 100;\nconst MASKED: u32 = 1 <<% 33;\nconst BIG: u64 = 18446744073709551615;\nfn main() -> i32 { return 0; }\n";
+    let (o, sg) = build(src);
+    debug.assert(value_is(&o, &sg, "LEN", false, 4) && value_is(&o, &sg, "TWICE", false, 8), "a const of a const");
+    debug.assert(value_is(&o, &sg, "HEX", false, 256), "a hex literal takes the const's type");
+    debug.assert(value_is(&o, &sg, "NEG", true, 128), "`-128i8`: the minus is part of the literal");
+    debug.assert(value_is(&o, &sg, "ARS", true, 4) && value_is(&o, &sg, "REM", true, 1), "`>>` is arithmetic on a signed type, `%` has the dividend's sign");
+    debug.assert(value_is(&o, &sg, "BITS", false, 61), "`&` binds tighter than `^`, `^` tighter than `|`");
+    debug.assert(value_is(&o, &sg, "WRAP", false, 44) && value_is(&o, &sg, "SAT", false, 255), "`as%` truncates, `as|` saturates");
+    debug.assert(value_is(&o, &sg, "WADD", false, 4) && value_is(&o, &sg, "SSUB", true, 128), "wrapping and saturating operators");
+    debug.assert(value_is(&o, &sg, "MASKED", false, 2), "`<<%` masks the amount");
+    debug.assert(value_is(&o, &sg, "BIG", false, 18446744073709551615), "u64::MAX");
+}
+
+test fn const_failures() {
+    let src = "const MIX: u8 = 200 + 100 - 100u8;\nconst DIV0: u32 = 1 / 0;\nconst MINDIV: i8 = -128i8 / -1;\nconst OVER: u8 = 255 + 1;\nconst SUB: usize = 0 - 1;\nconst BIGSH: u32 = 1 << 32;\nconst LOSSY: u8 = 300u32 as u8;\nconst UNEG: u32 = -1;\nconst TOOBIG: u64 = 18446744073709551616;\nconst MISMATCH: u8 = 1u32;\nfn main() -> i32 { return 0; }\n";
+    let (o, sg) = build(src);
+    debug.assert(fails(&o, &sg, "MIX"), "an unsuffixed literal takes its chain's type: 200 + 100 overflows u8");
+    debug.assert(fails(&o, &sg, "DIV0") && fails(&o, &sg, "MINDIV"), "division by zero and MIN / -1 trap");
+    debug.assert(fails(&o, &sg, "OVER") && fails(&o, &sg, "SUB"), "overflow in the const's type");
+    debug.assert(fails(&o, &sg, "BIGSH"), "a shift amount outside the width");
+    debug.assert(fails(&o, &sg, "LOSSY"), "a lossy plain `as`");
+    debug.assert(fails(&o, &sg, "UNEG") && fails(&o, &sg, "TOOBIG"), "a literal outside its type");
+    debug.assert(fails(&o, &sg, "MISMATCH"), "a value of another type");
+}
+
+test fn const_cycles() {
+    let src = "const CA: usize = CB;\nconst CB: usize = CA;\nconst SELF: usize = SELF + 1;\nconst AFTER: usize = CA + 1;\nconst T: [u8; T2] = [0u8; 1];\nconst T2: usize = 1;\nfn main() -> i32 { return 0; }\n";
+    let (o, sg) = build(src);
+    debug.assert(fails(&o, &sg, "CA") && fails(&o, &sg, "CB"), "a cycle has no value");
+    debug.assert(fails(&o, &sg, "SELF"), "a const that reads itself");
+    debug.assert(fails(&o, &sg, "AFTER"), "a const that reads a cycle has no value either");
+    debug.assert(value_is(&o, &sg, "T2", false, 1), "a const another's type names comes first");
+    debug.assert(sg.cx.skip == consteval.CV_NONE, "nothing undecided");
+}
+
+test fn size_of_in_signatures() {
+    let src = "const W: usize = size_of::<u64>();\nconst P: usize = align_of::<(u8, u32)>();\nstruct S { a: u8, b: [u16; size_of::<T2>()] }\nstruct T2 { x: u32 }\nconst SS: usize = size_of::<S>();\nconst AS: usize = align_of::<S>();\nfn f(a: [u8; size_of::<u64>()]) {}\nfn main() -> i32 { return 0; }\n";
+    let (o, sg) = build(src);
+    debug.assert(sg.cx.skip == consteval.CV_NONE, "every layout decided");
+    debug.assert(value_is(&o, &sg, "W", false, 8) && value_is(&o, &sg, "P", false, 4), "a built-in type's size and alignment");
+    debug.assert(value_is(&o, &sg, "SS", false, 10) && value_is(&o, &sg, "AS", false, 2), "a struct whose field length is another's size: rounds");
+    let (oc, c) = build("struct A { x: [u8; size_of::<B>()] }\nstruct B { y: [u8; size_of::<A>()] }\nconst CA: usize = size_of::<A>();\nconst UN: usize = size_of::<str>();\nfn main() -> i32 { return 0; }\n");
+    debug.assert(c.cx.skip == consteval.CV_NONE, "a cycle of layouts ends");
+    debug.assert(fails(&oc, &c, "CA") && fails(&oc, &c, "UN"), "a layout on a cycle, or of an unsized type, fails");
+    let (_, g) = build("fn f<T>(a: [u8; size_of::<T>()]) {}\nfn main() -> i32 { return 0; }\n");
+    debug.assert(g.cx.skip == consteval.CV_NONE, "size_of of a type with params fails without a layout");
+}
+
+// stage0's line for `needs` on `std.string.String.new` in an edited copy of the shipped std
+// (the shape cannot arise from the shipped packages, which declare it on no such fn).
+const RUNTIME_ENTRY_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0709\",\"severity\":\"error\",\"message\":\"a runtime entry fn cannot declare `needs`\",\"primary\":{\"file\":\"/probe/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"related\":[{\"span\":{\"file\":\"/probe/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"label\":\"`needs` here\"}],\"fix\":{\"description\":\"remove `needs(...)` here, and call the feature-specific code through a `dispatch` function\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
+
+test fn runtime_entry_needs() {
+    let mut k = test_kit.kit();
+    let m = k.package("main", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(m, "std", s);
+    k.file(m, "main", "fn main() -> i32 { return 0; }\n");
+    k.file(s, "core", "pub enum Option<T> { Some(T), None }\npub trait Copy {}\n");
+    let mut src = vec.Vec::<u8>.new();
+    for _ in 0..20u32 {
+        src.extend_from_slice(mem.str_bytes("//\n"));
+    }
+    src.extend_from_slice(mem.str_bytes("pub struct String { n: u32 }\nimpl String {\n    pub fn new() -> String needs(avx2) {\n        return String.{ n: 0 };\n    }\n}\n"));
+    k.file(s, "string", text.string_of(src.as_slice()).as_str());
+    let o = k.run();
+    let mut fl = files.FileList.empty();
+    fl.pkg_builtin.push(false);
+    fl.pkg_builtin.push(true);
+    fl.pkg_root.push(true);
+    fl.pkg_root.push(false);
+    let sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let mut d = diag.Diags.new();
+    diag_sigs.sigs_diags(&mut d, &sg, &o.ds, &o.nm, &o.lx, &o.set, &o.toks, &o.cut);
+    debug.assert(d.len() == 1, "one diagnostic: E0709 on the known method");
+    let mut ft = diag_out.FileTable.sources();
+    ft.rank.push(0);
+    ft.rank.push(1);
+    ft.rank.push(2);
+    ft.path.push(mem.str_bytes("main.stv"));
+    ft.path.push(mem.str_bytes("/probe/lib709/std/core.stv"));
+    ft.path.push(mem.str_bytes("/probe/lib709/std/string.stv"));
+    ft.nsrc = ft.rank.len();
+    let rows = d.order(ft.rank.as_slice());
+    let out = diag_out.render(&d, rows.as_slice(), &ft, &o.set, true);
+    debug.assert(out.as_slice().eq(mem.str_bytes(RUNTIME_ENTRY_LINE)), "the JSON line is stage0's");
+    // a user fn spelled like a known one is none
+    let uo = test_kit.single("pub struct String { n: u32 }\nimpl String {\n    pub fn new() -> String needs(avx2) {\n        return String.{ n: 0 };\n    }\n}\nfn main() -> i32 { return 0; }\n");
+    let u = sigs.build(&fl, &uo.md, &uo.ds, &uo.nm, &uo.set, &uo.toks, &uo.cut, &uo.tree, &uo.res);
+    debug.assert(u.rows.len() == 0, "a user item is no runtime entry");
+}

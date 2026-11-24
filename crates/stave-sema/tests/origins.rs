@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use stave_sema::origins::{self, Flow, ParamClass, ResultOrigin};
 use stave_sema::sigs::ParamOrigin;
-use stave_sema::traits::World;
+use stave_sema::traits::{Answers, World};
 use stave_sema::types::{Interner, TypeKind};
 use stave_sema::{Config, DeclId, DeclKind, Fs, Program, Typeck};
 
@@ -174,7 +174,9 @@ fn kinds_of_types() {
     let mut tys = tc.types.clone();
     let sig = tc.sigs.fn_sig(root_fn(&p, "by_ref_view")).unwrap();
     let by_ref = tc.sigs.fn_sig(root_fn(&p, "by_ref")).unwrap();
-    let k = |tys: &mut stave_sema::TypeTable, t| stave_sema::kinds::kind_of(w, tys, t, &[]);
+    let k = |tys: &mut stave_sema::TypeTable, t| {
+        stave_sema::kinds::kind_of(w, tys, t, &[], &mut Answers::default())
+    };
     // &mut Lexer: a view, not Copy, not Flat, Frozen (it reaches only a `&str`)
     let m = k(&mut tys, sig.params[0]);
     assert!(m.view && !m.copy && !m.flat && m.frozen && m.sized);

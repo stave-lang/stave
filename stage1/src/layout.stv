@@ -1,0 +1,706 @@
+// Layouts and type depth (types/layout): per type of the type table its size and alignment (or
+// why it has none), its field offsets, and its depth (E0005 case `type`), from the signatures
+// alone. The same on every target (8-byte pointers, a 64-bit `usize`).
+//
+// Data:
+// - `Shapes`, per decl D: a struct's or enum's variants (a struct: one) and their field types as
+//   declared (generic params unsubstituted), and whether a field type still waits for a layout
+//   (signature rounds, `sigs.build`).
+// - `Parts`, per type t: the field types of an ADT instance after substitution, made on demand
+//   (the table grows: a substituted field is a type of its own). A field taller than the table
+//   holds is `TALL`; a field of the error type is `ERR`.
+// - `closure`: every type the given roots reach through components and fields, the set every
+//   per-type pass of this module and of `kinds` / `traits` runs over.
+//
+// Passes, each a round loop over the closure (a type's answer from its parts' answers; never a
+// recursion over the types):
+// - `layouts`: a type scans its parts in layout order (variants, fields, elements) and is decided
+//   by the first part without a layout, else by combining them. A round decides every type whose
+//   scan reaches a decided part; what no round decides holds itself by value somewhere in its
+//   scan (`size none`). `h` is the recursion height of stage0's walk: a part needed `d` levels
+//   down has its layout only while `d + h < MAX_DEPTH`.
+// - `depths`: depth = max(the key height, one above each part held by value); a type no round
+//   decides reaches a type that holds itself by value (`depth -`).
+// - `reach`: the types from which a marked type is reachable over given edges, as breadth-first
+//   rounds over the reversed edges (drop glue, held locks).
+import decls;
+import types;
+import prims.col;
+import prims.ragged;
+import prims.search;
+import prims.sort;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+const ERR: u32 = types.ERR;
+// A field whose substituted type would be taller than `types.MAX_HEIGHT`.
+pub const TALL: u32 = 4294967293;
+
+pub const MAX_DEPTH: u32 = 1000;
+const INF: u32 = 4294967295;
+
+// Layout states.
+pub const LS_OK: u8 = 0;
+pub const LS_OVER: u8 = 1;
+pub const LS_UNK: u8 = 2;
+// An ADT whose fields wait for a layout (signature rounds only).
+pub const LS_PEND: u8 = 3;
+
+// Why a type has no layout (`unlaid`).
+pub const NL_PARAM: u8 = 0;
+pub const NL_UNSIZED: u8 = 1;
+pub const NL_OTHER: u8 = 2;
+
+// ADT shape kinds.
+pub const SK_NONE: u8 = 0;
+pub const SK_STRUCT: u8 = 1;
+pub const SK_ENUM: u8 = 2;
+
+pub struct Shapes {
+    pub kind: vec.Vec<u8>,
+    // per D: its variants are the rows `v_lo[D]..v_lo[D + 1]` of `fields`
+    pub v_lo: vec.Vec<u32>,
+    pub fields: ragged.Ragged<u32>,
+    pub pend: vec.Vec<bool>,
+}
+
+impl Shapes {
+    pub fn kind_of(&self, d: u32) -> u8 {
+        if d as usize >= self.kind.len() { return SK_NONE; }
+        return self.kind.as_slice()[d as usize];
+    }
+}
+
+// The members of every decl by (parent, index): the field and variant decls sorted, and their
+// keys.
+fn members(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
+    let mut keys = vec.Vec::<u64>.new();
+    let mut ids = vec.Vec::<u32>.new();
+    for e in 0..ds.decls() {
+        let k = ds.kind.as_slice()[e];
+        let p = ds.parent.as_slice()[e];
+        if (k != decls.DK_FIELD && k != decls.DK_VARIANT) || p == NONE { continue; }
+        keys.push(search.pair(p, ds.index.as_slice()[e]));
+        ids.push(e as% u32);
+    }
+    let perm = sort.sort_perm(keys.as_slice());
+    let mut sk = vec.Vec::<u64>.with_capacity(perm.len());
+    let mut si = vec.Vec::<u32>.with_capacity(perm.len());
+    for j in 0..perm.len() {
+        let x = perm.as_slice()[j] as usize;
+        sk.push(keys.as_slice()[x]);
+        si.push(ids.as_slice()[x]);
+    }
+    return (sk, si);
+}
+
+// The run of members of decl p in the sorted keys.
+fn run_of(keys: &[u64], p: u32) -> (usize, usize) {
+    let lo = search.lower_bound(keys, search.pair(p, 0));
+    let hi = search.lower_bound(keys, search.pair(p + 1, 0));
+    return (lo, hi);
+}
+
+// The shapes of every struct and enum: `ty` holds a field decl's type, `params` a tuple
+// variant's payload (row per decl), `pend` per decl whether its type waits for a layout.
+pub fn shapes(ds: &decls.Decls, ty: &[u32], params: &ragged.Ragged<u32>, pend: &[bool]) -> Shapes {
+    let n = ds.decls();
+    let (keys, ids) = members(ds);
+    let mut sh = Shapes.{ kind: col.filled(n, SK_NONE), v_lo: vec.Vec::<u32>.with_capacity(n + 1), fields: ragged.Ragged::<u32>.new(), pend: col.filled(n, false) };
+    let mut row = vec.Vec::<u32>.new();
+    for d in 0..n {
+        sh.v_lo.push(sh.fields.rows() as% u32);
+        let k = ds.kind.as_slice()[d];
+        if k != decls.DK_STRUCT && k != decls.DK_ENUM { continue; }
+        let (lo, hi) = run_of(keys.as_slice(), d as% u32);
+        let mut waits = false;
+        if k == decls.DK_STRUCT {
+            sh.kind.as_mut_slice()[d] = SK_STRUCT;
+            row.clear();
+            for j in lo..hi {
+                let f = ids.as_slice()[j] as usize;
+                if ds.kind.as_slice()[f] != decls.DK_FIELD { continue; }
+                row.push(ty[f]);
+                waits = waits || pend[f];
+            }
+            sh.fields.push_row(row.as_slice());
+        } else {
+            sh.kind.as_mut_slice()[d] = SK_ENUM;
+            for j in lo..hi {
+                let v = ids.as_slice()[j];
+                if ds.kind.as_slice()[v as usize] != decls.DK_VARIANT { continue; }
+                row.clear();
+                waits = waits || pend[v as usize];
+                if ds.flags.as_slice()[v as usize] & decls.F_TUPLE != 0 {
+                    if (v as usize) < params.rows() { row.extend_from_slice(params.row(v as usize)); }
+                } else {
+                    let (a, b) = run_of(keys.as_slice(), v);
+                    for x in a..b {
+                        let f = ids.as_slice()[x] as usize;
+                        if ds.kind.as_slice()[f] != decls.DK_FIELD { continue; }
+                        row.push(ty[f]);
+                        waits = waits || pend[f];
+                    }
+                }
+                sh.fields.push_row(row.as_slice());
+            }
+        }
+        sh.pend.as_mut_slice()[d] = waits;
+    }
+    sh.v_lo.push(sh.fields.rows() as% u32);
+    return sh;
+}
+
+// The fields of ADT instances, made on demand.
+pub struct Parts {
+    f_at: vec.Vec<u32>,
+    f_n: vec.Vec<u32>,
+    v_at: vec.Vec<u32>,
+    v_n: vec.Vec<u32>,
+    pub f_ty: vec.Vec<u32>,
+    pub v_len: vec.Vec<u32>,
+    args: vec.Vec<u32>,
+}
+
+impl Parts {
+    pub fn new() -> Parts {
+        return Parts.{ f_at: vec.Vec::<u32>.new(), f_n: vec.Vec::<u32>.new(), v_at: vec.Vec::<u32>.new(), v_n: vec.Vec::<u32>.new(), f_ty: vec.Vec::<u32>.new(), v_len: vec.Vec::<u32>.new(), args: vec.Vec::<u32>.new() };
+    }
+
+    fn grow(&mut self, n: usize) {
+        while self.f_at.len() < n {
+            self.f_at.push(NONE);
+            self.f_n.push(0);
+            self.v_at.push(0);
+            self.v_n.push(0);
+        }
+    }
+
+    // Makes the fields of type t (an ADT with a shape; nothing else has fields).
+    pub fn make(&mut self, tab: &mut types.Table, sh: &Shapes, t: u32) {
+        self.grow(tab.len());
+        let i = t as usize;
+        if self.f_at.as_slice()[i] != NONE { return; }
+        self.f_at.as_mut_slice()[i] = self.f_ty.len() as% u32;
+        self.v_at.as_mut_slice()[i] = self.v_len.len() as% u32;
+        if tab.tag_of(t) != types.TK_ADT { return; }
+        let d = tab.a_of(t);
+        if sh.kind_of(d) == SK_NONE { return; }
+        self.args.clear();
+        self.args.extend_from_slice(tab.x(t));
+        let vlo = sh.v_lo.as_slice()[d as usize] as usize;
+        let vhi = sh.v_lo.as_slice()[d as usize + 1] as usize;
+        let mut nf: u32 = 0;
+        for v in vlo..vhi {
+            let fs = sh.fields.row(v);
+            for k in 0..fs.len() {
+                let f = fs[k];
+                let r = if f == ERR then ERR else tab.subst(f, self.args.as_slice());
+                self.f_ty.push(if f != ERR && r == ERR then TALL else r);
+            }
+            self.v_len.push(fs.len() as% u32);
+            nf = nf + fs.len() as% u32;
+        }
+        self.f_n.as_mut_slice()[i] = nf;
+        self.v_n.as_mut_slice()[i] = (vhi - vlo) as% u32;
+    }
+
+    // The fields of t, all variants in order (made before).
+    pub fn fields(&self, t: u32) -> &[u32] from self {
+        let i = t as usize;
+        if i >= self.f_at.len() || self.f_at.as_slice()[i] == NONE { return &self.f_ty.as_slice()[0..0]; }
+        let a = self.f_at.as_slice()[i] as usize;
+        return &self.f_ty.as_slice()[a..a + self.f_n.as_slice()[i] as usize];
+    }
+
+    // The field counts of t's variants (made before).
+    pub fn variants(&self, t: u32) -> &[u32] from self {
+        let i = t as usize;
+        if i >= self.f_at.len() || self.f_at.as_slice()[i] == NONE { return &self.v_len.as_slice()[0..0]; }
+        let a = self.v_at.as_slice()[i] as usize;
+        return &self.v_len.as_slice()[a..a + self.v_n.as_slice()[i] as usize];
+    }
+}
+
+fn real(t: u32) -> bool {
+    return t != ERR && t != TALL && t != NONE;
+}
+
+// Every type the roots reach through components and ADT fields (fields made on the way), in
+// the order found.
+pub fn closure(tab: &mut types.Table, sh: &Shapes, pa: &mut Parts, roots: &[u32]) -> vec.Vec<u32> {
+    let mut seen = col.filled(tab.len(), false);
+    let mut out = vec.Vec::<u32>.new();
+    let mut stack = vec.Vec::<u32>.new();
+    for k in 0..roots.len() {
+        if real(roots[k]) { stack.push(roots[k]); }
+    }
+    let mut kids = vec.Vec::<u32>.new();
+    while stack.len() > 0 {
+        let t = stack.as_slice()[stack.len() - 1];
+        stack.truncate(stack.len() - 1);
+        while seen.len() < tab.len() {
+            seen.push(false);
+        }
+        if seen.as_slice()[t as usize] { continue; }
+        seen.as_mut_slice()[t as usize] = true;
+        out.push(t);
+        tab.kids(t, &mut kids);
+        stack.extend_from_slice(kids.as_slice());
+        if tab.tag_of(t) == types.TK_ADT {
+            pa.make(tab, sh, t);
+            let fs = pa.fields(t);
+            for k in 0..fs.len() {
+                if real(fs[k]) { stack.push(fs[k]); }
+            }
+        }
+    }
+    return out;
+}
+
+// The layout of every type of a closure.
+pub struct Lay {
+    pub st: vec.Vec<u8>,
+    pub size: vec.Vec<u64>,
+    pub aln: vec.Vec<u64>,
+    pub h: vec.Vec<u32>,
+}
+
+fn add_ok(a: u64, b: u64) -> (bool, u64) {
+    if a > 18446744073709551615 - b { return (false, 0); }
+    return (true, a + b);
+}
+
+fn mul_ok(a: u64, b: u64) -> (bool, u64) {
+    let (hi, lo) = a.mul_wide(b);
+    return (hi == 0, lo);
+}
+
+// The C-like record of fields (sizes ss, aligns als) from offset `start`: whether it fits, its
+// size and alignment; the offsets into `offs` when given.
+fn record(ss: &[u64], als: &[u64], start: u64, offs: &mut vec.Vec<u64>) -> (bool, u64, u64) {
+    let mut off = start;
+    let mut aln: u64 = 1;
+    for k in 0..ss.len() {
+        let a = if als[k] == 0 then 1u64 else als[k];
+        let (ok, x) = add_ok(off, a - 1);
+        if !ok { return (false, 0, 0); }
+        off = x / a * a;
+        offs.push(off);
+        let (ok2, y) = add_ok(off, ss[k]);
+        if !ok2 { return (false, 0, 0); }
+        off = y;
+        if a > aln { aln = a; }
+    }
+    let (ok, z) = add_ok(off, aln - 1);
+    if !ok { return (false, 0, 0); }
+    return (true, z / aln * aln, aln);
+}
+
+// The parts of t in layout order (into out), and its own layout when it has no parts:
+// (state, size, alignment, has parts).
+fn lay_parts(tab: &types.Table, sh: &Shapes, pa: &Parts, t: u32, out: &mut vec.Vec<u32>) -> (u8, u64, u64, bool) {
+    out.clear();
+    let tag = tab.tag_of(t);
+    let a = tab.a_of(t);
+    let b = tab.b_of(t);
+    if tag == types.TK_INT {
+        let s: u64 = if b == types.W_8 then 1 else if b == types.W_16 then 2 else if b == types.W_32 then 4 else 8;
+        return (LS_OK, s, s, false);
+    }
+    if tag == types.TK_FLOAT {
+        let s: u64 = if a == 1 then 4 else if a == 2 then 8 else 2;
+        return (LS_OK, s, s, false);
+    }
+    if tag == types.TK_BOOL { return (LS_OK, 1, 1, false); }
+    if tag == types.TK_CHAR { return (LS_OK, 4, 4, false); }
+    if tag == types.TK_NEVER { return (LS_OK, 0, 1, false); }
+    if tag == types.TK_REF || tag == types.TK_PTR {
+        let it = tab.tag_of(b);
+        if it == types.TK_STR || it == types.TK_SLICE { return (LS_OK, 16, 8, false); }
+        return (LS_OK, 8, 8, false);
+    }
+    if tag == types.TK_FN { return (LS_OK, 16, 8, false); }
+    if tag == types.TK_MASK {
+        if b == types.LANES_N { return (LS_UNK, 0, 0, false); }
+        let s = (a as u64 / 8) * (b as u64);
+        return (LS_OK, s, s, false);
+    }
+    if tag == types.TK_VECTOR {
+        if b == types.LANES_N { return (LS_UNK, 0, 0, false); }
+        out.push(a);
+        return (LS_OK, 0, 0, true);
+    }
+    if tag == types.TK_ARRAY {
+        if tab.x(t)[0] != types.GA_VALUE { return (LS_UNK, 0, 0, false); }
+        out.push(a);
+        return (LS_OK, 0, 0, true);
+    }
+    if tag == types.TK_RANGE {
+        out.push(a);
+        return (LS_OK, 0, 0, true);
+    }
+    if tag == types.TK_TUPLE {
+        out.extend_from_slice(tab.x(t));
+        return (LS_OK, 0, 0, true);
+    }
+    if tag == types.TK_ADT {
+        if sh.kind_of(a) == SK_NONE { return (LS_UNK, 0, 0, false); }
+        if sh.pend.as_slice()[a as usize] { return (LS_PEND, 0, 0, false); }
+        out.extend_from_slice(pa.fields(t));
+        return (LS_OK, 0, 0, true);
+    }
+    return (LS_UNK, 0, 0, false);
+}
+
+// The layout of type t (all parts laid out) from its parts' layouts.
+fn combine(tab: &types.Table, sh: &Shapes, pa: &Parts, ly: &Lay, t: u32, ps: &[u32], ss: &mut vec.Vec<u64>, als: &mut vec.Vec<u64>, offs: &mut vec.Vec<u64>) -> (u8, u64, u64) {
+    ss.clear();
+    als.clear();
+    for k in 0..ps.len() {
+        ss.push(ly.size.as_slice()[ps[k] as usize]);
+        als.push(ly.aln.as_slice()[ps[k] as usize]);
+    }
+    let tag = tab.tag_of(t);
+    if tag == types.TK_ARRAY {
+        let xs = tab.x(t);
+        let n = ((xs[1] as u64) << 32) | (xs[2] as u64);
+        let (ok, s) = mul_ok(ss.as_slice()[0], n);
+        if !ok { return (LS_OVER, 0, 0); }
+        return (LS_OK, s, als.as_slice()[0]);
+    }
+    if tag == types.TK_VECTOR {
+        let (ok, s) = mul_ok(ss.as_slice()[0], tab.b_of(t) as u64);
+        if !ok { return (LS_OVER, 0, 0); }
+        return (LS_OK, s, s);
+    }
+    if tag == types.TK_RANGE {
+        let s0 = ss.as_slice()[0];
+        let a0 = als.as_slice()[0];
+        ss.push(s0);
+        als.push(a0);
+    }
+    if tag == types.TK_ADT && sh.kind_of(tab.a_of(t)) == SK_ENUM {
+        let vs = pa.variants(t);
+        let mut size: u64 = 4;
+        let mut aln: u64 = 4;
+        let mut at: usize = 0;
+        for v in 0..vs.len() {
+            let n = vs[v] as usize;
+            offs.clear();
+            let (ok, s, a) = record(&ss.as_slice()[at..at + n], &als.as_slice()[at..at + n], 4, offs);
+            if !ok { return (LS_OVER, 0, 0); }
+            if s > size { size = s; }
+            if a > aln { aln = a; }
+            at = at + n;
+        }
+        let (ok, z) = add_ok(size, aln - 1);
+        if !ok { return (LS_OVER, 0, 0); }
+        return (LS_OK, z / aln * aln, aln);
+    }
+    offs.clear();
+    let (ok, s, a) = record(ss.as_slice(), als.as_slice(), 0, offs);
+    if !ok { return (LS_OVER, 0, 0); }
+    return (LS_OK, s, a);
+}
+
+fn grow_lay(ly: &mut Lay, n: usize) {
+    while ly.st.len() < n {
+        ly.st.push(LS_UNK);
+        ly.size.push(0);
+        ly.aln.push(0);
+        ly.h.push(INF);
+    }
+}
+
+// The layouts of the types of closure w (fields made), in rounds: a type waits at its first
+// part not decided yet; it is decided by the first part without a layout, or once every part
+// has one.
+pub fn layouts(tab: &types.Table, sh: &Shapes, pa: &Parts, w: &[u32]) -> Lay {
+    let n = tab.len();
+    let mut ly = Lay.{ st: vec.Vec::<u8>.new(), size: vec.Vec::<u64>.new(), aln: vec.Vec::<u64>.new(), h: vec.Vec::<u32>.new() };
+    grow_lay(&mut ly, n);
+    let mut done = col.filled(n, false);
+    let mut cur = col.filled(n, 0u32);
+    let mut hm = col.filled(n, 0u32);
+    let mut pend = vec.Vec::<u32>.new();
+    let mut ps = vec.Vec::<u32>.new();
+    for k in 0..w.len() {
+        let t = w[k];
+        let (st, s, a, has) = lay_parts(tab, sh, pa, t, &mut ps);
+        if has {
+            pend.push(t);
+        } else {
+            let i = t as usize;
+            ly.st.as_mut_slice()[i] = st;
+            ly.size.as_mut_slice()[i] = s;
+            ly.aln.as_mut_slice()[i] = a;
+            ly.h.as_mut_slice()[i] = 0;
+            done.as_mut_slice()[i] = true;
+        }
+    }
+    let mut ss = vec.Vec::<u64>.new();
+    let mut als = vec.Vec::<u64>.new();
+    let mut offs = vec.Vec::<u64>.new();
+    let mut next = vec.Vec::<u32>.new();
+    loop {
+        let mut progress = false;
+        next.clear();
+        for j in 0..pend.len() {
+            let t = pend.as_slice()[j];
+            let i = t as usize;
+            let _ = lay_parts(tab, sh, pa, t, &mut ps);
+            let mut c = cur.as_slice()[i] as usize;
+            let mut h = hm.as_slice()[i];
+            let mut state: u8 = 255;
+            while c < ps.len() {
+                let p = ps.as_slice()[c];
+                if !real(p) {
+                    state = LS_UNK;
+                    break;
+                }
+                if !done.as_slice()[p as usize] { break; }
+                let ph = ly.h.as_slice()[p as usize];
+                if ph > h { h = ph; }
+                let pst = ly.st.as_slice()[p as usize];
+                if pst != LS_OK {
+                    state = pst;
+                    break;
+                }
+                c = c + 1;
+            }
+            cur.as_mut_slice()[i] = c as% u32;
+            hm.as_mut_slice()[i] = h;
+            if state == 255 && c < ps.len() {
+                next.push(t);
+                continue;
+            }
+            progress = true;
+            done.as_mut_slice()[i] = true;
+            ly.h.as_mut_slice()[i] = h + 1;
+            if state != 255 {
+                ly.st.as_mut_slice()[i] = state;
+            } else {
+                let (st, s, a) = combine(tab, sh, pa, &ly, t, ps.as_slice(), &mut ss, &mut als, &mut offs);
+                ly.st.as_mut_slice()[i] = st;
+                ly.size.as_mut_slice()[i] = s;
+                ly.aln.as_mut_slice()[i] = a;
+            }
+        }
+        pend.clear();
+        pend.extend_from_slice(next.as_slice());
+        if !progress || pend.len() == 0 { break; }
+    }
+    // what no round decides waits on itself: no layout at any depth
+    for j in 0..pend.len() {
+        let i = pend.as_slice()[j] as usize;
+        ly.st.as_mut_slice()[i] = LS_UNK;
+        ly.h.as_mut_slice()[i] = INF;
+    }
+    return ly;
+}
+
+impl Lay {
+    // The layout state of t needed `d` levels below the type asked about.
+    pub fn at(&self, t: u32, d: u32) -> u8 {
+        if !real(t) || t as usize >= self.st.len() { return LS_UNK; }
+        let h = self.h.as_slice()[t as usize];
+        if h == INF || d + h >= MAX_DEPTH { return LS_UNK; }
+        return self.st.as_slice()[t as usize];
+    }
+}
+
+// Why type t (whose layout is unknown) has none: the walk down to the first part without one.
+pub fn unlaid(tab: &types.Table, sh: &Shapes, pa: &Parts, ly: &Lay, t0: u32) -> u8 {
+    let mut t = t0;
+    let mut depth: u32 = 0;
+    let mut ps = vec.Vec::<u32>.new();
+    loop {
+        if depth >= MAX_DEPTH || !real(t) { return NL_OTHER; }
+        let tag = tab.tag_of(t);
+        ps.clear();
+        if tag == types.TK_PARAM || tag == types.TK_CONSTPARAM || tag == types.TK_SELF { return NL_PARAM; }
+        if tag == types.TK_STR || tag == types.TK_SLICE { return NL_UNSIZED; }
+        if (tag == types.TK_VECTOR || tag == types.TK_MASK) && tab.b_of(t) == types.LANES_N { return NL_UNSIZED; }
+        if tag == types.TK_ARRAY {
+            let k = tab.x(t)[0];
+            if k == types.GA_PARAM { return NL_PARAM; }
+            if k != types.GA_VALUE { return NL_OTHER; }
+            ps.push(tab.a_of(t));
+        } else if tag == types.TK_RANGE || tag == types.TK_VECTOR {
+            ps.push(tab.a_of(t));
+        } else if tag == types.TK_TUPLE {
+            ps.extend_from_slice(tab.x(t));
+        } else if tag == types.TK_ADT {
+            if sh.kind_of(tab.a_of(t)) == SK_NONE { return NL_OTHER; }
+            ps.extend_from_slice(pa.fields(t));
+        } else {
+            return NL_OTHER;
+        }
+        let mut next = NONE;
+        for k in 0..ps.len() {
+            if ly.at(ps.as_slice()[k], depth + 1) == LS_UNK {
+                next = ps.as_slice()[k];
+                break;
+            }
+        }
+        if next == NONE { return NL_OTHER; }
+        t = next;
+        depth = depth + 1;
+    }
+}
+
+// The field offsets of struct, enum, or tuple t (laid out), per variant: offsets into `offs`,
+// each variant's count into `counts`.
+pub fn offsets(tab: &types.Table, sh: &Shapes, pa: &Parts, ly: &Lay, t: u32, offs: &mut vec.Vec<u64>, counts: &mut vec.Vec<u32>) {
+    offs.clear();
+    counts.clear();
+    let mut ss = vec.Vec::<u64>.new();
+    let mut als = vec.Vec::<u64>.new();
+    let tag = tab.tag_of(t);
+    let mut fs = vec.Vec::<u32>.new();
+    let mut start: u64 = 0;
+    if tag == types.TK_TUPLE {
+        fs.extend_from_slice(tab.x(t));
+        counts.push(fs.len() as% u32);
+    } else {
+        fs.extend_from_slice(pa.fields(t));
+        counts.extend_from_slice(pa.variants(t));
+        if sh.kind_of(tab.a_of(t)) == SK_ENUM { start = 4; }
+    }
+    for k in 0..fs.len() {
+        ss.push(ly.size.as_slice()[fs.as_slice()[k] as usize]);
+        als.push(ly.aln.as_slice()[fs.as_slice()[k] as usize]);
+    }
+    let mut at: usize = 0;
+    for v in 0..counts.len() {
+        let n = counts.as_slice()[v] as usize;
+        let _ = record(&ss.as_slice()[at..at + n], &als.as_slice()[at..at + n], start, offs);
+        at = at + n;
+    }
+}
+
+// The depth of every type of closure w, and whether it reaches a type that holds itself by
+// value (then its depth is not decided).
+pub fn depths(tab: &types.Table, sh: &Shapes, pa: &Parts, w: &[u32]) -> (vec.Vec<u32>, vec.Vec<bool>) {
+    let n = tab.len();
+    let mut dep = col.filled(n, 0u32);
+    let mut done = col.filled(n, false);
+    let mut pend = vec.Vec::<u32>.new();
+    let mut ps = vec.Vec::<u32>.new();
+    for k in 0..w.len() {
+        let t = w[k];
+        depth_parts(tab, sh, pa, t, &mut ps);
+        let base = tab.height.as_slice()[t as usize];
+        dep.as_mut_slice()[t as usize] = base;
+        if ps.len() == 0 {
+            done.as_mut_slice()[t as usize] = true;
+        } else {
+            pend.push(t);
+        }
+    }
+    let mut next = vec.Vec::<u32>.new();
+    loop {
+        let mut progress = false;
+        next.clear();
+        for j in 0..pend.len() {
+            let t = pend.as_slice()[j];
+            depth_parts(tab, sh, pa, t, &mut ps);
+            let mut d = dep.as_slice()[t as usize];
+            let mut ready = true;
+            for k in 0..ps.len() {
+                let p = ps.as_slice()[k];
+                if p == TALL {
+                    if d < MAX_DEPTH + 1 { d = MAX_DEPTH + 1; }
+                    continue;
+                }
+                // a field of the error type is one level deep
+                let pd = if p == ERR then 1u32 else if done.as_slice()[p as usize] then dep.as_slice()[p as usize] else NONE;
+                if pd == NONE {
+                    ready = false;
+                    break;
+                }
+                let up = if pd >= INF - 1 then pd else pd + 1;
+                if up > d { d = up; }
+            }
+            if !ready {
+                next.push(t);
+                continue;
+            }
+            progress = true;
+            dep.as_mut_slice()[t as usize] = d;
+            done.as_mut_slice()[t as usize] = true;
+        }
+        pend.clear();
+        pend.extend_from_slice(next.as_slice());
+        if !progress || pend.len() == 0 { break; }
+    }
+    let mut cyclic = col.filled(n, false);
+    for j in 0..pend.len() {
+        cyclic.as_mut_slice()[pend.as_slice()[j] as usize] = true;
+    }
+    return (dep, cyclic);
+}
+
+// The parts of t held by value: array, range, and vector elements, tuple elements, ADT fields.
+fn depth_parts(tab: &types.Table, sh: &Shapes, pa: &Parts, t: u32, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let tag = tab.tag_of(t);
+    if tag == types.TK_ARRAY || tag == types.TK_RANGE || tag == types.TK_VECTOR {
+        out.push(tab.a_of(t));
+    } else if tag == types.TK_TUPLE {
+        out.extend_from_slice(tab.x(t));
+    } else if tag == types.TK_ADT && sh.kind_of(tab.a_of(t)) != SK_NONE {
+        out.extend_from_slice(pa.fields(t));
+    }
+}
+
+// The types that reach a marked type over edges (src[k] -> dst[k]): breadth-first rounds over
+// the reversed edges, from the marked types. `n`: the number of types.
+pub fn reach(n: usize, src: &[u32], dst: &[u32], marked: &[bool]) -> vec.Vec<bool> {
+    // reversed edges by destination: count, scan, place
+    let mut off = col.filled(n + 1, 0u32);
+    for k in 0..dst.len() {
+        let d = dst[k] as usize;
+        let c = off.as_slice()[d + 1] + 1;
+        off.as_mut_slice()[d + 1] = c;
+    }
+    for i in 1..n + 1 {
+        let c = off.as_slice()[i] + off.as_slice()[i - 1];
+        off.as_mut_slice()[i] = c;
+    }
+    let mut fill = vec.Vec::<u32>.new();
+    fill.extend_from_slice(off.as_slice());
+    let mut srcs = col.filled(dst.len(), 0u32);
+    for k in 0..dst.len() {
+        let d = dst[k] as usize;
+        let at = fill.as_slice()[d];
+        srcs.as_mut_slice()[at as usize] = src[k];
+        fill.as_mut_slice()[d] = at + 1;
+    }
+    let mut hit = col.filled(n, false);
+    let mut front = vec.Vec::<u32>.new();
+    for t in 0..n {
+        if t < marked.len() && marked[t] {
+            hit.as_mut_slice()[t] = true;
+            front.push(t as% u32);
+        }
+    }
+    let mut next = vec.Vec::<u32>.new();
+    while front.len() > 0 {
+        next.clear();
+        for j in 0..front.len() {
+            let d = front.as_slice()[j] as usize;
+            for x in off.as_slice()[d] as usize..off.as_slice()[d + 1] as usize {
+                let s = srcs.as_slice()[x] as usize;
+                if !hit.as_slice()[s] {
+                    hit.as_mut_slice()[s] = true;
+                    next.push(s as% u32);
+                }
+            }
+        }
+        front.clear();
+        front.extend_from_slice(next.as_slice());
+    }
+    return hit;
+}

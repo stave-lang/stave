@@ -1,0 +1,655 @@
+// The impl checks over the impl table, as stage0's `check_impls` raises them: per impl decl in
+// D order, E0421 (a param its self type does not bind), E0420 (an impl in neither the package of
+// its trait nor that of its self type's head), E1408 (an impl of `Flat` or `Frozen`), E0810 (an
+// unsafe trait implemented without `unsafe("..")`), E0907 (`pub` on a trait impl method), E0906
+// (a trait method missing, or a method the trait lacks), E0419 (`Drop` for a type of another
+// package), E0416 (a `Drop` impl whose head unifies with a `Copy` impl's), E0414 case `drop` (a
+// `Drop` impl that does not cover the view params of its ADT), and E0903 (two impls of one trait
+// whose heads and trait arguments unify, or an operator impl beside a built-in one). An impl that
+// fails E0421, E0420, E1408, or E0419 takes part in no later check, and only the impls that pass
+// every check are met by the overlap check of later ones.
+//
+// Not raised here yet (stage0 raises them in the same pass): E0905 (a method signature that
+// differs from the trait's), E0415 and E0422 (Copy under the impl's own bounds).
+import ast;
+import decls;
+import diag;
+import diag_sigs;
+import files;
+import generated.terminals;
+import intern;
+import items;
+import lex;
+import modules;
+import source;
+import sigs;
+import traits;
+import types;
+import prims.col;
+import prims.search;
+import prims.sort;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = 4294967295;
+const ERR: u32 = types.ERR;
+
+const T_KW_PUB: u8 = terminals.T_KW_PUB as% u8;
+const T_KW_UNSAFE: u8 = terminals.T_KW_UNSAFE as% u8;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
+const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
+
+fn tk(t: &lex.Tokens, tok: u32) -> u8 {
+    return t.kind.as_slice()[tok as usize] as% u8;
+}
+
+fn pkg_of(ds: &decls.Decls, md: &modules.Modules, d: u32) -> u32 {
+    if d == NONE || d as usize >= ds.decls() { return NONE; }
+    let m = ds.module.as_slice()[d as usize];
+    if m == NONE { return NONE; }
+    return md.mod_pkg.as_slice()[m as usize];
+}
+
+// The dotted path of decl d (`main.Area`, `std.core.Copy`, `main.S.impl`).
+fn decl_path(out: &mut vec.Vec<u8>, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, d: u32) {
+    let mut chain = vec.Vec::<u32>.new();
+    let mut x = d;
+    while x != NONE {
+        chain.push(x);
+        if ds.kind.as_slice()[x as usize] == decls.DK_MODULE { break; }
+        x = ds.parent.as_slice()[x as usize];
+    }
+    let top = chain.as_slice()[chain.len() - 1];
+    let m = ds.module.as_slice()[top as usize];
+    let start = out.len();
+    if m != NONE { out.extend_from_slice(md.text(m as usize)); }
+    let mut j = chain.len();
+    while j > 0 {
+        j = j - 1;
+        let e = chain.as_slice()[j];
+        if ds.kind.as_slice()[e as usize] == decls.DK_MODULE { continue; }
+        if out.len() > start { out.push(46); }
+        if ds.kind.as_slice()[e as usize] == decls.DK_IMPL {
+            out.extend_from_slice(mem.str_bytes("impl"));
+        } else {
+            out.extend_from_slice(nm.tab.text(ds.name.as_slice()[e as usize] as usize));
+        }
+    }
+}
+
+// The members of every decl sorted by (parent, D): keys and decls.
+fn by_parent(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
+    let mut keys = vec.Vec::<u64>.new();
+    for e in 0..ds.decls() {
+        let p = ds.parent.as_slice()[e];
+        if p == NONE { continue; }
+        keys.push(search.pair(p, e as% u32));
+    }
+    let perm = sort.sort_perm(keys.as_slice());
+    let mut sk = vec.Vec::<u64>.new();
+    let mut si = vec.Vec::<u32>.new();
+    for j in 0..perm.len() {
+        let k = keys.as_slice()[perm.as_slice()[j] as usize];
+        sk.push(k);
+        si.push((k & 4294967295) as% u32);
+    }
+    return (sk, si);
+}
+
+fn members_of(keys: &[u64], ids: &[u32], p: u32, kind: u8, ds: &decls.Decls, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let lo = search.lower_bound(keys, search.pair(p, 0));
+    let hi = search.lower_bound(keys, search.pair(p + 1, 0));
+    for j in lo..hi {
+        if ds.kind.as_slice()[ids[j] as usize] == kind { out.push(ids[j]); }
+    }
+}
+
+// The generic params of impl d (rows lo..hi) that its self type does not name.
+fn unbound_params(tab: &types.Table, st: u32, n: usize, out: &mut vec.Vec<u32>) {
+    out.clear();
+    if st == ERR { return; }
+    let mut used = col.filled(n, false);
+    let mut stack = vec.Vec::<u32>.new();
+    let mut kids = vec.Vec::<u32>.new();
+    stack.push(st);
+    while stack.len() > 0 {
+        let x = stack.as_slice()[stack.len() - 1];
+        stack.truncate(stack.len() - 1);
+        let tag = tab.tag_of(x);
+        let xs = tab.x(x);
+        if (tag == types.TK_PARAM || tag == types.TK_CONSTPARAM) && (tab.a_of(x) as usize) < n { used.as_mut_slice()[tab.a_of(x) as usize] = true; }
+        if tag == types.TK_ARRAY && xs[0] == types.GA_PARAM && (xs[1] as usize) < n { used.as_mut_slice()[xs[1] as usize] = true; }
+        if tag == types.TK_ADT {
+            let mut k: usize = 0;
+            while k + 2 < xs.len() {
+                if xs[k] == types.GA_PARAM && (xs[k + 1] as usize) < n { used.as_mut_slice()[xs[k + 1] as usize] = true; }
+                k = k + 3;
+            }
+        }
+        tab.kids(x, &mut kids);
+        stack.extend_from_slice(kids.as_slice());
+    }
+    for i in 0..n {
+        if !used.as_slice()[i] { out.push(i as% u32); }
+    }
+}
+
+// Syntactic unification of two impl heads: impl a's params are the variables 0..na, impl b's
+// na..na + nb (b's types shifted). A variable is bound once (3 words: kind NONE while unbound),
+// with an occurs check.
+struct Unifier {
+    binds: vec.Vec<u32>,
+    nv: u32,
+}
+
+impl Unifier {
+    fn resolve(&self, tab: &types.Table, t: u32) -> u32 {
+        let mut x = t;
+        loop {
+            if tab.tag_of(x) != types.TK_PARAM { return x; }
+            let i = tab.a_of(x);
+            if i >= self.nv || self.binds.as_slice()[3 * i as usize] != types.GA_TYPE { return x; }
+            x = self.binds.as_slice()[3 * i as usize + 1];
+        }
+    }
+
+    fn resolve_const(&self, k: u32, x: u32, y: u32) -> (u32, u32, u32) {
+        let mut c = (k, x, y);
+        loop {
+            let (ck, cx, _) = c;
+            if ck != types.GA_PARAM || cx >= self.nv { return c; }
+            let b = 3 * cx as usize;
+            let bk = self.binds.as_slice()[b];
+            if bk == NONE || bk == types.GA_TYPE { return c; }
+            c = (bk, self.binds.as_slice()[b + 1], self.binds.as_slice()[b + 2]);
+        }
+    }
+
+    fn occurs(&self, tab: &types.Table, v: u32, t: u32) -> bool {
+        let mut stack = vec.Vec::<u32>.new();
+        let mut kids = vec.Vec::<u32>.new();
+        stack.push(t);
+        let mut steps: usize = 0;
+        while stack.len() > 0 && steps < 1000000 {
+            steps = steps + 1;
+            let x0 = stack.as_slice()[stack.len() - 1];
+            stack.truncate(stack.len() - 1);
+            let x = self.resolve(tab, x0);
+            if tab.tag_of(x) == types.TK_PARAM {
+                if tab.a_of(x) == v { return true; }
+                continue;
+            }
+            tab.kids(x, &mut kids);
+            stack.extend_from_slice(kids.as_slice());
+        }
+        return false;
+    }
+
+    fn bind(&mut self, tab: &types.Table, v: u32, t: u32) -> bool {
+        if self.binds.as_slice()[3 * v as usize] != NONE { return false; }
+        if self.occurs(tab, v, t) { return false; }
+        self.binds.as_mut_slice()[3 * v as usize] = types.GA_TYPE;
+        self.binds.as_mut_slice()[3 * v as usize + 1] = t;
+        return true;
+    }
+
+    fn unify_const(&mut self, pk: u32, px: u32, py: u32, xk: u32, xx: u32, xy: u32) -> bool {
+        let (ak, ax, ay) = self.resolve_const(pk, px, py);
+        let (bk, bx, by) = self.resolve_const(xk, xx, xy);
+        if (ak == bk && ax == bx && ay == by) || ak == types.GA_ERROR || bk == types.GA_ERROR { return true; }
+        if ak == types.GA_PARAM && ax < self.nv && self.binds.as_slice()[3 * ax as usize] == NONE {
+            self.set_const(ax, bk, bx, by);
+            return true;
+        }
+        if bk == types.GA_PARAM && bx < self.nv && self.binds.as_slice()[3 * bx as usize] == NONE {
+            self.set_const(bx, ak, ax, ay);
+            return true;
+        }
+        return false;
+    }
+
+    fn set_const(&mut self, v: u32, k: u32, x: u32, y: u32) {
+        let b = 3 * v as usize;
+        self.binds.as_mut_slice()[b] = k;
+        self.binds.as_mut_slice()[b + 1] = x;
+        self.binds.as_mut_slice()[b + 2] = y;
+    }
+
+    // Whether a and b have a common instance.
+    fn unify(&mut self, tab: &types.Table, a: u32, b: u32) -> bool {
+        let mut stack = vec.Vec::<u32>.new();
+        stack.push(a);
+        stack.push(b);
+        while stack.len() > 0 {
+            let n = stack.len();
+            let x = self.resolve(tab, stack.as_slice()[n - 1]);
+            let p = self.resolve(tab, stack.as_slice()[n - 2]);
+            stack.truncate(n - 2);
+            if p == x || p == ERR || x == ERR { continue; }
+            let tp = tab.tag_of(p);
+            let tx = tab.tag_of(x);
+            if tp == types.TK_PARAM && tab.a_of(p) < self.nv {
+                if !self.bind(tab, tab.a_of(p), x) { return false; }
+                continue;
+            }
+            if tx == types.TK_PARAM && tab.a_of(x) < self.nv {
+                if !self.bind(tab, tab.a_of(x), p) { return false; }
+                continue;
+            }
+            if tp != tx { return false; }
+            let pa = tab.a_of(p);
+            let xa = tab.a_of(x);
+            let pb = tab.b_of(p);
+            let xb = tab.b_of(x);
+            if tp == types.TK_REF || tp == types.TK_PTR {
+                if pa != xa { return false; }
+                stack.push(pb);
+                stack.push(xb);
+            } else if tp == types.TK_ARRAY {
+                let px = tab.x(p);
+                let xx = tab.x(x);
+                if !self.unify_const(px[0], px[1], px[2], xx[0], xx[1], xx[2]) { return false; }
+                stack.push(pa);
+                stack.push(xa);
+            } else if tp == types.TK_SLICE || tp == types.TK_RANGE || tp == types.TK_VECTOR {
+                if pb != xb { return false; }
+                stack.push(pa);
+                stack.push(xa);
+            } else if tp == types.TK_TUPLE {
+                let px = tab.x(p);
+                let xx = tab.x(x);
+                if px.len() != xx.len() { return false; }
+                for k in 0..px.len() {
+                    stack.push(px[k]);
+                    stack.push(xx[k]);
+                }
+            } else if tp == types.TK_ADT {
+                let px = tab.x(p);
+                let xx = tab.x(x);
+                if pa != xa || px.len() != xx.len() { return false; }
+                let mut k: usize = 0;
+                while k + 2 < px.len() {
+                    let pt = px[k] == types.GA_TYPE;
+                    let xt = xx[k] == types.GA_TYPE;
+                    if pt && xt {
+                        stack.push(px[k + 1]);
+                        stack.push(xx[k + 1]);
+                    } else if pt || xt {
+                        return false;
+                    } else if !self.unify_const(px[k], px[k + 1], px[k + 2], xx[k], xx[k + 1], xx[k + 2]) {
+                        return false;
+                    }
+                    k = k + 3;
+                }
+            } else if tp == types.TK_FN {
+                let px = tab.x(p);
+                let xx = tab.x(x);
+                if pa != xa { return false; }
+                let np = pa as usize;
+                for k in np + 1..np + 4 {
+                    if px[k] != xx[k] { return false; }
+                }
+                for k in 0..np + 1 {
+                    stack.push(px[k]);
+                    stack.push(xx[k]);
+                }
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+// Whether the heads of impls a and b (and their trait arguments, when `args`) unify.
+fn heads_unify(tab: &mut types.Table, sg: &sigs.Sigs, a: u32, b: u32, args: bool) -> bool {
+    let gl = &sg.cx.gens.lo;
+    let na = gl.as_slice()[a as usize + 1] - gl.as_slice()[a as usize];
+    let blo = gl.as_slice()[b as usize];
+    let nb = gl.as_slice()[b as usize + 1] - blo;
+    let mut shift = vec.Vec::<u32>.new();
+    for i in 0..nb {
+        if sg.cx.gens.is_const.as_slice()[(blo + i) as usize] {
+            shift.push(types.GA_PARAM);
+            shift.push(na + i);
+            shift.push(0);
+        } else {
+            shift.push(types.GA_TYPE);
+            shift.push(tab.key(types.TK_PARAM, na + i, 0));
+            shift.push(0);
+        }
+    }
+    let mut u = Unifier.{ binds: col.filled(3 * (na + nb) as usize, NONE), nv: na + nb };
+    let bt = tab.subst(sg.cx.ty.as_slice()[b as usize], shift.as_slice());
+    if !u.unify(tab, sg.cx.ty.as_slice()[a as usize], bt) { return false; }
+    if !args { return true; }
+    let ra = sg.trait_ref.as_slice()[a as usize];
+    let rb = sg.trait_ref.as_slice()[b as usize];
+    if ra == NONE || rb == NONE { return false; }
+    let mut xa = vec.Vec::<u32>.new();
+    xa.extend_from_slice(sg.b_args.row(ra as usize));
+    let mut xb = vec.Vec::<u32>.new();
+    let rbx = sg.b_args.row(rb as usize);
+    let mut k: usize = 0;
+    while k + 2 < rbx.len() {
+        if rbx[k] == types.GA_TYPE {
+            xb.push(types.GA_TYPE);
+            xb.push(tab.subst(rbx[k + 1], shift.as_slice()));
+            xb.push(0);
+        } else if rbx[k] == types.GA_PARAM && 3 * (rbx[k + 1] as usize) + 2 < shift.len() && shift.as_slice()[3 * rbx[k + 1] as usize] != types.GA_TYPE {
+            let s = 3 * rbx[k + 1] as usize;
+            xb.push(shift.as_slice()[s]);
+            xb.push(shift.as_slice()[s + 1]);
+            xb.push(shift.as_slice()[s + 2]);
+        } else {
+            xb.push(rbx[k]);
+            xb.push(rbx[k + 1]);
+            xb.push(rbx[k + 2]);
+        }
+        k = k + 3;
+    }
+    if xa.len() != xb.len() { return false; }
+    let mut j: usize = 0;
+    while j + 2 < xa.len() {
+        let pa = xa.as_slice()[j];
+        let pb = xb.as_slice()[j];
+        let ok = if pa == types.GA_TYPE && pb == types.GA_TYPE then u.unify(tab, xa.as_slice()[j + 1], xb.as_slice()[j + 1]) else if pa != types.GA_TYPE && pb != types.GA_TYPE then u.unify_const(pa, xa.as_slice()[j + 1], xa.as_slice()[j + 2], pb, xb.as_slice()[j + 1], xb.as_slice()[j + 2]) else false;
+        if !ok { return false; }
+        j = j + 3;
+    }
+    return true;
+}
+
+// The span (file, start, size) of the name of generic param row r of a decl in item it.
+fn gparam_span(sg: &sigs.Sigs, tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, it: u32, r: usize) -> (u32, u32, u32) {
+    let g = tree.item_node.as_slice()[it as usize] as usize + sg.cx.gens.node.as_slice()[r] as usize;
+    let a = tree.tok.as_slice()[g];
+    let nt = if tk(t, a) == terminals.T_KW_CONST as% u8 then a + 1 else a;
+    return modules.tok_span(lx, set, t, nt);
+}
+
+// The `pub` token before method m's `fn` (or its `unsafe("..")`), or NONE.
+fn pub_token(tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, m: u32) -> u32 {
+    let it = ds.item.as_slice()[m as usize];
+    let n = ds.node.as_slice()[m as usize];
+    if it == NONE || n == NONE { return NONE; }
+    let a = tree.tok.as_slice()[tree.item_node.as_slice()[it as usize] as usize + n as usize];
+    for back in 1..6u32 {
+        if back > a { return NONE; }
+        let x = a - back;
+        let k = tk(t, x);
+        if k == T_KW_PUB { return x; }
+        if k != T_KW_UNSAFE && k != T_L_PAREN && k != T_R_PAREN && k != T_STR_LIT { return NONE; }
+    }
+    return NONE;
+}
+
+fn span_of(ds: &decls.Decls, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, d: u32) -> (u32, u32, u32) {
+    return decls.span(ds, md, lx, set, t, d);
+}
+
+// The name of decl d as written.
+fn name_of(nm: &intern.Interned, ds: &decls.Decls, d: u32) -> &[u8] from nm {
+    return nm.tab.text(ds.name.as_slice()[d as usize] as usize);
+}
+
+// E0420: the impl is in neither the package of its trait nor that of its self type's head (a
+// struct or enum belongs to its package, any other head to `std`, a generic param to none).
+fn incoherent(tab: &types.Table, sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, lang: &traits.Lang, d: u32, tr: u32) -> bool {
+    let st = sg.cx.ty.as_slice()[d as usize];
+    if st == ERR { return false; }
+    let pkg = pkg_of(ds, md, d);
+    let std_pkg = if lang.copy_tr == NONE then NONE else pkg_of(ds, md, lang.copy_tr);
+    let tag = tab.tag_of(st);
+    let local = if tag == types.TK_ADT then pkg_of(ds, md, tab.a_of(st)) == pkg else if tag == types.TK_PARAM || tag == types.TK_CONSTPARAM || tag == types.TK_SELF then false else pkg != NONE && std_pkg == pkg;
+    if tr == NONE { return !local; }
+    return !local && pkg_of(ds, md, tr) != pkg;
+}
+
+// The impl checks as diagnostics. The type table grows (shifted impl heads) and is put back.
+pub fn impl_diags(d: &mut diag.Diags, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, fl: &files.FileList, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast) {
+    let n = ds.decls();
+    // each impl's self type as written in its messages
+    let mut texts = vec.Vec::<u8>.new();
+    let mut one = vec.Vec::<u8>.new();
+    let mut t_lo = col.filled(n + 1, 0u32);
+    for x in 0..n {
+        t_lo.as_mut_slice()[x] = texts.len() as% u32;
+        if ds.kind.as_slice()[x] != decls.DK_IMPL || ds.item.as_slice()[x] == NONE { continue; }
+        let lo = sg.cx.gens.lo.as_slice()[x];
+        let hi = sg.cx.gens.lo.as_slice()[x + 1];
+        let sc = [0u32, 0u32, lo, hi];
+        // the spelling is cut by its own length: one buffer per type
+        one.clear();
+        diag_sigs.display(&mut one, sg, ds, nm, &sc, sg.cx.ty.as_slice()[x]);
+        texts.extend_from_slice(one.as_slice());
+    }
+    t_lo.as_mut_slice()[n] = texts.len() as% u32;
+    let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());
+    check(d, &mut tab, sg, ds, md, nm, fl, lx, set, t, tree, texts.as_slice(), t_lo.as_slice());
+    sg.cx.tab = tab;
+}
+
+fn check(d: &mut diag.Diags, tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, fl: &files.FileList, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, texts: &[u8], t_lo: &[u32]) {
+    let n = ds.decls();
+    let lang = traits.lang_items(fl, md, ds, nm);
+    let im = traits.impls(sg, tab, ds);
+    let (mk, mi) = by_parent(ds);
+    let copy_k = im.trait_pos(lang.copy_tr);
+    let mut seen = vec.Vec::<u32>.new();
+    let mut free = vec.Vec::<u32>.new();
+    let mut ms = vec.Vec::<u32>.new();
+    let mut tms = vec.Vec::<u32>.new();
+    let mut buf = vec.Vec::<u8>.new();
+    for x in 0..n {
+        if ds.kind.as_slice()[x] != decls.DK_IMPL || ds.item.as_slice()[x] == NONE { continue; }
+        let i = x as% u32;
+        let it = ds.item.as_slice()[x];
+        let st = sg.cx.ty.as_slice()[x];
+        let lo = sg.cx.gens.lo.as_slice()[x] as usize;
+        let hi = sg.cx.gens.lo.as_slice()[x + 1] as usize;
+        let self_text = &texts[t_lo[x] as usize..t_lo[x + 1] as usize];
+        let (f, s, z) = span_of(ds, md, lx, set, t, i);
+        // E0421: a use of the impl binds its params from the self type alone
+        unbound_params(tab, st, hi - lo, &mut free);
+        if free.len() > 0 {
+            for k in 0..free.len() {
+                let r = lo + free.as_slice()[k] as usize;
+                d.begin(421, "");
+                d.arg("param", nm.tab.text(sg.cx.gens.name.as_slice()[r] as usize));
+                d.arg("type", self_text);
+                let (pf, ps, pz) = gparam_span(sg, tree, lx, set, t, it, r);
+                d.role("param", pf, ps, pz);
+                d.end(f, s, z);
+            }
+            continue;
+        }
+        let tr = im.trait_of.as_slice()[x];
+        if tr == NONE {
+            if incoherent(tab, sg, ds, md, &lang, i, NONE) {
+                d.begin(420, "inherent");
+                d.arg("type", self_text);
+                d.end(f, s, z);
+            }
+            continue;
+        }
+        // E1408: Flat and Frozen come from the type's structure only
+        if tr == lang.flat || tr == lang.frozen {
+            d.begin(1408, "");
+            d.arg("trait", mem.str_bytes(if tr == lang.flat then "Flat" else "Frozen"));
+            d.arg("type", self_text);
+            d.end(f, s, z);
+            continue;
+        }
+        if ds.kind.as_slice()[tr as usize] != decls.DK_TRAIT { continue; }
+        buf.clear();
+        decl_path(&mut buf, ds, md, nm, tr);
+        let tpath = buf.as_slice();
+        if tr != lang.drop && incoherent(tab, sg, ds, md, &lang, i, tr) {
+            d.begin(420, "");
+            d.arg("trait", tpath);
+            d.arg("type", self_text);
+            d.end(f, s, z);
+            continue;
+        }
+        // E0810: an unsafe trait is implemented only by an `unsafe("..") impl`
+        if ds.flags.as_slice()[tr as usize] & decls.F_UNSAFE != 0 && ds.flags.as_slice()[x] & decls.F_UNSAFE == 0 {
+            d.begin(810, "");
+            d.arg("trait", tpath);
+            let (rf, rs, rz) = span_of(ds, md, lx, set, t, tr);
+            d.role("trait", rf, rs, rz);
+            d.end(f, s, z);
+        }
+        members_of(mk.as_slice(), mi.as_slice(), i, decls.DK_METHOD, ds, &mut ms);
+        members_of(mk.as_slice(), mi.as_slice(), tr, decls.DK_TRAIT_METHOD, ds, &mut tms);
+        // E0907: `pub` on a trait impl method
+        for j in 0..ms.len() {
+            let m = ms.as_slice()[j];
+            if ds.flags.as_slice()[m as usize] & decls.F_PUB == 0 { continue; }
+            let p = pub_token(tree, t, ds, m);
+            if p == NONE { continue; }
+            let (af, as_, az) = modules.tok_span(lx, set, t, p);
+            let next = t.start.as_slice()[p as usize + 1];
+            let cut = if next > as_ && next - as_ > az then next - as_ else az;
+            d.begin(907, "");
+            d.arg("name", name_of(nm, ds, m));
+            d.role("cut", af, as_, cut);
+            d.end(af, as_, az);
+        }
+        // E0906: a trait method the impl lacks, a method the trait lacks
+        for j in 0..tms.len() {
+            let tm = tms.as_slice()[j];
+            let mut found = false;
+            for q in 0..ms.len() {
+                if ds.name.as_slice()[ms.as_slice()[q] as usize] == ds.name.as_slice()[tm as usize] { found = true; }
+            }
+            if found { continue; }
+            d.begin(906, "");
+            d.arg("name", name_of(nm, ds, tm));
+            d.arg("trait", tpath);
+            let (rf, rs, rz) = span_of(ds, md, lx, set, t, tm);
+            d.role("trait", rf, rs, rz);
+            d.end(f, s, z);
+        }
+        for j in 0..ms.len() {
+            let m = ms.as_slice()[j];
+            let mut found = false;
+            for q in 0..tms.len() {
+                if ds.name.as_slice()[tms.as_slice()[q] as usize] == ds.name.as_slice()[m as usize] { found = true; }
+            }
+            if found { continue; }
+            d.begin(906, "extra");
+            d.arg("name", name_of(nm, ds, m));
+            d.arg("trait", tpath);
+            let (mf, mst, mz) = span_of(ds, md, lx, set, t, m);
+            d.end(mf, mst, mz);
+        }
+        // E0419: a `Drop` impl's self type is a struct or enum of its package; E0416: no
+        // instance of its head may be Copy (a Copy impl whose head unifies with it)
+        if tr == lang.drop && lang.drop != NONE && st != ERR {
+            let own = tab.tag_of(st) == types.TK_ADT && pkg_of(ds, md, tab.a_of(st)) == pkg_of(ds, md, i);
+            if !own {
+                d.begin(419, "");
+                d.arg("type", self_text);
+                d.end(f, s, z);
+                continue;
+            }
+            if copy_k != NONE {
+                let mut cs = vec.Vec::<u32>.new();
+                cs.extend_from_slice(im.of(copy_k));
+                for j in 0..cs.len() {
+                    let ci = cs.as_slice()[j];
+                    if sg.cx.ty.as_slice()[ci as usize] == ERR || !heads_unify(tab, sg, i, ci, false) { continue; }
+                    d.begin(416, "");
+                    d.arg("type", self_text);
+                    let (cf, cst, cz) = span_of(ds, md, lx, set, t, ci);
+                    d.role("copy", cf, cst, cz);
+                    d.end(f, s, z);
+                    break;
+                }
+            }
+        }
+        // E0414 case `drop`: the impl takes a view wherever its ADT does
+        if tr == lang.drop && lang.drop != NONE && st != ERR && tab.tag_of(st) == types.TK_ADT {
+            drop_views(d, tab, sg, ds, md, nm, lx, set, t, tree, i, self_text, f, s, z);
+        }
+        // E0903: an operator impl beside the built-in one, or two impls whose heads unify
+        let mut op = false;
+        for k in 0..lang.ops.len() {
+            if lang.ops.as_slice()[k] == tr && st != ERR && traits.builtin_op(tab, k, st) { op = true; }
+        }
+        if op {
+            d.begin(903, "");
+            d.arg("trait", tpath);
+            d.arg("type", self_text);
+            d.end(f, s, z);
+            continue;
+        }
+        let h = im.head_of.as_slice()[x];
+        for j in 0..seen.len() {
+            let o = seen.as_slice()[j];
+            if im.trait_of.as_slice()[o as usize] != tr { continue; }
+            let oh = im.head_of.as_slice()[o as usize];
+            if h != traits.H_NONE && oh != traits.H_NONE && oh != h { continue; }
+            if sg.cx.ty.as_slice()[o as usize] == ERR || st == ERR { continue; }
+            if !heads_unify(tab, sg, o, i, true) { continue; }
+            d.begin(903, "");
+            d.arg("trait", tpath);
+            d.arg("type", self_text);
+            let (of, ost, oz) = span_of(ds, md, lx, set, t, o);
+            d.role("other", of, ost, oz);
+            d.end(f, s, z);
+            break;
+        }
+        seen.push(i);
+    }
+}
+
+// E0414 case `drop` for Drop impl i of an ADT instance: each param of the impl without `view`
+// that occurs in a type argument the ADT's own param with `view` takes, in param order.
+fn drop_views(d: &mut diag.Diags, tab: &types.Table, sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, i: u32, self_text: &[u8], f: u32, s: u32, z: u32) {
+    let st = sg.cx.ty.as_slice()[i as usize];
+    let def = tab.a_of(st);
+    let alo = sg.cx.gens.lo.as_slice()[def as usize] as usize;
+    let ahi = sg.cx.gens.lo.as_slice()[def as usize + 1] as usize;
+    let ilo = sg.cx.gens.lo.as_slice()[i as usize] as usize;
+    let ihi = sg.cx.gens.lo.as_slice()[i as usize + 1] as usize;
+    let mut named = col.filled(ihi - ilo, false);
+    let xs = tab.x(st);
+    let mut stack = vec.Vec::<u32>.new();
+    let mut kids = vec.Vec::<u32>.new();
+    let mut k: usize = 0;
+    while k + 2 < xs.len() {
+        let ai = k / 3;
+        if xs[k] == types.GA_TYPE && ai < ahi - alo && sg.cx.gens.is_view.as_slice()[alo + ai] {
+            stack.push(xs[k + 1]);
+            while stack.len() > 0 {
+                let y = stack.as_slice()[stack.len() - 1];
+                stack.truncate(stack.len() - 1);
+                if tab.tag_of(y) == types.TK_PARAM {
+                    let p = tab.a_of(y) as usize;
+                    if p < ihi - ilo && !sg.cx.gens.is_view.as_slice()[ilo + p] { named.as_mut_slice()[p] = true; }
+                    continue;
+                }
+                tab.kids(y, &mut kids);
+                stack.extend_from_slice(kids.as_slice());
+            }
+        }
+        k = k + 3;
+    }
+    let it = ds.item.as_slice()[i as usize];
+    let mut path = vec.Vec::<u8>.new();
+    decl_path(&mut path, ds, md, nm, def);
+    for p in 0..named.len() {
+        if !named.as_slice()[p] { continue; }
+        d.begin(414, "drop");
+        d.arg("param", nm.tab.text(sg.cx.gens.name.as_slice()[ilo + p] as usize));
+        d.arg("type", self_text);
+        d.arg("generic", path.as_slice());
+        let (pf, ps, pz) = gparam_span(sg, tree, lx, set, t, it, ilo + p);
+        d.role("param", pf, ps, pz);
+        d.end(f, s, z);
+    }
+}

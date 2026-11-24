@@ -46,7 +46,7 @@ use crate::ids::{DeclId, Sym};
 use crate::itemcx::{Brackets, ItemCx};
 use crate::package::PackageKind;
 use crate::sigs::{GenericParam, Sigs, TraitRef};
-use crate::traits::World;
+use crate::traits::{Answers, World};
 use crate::typeck::{Typeck, TypedBody};
 use crate::types::{ConstArg, GArg, Interner, Overlay, TypeId, TypeKind, TypeTable};
 
@@ -360,12 +360,22 @@ pub(crate) fn resolve_trait_method<I: Interner + ?Sized>(
 
 /// The `Drop.drop` impl method instance of `t`, if `t` implements `Drop`.
 pub(crate) fn drop_method<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> Option<InstKey> {
+    drop_method_kept(w, cx, t, &mut Answers::default())
+}
+
+/// [`drop_method`] with the answers of earlier queries in the empty environment.
+fn drop_method_kept<I: Interner + ?Sized>(
+    w: &World<'_>,
+    cx: &mut I,
+    t: TypeId,
+    kept: &mut Answers,
+) -> Option<InstKey> {
     let drop = w.sigs.lang.drop;
     let TypeKind::Adt { def, .. } = *cx.kind(t) else { return None };
     if drop.is_none() {
         return None;
     }
-    let (imp, args) = w.find_impl(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[])?;
+    let (imp, args) = w.find_impl_kept(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[], kept)?;
     if !own_package(w, imp, def) {
         return None;
     }
@@ -386,9 +396,20 @@ fn own_package(w: &World<'_>, imp: DeclId, def: DeclId) -> bool {
 /// (in a generic body): some instance may, so any `Drop` impl of its ADT counts. The one answer
 /// the borrow checker's CFG, the lowering, and the drop schedule read.
 pub fn drop_impl<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> bool {
+    drop_impl_kept(w, cx, t, &mut Answers::default())
+}
+
+/// [`drop_impl`] with the answers of earlier queries in the empty environment
+/// ([`crate::traits::Answers`]).
+pub fn drop_impl_kept<I: Interner + ?Sized>(
+    w: &World<'_>,
+    cx: &mut I,
+    t: TypeId,
+    kept: &mut Answers,
+) -> bool {
     let TypeKind::Adt { def, .. } = *cx.kind(t) else { return false };
     if !has_params(cx, t) {
-        return drop_method(w, cx, t).is_some();
+        return drop_method_kept(w, cx, t, kept).is_some();
     }
     let drop = w.sigs.lang.drop;
     w.sigs.impls_by_trait.get(&drop).is_some_and(|is| {
