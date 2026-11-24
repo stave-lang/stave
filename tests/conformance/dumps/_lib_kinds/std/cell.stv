@@ -1,0 +1,4 @@
+// Stand-in for std/cell.stv (`kinds_` dump goldens): the interior-mutability type.
+pub struct UnsafeCell<T> {
+    value: T,
+}

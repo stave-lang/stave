@@ -1,0 +1,3 @@
+name = "manifest_syntax_utf8"
+kind = "bin"
+ключ = 1 #~ ERROR E1002

@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// E1002 case `wrong-type` for strings and tables (at the value), the base shape for a quoted, a dotted,
+// and a table key, and `unknown-target` for a quoted name.
+fn main() -> i32 {
+    return 0;
+}

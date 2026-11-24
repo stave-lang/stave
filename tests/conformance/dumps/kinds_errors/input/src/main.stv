@@ -1,0 +1,48 @@
+//~ CHECK-ONLY
+// Dump golden (kinds): impls and types with errors. A type that holds itself by value has no
+// depth and no layout, nor does one holding it (no diagnostic: no value of it is made); an impl
+// of an unresolved trait (an inherent impl of `u16`), an impl for an unresolved type (no head: a
+// candidate for every type, applying to none), overlapping impls (both apply), and an impl with
+// a param its self type does not bind are all in the impl table.
+struct Loop { next: Loop, n: u32 }
+
+struct Outer { l: Loop }
+
+trait Area {
+    fn area(&self) -> u64;
+}
+
+impl Area for u32 {
+    fn area(&self) -> u64 {
+        return 0;
+    }
+}
+
+impl Area for u32 { //~ ERROR E0903
+    fn area(&self) -> u64 {
+        return 1;
+    }
+}
+
+impl<T> Area for u8 { //~ ERROR E0421
+    fn area(&self) -> u64 {
+        return 0;
+    }
+}
+
+impl Missing for u16 { //~ ERROR E0420
+} //~^ ERROR E0101
+
+impl Area for Nope { //~ ERROR E0101
+    fn area(&self) -> u64 {
+        return 0;
+    }
+}
+
+fn f(o: &Outer, x: u32) -> u32 {
+    return x;
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -12,17 +12,35 @@ pub struct Table {
     pub abi_ret: vec.Vec<u8>,
     abi_off: vec.Vec<u32>,
     abi_param: vec.Vec<u8>,
+    part_off: vec.Vec<u32>,
+    parts: vec.Vec<u8>,
 }
 
 impl Table {
     pub fn new() -> Table {
-        let mut t = Table.{ path_off: vec.Vec::<u32>.new(), path: vec.Vec::<u8>.new(), report: vec.Vec::<bool>.new(), abi_ret: vec.Vec::<u8>.new(), abi_off: vec.Vec::<u32>.new(), abi_param: vec.Vec::<u8>.new() };
+        let mut t = Table.{ path_off: vec.Vec::<u32>.new(), path: vec.Vec::<u8>.new(), report: vec.Vec::<bool>.new(), abi_ret: vec.Vec::<u8>.new(), abi_off: vec.Vec::<u32>.new(), abi_param: vec.Vec::<u8>.new(), part_off: vec.Vec::<u32>.new(), parts: vec.Vec::<u8>.new() };
         t.path_off.extend_from_slice(&known_items.KNOWN_PATH_OFF);
         t.path.extend_from_slice(&known_items.KNOWN_PATH);
         t.report.extend_from_slice(&known_items.KNOWN_REPORT);
         t.abi_ret.extend_from_slice(&known_items.KNOWN_ABI_RET);
         t.abi_off.extend_from_slice(&known_items.KNOWN_ABI_OFF);
         t.abi_param.extend_from_slice(&known_items.KNOWN_ABI_PARAM);
+        // module, name, and method rows of item k are the rows 3k, 3k + 1, 3k + 2 of `parts`
+        let mo = known_items.KNOWN_MODULE_OFF;
+        let mb = known_items.KNOWN_MODULE;
+        let no = known_items.KNOWN_NAME_OFF;
+        let nb = known_items.KNOWN_NAME;
+        let fo = known_items.KNOWN_METHOD_OFF;
+        let fb = known_items.KNOWN_METHOD;
+        t.part_off.push(0);
+        for k in 0..t.report.len() {
+            t.parts.extend_from_slice(&mb[mo[k] as usize..mo[k + 1] as usize]);
+            t.part_off.push(t.parts.len() as% u32);
+            t.parts.extend_from_slice(&nb[no[k] as usize..no[k + 1] as usize]);
+            t.part_off.push(t.parts.len() as% u32);
+            t.parts.extend_from_slice(&fb[fo[k] as usize..fo[k + 1] as usize]);
+            t.part_off.push(t.parts.len() as% u32);
+        }
         return t;
     }
 
@@ -41,6 +59,12 @@ impl Table {
             if self.path(k).eq(p) { return k as% u32; }
         }
         return NONE;
+    }
+
+    // Part p (0 module, 1 name, 2 method: empty for no method) of item k's path.
+    pub fn part(&self, k: usize, p: usize) -> &[u8] from self {
+        let o = self.part_off.as_slice();
+        return &self.parts.as_slice()[o[3 * k + p] as usize..o[3 * k + p + 1] as usize];
     }
 
     // The ABI params of item k (`ITY_*` codes); its result is `abi_ret[k]` (`ITY_NONE`: none).

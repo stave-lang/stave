@@ -1,0 +1,2 @@
+end: dropG1 drop1 | dropG1 drop1 | dropG1 drop1 | dropG1 drop1 | dropG1 drop1 | dropG1 dropG2 drop1 drop2 | dropG4 | t1 drop1 |
+exit: dropG1 drop1 dropG1 drop1 dropG1 drop1 b dropG1 drop1 dropG1 drop1 dropG1 drop1 drop2 dropG4 b t1 drop1

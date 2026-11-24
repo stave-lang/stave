@@ -1,0 +1,75 @@
+t0 copy,send,sync,sized,flat,frozen depth 1 size 1 align 1
+t1 copy,send,sync,sized,flat,frozen depth 1 size 2 align 2
+t2 copy,send,sync,sized,flat,frozen depth 1 size 4 align 4
+t3 copy,send,sync,sized,flat,frozen depth 1 size 8 align 8
+t4 copy,send,sync,sized,flat,frozen depth 1 size 8 align 8
+t5 copy,send,sync,sized,flat,frozen depth 1 size 4 align 4
+t6 send,sync,frozen depth 1 size unsized
+t7 copy,view,send,sync,sized,frozen depth 2 size 8 align 8
+t8 copy,view,send,sync,sized,frozen depth 2 size 8 align 8
+t9 copy,view,send,sync,sized,frozen depth 2 size 8 align 8
+t10 copy,view,send,sync,sized,frozen depth 2 size 16 align 8
+t11 copy,view,sized depth 3 size 8 align 8
+t12 copy,view,send,sync,sized,frozen depth 2 size 8 align 8
+t13 copy,view,send,sync,sized depth 2 size 8 align 8
+t14 view,sized depth 3 size 8 align 8
+t15 view,send,sync,sized,frozen depth 2 size 8 align 8
+t16 view,sized depth 2 size 8 align 8
+t17 view,send,sync,sized depth 2 size 8 align 8
+t18 copy,sized,frozen depth 2 size 8 align 8
+t19 copy,send,sync,sized,flat,frozen depth 1 size 0 align 1 fields[]
+t20 view,sized,drop-impl,drop,lock depth 4 size 16 align 8 fields[0 8]
+t21 sized,drop depth 3 size param
+t22 send,sized depth 2 size 4 align 4 fields[0]
+t23 sized,drop depth 2 size param
+t24 send,sync,sized,flat,frozen depth 2 size 8 align 8 fields[0]
+t25 send,sync,sized,flat,frozen depth - size none
+t26 send,sync,sized,flat,frozen depth - size none
+t27 sized,drop depth 1 size param
+t28 send,sync,sized depth 1 size param
+impl d57 trait - head u16 gen 0 methods[]
+impl d14 trait d19 head d7 gen 2 methods[]
+impl d13 trait d19 head d10 gen 2 methods[]
+impl d33 trait d27 head i32 gen 0 methods[d34]
+impl d35 trait d27 head str gen 0 methods[d36]
+impl d15 trait d29 head d7 gen 2 methods[d16]
+impl d39 trait d31 head d37 gen 0 methods[d40]
+impl d58 trait d48 head - gen 0 methods[d59]
+impl d51 trait d48 head u32 gen 0 methods[d52]
+impl d53 trait d48 head u32 gen 0 methods[d54]
+impl d55 trait d48 head u8 gen 1 methods[d56]
+apply t0 d48 [d55]
+apply t1 d48 []
+apply t2 d48 [d51 d53]
+apply t3 d48 []
+apply t4 d48 []
+apply t5 d27 [d33]
+apply t5 d48 []
+apply t6 d27 [d35]
+apply t6 d48 []
+apply t7 d48 []
+apply t8 d48 []
+apply t9 d48 []
+apply t10 d48 []
+apply t11 d48 []
+apply t12 d48 []
+apply t13 d48 []
+apply t14 d48 []
+apply t15 d48 []
+apply t16 d48 []
+apply t17 d48 []
+apply t18 d48 []
+apply t19 d48 []
+apply t20 d19 []
+apply t20 d29 [d15]
+apply t20 d48 []
+apply t21 d19 []
+apply t21 d48 []
+apply t22 d48 []
+apply t23 d48 []
+apply t24 d31 [d39]
+apply t24 d48 []
+apply t25 d48 []
+apply t26 d48 []
+apply t27 d48 []
+apply t28 d48 []

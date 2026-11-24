@@ -206,6 +206,22 @@ pub fn emit_stave(items: &[Item]) -> Result<String, String> {
     array(&mut o, "KNOWN_ABI_RET", "u8", &rets);
     array(&mut o, "KNOWN_ABI_OFF", "u32", &s(&aoff));
     array(&mut o, "KNOWN_ABI_PARAM", "u8", &params);
+    o += "// The parts of each path (`KNOWN_METHOD` empty for an item that is no method).\n";
+    for (name, part) in [("KNOWN_MODULE", 0), ("KNOWN_NAME", 1), ("KNOWN_METHOD", 2)] {
+        let mut poff = vec![0u32];
+        let mut pbytes = Vec::new();
+        for it in items {
+            let text = match part {
+                0 => it.module.as_str(),
+                1 => it.name.as_str(),
+                _ => it.method.as_deref().unwrap_or(""),
+            };
+            pbytes.extend(text.bytes().map(|b| b.to_string()));
+            poff.push(pbytes.len() as u32);
+        }
+        array(&mut o, &format!("{name}_OFF"), "u32", &s(&poff));
+        array(&mut o, name, "u8", &pbytes);
+    }
     Ok(o)
 }
 

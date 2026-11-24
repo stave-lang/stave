@@ -20,10 +20,31 @@ import std.idx;
 import std.mem;
 import std.vec;
 
-// Per file: the rank of (package name, display path), and the display path.
+// Per file: the rank of (package name, display path), and the display path. The files are the
+// `nsrc` source files, then the manifests, whose text is kept here (`man_bytes`, cut at
+// `man_off`).
 pub struct FileTable {
     pub rank: vec.Vec<u32>,
     pub path: diag_reg.Strs,
+    pub nsrc: usize,
+    man_bytes: vec.Vec<u8>,
+    man_off: vec.Vec<u64>,
+}
+
+impl FileTable {
+    // A table without manifests, for the caller to fill: push `rank` and `path` per source file
+    // and set `nsrc` to their count.
+    pub fn sources() -> FileTable {
+        let mut mo = vec.Vec::<u64>.new();
+        mo.push(0);
+        return FileTable.{ rank: vec.Vec::<u32>.new(), path: diag_reg.Strs.new(), nsrc: 0, man_bytes: vec.Vec::<u8>.new(), man_off: mo };
+    }
+
+    // The text of manifest m.
+    fn manifest(&self, m: usize) -> &[u8] from self {
+        let o = self.man_off.as_slice();
+        return &self.man_bytes.as_slice()[(o[m] as usize)..(o[m + 1] as usize)];
+    }
 }
 
 // `root_dir` is the directory of the root package (the parent of a root `.stv` file). The key
@@ -34,16 +55,28 @@ pub fn file_table(fl: &files.FileList, root_dir: &str) -> FileTable {
     let mut path = diag_reg.Strs.new();
     let mut keys = diag_reg.Strs.new();
     let mut key = vec.Vec::<u8>.new();
-    for f in 0..n {
-        let d = paths.display(root_dir, fl.abs_path.get_ref(f).as_str());
+    for f in 0..n + fl.man_abs.len() {
+        let (pkg, abs) = if f < n then (fl.package.get_ref(f), fl.abs_path.get_ref(f)) else (fl.man_pkg.get_ref(f - n), fl.man_abs.get_ref(f - n));
+        let d = paths.display(root_dir, abs.as_str());
         path.push(d.as_bytes());
         key.clear();
-        key.extend_from_slice(fl.package.get_ref(f).as_bytes());
+        key.extend_from_slice(pkg.as_bytes());
         key.push(0);
         key.extend_from_slice(d.as_bytes());
         keys.push(key.as_slice());
     }
-    return FileTable.{ rank: diag.ranks(&keys), path: path };
+    let mut mb = vec.Vec::<u8>.new();
+    mb.extend_from_slice(fl.man_bytes.as_slice());
+    let mut mo = vec.Vec::<u64>.new();
+    mo.extend_from_slice(fl.man_off.as_slice());
+    return FileTable.{ rank: diag.ranks(&keys), path: path, nsrc: n, man_bytes: mb, man_off: mo };
+}
+
+// Per byte of src: whether it is a newline.
+fn newlines(src: &[u8]) -> vec.Vec<bool> {
+    let mut flags = vec.Vec::<bool>.with_capacity(src.len());
+    for k in 0..src.len() { flags.push(src[k] == 10); }
+    return flags;
 }
 
 // The newline offsets of the files that diagnostics point into.
@@ -53,8 +86,8 @@ struct Lines {
 }
 
 impl Lines {
-    fn build(d: &diag.Diags, set: &source.SourceSet) -> Lines {
-        let n = set.files();
+    fn build(d: &diag.Diags, set: &source.SourceSet, ft: &FileTable) -> Lines {
+        let n = ft.rank.len();
         let mut need = col.filled(n, false);
         for i in 0..d.len() {
             let f = d.file.as_slice()[i];
@@ -67,9 +100,7 @@ impl Lines {
         for f in 0..n {
             l.first.push(l.nl.len() as% u32);
             if !need.as_slice()[f] { continue; }
-            let src = set.file(f);
-            let mut flags = vec.Vec::<bool>.with_capacity(src.len());
-            for k in 0..src.len() { flags.push(src[k] == 10); }
+            let flags = if f < ft.nsrc then newlines(set.file(f)) else newlines(ft.manifest(f - ft.nsrc));
             let at = select.indices(flags.as_slice());
             l.nl.extend_from_slice(at.as_slice());
         }
@@ -349,7 +380,7 @@ impl Printer {
 
 // The listed rows of d (`d.order`) as human text, or as JSON lines.
 pub fn render(d: &diag.Diags, rows: &[u32], ft: &FileTable, set: &source.SourceSet, json: bool) -> vec.Vec<u8> {
-    let pr = Printer.{ lines: Lines.build(d, set) };
+    let pr = Printer.{ lines: Lines.build(d, set, ft) };
     let mut out = vec.Vec::<u8>.new();
     let mut p = Parts.new();
     for k in 0..rows.len() {

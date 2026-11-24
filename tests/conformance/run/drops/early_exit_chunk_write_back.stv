@@ -1,0 +1,190 @@
+//~ STDOUT early_exit_chunk_write_back.stdout
+// A `&mut` chunk binding is written back where its block is left, and on `return`, `?`, and
+// `break` that is before the `match` scrutinee temporary around the loop is dropped: the drop
+// sees the written chunk (`A2`, `first101`), never the value before the write-back, and the
+// write-back never stores into a value already dropped (a freed `Vec` buffer).
+import std.io;
+import std.vec;
+
+struct A { a: [u32; 4] }
+
+impl Drop for A {
+    fn drop(&mut self) {
+        let v = self.a[0];
+        io.print(f" A{v}");
+        self.a[0] = 1000;
+    }
+}
+
+struct D { id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        io.print(f" {self.id}");
+    }
+}
+
+struct W { v: vec.Vec<u32> }
+
+impl Drop for W {
+    fn drop(&mut self) {
+        let n = self.v.len();
+        let s = self.v.as_slice();
+        let a = s[0];
+        io.print(f" W len{n} first{a}");
+    }
+}
+
+static Z: u32 = 9;
+
+fn yes() -> bool {
+    return Z == 9;
+}
+
+fn fail() -> Result<u32, u32> {
+    return Result.Err(7);
+}
+
+fn mka() -> A {
+    return A.{ a: [1u32, 1u32, 1u32, 1u32] };
+}
+
+fn mk(id: u32) -> D {
+    return D.{ id: id };
+}
+
+fn mkw() -> W {
+    let mut v = vec.Vec::<u32>.new();
+    let mut i: u32 = 0;
+    while i < 64 {
+        v.push(1);
+        i += 1;
+    }
+    return W.{ v: v };
+}
+
+fn junk() {
+    let mut v = vec.Vec::<u32>.new();
+    let mut i: u32 = 0;
+    while i < 64 {
+        v.push(7);
+        i += 1;
+    }
+    let s = v.as_slice();
+    let a = s[0];
+    io.print(f" junk{a}");
+}
+
+fn heap_return() {
+    match &mut mkw() {
+        w => {
+            for c: &mut u32x4 in w.v.as_mut_slice() {
+                *c = *c +% u32x4.splat(100u32);
+                return;
+            } tail scalar (x) {
+            }
+        }
+    }
+}
+
+fn array_return() {
+    match &mut mka() {
+        h => {
+            for v: &mut u32x4 in &mut h.a {
+                *v = *v +% u32x4.splat(1u32);
+                return;
+            }
+        }
+    }
+}
+
+fn array_block_return() {
+    match &mut mka() {
+        h => {
+            {
+                for v: &mut u32x4 in &mut h.a {
+                    *v = *v +% u32x4.splat(1u32);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn array_try() -> Result<u32, u32> {
+    match &mut mka() {
+        h => {
+            for v: &mut u32x4 in &mut h.a {
+                *v = *v +% u32x4.splat(1u32);
+                let _ = fail()?;
+            }
+        }
+    }
+    return Result.Ok(0);
+}
+
+fn array_closure_return() {
+    let c = fn() -> u32 {
+        match &mut mka() {
+            h => {
+                for v: &mut u32x4 in &mut h.a {
+                    *v = *v +% u32x4.splat(1u32);
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    };
+    let r = c();
+    io.print(f" r{r}");
+}
+
+fn arm_local_in_for_return() {
+    for i in 0u32..1 {
+        match &mut mka() {
+            h => {
+                let b = mk(7);
+                for v: &mut u32x4 in &mut h.a {
+                    *v = *v +% u32x4.splat(1u32);
+                    if yes() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn array_break() {
+    loop {
+        match &mut mka() {
+            h => {
+                for v: &mut u32x4 in &mut h.a {
+                    *v = *v +% u32x4.splat(1u32);
+                    break;
+                }
+            }
+        }
+        break;
+    }
+}
+
+fn main() -> i32 {
+    io.print("heap return:");
+    heap_return();
+    junk();
+    io.print("\narray return:");
+    array_return();
+    io.print("\narray block return:");
+    array_block_return();
+    io.print("\narray ?:");
+    let _ = array_try();
+    io.print("\nclosure return:");
+    array_closure_return();
+    io.print("\narm local, return:");
+    arm_local_in_for_return();
+    io.print("\nbreak of the chunk loop:");
+    array_break();
+    io.print("\n");
+    return 0;
+}

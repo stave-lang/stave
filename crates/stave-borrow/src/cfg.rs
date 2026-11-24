@@ -46,7 +46,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::Span;
-use stave_sema::drops::{Made, Owner, Point, Row, Schedule};
+use stave_sema::drops::{Leave, Made, Owner, Point, Row, Schedule};
 use stave_sema::itemcx::ItemCx;
 use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, World};
@@ -288,6 +288,9 @@ pub struct Local {
     /// E0513); a call result or returned value that cannot reach a fn value does not keep that
     /// loan ([`Builder::drop_env`]).
     pub env: bool,
+    /// A binding of a `match` arm, `for`, or tail pattern: it is bound where its block begins,
+    /// so no declaration of it can move before a statement or local around that block.
+    pub matched: bool,
 }
 
 /// What ends a temporary: its statement ([`stave_sema::temps`]), or the `for` loop whose
@@ -395,6 +398,12 @@ pub struct Body {
     /// references ([`Tys::drop_reaches_refs`]): their drop, and an assignment through a
     /// dereference that drops one, is an access of what the value reaches.
     pub deep_drops: FxHashSet<TypeId>,
+    /// The tokens of the `return`, `?`, `break`, and `continue` exits: the drops on an exit
+    /// path are at its token, so a drop there that reads a borrow is named by what it drops
+    /// (E0501 cases `exit-temp`, `exit-local`).
+    pub exit_spans: Vec<Span>,
+    /// The statements an exit leaves, by node: how an E0501 fix names one (the `before` hole).
+    pub stmt_words: FxHashMap<u32, &'static str>,
 }
 
 impl Body {
@@ -451,6 +460,15 @@ struct TempMark {
     open: usize,
 }
 
+/// An open statement: its node, where its temporaries begin, and the number of scopes open
+/// when it was opened ([`stave_sema::drops::exit_order`]).
+#[derive(Clone, Copy)]
+struct OpenStmt {
+    node: u32,
+    mark: TempMark,
+    depth: usize,
+}
+
 /// Builds one body.
 pub struct Builder<'a, 'b> {
     icx: ItemCx<'a>,
@@ -465,7 +483,7 @@ pub struct Builder<'a, 'b> {
     /// Every temporary the open statements made, in order ([`Builder::end_stmt_temps`]).
     made: Vec<LocalId>,
     /// The open statements ([`stave_sema::temps`]), innermost last.
-    stmts: Vec<u32>,
+    stmts: Vec<OpenStmt>,
     /// By local: a loan of the local's own bytes was made (not one through a dereference).
     lent: Vec<bool>,
     by_node: FxHashMap<u32, LocalId>,
@@ -585,6 +603,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             loops: Vec::new(),
             schedule: Schedule::default(),
             deep_drops: FxHashSet::default(),
+            exit_spans: Vec::new(),
+            stmt_words: FxHashMap::default(),
         };
         Builder {
             icx,
@@ -779,13 +799,14 @@ impl<'a, 'b> Builder<'a, 'b> {
             capture_mut: false,
             temp: temp.is_some(),
             end: temp.and_then(|n| self.tb.stmt_ends.bound(n)).map(TempEnd::Stmt),
-            stmt: self.stmts.last().copied().unwrap_or(stave_sema::temps::NONE),
+            stmt: self.stmts.last().map_or(stave_sema::temps::NONE, |o| o.node),
             made: None,
             guard: false,
             node: u32::MAX,
             static_root: false,
             static_item: false,
             env: false,
+            matched: false,
         });
         let l = (self.body.locals.len() - 1) as LocalId;
         if let Some(n) = temp {
@@ -820,6 +841,13 @@ impl<'a, 'b> Builder<'a, 'b> {
         };
         let l = self.new_local(ty, mutable, span, String::new(), None);
         self.body.locals[l as usize].node = b;
+        self.body.locals[l as usize].matched = bind.is_some_and(|x| {
+            use stave_sema::BindKind;
+            match x.kind {
+                BindKind::Arm | BindKind::For | BindKind::Tail => true,
+                BindKind::Let | BindKind::Param | BindKind::SelfParam | BindKind::ClosureParam => false,
+            }
+        });
         self.by_node.insert(b, l);
         if let Some(s) = self.scopes.last_mut() {
             s.push(l);
@@ -1265,14 +1293,14 @@ impl<'a, 'b> Builder<'a, 'b> {
         if !self.tb.stmt_ends.is_stmt(b) {
             self.body.internal.get_or_insert("a statement the temporaries table does not name");
         }
-        self.stmts.push(b);
+        self.stmts.push(OpenStmt { node: b, mark, depth: self.scopes.len() });
         mark
     }
 
     /// A temporary is made at node `n`: the innermost open statement must be the one the table
     /// gives it, the statement whose end ends it.
     fn made_at(&mut self, n: u32) {
-        let open = self.stmts.last().copied().unwrap_or(stave_sema::temps::NONE);
+        let open = self.stmts.last().map_or(stave_sema::temps::NONE, |o| o.node);
         if n != u32::MAX && self.tb.stmt_ends.of(n) != open {
             self.body.internal.get_or_insert("a temporary outside the statement that ends it");
         }
@@ -1313,33 +1341,87 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.made.truncate(mark.made);
     }
 
-    /// Drops on an exit path (temps and scopes above the marks), without forgetting them. A
-    /// `scope` statement left on the way joins its threads before its own locals are dropped.
-    /// Leaving to a loop's head or exit (`dead`) ends the temporaries of the statements left
-    /// as [`Self::end_stmt_temps`] does. `point`: the exit, for the drop schedule.
+    /// Drops on an exit path (the statements and scopes above the marks), without forgetting
+    /// them, in the order [`stave_sema::drops::exit_order`] gives, which also says what ends
+    /// there: on a jump to a loop's head or exit (`dead`) all of it, on a return what lies
+    /// inside the statements it leaves. A `scope` statement left on the way joins its threads
+    /// before its own locals are dropped. `point`: the exit, for the drop schedule.
     fn exit_path(&mut self, scopes: usize, temps: TempMark, dead: bool, at: Span, point: Point) {
-        let ts: Vec<LocalId> = self.temps.get(temps.drops..).unwrap_or(&[]).to_vec();
+        if point != Point::End {
+            self.body.exit_spans.push(at);
+        }
+        let opened: Vec<usize> = self.stmts.iter().map(|o| o.depth).collect();
+        let first = temps.open.min(self.stmts.len());
+        let order = stave_sema::drops::exit_order(&opened, first, scopes, self.scopes.len(), !dead);
+        for (step, end) in order {
+            match step {
+                Leave::Stmt(i) => {
+                    let node = self.stmts[i].node;
+                    let word = self.stmt_word(node);
+                    self.body.stmt_words.insert(node, word);
+                    let from = self.stmts[i].mark;
+                    let to = self.stmts.get(i + 1).map(|o| o.mark);
+                    self.exit_temps(from, to, end, at, point);
+                }
+                Leave::Scope(s) => self.exit_scope(s, end, at, point),
+                Leave::Outside => {
+                    let to = self.stmts.get(first).map(|o| o.mark);
+                    self.exit_temps(temps, to, end, at, point);
+                }
+            }
+        }
+    }
+
+    /// How an E0501 fix names statement `s` (a choice of its `before` hole): by the keyword
+    /// of a statement whose temporaries live across the blocks inside it.
+    fn stmt_word(&self, s: u32) -> &'static str {
+        let a = self.icx.a(s);
+        if self.icx.is(a, Term::KwMatch) {
+            "the `match`"
+        } else if self.icx.is(a, Term::KwFor) {
+            "the `for`"
+        } else if self.icx.is(a, Term::KwLet) {
+            "the `let`"
+        } else {
+            "the statement"
+        }
+    }
+
+    /// The temporaries from mark `from` to mark `to` (the next open statement's; `None`: the
+    /// last made) on an exit path: the ones with drop glue, last made first; where they end
+    /// (`dead`), then the storage ends of the lent ones without.
+    fn exit_temps(&mut self, from: TempMark, to: Option<TempMark>, dead: bool, at: Span, point: Point) {
+        let (d1, m1) = to.map_or((self.temps.len(), self.made.len()), |t| (t.drops, t.made));
+        // the marks of open statements nest: one that does not names temporaries this exit
+        // cannot know, and an exit that dropped none of them would be unchecked code
+        let (Some(ts), Some(made)) = (self.temps.get(from.drops..d1), self.made.get(from.made..m1)) else {
+            self.body.internal.get_or_insert("an exit's temporaries outside the marks of its statements");
+            return;
+        };
+        let (ts, made) = (ts.to_vec(), made.to_vec());
         for &t in ts.iter().rev() {
             self.end_local(t, dead, Some(at), point);
         }
         if dead {
-            let made: Vec<LocalId> = self.made.get(temps.made..).unwrap_or(&[]).to_vec();
             for &t in made.iter().rev() {
                 if self.lent.get(t as usize) == Some(&true) && !ts.contains(&t) {
                     self.end_local_storage(t, Some(at));
                 }
             }
         }
-        let ss: Vec<Vec<LocalId>> = self.scopes.get(scopes..).unwrap_or(&[]).to_vec();
-        for (k, s) in ss.iter().enumerate().rev() {
-            let depth = scopes + k + 1;
-            let js: Vec<LocalId> = self.joins.iter().filter(|j| j.0 == depth).map(|j| j.1).collect();
-            for j in js {
-                self.join_read(j, at, u32::MAX);
-            }
-            for &l in s.iter().rev() {
-                self.end_local(l, dead, Some(at), point);
-            }
+    }
+
+    /// The locals of scope `s` (a depth index) on an exit path, after the joins of a `scope`
+    /// statement whose block it is; `dead`: their storage ends there.
+    fn exit_scope(&mut self, s: usize, dead: bool, at: Span, point: Point) {
+        let depth = s + 1;
+        let js: Vec<LocalId> = self.joins.iter().filter(|j| j.0 == depth).map(|j| j.1).collect();
+        for j in js {
+            self.join_read(j, at, u32::MAX);
+        }
+        let ls: Vec<LocalId> = self.scopes.get(s).cloned().unwrap_or_default();
+        for &l in ls.iter().rev() {
+            self.end_local(l, dead, Some(at), point);
         }
     }
 
@@ -1915,6 +1997,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let call = Rvalue::call(vec![rop], flows.clone(), icx.a(f));
                 let res = self.put_temp(call, opt_ty, iter);
                 let V::P(rp) = res else { return };
+                // The `Option` is taken apart at the head, as the code does: a `Some` hands its
+                // payload to the iteration's item (an owner of its own), a `None` holds nothing.
+                // It is no owner, so it has no drop: one would drop the item a second time, under
+                // the key of the source, which names the iterator.
+                if let Some(i) = self.temps.iter().rposition(|&t| t == rp.local) {
+                    self.temps.remove(i);
+                }
                 let some = self.some_index();
                 Some(rp.with(Proj::EnumField(some, 0), *item_ty))
             }

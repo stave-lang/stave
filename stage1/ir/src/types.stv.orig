@@ -1,0 +1,599 @@
+// The type table: one row `TypeKey{tag, a, b}` per type key, with a row of `extra` words for
+// the keys that hold lists, ids by interning order while building. A dump's T is the canonical
+// rank of a key among the types it prints (`rank`), so the interning order never reaches an id.
+//
+// Key layout by tag (the tags are in the canonical key order):
+// - INT: a = signed (0, 1), b = width (0 .. 3: 8 16 32 64, 4: size)
+// - FLOAT: a = format (0 f16, 1 f32, 2 f64, 3 bf16)
+// - BOOL CHAR STR NEVER SELF: no fields
+// - REF PTR: a = mutable (0, 1), b = the inner T
+// - ARRAY: a = the element T; extra: one const argument (3 words)
+// - SLICE: a = the element T, b = the alignment (0: none); an alignment of 0 written in IR text
+//   is b = 0 with one extra word 0
+// - TUPLE: extra: the element Ts
+// - ADT: a = the decl D; extra: 3 words per argument
+// - FN: a = the parameter count; extra: the parameter Ts, the return T, the feature bits (high
+//   word, low word), the deny bits
+// - VECTOR: a = the lane T, b = the lanes (a count, or `LANES_N` sizeless: above every count)
+// - MASK: a = the lane width, b = the lanes
+// - PARAM CONSTPARAM: a = the flat parameter index
+// - RANGE: a = the element T, b = inclusive (0, 1)
+// A generic argument is 3 words, in the canonical order of arguments: (0, T, 0) a type, (1, hi,
+// lo) a value, (2, i, 0) the const parameter i, (3, 0, 0) a value unknown after an error, (4, w, 0)
+// an IR const argument outside u64, w its row in the IR module's wide-int pool.
+//
+// The error type has no key: it is `ERR`, and a key never holds it (making a key from it gives
+// `ERR`). A key taller than `MAX_HEIGHT` is refused: interning it gives `ERR` and counts a refusal.
+import prims.col;
+import prims.ragged;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+pub const ERR: u32 = 4294967294;
+
+pub const TK_INT: u8 = 0;
+pub const TK_FLOAT: u8 = 1;
+pub const TK_BOOL: u8 = 2;
+pub const TK_CHAR: u8 = 3;
+pub const TK_STR: u8 = 4;
+pub const TK_REF: u8 = 5;
+pub const TK_PTR: u8 = 6;
+pub const TK_ARRAY: u8 = 7;
+pub const TK_SLICE: u8 = 8;
+pub const TK_TUPLE: u8 = 9;
+pub const TK_ADT: u8 = 10;
+pub const TK_FN: u8 = 11;
+pub const TK_VECTOR: u8 = 12;
+pub const TK_MASK: u8 = 13;
+pub const TK_PARAM: u8 = 14;
+pub const TK_CONSTPARAM: u8 = 15;
+pub const TK_NEVER: u8 = 16;
+pub const TK_RANGE: u8 = 17;
+pub const TK_SELF: u8 = 18;
+
+pub const W_8: u32 = 0;
+pub const W_16: u32 = 1;
+pub const W_32: u32 = 2;
+pub const W_64: u32 = 3;
+pub const W_SIZE: u32 = 4;
+
+pub const LANES_N: u32 = 256;
+
+pub const GA_TYPE: u32 = 0;
+pub const GA_VALUE: u32 = 1;
+pub const GA_PARAM: u32 = 2;
+pub const GA_ERROR: u32 = 3;
+pub const GA_WIDE: u32 = 4;
+
+// The tallest key: a type is one above its tallest component, a type without components is 1.
+pub const MAX_HEIGHT: u32 = 1000;
+
+// The 64-bit finalizer of MurmurHash3.
+fn mix(k: u64) -> u64 {
+    let mut x = k;
+    x = x ^ (x >> 33);
+    x = x *% 0xff51afd7ed558ccd;
+    x = x ^ (x >> 33);
+    x = x *% 0xc4ceb9fe1a85ec53;
+    return x ^ (x >> 33);
+}
+
+pub struct Table {
+    pub tag: vec.Vec<u8>,
+    pub a: vec.Vec<u32>,
+    pub b: vec.Vec<u32>,
+    pub extra: ragged.Ragged<u32>,
+    pub height: vec.Vec<u32>,
+    pub refused: u32,
+    usize_id: u32,
+    // the interning index: open addressing over the keys' hashes
+    slots: vec.Vec<u32>,
+    hashes: vec.Vec<u64>,
+    // the extra words of the key being made
+    pend: vec.Vec<u32>,
+}
+
+impl Table {
+    pub fn new() -> Table {
+        return Table.{
+            tag: vec.Vec::<u8>.new(),
+            a: vec.Vec::<u32>.new(),
+            b: vec.Vec::<u32>.new(),
+            extra: ragged.Ragged::<u32>.new(),
+            height: vec.Vec::<u32>.new(),
+            refused: 0,
+            usize_id: NONE,
+            slots: col.filled(64, NONE),
+            hashes: vec.Vec::<u64>.new(),
+            pend: vec.Vec::<u32>.new(),
+        };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.tag.len();
+    }
+
+    pub fn tag_of(&self, t: u32) -> u8 {
+        if t >= self.tag.len() as% u32 { return 255u8; }
+        return self.tag.as_slice()[t as usize];
+    }
+
+    pub fn a_of(&self, t: u32) -> u32 {
+        return self.a.as_slice()[t as usize];
+    }
+
+    pub fn b_of(&self, t: u32) -> u32 {
+        return self.b.as_slice()[t as usize];
+    }
+
+    pub fn x(&self, t: u32) -> &[u32] from self {
+        return self.extra.row(t as usize);
+    }
+
+    // Starts the extra words of a key.
+    pub fn begin(&mut self) {
+        self.pend.clear();
+    }
+
+    pub fn push(&mut self, w: u32) {
+        self.pend.push(w);
+    }
+
+    pub fn push_garg(&mut self, k: u32, x: u32, y: u32) {
+        self.pend.push(k);
+        self.pend.push(x);
+        self.pend.push(y);
+    }
+
+    // The component Ts of the pending key (tag, a, b) into out.
+    fn kids_of(&self, tag: u8, a: u32, b: u32, xs: &[u32], out: &mut vec.Vec<u32>) {
+        out.clear();
+        if tag == TK_REF || tag == TK_PTR {
+            out.push(b);
+        } else if tag == TK_ARRAY || tag == TK_SLICE || tag == TK_VECTOR || tag == TK_RANGE {
+            out.push(a);
+        } else if tag == TK_TUPLE {
+            out.extend_from_slice(xs);
+        } else if tag == TK_ADT {
+            let mut k: usize = 0;
+            while k + 2 < xs.len() {
+                if xs[k] == GA_TYPE { out.push(xs[k + 1]); }
+                k = k + 3;
+            }
+        } else if tag == TK_FN {
+            let np = a as usize;
+            out.extend_from_slice(&xs[0..np + 1]);
+        }
+    }
+
+    // The component Ts of type t, in key order.
+    pub fn kids(&self, t: u32, out: &mut vec.Vec<u32>) {
+        let i = t as usize;
+        self.kids_of(self.tag.as_slice()[i], self.a.as_slice()[i], self.b.as_slice()[i], self.extra.row(i), out);
+    }
+
+    fn hash_of(tag: u8, a: u32, b: u32, xs: &[u32]) -> u64 {
+        let mut h = mix((tag as u64) | ((a as u64) << 8) | ((b as u64) << 40) | ((xs.len() as u64) << 60));
+        for k in 0..xs.len() {
+            h = mix(h ^ (xs[k] as u64) ^ ((k as u64) << 40));
+        }
+        return h;
+    }
+
+    fn same(&self, t: u32, tag: u8, a: u32, b: u32, xs: &[u32]) -> bool {
+        let i = t as usize;
+        return self.tag.as_slice()[i] == tag && self.a.as_slice()[i] == a && self.b.as_slice()[i] == b && self.extra.row(i).eq(xs);
+    }
+
+    fn grow(&mut self) {
+        let cap = self.slots.len() * 2;
+        let mask = cap - 1;
+        let mut slots = col.filled(cap, NONE);
+        {
+            let s = slots.as_mut_slice();
+            let hs = self.hashes.as_slice();
+            for t in 0..hs.len() {
+                let mut at = (hs[t] as usize) & mask;
+                while s[at] != NONE {
+                    at = (at + 1) & mask;
+                }
+                s[at] = t as% u32;
+            }
+        }
+        self.slots = slots;
+    }
+
+    // The id of key (tag, a, b) with the pending extra words; `ERR` if a component is the error
+    // type or the key is taller than `MAX_HEIGHT` (a refusal).
+    pub fn intern(&mut self, tag: u8, a: u32, b: u32) -> u32 {
+        let pend = self.pend.as_slice();
+        let h = comp_height(self.height.as_slice(), tag, a, b, pend);
+        if h == ERR { return ERR; }
+        let hash = Table.hash_of(tag, a, b, pend);
+        let mask = self.slots.len() - 1;
+        let mut at = (hash as usize) & mask;
+        loop {
+            let s = self.slots.as_slice()[at];
+            if s == NONE { break; }
+            if self.hashes.as_slice()[s as usize] == hash && self.same(s, tag, a, b, pend) { return s; }
+            at = (at + 1) & mask;
+        }
+        if h + 1 > MAX_HEIGHT {
+            self.refused = self.refused + 1;
+            return ERR;
+        }
+        let id = self.tag.len() as% u32;
+        self.tag.push(tag);
+        self.a.push(a);
+        self.b.push(b);
+        self.extra.push_row(pend);
+        self.height.push(h + 1);
+        self.hashes.push(hash);
+        self.slots.as_mut_slice()[at] = id;
+        if self.tag.len() * 2 > self.slots.len() { self.grow(); }
+        return id;
+    }
+
+    // Appends key (tag, a, b) with the pending extra words as the next id, unindexed and without
+    // a height: a table read from IR text keeps the text's ids, components may come later, and
+    // equal keys are an input error. `first_equal` then finds them.
+    pub fn push_raw(&mut self, tag: u8, a: u32, b: u32) -> u32 {
+        let pend = self.pend.as_slice();
+        let id = self.tag.len() as% u32;
+        self.tag.push(tag);
+        self.a.push(a);
+        self.b.push(b);
+        self.extra.push_row(pend);
+        self.height.push(0);
+        self.hashes.push(Table.hash_of(tag, a, b, pend));
+        return id;
+    }
+
+    // For a table of raw rows: per row, the first earlier row with an equal key, or NONE. Indexes
+    // the rows; heights are the caller's (`height` after a well-formedness pass).
+    pub fn first_equal(&mut self) -> vec.Vec<u32> {
+        let n = self.tag.len();
+        let mut cap: usize = 64;
+        while cap < n * 2 + 2 {
+            cap = cap * 2;
+        }
+        let mask = cap - 1;
+        let mut slots = col.filled(cap, NONE);
+        let mut out = col.filled(n, NONE);
+        for t in 0..n {
+            let id = t as% u32;
+            let hash = self.hashes.as_slice()[t];
+            let mut at = (hash as usize) & mask;
+            loop {
+                let s = slots.as_slice()[at];
+                if s == NONE {
+                    slots.as_mut_slice()[at] = id;
+                    break;
+                }
+                let si = s as usize;
+                if self.hashes.as_slice()[si] == hash && self.same(s, self.tag.as_slice()[t], self.a.as_slice()[t], self.b.as_slice()[t], self.extra.row(t)) {
+                    out.as_mut_slice()[t] = s;
+                    break;
+                }
+                at = (at + 1) & mask;
+            }
+        }
+        self.slots = slots;
+        return out;
+    }
+
+    // The id of key (tag, a, b, xs) in an indexed table, or NONE (lookup only).
+    pub fn find(&self, tag: u8, a: u32, b: u32, xs: &[u32]) -> u32 {
+        let hash = Table.hash_of(tag, a, b, xs);
+        let mask = self.slots.len() - 1;
+        let mut at = (hash as usize) & mask;
+        loop {
+            let s = self.slots.as_slice()[at];
+            if s == NONE { return NONE; }
+            if self.hashes.as_slice()[s as usize] == hash && self.same(s, tag, a, b, xs) { return s; }
+            at = (at + 1) & mask;
+        }
+    }
+
+    // A key without extra words.
+    pub fn key(&mut self, tag: u8, a: u32, b: u32) -> u32 {
+        self.pend.clear();
+        return self.intern(tag, a, b);
+    }
+
+    pub fn mk_ref(&mut self, mutable: bool, inner: u32) -> u32 {
+        if inner == ERR { return ERR; }
+        return self.key(TK_REF, if mutable then 1u32 else 0u32, inner);
+    }
+
+    pub fn mk_ptr(&mut self, mutable: bool, inner: u32) -> u32 {
+        if inner == ERR { return ERR; }
+        return self.key(TK_PTR, if mutable then 1u32 else 0u32, inner);
+    }
+
+    pub fn unit(&mut self) -> u32 {
+        self.pend.clear();
+        return self.intern(TK_TUPLE, 0, 0);
+    }
+
+    // An int type: width code w.
+    pub fn int(&mut self, signed: bool, w: u32) -> u32 {
+        return self.key(TK_INT, if signed then 1u32 else 0u32, w);
+    }
+
+    pub fn usize_t(&mut self) -> u32 {
+        if self.usize_id == NONE { self.usize_id = self.int(false, W_SIZE); }
+        return self.usize_id;
+    }
+
+    // Whether t is or holds the error type: only `ERR` itself (keys never hold it).
+    pub fn is_err(&self, t: u32) -> bool {
+        return t == ERR || t == NONE;
+    }
+
+    // The bits of int type t (0 if t is no int).
+    pub fn int_bits(&self, t: u32) -> u32 {
+        if self.tag_of(t) != TK_INT { return 0; }
+        let w = self.b_of(t);
+        return if w == W_8 then 8u32 else if w == W_16 then 16u32 else if w == W_32 then 32u32 else 64u32;
+    }
+
+    pub fn is_signed(&self, t: u32) -> bool {
+        return self.tag_of(t) == TK_INT && self.a_of(t) == 1;
+    }
+
+    // Canonical order of keys x and y whose components are ranked by `rank`: negative, 0, or
+    // positive.
+    pub fn cmp(&self, x: u32, y: u32, rank: &[u32]) -> i32 {
+        if x == y { return 0; }
+        let tx = self.tag.as_slice()[x as usize];
+        let ty = self.tag.as_slice()[y as usize];
+        if tx != ty { return if tx < ty then -1 else 1; }
+        let ax = self.a.as_slice()[x as usize];
+        let ay = self.a.as_slice()[y as usize];
+        let bx = self.b.as_slice()[x as usize];
+        let by = self.b.as_slice()[y as usize];
+        let xs = self.extra.row(x as usize);
+        let ys = self.extra.row(y as usize);
+        if tx == TK_INT || tx == TK_FLOAT || tx == TK_MASK || tx == TK_PARAM || tx == TK_CONSTPARAM {
+            let c = cmp_u32(ax, ay);
+            if c != 0 { return c; }
+            return cmp_u32(bx, by);
+        }
+        if tx == TK_REF || tx == TK_PTR {
+            let c = cmp_u32(ax, ay);
+            if c != 0 { return c; }
+            return cmp_u32(rank[bx as usize], rank[by as usize]);
+        }
+        if tx == TK_ARRAY {
+            let c = cmp_u32(rank[ax as usize], rank[ay as usize]);
+            if c != 0 { return c; }
+            return cmp_args(xs, ys, rank);
+        }
+        if tx == TK_SLICE || tx == TK_VECTOR || tx == TK_RANGE {
+            let c = cmp_u32(rank[ax as usize], rank[ay as usize]);
+            if c != 0 { return c; }
+            return cmp_u32(bx, by);
+        }
+        if tx == TK_TUPLE {
+            return cmp_list(xs, ys, rank);
+        }
+        if tx == TK_ADT {
+            let c = cmp_u32(ax, ay);
+            if c != 0 { return c; }
+            return cmp_args(xs, ys, rank);
+        }
+        if tx == TK_FN {
+            let c = cmp_list(&xs[0..ax as usize], &ys[0..ay as usize], rank);
+            if c != 0 { return c; }
+            let nx = ax as usize;
+            let ny = ay as usize;
+            let r = cmp_u32(rank[xs[nx] as usize], rank[ys[ny] as usize]);
+            if r != 0 { return r; }
+            for k in 1..4usize {
+                let w = cmp_u32(xs[nx + k], ys[ny + k]);
+                if w != 0 { return w; }
+            }
+            return 0;
+        }
+        return 0;
+    }
+
+    // The canonical rank of each type that `roots` name or reach through components: `num[t]` is
+    // t's rank among them (`NONE` for the others), `order` lists them by rank. Ranked in rounds
+    // by height: a round sorts the keys of its height (their components are ranked by the
+    // earlier rounds) and merges them into the order so far.
+    pub fn rank(&self, roots: &[u32]) -> (vec.Vec<u32>, vec.Vec<u32>) {
+        let n = self.len();
+        let mut used = col.filled(n, false);
+        let mut stack = vec.Vec::<u32>.new();
+        for k in 0..roots.len() {
+            let r = roots[k];
+            if r != ERR && r != NONE { stack.push(r); }
+        }
+        let mut kids = vec.Vec::<u32>.new();
+        while stack.len() > 0 {
+            let t = stack.as_slice()[stack.len() - 1];
+            stack.truncate(stack.len() - 1);
+            if used.as_slice()[t as usize] { continue; }
+            used.as_mut_slice()[t as usize] = true;
+            self.kids(t, &mut kids);
+            stack.extend_from_slice(kids.as_slice());
+        }
+        let mut maxh: u32 = 0;
+        for t in 0..n {
+            if used.as_slice()[t] && self.height.as_slice()[t] > maxh { maxh = self.height.as_slice()[t]; }
+        }
+        // by height: keys of height h are `by_h[h_off[h]..h_off[h + 1]]`
+        let mut cnt = col.filled(maxh as usize + 2, 0u32);
+        for t in 0..n {
+            if used.as_slice()[t] {
+                let h = self.height.as_slice()[t] as usize;
+                let c = cnt.as_slice()[h + 1] + 1;
+                cnt.as_mut_slice()[h + 1] = c;
+            }
+        }
+        for h in 1..cnt.len() {
+            let c = cnt.as_slice()[h] + cnt.as_slice()[h - 1];
+            cnt.as_mut_slice()[h] = c;
+        }
+        let total = cnt.as_slice()[cnt.len() - 1] as usize;
+        let mut by_h = col.filled(total, 0u32);
+        let mut fill = vec.Vec::<u32>.new();
+        fill.extend_from_slice(cnt.as_slice());
+        for t in 0..n {
+            if used.as_slice()[t] {
+                let h = self.height.as_slice()[t] as usize;
+                let at = fill.as_slice()[h];
+                by_h.as_mut_slice()[at as usize] = t as% u32;
+                fill.as_mut_slice()[h] = at + 1;
+            }
+        }
+        let mut num = col.filled(n, NONE);
+        let mut order = vec.Vec::<u32>.new();
+        let mut tmp = vec.Vec::<u32>.new();
+        let mut merged = vec.Vec::<u32>.new();
+        for h in 1..(maxh as usize + 1) {
+            let lo = cnt.as_slice()[h] as usize;
+            let hi = cnt.as_slice()[h + 1] as usize;
+            if lo == hi { continue; }
+            let mut round = vec.Vec::<u32>.new();
+            round.extend_from_slice(&by_h.as_slice()[lo..hi]);
+            self.sort_ids(&mut round, num.as_slice(), &mut tmp);
+            merged.clear();
+            let o = order.as_slice();
+            let r = round.as_slice();
+            let mut i: usize = 0;
+            let mut j: usize = 0;
+            while i < o.len() || j < r.len() {
+                if j == r.len() || (i < o.len() && self.cmp(o[i], r[j], num.as_slice()) <= 0) {
+                    merged.push(o[i]);
+                    i = i + 1;
+                } else {
+                    merged.push(r[j]);
+                    j = j + 1;
+                }
+            }
+            order.clear();
+            order.extend_from_slice(merged.as_slice());
+            for k in 0..order.len() {
+                num.as_mut_slice()[order.as_slice()[k] as usize] = k as% u32;
+            }
+        }
+        return (num, order);
+    }
+
+    // Sorts ids by the canonical order (components ranked by `rank`): a bottom-up merge sort.
+    fn sort_ids(&self, ids: &mut vec.Vec<u32>, rank: &[u32], tmp: &mut vec.Vec<u32>) {
+        let n = ids.len();
+        tmp.clear();
+        tmp.extend_from_slice(ids.as_slice());
+        let mut width: usize = 1;
+        let mut in_ids = true;
+        while width < n {
+            if in_ids {
+                self.merge_pass(ids.as_slice(), tmp.as_mut_slice(), width, rank);
+            } else {
+                self.merge_pass(tmp.as_slice(), ids.as_mut_slice(), width, rank);
+            }
+            in_ids = !in_ids;
+            width = width * 2;
+        }
+        if !in_ids {
+            ids.clear();
+            ids.extend_from_slice(tmp.as_slice());
+        }
+    }
+
+    // One pass of the merge sort: runs of `width` in src merged pairwise into dst.
+    fn merge_pass(&self, src: &[u32], dst: &mut [u32], width: usize, rank: &[u32]) {
+        let n = src.len();
+        let mut lo: usize = 0;
+        while lo < n {
+            let mid = if lo + width < n then lo + width else n;
+            let hi = if lo + 2 * width < n then lo + 2 * width else n;
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            while k < hi {
+                if j == hi || (i < mid && self.cmp(src[i], src[j], rank) <= 0) {
+                    dst[k] = src[i];
+                    i = i + 1;
+                } else {
+                    dst[k] = src[j];
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            lo = hi;
+        }
+    }
+}
+
+// The tallest component height of key (tag, a, b, xs), or ERR if a component is the error type.
+fn comp_height(height: &[u32], tag: u8, a: u32, b: u32, xs: &[u32]) -> u32 {
+    let mut h: u32 = 0;
+    if tag == TK_REF || tag == TK_PTR {
+        if b == ERR || b == NONE { return ERR; }
+        return height[b as usize];
+    }
+    if tag == TK_ARRAY || tag == TK_SLICE || tag == TK_VECTOR || tag == TK_RANGE {
+        if a == ERR || a == NONE { return ERR; }
+        return height[a as usize];
+    }
+    if tag == TK_TUPLE || tag == TK_FN {
+        let n = if tag == TK_FN then a as usize + 1 else xs.len();
+        for k in 0..n {
+            let c = xs[k];
+            if c == ERR || c == NONE { return ERR; }
+            if height[c as usize] > h { h = height[c as usize]; }
+        }
+        return h;
+    }
+    if tag == TK_ADT {
+        let mut k: usize = 0;
+        while k + 2 < xs.len() {
+            if xs[k] == GA_TYPE {
+                let c = xs[k + 1];
+                if c == ERR || c == NONE { return ERR; }
+                if height[c as usize] > h { h = height[c as usize]; }
+            }
+            k = k + 3;
+        }
+    }
+    return h;
+}
+
+fn cmp_u32(x: u32, y: u32) -> i32 {
+    return if x < y then -1 else if x > y then 1 else 0;
+}
+
+// Element lists: element by element, then a prefix first.
+fn cmp_list(xs: &[u32], ys: &[u32], rank: &[u32]) -> i32 {
+    let n = if xs.len() < ys.len() then xs.len() else ys.len();
+    for k in 0..n {
+        let c = cmp_u32(rank[xs[k] as usize], rank[ys[k] as usize]);
+        if c != 0 { return c; }
+    }
+    return cmp_u32(xs.len() as% u32, ys.len() as% u32);
+}
+
+// Generic argument lists (3 words each): kind, then a type by rank or a value by its words.
+fn cmp_args(xs: &[u32], ys: &[u32], rank: &[u32]) -> i32 {
+    let mut k: usize = 0;
+    while k + 2 < xs.len() && k + 2 < ys.len() {
+        let c = cmp_u32(xs[k], ys[k]);
+        if c != 0 { return c; }
+        if xs[k] == GA_TYPE {
+            let r = cmp_u32(rank[xs[k + 1] as usize], rank[ys[k + 1] as usize]);
+            if r != 0 { return r; }
+        } else {
+            let a = cmp_u32(xs[k + 1], ys[k + 1]);
+            if a != 0 { return a; }
+            let b = cmp_u32(xs[k + 2], ys[k + 2]);
+            if b != 0 { return b; }
+        }
+        k = k + 3;
+    }
+    return cmp_u32(xs.len() as% u32, ys.len() as% u32);
+}

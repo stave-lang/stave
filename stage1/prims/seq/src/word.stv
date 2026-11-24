@@ -13,6 +13,8 @@ pub trait Word {
     fn bits() -> u32;
     // The k-th byte of the value, k = 0 the least significant (k < bits() / 8).
     fn byte(self, k: u32) -> usize;
+    // The value zero-extended to 64 bits.
+    fn wide(self) -> u64;
 }
 
 impl Word for u8 {
@@ -22,6 +24,7 @@ impl Word for u8 {
     fn less(self, o: u8) -> bool { return self < o; }
     fn bits() -> u32 { return 8; }
     fn byte(self, k: u32) -> usize { return self as usize; }
+    fn wide(self) -> u64 { return self as u64; }
 }
 
 impl Word for u16 {
@@ -34,6 +37,7 @@ impl Word for u16 {
         let sh = (k * 8) as% u16;
         return ((self >> sh) & 255) as usize;
     }
+    fn wide(self) -> u64 { return self as u64; }
 }
 
 impl Word for u32 {
@@ -43,6 +47,7 @@ impl Word for u32 {
     fn less(self, o: u32) -> bool { return self < o; }
     fn bits() -> u32 { return 32; }
     fn byte(self, k: u32) -> usize { return ((self >> (k * 8)) & 255) as usize; }
+    fn wide(self) -> u64 { return self as u64; }
 }
 
 impl Word for u64 {
@@ -55,4 +60,5 @@ impl Word for u64 {
         let sh = (k * 8) as u64;
         return ((self >> sh) & 255) as usize;
     }
+    fn wide(self) -> u64 { return self; }
 }

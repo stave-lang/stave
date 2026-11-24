@@ -18,6 +18,9 @@
 // `diags`: one JSON line per diagnostic, in canonical order.
 //
 // `sigs`: the signature type table, then one line per decl (`sigs_txt`).
+//
+// `kinds`: per `sigs` table type its flags, depth, and layout, the impl lines, the apply lines
+// (`kinds_txt`).
 import ast;
 import files;
 import generated.ll1_table;
@@ -26,6 +29,7 @@ import decls;
 import diag_out;
 import intern;
 import items;
+import kinds;
 import lex;
 import modules;
 import resolve;
@@ -184,11 +188,7 @@ pub fn diags(d: &diag.Diags, rows: &[u32], ft: &diag_out.FileTable, set: &source
 // by T, T the canonical rank among them; then one line per decl, by D (contracts/stage-gates.md).
 pub fn sigs_txt(sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules) -> vec.Vec<u8> {
     let n = ds.decls();
-    let mut roots = vec.Vec::<u32>.new();
-    for d in 0..n {
-        sig_roots(sg, ds, d, &mut roots);
-    }
-    let (num, order) = sg.cx.tab.rank(roots.as_slice());
+    let (num, order) = sigs_order(sg, ds);
     let mut buf = vec.Vec::<u8>.with_capacity(n * 80 + order.len() * 24);
     let nt = order.len() as% u32;
     for k in 0..order.len() {
@@ -202,6 +202,125 @@ pub fn sigs_txt(sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules) -> vec.V
         decl_line(&mut buf, sg, ds, md, d, num.as_slice(), nt);
     }
     return buf;
+}
+
+// The `sigs` type table: the rank of each type among those the decl lines name (NONE for the
+// others), and the types by rank.
+pub fn sigs_order(sg: &sigs.Sigs, ds: &decls.Decls) -> (vec.Vec<u32>, vec.Vec<u32>) {
+    let mut roots = vec.Vec::<u32>.new();
+    for d in 0..ds.decls() {
+        sig_roots(sg, ds, d, &mut roots);
+    }
+    return sg.cx.tab.rank(roots.as_slice());
+}
+
+// `kinds`: per `sigs` table type (same T) `t<T> FLAGS depth D SIZE`, then the impl lines, then
+// the apply lines (contracts/stage-gates.md).
+pub fn kinds_txt(kd: &kinds.Kinds) -> vec.Vec<u8> {
+    let mut buf = vec.Vec::<u8>.with_capacity(kd.bits.len() * 48 + kd.line.len() * 48 + kd.ap_t.len() * 24);
+    for k in 0..kd.bits.len() {
+        buf.push(116);
+        text.push_u32(&mut buf, k as% u32);
+        buf.push(32);
+        let b = kd.bits.as_slice()[k];
+        let mut any = false;
+        for f in 0..10usize {
+            if (b >> f as% u16) & 1 == 1 {
+                if any { buf.push(44); }
+                push_str(&mut buf, kind_flag(f));
+                any = true;
+            }
+        }
+        if !any { buf.push(45); }
+        push_str(&mut buf, " depth ");
+        let d = kd.depth.as_slice()[k];
+        if d == kinds.D_CYCLIC {
+            buf.push(45);
+        } else if d > 1000 {
+            push_str(&mut buf, "over");
+        } else {
+            text.push_u32(&mut buf, d);
+        }
+        let sz = kd.sz.as_slice()[k];
+        if sz == kinds.SZ_OK {
+            push_str(&mut buf, " size ");
+            text.push_u64(&mut buf, kd.size.as_slice()[k]);
+            push_str(&mut buf, " align ");
+            text.push_u64(&mut buf, kd.aln.as_slice()[k]);
+            let rk = kd.rk.as_slice()[k];
+            let offs = kd.offs.row(k);
+            let cnt = kd.vcnt.row(k);
+            if rk == kinds.REC_FIELDS {
+                push_str(&mut buf, " fields");
+                push_offsets(&mut buf, offs);
+            } else if rk == kinds.REC_ENUM {
+                push_str(&mut buf, " tag 4 variants[");
+                let mut at: usize = 0;
+                for v in 0..cnt.len() {
+                    if v > 0 { buf.push(32); }
+                    let c = cnt[v] as usize;
+                    push_offsets(&mut buf, &offs[at..at + c]);
+                    at = at + c;
+                }
+                buf.push(93);
+            }
+        } else {
+            push_str(&mut buf, if sz == kinds.SZ_OVER then " size overflow" else if sz == kinds.SZ_PARAM then " size param" else if sz == kinds.SZ_UNSIZED then " size unsized" else " size none");
+        }
+        buf.push(10);
+    }
+    for j in 0..kd.line.len() {
+        push_str(&mut buf, "impl d");
+        text.push_u32(&mut buf, kd.line.as_slice()[j]);
+        push_str(&mut buf, " trait ");
+        let tr = kd.l_trait.as_slice()[j];
+        if tr == types.NONE {
+            buf.push(45);
+        } else {
+            buf.push(100);
+            text.push_u32(&mut buf, tr);
+        }
+        push_str(&mut buf, " head ");
+        buf.extend_from_slice(kd.l_head.row(j));
+        push_str(&mut buf, " gen ");
+        text.push_u32(&mut buf, kd.l_gen.as_slice()[j]);
+        push_str(&mut buf, " methods");
+        push_decls(&mut buf, kd.l_methods.row(j));
+        buf.push(10);
+    }
+    for r in 0..kd.ap_t.len() {
+        push_str(&mut buf, "apply t");
+        text.push_u32(&mut buf, kd.ap_t.as_slice()[r]);
+        push_str(&mut buf, " d");
+        text.push_u32(&mut buf, kd.ap_tr.as_slice()[r]);
+        buf.push(32);
+        push_decls(&mut buf, kd.ap_impls.row(r));
+        buf.push(10);
+    }
+    return buf;
+}
+
+fn kind_flag(f: usize) -> &str {
+    return if f == 0 then "copy" else if f == 1 then "view" else if f == 2 then "send" else if f == 3 then "sync" else if f == 4 then "sized" else if f == 5 then "flat" else if f == 6 then "frozen" else if f == 7 then "drop-impl" else if f == 8 then "drop" else "lock";
+}
+
+fn push_offsets(buf: &mut vec.Vec<u8>, xs: &[u64]) {
+    buf.push(91);
+    for k in 0..xs.len() {
+        if k > 0 { buf.push(32); }
+        text.push_u64(buf, xs[k]);
+    }
+    buf.push(93);
+}
+
+fn push_decls(buf: &mut vec.Vec<u8>, ds: &[u32]) {
+    buf.push(91);
+    for k in 0..ds.len() {
+        if k > 0 { buf.push(32); }
+        buf.push(100);
+        text.push_u32(buf, ds[k]);
+    }
+    buf.push(93);
 }
 
 fn push_ty(buf: &mut vec.Vec<u8>, t: u32, num: &[u32], nt: u32) {

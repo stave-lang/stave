@@ -1,0 +1,5 @@
+name = "manifest_syntax_table"
+kind = "bin"
+
+[[bin]] #~ ERROR E1002
+name = "x"

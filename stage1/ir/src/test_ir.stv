@@ -115,6 +115,14 @@ test fn faults_of_verification() {
     debug.assert(first_has(&load.load(text(&g).as_slice()), "lie past its size"), "data inside its static");
 }
 
+test fn an_intrinsic_is_built_for_the_header_target() {
+    let x86 = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u 64", "type t1 int u 32", "fn @0 a.f(t1) -> t0 {", "b0(%0: t1):", "  %1 = intrinsic.xgetbv t0 %0", "  ret %1", "}"];
+    debug.assert(load.load(text(&x86).as_slice()).ok(), "xgetbv on x86-64");
+    let a64 = ["stave.ir 4 \"aarch64-linux\" debug checked", "type t0 int u 64", "type t1 int u 32", "fn @0 a.f(t1) -> t0 {", "b0(%0: t1):", "  %1 = intrinsic.xgetbv t0 %0", "  ret %1", "}"];
+    let ld = load.load(text(&a64).as_slice());
+    debug.assert(!ld.ok() && first_has(&ld, "not built for the target arch AArch64") && ld.errs.line.as_slice()[0] == 6, "xgetbv on AArch64, at its line");
+}
+
 test fn a_deep_type_chain_is_a_fault_not_a_deep_stack() {
     let mut v = vec.Vec::<u8>.new();
     bytes.push_str(&mut v, "stave.ir 4 \"x86_64-linux-v2\" debug checked\ntype t0 bool\n");

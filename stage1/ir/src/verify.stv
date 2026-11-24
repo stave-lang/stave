@@ -4,7 +4,8 @@
 // bytes lie inside its type's size; a failure there stops. Then the module rules (address words,
 // vector and mask shapes, layouts, static layouts) and, per fn, the known-item signature, the
 // entry block, dominance of every use by its definition, and the typing of every instruction
-// and terminator. A fault is reported at the line it is about: an instruction's, a block's
+// and terminator; with none of those, every intrinsic is one the header's target builds. A fault
+// is reported at the line it is about: an instruction's, a block's
 // terminator (the entry params: the block header), a fn's header, a `type` or `static` line.
 import bytes;
 import errs;
@@ -195,6 +196,7 @@ pub fn verify(ld: &mut read.Loaded) {
         if er.full() { break; }
         v.func(m, f, er, ld.fn_line.as_slice(), ld.blk_line.as_slice(), ld.blk_tline.as_slice(), ld.ins_line.as_slice());
     }
+    if er.len() == 0 { v.target(m, er, ld.ins_line.as_slice()); }
 }
 
 // The first type that is a component of itself or nests deeper than `MAX_DEPTH` (true), or
@@ -335,6 +337,29 @@ fn lanes(m: &model.Module, ty_line: &[u32], me: &mut errs.Errs) {
 }
 
 impl V {
+    // The part that needs the header's target: every `intrinsic.<name>` is built for its arch (an
+    // intrinsic of both arches for every target, an x86-64 or AArch64 one for that arch only).
+    fn target(&mut self, m: &model.Module, er: &mut errs.Errs, ln_i: &[u32]) {
+        let arch = if m.target <= 2 then intrinsic_table.ARCH_X86 else if m.target <= 5 then intrinsic_table.ARCH_A64 else 255u8;
+        let name = if arch == intrinsic_table.ARCH_X86 then "x86-64" else if arch == intrinsic_table.ARCH_A64 then "AArch64" else "gpu-sm86";
+        let mut arches = vec.Vec::<u8>.new();
+        arches.extend_from_slice(&intrinsic_table.INTR_ARCH);
+        for i in 0..m.ins_op.len() {
+            if m.ins_op.as_slice()[i] != ir_text_terminals.IR_T_INTR { continue; }
+            let x = m.intr.row(m.ins_intr.as_slice()[i] as usize);
+            let r = self.intr_row(x);
+            if r == NONE { continue; }
+            let a = arches.as_slice()[r as usize];
+            if a == intrinsic_table.ARCH_BOTH || a == arch { continue; }
+            let mut e = vec.Vec::<u8>.new();
+            bytes.push_str(&mut e, "`intrinsic.");
+            e.extend_from_slice(x);
+            bytes.push_str(&mut e, "` is not built for the target arch ");
+            bytes.push_str(&mut e, name);
+            er.add(errs.K_VERIFY, ln_i[i], 0, e.as_slice());
+        }
+    }
+
     fn fail(&mut self, s: &str) -> bool {
         self.msg.clear();
         bytes.push_str(&mut self.msg, s);

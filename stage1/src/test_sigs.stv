@@ -182,16 +182,22 @@ test fn const_cycles() {
     debug.assert(sg.cx.skip == consteval.CV_NONE, "nothing undecided");
 }
 
-test fn layout_is_not_guessed() {
-    let (_, sg) = build("fn f(a: [u8; size_of::<u64>()]) {}\nfn main() -> i32 { return 0; }\n");
-    debug.assert(sg.cx.skip == consteval.CV_LAYOUT, "a size_of length needs a layout");
+test fn size_of_in_signatures() {
+    let src = "const W: usize = size_of::<u64>();\nconst P: usize = align_of::<(u8, u32)>();\nstruct S { a: u8, b: [u16; size_of::<T2>()] }\nstruct T2 { x: u32 }\nconst SS: usize = size_of::<S>();\nconst AS: usize = align_of::<S>();\nfn f(a: [u8; size_of::<u64>()]) {}\nfn main() -> i32 { return 0; }\n";
+    let (o, sg) = build(src);
+    debug.assert(sg.cx.skip == consteval.CV_NONE, "every layout decided");
+    debug.assert(value_is(&o, &sg, "W", false, 8) && value_is(&o, &sg, "P", false, 4), "a built-in type's size and alignment");
+    debug.assert(value_is(&o, &sg, "SS", false, 10) && value_is(&o, &sg, "AS", false, 2), "a struct whose field length is another's size: rounds");
+    let (oc, c) = build("struct A { x: [u8; size_of::<B>()] }\nstruct B { y: [u8; size_of::<A>()] }\nconst CA: usize = size_of::<A>();\nconst UN: usize = size_of::<str>();\nfn main() -> i32 { return 0; }\n");
+    debug.assert(c.cx.skip == consteval.CV_NONE, "a cycle of layouts ends");
+    debug.assert(fails(&oc, &c, "CA") && fails(&oc, &c, "UN"), "a layout on a cycle, or of an unsized type, fails");
     let (_, g) = build("fn f<T>(a: [u8; size_of::<T>()]) {}\nfn main() -> i32 { return 0; }\n");
     debug.assert(g.cx.skip == consteval.CV_NONE, "size_of of a type with params fails without a layout");
 }
 
 // stage0's line for `needs` on `std.string.String.new` in an edited copy of the shipped std
 // (the shape cannot arise from the shipped packages, which declare it on no such fn).
-const RUNTIME_ENTRY_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0709\",\"severity\":\"error\",\"message\":\"a runtime entry fn cannot declare `needs`\",\"primary\":{\"file\":\"/home/aleksei/stave-s1d-probes/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"related\":[{\"span\":{\"file\":\"/home/aleksei/stave-s1d-probes/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"label\":\"`needs` here\"}],\"fix\":{\"description\":\"remove `needs(...)` here, and call the feature-specific code through a `dispatch` function\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
+const RUNTIME_ENTRY_LINE: &str = "{\"kind\":\"diagnostic\",\"code\":\"E0709\",\"severity\":\"error\",\"message\":\"a runtime entry fn cannot declare `needs`\",\"primary\":{\"file\":\"/probe/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"related\":[{\"span\":{\"file\":\"/probe/lib709/std/string.stv\",\"line\":23,\"col\":28,\"len\":10},\"label\":\"`needs` here\"}],\"fix\":{\"description\":\"remove `needs(...)` here, and call the feature-specific code through a `dispatch` function\",\"applicability\":\"placeholder\",\"edits\":[]}}\n";
 
 test fn runtime_entry_needs() {
     let mut k = test_kit.kit();
@@ -216,13 +222,14 @@ test fn runtime_entry_needs() {
     let mut d = diag.Diags.new();
     diag_sigs.sigs_diags(&mut d, &sg, &o.ds, &o.nm, &o.lx, &o.set, &o.toks, &o.cut);
     debug.assert(d.len() == 1, "one diagnostic: E0709 on the known method");
-    let mut ft = diag_out.FileTable.{ rank: vec.Vec::<u32>.new(), path: diag_reg.Strs.new() };
+    let mut ft = diag_out.FileTable.sources();
     ft.rank.push(0);
     ft.rank.push(1);
     ft.rank.push(2);
     ft.path.push(mem.str_bytes("main.stv"));
-    ft.path.push(mem.str_bytes("/home/aleksei/stave-s1d-probes/lib709/std/core.stv"));
-    ft.path.push(mem.str_bytes("/home/aleksei/stave-s1d-probes/lib709/std/string.stv"));
+    ft.path.push(mem.str_bytes("/probe/lib709/std/core.stv"));
+    ft.path.push(mem.str_bytes("/probe/lib709/std/string.stv"));
+    ft.nsrc = ft.rank.len();
     let rows = d.order(ft.rank.as_slice());
     let out = diag_out.render(&d, rows.as_slice(), &ft, &o.set, true);
     debug.assert(out.as_slice().eq(mem.str_bytes(RUNTIME_ENTRY_LINE)), "the JSON line is stage0's");

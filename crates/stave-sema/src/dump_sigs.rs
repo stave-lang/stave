@@ -39,52 +39,76 @@ const FLAG_NAMES: [&str; 14] = [
 /// The `sigs` dump: `t<T> key` per table type, by T, then one decl line per decl, by D.
 pub fn dump_sigs(prog: &Program, tc: &Typeck) -> String {
     let members = Members::new(prog, tc);
-    // The decl lines are rendered twice by the same code: first to collect the types they name,
-    // then with the table's numbers, so the table holds exactly what the lines name.
-    let mut cx = Cx { tc, num: None, roots: Vec::new() };
-    let mut scratch = String::new();
-    for d in 0..prog.decls.len() {
-        scratch.clear();
-        decl_line(prog, tc, &members, &mut cx, DeclId(d as u32), &mut scratch);
-    }
-    let err = tc.error_type;
-    let mut used = vec![false; tc.types.len()];
-    let mut stack = std::mem::take(&mut cx.roots);
-    let mut kids = Vec::new();
-    while let Some(t) = stack.pop() {
-        let Some(u) = used.get_mut(t.idx()) else { continue };
-        if *u {
-            continue;
-        }
-        *u = true;
-        kids.clear();
-        tc.types.kind(t).children(&mut kids);
-        stack.extend_from_slice(&kids);
-    }
-    let mut num = vec![u32::MAX; tc.types.len()];
-    let mut next = 0u32;
-    for (i, &u) in used.iter().enumerate() {
-        if u && TypeId(i as u32) != err {
-            num[i] = next;
-            next += 1;
-        }
-    }
-    if let Some(e) = num.get_mut(err.idx()) {
-        *e = next;
-    }
+    let table = SigTable::new(prog, tc, &members);
     let mut out = String::new();
-    let at = |c: TypeId| num.get(c.idx()).copied().unwrap_or(next);
-    for (i, &u) in used.iter().enumerate() {
-        let t = TypeId(i as u32);
-        if u && t != err {
-            let _ = writeln!(out, "t{} {}", at(t), types::type_key_text_as(&tc.types, t, &at));
-        }
+    for &t in &table.order {
+        let _ = writeln!(out, "t{} {}", table.at(t), types::type_key_text_as(&tc.types, t, &|c| table.at(c)));
     }
-    let mut cx = Cx { tc, num: Some(&num), roots: Vec::new() };
+    let mut cx = Cx { tc, num: Some(&table.num), roots: Vec::new() };
     for d in 0..prog.decls.len() {
         decl_line(prog, tc, &members, &mut cx, DeclId(d as u32), &mut out);
     }
     out
+}
+
+/// The `sigs` type table: the types the decl lines name, closed over key components, numbered
+/// by rank among themselves. Every dump that names `t<T>` of `sigs` reads this numbering.
+pub(crate) struct SigTable {
+    /// The table's types by local T.
+    pub order: Vec<TypeId>,
+    /// Global id -> local T; the error type and types outside the table map to `next`.
+    num: Vec<u32>,
+    /// The number of table lines (the error type's number).
+    next: u32,
+}
+
+impl SigTable {
+    pub(crate) fn of(prog: &Program, tc: &Typeck) -> SigTable {
+        SigTable::new(prog, tc, &Members::new(prog, tc))
+    }
+
+    fn new(prog: &Program, tc: &Typeck, members: &Members) -> SigTable {
+        // The decl lines are rendered by the same code as the dump, to collect the types they
+        // name, so the table holds exactly what the lines name.
+        let mut cx = Cx { tc, num: None, roots: Vec::new() };
+        let mut scratch = String::new();
+        for d in 0..prog.decls.len() {
+            scratch.clear();
+            decl_line(prog, tc, members, &mut cx, DeclId(d as u32), &mut scratch);
+        }
+        let err = tc.error_type;
+        let mut used = vec![false; tc.types.len()];
+        let mut stack = std::mem::take(&mut cx.roots);
+        let mut kids = Vec::new();
+        while let Some(t) = stack.pop() {
+            let Some(u) = used.get_mut(t.idx()) else { continue };
+            if *u {
+                continue;
+            }
+            *u = true;
+            kids.clear();
+            tc.types.kind(t).children(&mut kids);
+            stack.extend_from_slice(&kids);
+        }
+        let mut num = vec![u32::MAX; tc.types.len()];
+        let mut order = Vec::new();
+        for (i, &u) in used.iter().enumerate() {
+            if u && TypeId(i as u32) != err {
+                num[i] = order.len() as u32;
+                order.push(TypeId(i as u32));
+            }
+        }
+        let next = order.len() as u32;
+        if let Some(e) = num.get_mut(err.idx()) {
+            *e = next;
+        }
+        SigTable { order, num, next }
+    }
+
+    /// The local T of global type `t` (the error type: the number of table lines).
+    pub(crate) fn at(&self, t: TypeId) -> u32 {
+        self.num.get(t.idx()).copied().unwrap_or(self.next)
+    }
 }
 
 /// Field types and tuple payloads, by member decl (they live in their ADT's signature).

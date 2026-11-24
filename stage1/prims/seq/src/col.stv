@@ -2,21 +2,27 @@
 import std.debug;
 import std.vec;
 
-// A column of n copies of x.
+// A column of n copies of x, appended a block at a time (a call per element costs more than the
+// copy).
 pub fn filled<T: Copy>(n: usize, x: T) -> vec.Vec<T> {
     let mut v = vec.Vec::<T>.with_capacity(n);
-    for _ in 0..n {
-        v.push(x);
+    let blk = [x; 64];
+    let mut k = n;
+    while k >= 64 {
+        v.extend_from_slice(&blk);
+        k = k - 64;
     }
+    v.extend_from_slice(&blk[0..k]);
     return v;
 }
 
 // The ids 0..n in order.
 pub fn iota(n: usize) -> vec.Vec<u32> {
-    let end = ids(n);
-    let mut v = vec.Vec::<u32>.with_capacity(n);
-    for i in 0..end {
-        v.push(i);
+    let _ = ids(n);
+    let mut v = filled(n, 0u32);
+    let s = v.as_mut_slice();
+    for i in 0..s.len() {
+        s[i] = i as% u32;
     }
     return v;
 }

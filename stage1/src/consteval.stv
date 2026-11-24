@@ -19,8 +19,12 @@
 // whole length or argument, parentheses, the operators `+ - * / %` (and their `%` and `|`
 // forms), `& | ^ << >> <<%`, unary `-` and `~`, and `as` / `as%` / `as|` between int types.
 // A form outside these makes the evaluation `UNSUP` (stage1 does not decide it: the caller
-// writes no dump), `size_of` / `align_of` of a type without parameters makes it `LAYOUT` (the
-// layout is a later stage's).
+// writes no dump).
+//
+// `size_of::<T>()` / `align_of::<T>()` of a type without parameters is a layout request (`Lay`,
+// keyed by the call's node row): decided, it is T's size or alignment (or a failure: T has no
+// layout); pending, the evaluation is `LAYOUT` and counts in `Cx.hits`, and signature building
+// decides the requests between rounds (`sigs.build`).
 import ast;
 import decls;
 import generated.node_kinds;
@@ -180,8 +184,73 @@ pub struct Consts {
     pub mag: vec.Vec<u64>,
 }
 
+// The layout requests of `size_of` / `align_of` calls, by the call's node row: the state
+// (`CV_OK`, `CV_FAIL`, or pending `CV_LAYOUT`), size and alignment once decided, and the item and
+// scope the type argument is lowered in, as of the round that last met the request (`met`: this
+// round did; the scope's types are this round's).
+pub struct Lay {
+    pub row: vec.Vec<u32>,
+    pub st: vec.Vec<u8>,
+    pub size: vec.Vec<u64>,
+    pub aln: vec.Vec<u64>,
+    pub it: vec.Vec<u32>,
+    pub sc: vec.Vec<Scope>,
+    pub met: vec.Vec<bool>,
+}
+
+impl Lay {
+    pub fn new() -> Lay {
+        return Lay.{ row: vec.Vec::<u32>.new(), st: vec.Vec::<u8>.new(), size: vec.Vec::<u64>.new(), aln: vec.Vec::<u64>.new(), it: vec.Vec::<u32>.new(), sc: vec.Vec::<Scope>.new(), met: vec.Vec::<bool>.new() };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.row.len();
+    }
+
+    // The request of node row g, or NONE.
+    pub fn find(&self, g: u32) -> u32 {
+        for k in 0..self.row.len() {
+            if self.row.as_slice()[k] == g { return k as% u32; }
+        }
+        return NONE;
+    }
+
+    pub fn add(&mut self, g: u32, it: u32, sc: Scope) {
+        self.row.push(g);
+        self.st.push(CV_LAYOUT);
+        self.size.push(0);
+        self.aln.push(0);
+        self.it.push(it);
+        self.sc.push(sc);
+        self.met.push(true);
+    }
+
+    pub fn pending(&self) -> usize {
+        let mut n: usize = 0;
+        for k in 0..self.st.len() {
+            if self.st.as_slice()[k] == CV_LAYOUT { n = n + 1; }
+        }
+        return n;
+    }
+
+    // Starts a round: no request met yet.
+    pub fn new_round(&mut self) {
+        for k in 0..self.met.len() {
+            self.met.as_mut_slice()[k] = false;
+        }
+    }
+
+    // Decides every pending request as failed (what waits on itself).
+    pub fn fail_pending(&mut self) {
+        for k in 0..self.st.len() {
+            if self.st.as_slice()[k] == CV_LAYOUT { self.st.as_mut_slice()[k] = CV_FAIL; }
+        }
+    }
+}
+
 // The shared state of signature building: the type table, the uses, the node parents, the
-// generic params, the const values, and the first reason a needed fact is not decided here.
+// generic params, the const values, the layout requests, and the first reason a needed fact is
+// not decided here.
 pub struct Cx {
     pub tab: types.Table,
     pub uses: Uses,
@@ -194,11 +263,17 @@ pub struct Cx {
     pub ty: vec.Vec<u32>,
     pub ready: vec.Vec<bool>,
     pub skip: u8,
+    pub lay: Lay,
+    // the scope of the evaluation running (a request's type argument is lowered in it)
+    pub sc: Scope,
+    // evaluations so far that wait for a layout; per decl D: whether its signature waited
+    pub hits: u32,
+    pub wait: vec.Vec<bool>,
 }
 
 impl Cx {
     pub fn note_skip(&mut self, why: u8) {
-        if self.skip == CV_NONE || (why == CV_LAYOUT && self.skip != CV_LAYOUT) { self.skip = why; }
+        if self.skip == CV_NONE { self.skip = why; }
     }
 }
 
@@ -759,11 +834,34 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                         let (ulo, uhi) = cx.uses.range(it, (head - base) as% u32);
                         if ulo == uhi {
                             let ga = child(tree, base, head, K_GENERIC_ARGS);
-                            if ga != NONE && names_generic(cx, tree, it, base, ga as usize) {
+                            if ga == NONE || names_generic(cx, tree, it, base, ga as usize) {
                                 ev.fail(CV_FAIL);
-                            } else {
-                                ev.fail(CV_LAYOUT);
+                                continue;
                             }
+                            let r = cx.lay.find(cur as% u32);
+                            if r == NONE {
+                                cx.lay.add(cur as% u32, it, cx.sc);
+                                ev.fail(CV_LAYOUT);
+                                continue;
+                            }
+                            let st = cx.lay.st.as_slice()[r as usize];
+                            if st == CV_LAYOUT {
+                                cx.lay.it.as_mut_slice()[r as usize] = it;
+                                cx.lay.sc.as_mut_slice()[r as usize] = cx.sc;
+                                cx.lay.met.as_mut_slice()[r as usize] = true;
+                            }
+                            if st != CV_OK {
+                                ev.fail(st);
+                                continue;
+                            }
+                            let is_size = nm.tab.text(name_of(nm, ha) as usize).eq(std_bytes("size_of"));
+                            let x = cur - ev.lo;
+                            ev.lit.as_mut_slice()[x] = 2;
+                            ev.vneg.as_mut_slice()[x] = false;
+                            ev.vmag.as_mut_slice()[x] = if is_size then cx.lay.size.as_slice()[r as usize] else cx.lay.aln.as_slice()[r as usize];
+                            ret = cx.tab.usize_t() as u64;
+                            ev.nty.as_mut_slice()[x] = ret;
+                            entering = false;
                             continue;
                         }
                     }
@@ -1113,12 +1211,14 @@ pub fn eval_u64(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interne
             }
         }
     }
+    cx.sc = sc;
     let (st, _, neg, mag) = eval(cx, tree, t, nm, set, cut, ds, it, g, want);
     if st == CV_OK {
         if neg { return (types.GA_ERROR, 0, 0); }
         return (types.GA_VALUE, (mag >> 32) as% u32, mag as% u32);
     }
-    if st == CV_UNSUP || st == CV_LAYOUT { cx.note_skip(st); }
+    if st == CV_UNSUP { cx.note_skip(st); }
+    if st == CV_LAYOUT { cx.hits = cx.hits + 1; }
     return (types.GA_ERROR, 0, 0);
 }
 
