@@ -1410,12 +1410,8 @@ impl<'a> FnCx<'a> {
             return;
         };
         // the statements opened inside the loop's body are left
-        let from = self.f.scope_stmts.get(lp.scope).copied().unwrap_or(self.f.stmts.len());
-        self.exit_drops(Point::Jump(tok), from.max(1), lp.scope);
-        for s in (lp.scope..self.f.scopes.len()).rev() {
-            let ls = self.f.scopes[s].clone();
-            self.end_locals(&ls);
-        }
+        let from = self.stmts_inside(lp.scope);
+        self.exit_drops(Point::Jump(tok), from, lp.scope);
         if is_break {
             self.br_join(lp.exit, &[]);
         } else {

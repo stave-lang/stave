@@ -331,8 +331,15 @@ when that owner ends.
   temporary of the statement, made when the `select` is evaluated. Which operand that is is
   known only when the program runs: what either operand borrows stays borrowed to the end of
   the statement, and the temporary's drop is checked as either operand's.
-- **Leaving early.** `return`, `break`, `continue`, and `?` drop the temporaries of the
-  statements they leave, then the locals of the scopes they leave. `?` also drops the operands
+- **Leaving early.** `return`, `break`, `continue`, and `?` drop what they leave in the order
+  of its normal end, innermost first: scope by scope from the innermost, the temporaries of the
+  statements opened in it (each statement's after the scopes inside it), then its locals. So a
+  `match` scrutinee's or a `for` header's temporaries are dropped after the locals of the arm or
+  body that is left, and the locals of an arm or body end before the temporaries of the
+  statement around it: a borrow of such a local that such a temporary holds, read by its drop,
+  is E0501 on every way out of the arm, as at its end. A `break` or `continue` leaves only the
+  statements inside the loop's body, so the temporaries of a `for` header are dropped after the
+  loop. `?` also drops the operands
   of the enclosing expressions that were already evaluated (earlier arguments, a by-value
   receiver, earlier fields of a literal), the last evaluated first.
 - **One schedule.** Where each drop runs is decided once per body, as its drop schedule

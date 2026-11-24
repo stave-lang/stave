@@ -20,6 +20,10 @@
 //! scheduled drop runs is the owner's init bit: the CFG's dataflow and the lowering's owner
 //! states (or dynamic flags) both follow the moves.
 //!
+//! **Exits.** An exit that leaves scopes and statements drops in the order of their normal
+//! ends, innermost first ([`exit_order`], which both stages call): the temporaries of a
+//! statement after the locals of the scopes inside it.
+//!
 //! **Parts of a pattern.** A pattern that binds a non-Copy part by value takes its whole value;
 //! the parts it does not bind are dropped at its binding point, in the order of
 //! [`ignored_parts`], which both stages call ([`pat_shape`] reads the pattern for both).
@@ -228,6 +232,56 @@ impl Schedule {
         let lo = self.rows.partition_point(|r| (r.point, r.owner) < (point, owner));
         self.rows[lo..].iter().take_while(|r| r.point == point && r.owner == owner).any(fits)
     }
+}
+
+/// One step of an early exit ([`exit_order`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leave {
+    /// The open statement with this index (0 the outermost) is left: its temporaries end.
+    Stmt(usize),
+    /// The scope with this depth index (0 the outermost) is left: its locals end.
+    Scope(usize),
+}
+
+/// The order in which an exit (`return`, `?`, `break`, `continue`) leaves the open statements
+/// `stmts..` and the scopes `scopes..depth`, the order their normal ends have: innermost
+/// first, each scope after the statements opened inside it and before the statement it is
+/// part of. `opened[i]`: the number of scopes open when statement `i` was opened (it is part
+/// of scope `opened[i] - 1`). Both the checker's CFG and the lowering run their exit drops in
+/// this order; the schedule's [`Schedule::in_order`] holds the lowering to the checker's rows.
+///
+/// With each step: whether what it leaves ends there (its storage, after its drops). A jump
+/// ends all of it. A frame exit (`frame`: `return`, `?`) ends everything up to the last
+/// statement it leaves, so a drop after it cannot read a local or temporary that its normal
+/// end would have ended first; the scopes after that statement (the fn body's block, the
+/// params) end with the frame.
+pub fn exit_order(
+    opened: &[usize],
+    stmts: usize,
+    scopes: usize,
+    depth: usize,
+    frame: bool,
+) -> Vec<(Leave, bool)> {
+    let mut out = Vec::with_capacity(opened.len().saturating_sub(stmts) + depth.saturating_sub(scopes));
+    let mut i = opened.len();
+    for s in (scopes..depth).rev() {
+        while i > stmts && opened[i - 1] > s {
+            i -= 1;
+            out.push((Leave::Stmt(i), true));
+        }
+        out.push((Leave::Scope(s), true));
+    }
+    while i > stmts {
+        i -= 1;
+        out.push((Leave::Stmt(i), true));
+    }
+    if frame {
+        let last = out.iter().rposition(|x| matches!(x.0, Leave::Stmt(_))).map_or(0, |k| k + 1);
+        for x in &mut out[last..] {
+            x.1 = false;
+        }
+    }
+    out
 }
 
 /// What a lowering of one body did with the rows of its [`Schedule`]: the one record both
@@ -658,6 +712,25 @@ mod tests {
 
     fn row(point: Point, owner: Owner, head: Head) -> Row {
         Row { point, owner, head }
+    }
+
+    #[test]
+    fn an_exit_leaves_innermost_first() {
+        use Leave::{Scope, Stmt};
+        let leaves = |v: Vec<(Leave, bool)>| v.into_iter().map(|x| x.0).collect::<Vec<_>>();
+        // fn scope 0, body block 1: `match` statement 0 in the block, arm block 2 with
+        // statement 1 (`if`), its block 3 with statement 2 (`return`)
+        let opened = [2, 3, 4];
+        let ret = exit_order(&opened, 0, 0, 4, true);
+        assert_eq!(leaves(ret.clone()), [Stmt(2), Scope(3), Stmt(1), Scope(2), Stmt(0), Scope(1), Scope(0)]);
+        // a `return` ends all but the body's block and the params: the frame ends them
+        assert_eq!(ret.iter().map(|x| x.1).collect::<Vec<_>>(), [true, true, true, true, true, false, false]);
+        // a loop body opened at depth 2 inside statement 0: `break` leaves scopes 2.. and the
+        // statements opened in them, and ends all of them
+        let brk = exit_order(&opened, 1, 2, 4, false);
+        assert_eq!(brk, [(Stmt(2), true), (Scope(3), true), (Stmt(1), true), (Scope(2), true)]);
+        // statements opened outside every scope left are left after them
+        assert_eq!(leaves(exit_order(&[1, 1], 0, 1, 2, false)), [Scope(1), Stmt(1), Stmt(0)]);
     }
 
     #[test]
