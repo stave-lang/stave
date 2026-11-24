@@ -28,8 +28,10 @@ pub const C_BUILTIN_NAME: u8 = 12;
 pub const C_UNREADABLE: u8 = 13;
 pub const C_STACK: u8 = 14;
 
-// The registry's name of a case ("" for the base shape).
+// The registry's name of a case ("" for the base shape). A number that is no case has no name
+// the registry knows, so its row is an internal error, not a diagnostic.
 pub fn case_name(c: u8) -> &str {
+    if c == C_UNKNOWN_KEY { return ""; }
     if c == C_WRONG_TYPE { return "wrong-type"; }
     if c == C_NON_PATH { return "non-path-dependency"; }
     if c == C_UNKNOWN_TARGET { return "unknown-target"; }
@@ -44,7 +46,7 @@ pub fn case_name(c: u8) -> &str {
     if c == C_BUILTIN_NAME { return "builtin-name"; }
     if c == C_UNREADABLE { return "unreadable"; }
     if c == C_STACK { return "stack"; }
-    return "";
+    return "no such case";
 }
 
 // Whether the case has a `key` hole.
