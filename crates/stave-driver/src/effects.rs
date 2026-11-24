@@ -24,9 +24,9 @@
 
 use rayon::prelude::*;
 use stave_diag::{Diagnostic, Span};
-use stave_ir::FuncId;
-use stave_ir::bounds::{Clause, Finding};
+use stave_ir::bounds::{CallFinding, Clause, Finding};
 use stave_ir::traps;
+use stave_ir::{FuncId, Module};
 use stave_sema::effects::{self, EffectSets, NodeIr};
 use stave_sema::{Program, Typeck};
 
@@ -136,6 +136,9 @@ pub fn node_ir(
     let (r, _) = stave_sema::lower_graph_nodes(prog, tc, nodes, drops);
     let mut gl = r.map_err(|es| build::lower_failure(&es))?;
     build::verified(&gl.module, Stage::Lower)?;
+    // The removal reads canonical modules, as the build's does ([`build::lower`]).
+    let remap = build::canonical(&mut gl.module);
+    stave_ir::canon::permute_by_func(&mut gl.nodes_of_func, &remap);
     // The module is a part of the program: every function keeps its checked entry, so the entry
     // effect read below does not depend on which callers were lowered with it.
     let removed = build::remove_proven_checks(&mut gl.module, false)?;
@@ -227,23 +230,9 @@ pub fn node_ir(
     // of one: such a body has no generic arguments of its own, its instance id starts with the
     // enclosing fn's.
     // None either for a call of a fn that already has E0215: no call of it can pass.
-    let uncallable: Vec<FuncId> = found
-        .iter()
-        .filter(|x| x.refuted && x.clause == Clause::Requires)
-        .map(|x| x.func)
-        .filter(|&f| m.func(f).is_some_and(|f| f.type_args.is_empty()))
-        .collect();
+    let uncallable = uncallable(m, found);
     for x in &removed.calls {
-        let Some(func) = m.func(x.func) else { continue };
-        if uncallable.contains(&x.callee) {
-            continue;
-        }
-        let root = func.instance.0.first();
-        let encloser_generic = m
-            .funcs
-            .iter()
-            .any(|g| g.instance.0.len() == 1 && g.instance.0.first() == root && !g.type_args.is_empty());
-        if !func.type_args.is_empty() || encloser_generic {
+        if !call_reported(m, &uncallable, x) {
             continue;
         }
         let fallback = nodes_of(x.func)
@@ -267,12 +256,35 @@ pub fn node_ir(
     Ok(NodeIrs { ir: out, funcs: m.funcs.len(), unmapped, contracts, proved })
 }
 
+/// The fns with a `requires` that fails whenever it is reached (E0215): no call of them can pass.
+pub(crate) fn uncallable(m: &Module, found: &[Finding]) -> Vec<FuncId> {
+    found
+        .iter()
+        .filter(|x| x.refuted && x.clause == Clause::Requires)
+        .map(|x| x.func)
+        .filter(|&f| m.func(f).is_some_and(|f| f.type_args.is_empty()))
+        .collect()
+}
+
+/// Whether refuted call `x` is reported (E0218): not in an instance of a generic fn (as E0215),
+/// nor in a closure or `spawn` body of one (such a body has no generic arguments of its own, its
+/// instance id starts with the enclosing fn's), nor a call of an `uncallable` fn.
+pub(crate) fn call_reported(m: &Module, uncallable: &[FuncId], x: &CallFinding) -> bool {
+    let Some(func) = m.func(x.func) else { return false };
+    let root = func.instance.0.first();
+    let encloser_generic = m
+        .funcs
+        .iter()
+        .any(|g| g.instance.0.len() == 1 && g.instance.0.first() == root && !g.type_args.is_empty());
+    !uncallable.contains(&x.callee) && func.type_args.is_empty() && !encloser_generic
+}
+
 /// The code, primary span, and (E0217) clause span of the diagnostic of contract finding `x`, if
 /// it has one. None in an instance of a generic fn: what holds there may depend on the instance,
 /// and the instance may be called only where its caller knows the check holds. A proved `ensures`
 /// has none, nor a proved `requires` whose own evaluation can trap or calls a fn (removing it
 /// from the source would remove that trap).
-fn contract_diag(
+pub(crate) fn contract_diag(
     x: &Finding,
     generic: bool,
     span: impl Fn(stave_ir::Site) -> Span,

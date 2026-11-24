@@ -12,7 +12,7 @@ error diagnostics; with errors, its file is not written.
 
 | Level | The module after | Dump |
 |---|---|---|
-| `lowered` | lowering and the IR verifier, before the removal of proven checks ("Bounds checks") | `lir` |
+| `lowered` | lowering and the IR verifier, before the removal of proven checks ("Bounds checks"), which reads this canonical module | `lir` |
 | `checked` | the removal of the checks that have a witness: the input of the interpreter and of both back ends | `ir` |
 | `opt` | the release passes, then the IR verifier and the bounds audit on their output; release builds only | `opt` |
 

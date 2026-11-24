@@ -7,11 +7,11 @@
 //!   [`Failure::Unsupported`]; any other lowering or verifier error is a compiler bug
 //!   ([`Failure::Internal`]).
 //! - [`lower`] then decides which bounds and contract checks the program keeps, the same way in
-//!   every build mode: per function, the bounds audit (an element access without a check or proof
-//!   is a compiler bug) and the proofs of removable checks ([`stave_ir::bounds::analyze_func`]); the
-//!   witness checker on every proof ([`stave_ir::witness::check`]; a refused witness is a
-//!   compiler bug); then the removal of the accepted checks; then the canonical numbering
-//!   ([`canonical`]). The module it returns is the checked IR: what the `ir` dump prints, the
+//!   every build mode, on the canonical module ([`canonical`]; level `lowered`): per function, the
+//!   bounds audit (an element access without a check or proof is a compiler bug) and the proofs
+//!   of removable checks ([`stave_ir::bounds::analyze_func`]); the witness checker on every
+//!   proof ([`stave_ir::witness::check`]; a refused witness is a compiler bug); then the removal
+//!   of the accepted checks; then the canonical numbering again. The module it returns is the checked IR: what the `ir` dump prints, the
 //!   interpreter runs, and both code generators get.
 //! - [`codegen_link`]: release builds first run the IR passes of stave-opt and renumber their
 //!   result canonically, then the IR verifier
@@ -163,11 +163,12 @@ pub fn lower_keeping(
     m.main = main_path(prog).and_then(|p| m.find_func(&p));
     verified(&m, Stage::Lower)?;
     prof::mark("verify");
-    let lowered = keep_lowered.then(|| {
-        let mut c = m.clone();
-        canonical(&mut c);
-        c
-    });
+    // The removal reads the canonical module, level `lowered`: the proofs read a constant by its
+    // pool entry, so they must see the pool the text carries (one entry per distinct constant),
+    // or loading the `lowered` text would remove other checks than the build does.
+    let remap = canonical(&mut m);
+    stave_ir::canon::permute_by_func(&mut nodes_of_func, &remap);
+    let lowered = keep_lowered.then(|| m.clone());
     let r = remove_proven_checks(&mut m, true)?;
     extend_nodes(&mut nodes_of_func, &r.removal);
     let mut removed: Vec<Proved> = r.proved.into_iter().filter(|p| !p.witness.removed.is_empty()).collect();
