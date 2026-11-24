@@ -1,0 +1,35 @@
+//~ CHECK-ONLY
+// A `for` source that spans lines is quoted on one line in E0908 `for` and `for-mut`.
+struct It { i: u64, n: u64 }
+
+trait Next {
+    fn next(&mut self) -> Option<u64>;
+}
+
+trait Back {
+    fn next(&mut self) -> Option<u64>;
+}
+
+impl Next for It {
+    fn next(&mut self) -> Option<u64> {
+        return Option.None;
+    }
+}
+
+impl Back for It {
+    fn next(&mut self) -> Option<u64> {
+        return Option.None;
+    }
+}
+
+fn two_impls_lines(a: It) {
+    for x in (a
+    ) { //~^ ERROR E0908
+    }
+}
+
+fn two_bounds_lines<T: Next + Back>(t: &mut T) {
+    for x in (t
+    ) { //~^ ERROR E0908
+    }
+}

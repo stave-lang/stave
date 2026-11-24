@@ -2,7 +2,7 @@
 
 mod common;
 
-use stave_diag::{Diagnostic, LineIndex, RenderError, Span, emit_human, emit_json, render};
+use stave_diag::{Diagnostic, LineIndex, RenderError, Span, emit_human, emit_json, render, spelled};
 
 #[test]
 fn human_form_with_related_and_fix() {
@@ -120,6 +120,25 @@ fn source_holes_collapse_whitespace_in_one_line_text() {
     // Other hole kinds still refuse a newline.
     assert!(matches!(
         render("E0201", None, &[("expected", "i\n64"), ("found", "i32"), ("operand", "1")]),
+        Err(RenderError::BadValue { .. })
+    ));
+}
+
+#[test]
+fn spelled_source_text_is_a_valid_value_of_every_one_line_hole_kind() {
+    assert_eq!(spelled("'a'\n        .. 'd'"), "'a' .. 'd'");
+    assert_eq!(spelled("  f(\r\n\tx)\x0B"), "f( x)");
+    assert_eq!(spelled("x"), "x");
+    let text = spelled("'a'\n  .. 'd'");
+    let r = render("E0219", None, &[("place", &text)]).expect("E0219");
+    assert_eq!(
+        r.message,
+        "`for` cannot iterate the array or slice `'a' .. 'd'` by value: iterate a reference to it"
+    );
+    // The renderer still refuses the raw value, and a value that is empty after the rewrite.
+    assert!(matches!(render("E0219", None, &[("place", "'a'\n.. 'd'")]), Err(RenderError::BadValue { .. })));
+    assert!(matches!(
+        render("E0219", None, &[("place", &spelled(" \n "))]),
         Err(RenderError::BadValue { .. })
     ));
 }

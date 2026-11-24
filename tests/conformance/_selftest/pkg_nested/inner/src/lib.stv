@@ -1,0 +1,4 @@
+//~ CHECK-ONLY
+pub fn one() -> i32 {
+    return "x"; //~ ERROR E0201
+}

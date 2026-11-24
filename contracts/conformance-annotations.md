@@ -64,6 +64,12 @@ number) gets the same meaning as `STDOUT expected.stdout` / `EXIT n`.
   are skipped (`_selftest/` holds the runner's own fixtures). A directory with a `stave.toml` is one
   package test; discovery does not descend into it (its subdirectories are its path
   dependencies). Tests run in name order (path relative to the root, `/`-separated).
+- **Files of a package test**: every `.stv` file and every `stave.toml` below the package
+  directory, hidden names excluded. A subdirectory with its own `stave.toml` is another package (a
+  path dependency): the test reads its files only for located `ERROR` and `WARNING` annotations,
+  the diagnostics this build reports in them. Its directives (`CHECK-ONLY` of its own library
+  root, ..) and malformed annotations belong to the test of that package alone, and so do its
+  `test fn`s.
 - **Paths**: a diagnostic's `file` is compared relative to the package directory (package test)
   or to the directory holding the single file. A `STDOUT <file>` path is relative to the directory
   of the file holding the annotation; an absolute path is malformed.
@@ -74,7 +80,7 @@ number) gets the same meaning as `STDOUT expected.stdout` / `EXIT n`.
   0..=255; a negative test with run expectations; `INTERP-REPORT` on a test that is not a positive
   run test; `CHECK-ONLY` or `PARSE-ONLY` with run
   expectations; both `CHECK-ONLY` and `PARSE-ONLY`; a directive outside the root module of a
-  package; a code not in the registry.
+  package (a nested package's files do not count); a code not in the registry.
 - **Not run** (E1001): never fails the suite and is never counted as passed. The suite passes iff
   no test failed and none is malformed; the summary lists passed, failed, malformed, and not-run
   counts.
