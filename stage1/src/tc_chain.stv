@@ -541,8 +541,10 @@ impl tc_rows.Typeck {
                 return true;
             }
             if ty == T_QUESTION {
-                let _ = self.chain_value(r);
-                self.set_chain(r, S_VAL, UNK);
+                let b0 = self.chain_value(r);
+                let base = self.force(b0);
+                let v = self.try_value(&sg.cx.tab, base);
+                self.set_chain(r, S_VAL, v);
                 p = p + 1;
                 continue;
             }
@@ -550,6 +552,33 @@ impl tc_rows.Typeck {
         }
         self.pos.as_mut_slice()[r] = end;
         return false;
+    }
+
+    // `base?`, as stage0's `try_op`: the first argument of an `Option` or `Result`; an error for
+    // any other type, and when the return type (the innermost fn or closure's) is not of the
+    // same enum or, for `Result`, has another error type. A return type not known here does
+    // not change the value.
+    fn try_value(&mut self, tab: &types.Table, base: u32) -> u32 {
+        if base == UNK { return UNK; }
+        if base == NONE || is_lit(base) || tab.tag_of(base) != types.TK_ADT { return self.err(); }
+        let def = tab.a_of(base);
+        if def == NONE || def != self.opt && def != self.res { return self.err(); }
+        let xs = tab.x(base);
+        if xs.len() < 3 || xs[0] != types.GA_TYPE { return UNK; }
+        let inner = xs[1];
+        // a const or static initializer has no return type: stage0 does not check it
+        if self.rets.len() == 0 { return inner; }
+        let ret = self.rets.as_slice()[self.rets.len() - 1];
+        if ret == UNK { return inner; }
+        if ret == NONE || ret == ERR || tab.tag_of(ret) != types.TK_ADT || tab.a_of(ret) != def { return self.err(); }
+        if def == self.res {
+            let ra = tab.x(ret);
+            if ra.len() < 6 || xs.len() < 6 { return self.err(); }
+            let re = &ra[3..6];
+            let be = &xs[3..6];
+            if !re.eq(be) { return self.err(); }
+        }
+        return inner;
     }
 
     // A chain whose steps do not match its children: not modeled.

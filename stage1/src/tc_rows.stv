@@ -100,8 +100,9 @@ pub struct Typeck {
     pub bt: tc_builtins.Builtins,
     // the trait questions, asked in rounds (`tc_traits`)
     pub tq: tc_traits.Tq,
-    // `std.core.Option` (NONE: none in this program)
+    // `std.core.Option`, `std.core.Result` (NONE: none in this program)
     pub opt: u32,
+    pub res: u32,
     pub t_bool: u32,
     pub t_char: u32,
     pub t_unit: u32,

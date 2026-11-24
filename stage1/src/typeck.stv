@@ -1466,6 +1466,8 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
     let soa = if md.soa_mod == NONE || soa_s == NONE then NONE else ds.module_item(md.soa_mod, soa_s);
     let opt_s = modules.lookup(&nm.tab, mem.str_bytes("Option"));
     let opt = if md.core_mod == NONE || opt_s == NONE then NONE else ds.module_item(md.core_mod, opt_s);
+    let res_s = modules.lookup(&nm.tab, mem.str_bytes("Result"));
+    let res = if md.core_mod == NONE || res_s == NONE then NONE else ds.module_item(md.core_mod, res_s);
     let (hl_name, hl_m) = tc_rows.headless_impls(ds);
     let mut tc = tc_rows.Typeck.{
         nty: col.filled(n, NONE),
@@ -1509,6 +1511,7 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         bt: tc_builtins.table(&nm.tab, opt),
         tq: tc_traits.new(sg, ds, fl, md, nm),
         opt: opt,
+        res: res,
         t_bool: t_bool,
         t_char: t_char,
         t_unit: t_unit,
