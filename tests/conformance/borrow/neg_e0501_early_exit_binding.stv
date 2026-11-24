@@ -1,5 +1,5 @@
 //~ CHECK-ONLY
-// E0501 on an exit that ends a local bound by a `match` arm or `for` pattern while a borrow of
+// E0501 on an exit that ends a local bound by a `match` arm, `for`, or tail pattern while a borrow of
 // it is held by what is dropped after it on the way out (a temporary of a statement around the
 // block, or a local declared before it). Such a binding is bound where its block begins, so it
 // cannot be declared earlier: the fix the diagnostic prints is to copy it into a local declared
@@ -75,6 +75,27 @@ fn for_binding_local_holder() {
     }
 }
 
+fn tail_binding_local_holder(xs: &[u32]) {
+    let mut g = mkg();
+    for v: u32x4 in xs {
+    } tail scalar (x) {
+        g.r = &x;
+        return; //~ ERROR E0501
+    }
+}
+
+fn tail_binding_temp_holder(xs: &[u32]) {
+    match &mut mkg() {
+        g => {
+            for v: u32x4 in xs {
+            } tail scalar (x) {
+                g.r = &x;
+                return; //~ ERROR E0501
+            }
+        }
+    }
+}
+
 // Each of the above with the fix the diagnostic prints applied.
 
 fn arm_binding_local_holder_fixed() {
@@ -127,7 +148,37 @@ fn for_binding_local_holder_fixed() {
     }
 }
 
+fn tail_binding_local_holder_fixed(xs: &[u32]) {
+    let mut y: u32 = 0;
+    let mut g = mkg();
+    for v: u32x4 in xs {
+    } tail scalar (x) {
+        y = x;
+        g.r = &y;
+        return;
+    }
+}
+
+fn tail_binding_temp_holder_fixed(xs: &[u32]) {
+    let mut y: u32 = 0;
+    match &mut mkg() {
+        g => {
+            for v: u32x4 in xs {
+            } tail scalar (x) {
+                y = x;
+                g.r = &y;
+                return;
+            }
+        }
+    }
+}
+
 fn main() {
+    let a: [u32; 6] = [1, 2, 3, 4, 5, 6];
+    tail_binding_local_holder(&a);
+    tail_binding_temp_holder(&a);
+    tail_binding_local_holder_fixed(&a);
+    tail_binding_temp_holder_fixed(&a);
     arm_binding_local_holder();
     arm_binding_temp_holder();
     for_binding_temp_holder();

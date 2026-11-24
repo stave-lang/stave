@@ -1162,12 +1162,12 @@ fix = { description = "declare `{place}` before `{holder}`, so that it is droppe
 [diag.cases.exit-temp-binding]
 message = "cannot {access} `{place}`: it has a live {loan} borrow"
 labels = [{ at = "primary", text = "{access} here: this exit leaves the block of `{place}` before {before}" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here: the temporary `{holder}` of {before} is dropped after `{place}` on this exit, and its drop reads the borrow" }]
-fix = { description = "`{place}` is bound by its pattern, where its block begins: declare a local before {before}, copy or move `{place}` into it, and borrow that local, so that it is dropped after the temporary `{holder}`" }
+fix = { description = "`{place}` is bound by its pattern, where its block begins: declare an initialized local before {before}, copy `{place}` into it (or move it in, which drops the first value), and borrow that local, so that it is dropped after the temporary `{holder}`" }
 
 [diag.cases.exit-local-binding]
 message = "cannot {access} `{place}`: it has a live {loan} borrow"
 labels = [{ at = "primary", text = "{access} here: this exit leaves the block of `{place}`" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here: `{holder}` is dropped after `{place}` on this exit, and its drop reads the borrow" }]
-fix = { description = "`{place}` is bound by its pattern, where its block begins: declare a local before `{holder}`, copy or move `{place}` into it, and borrow that local, so that it is dropped after `{holder}`" }
+fix = { description = "`{place}` is bound by its pattern, where its block begins: declare an initialized local before `{holder}`, copy `{place}` into it (or move it in, which drops the first value), and borrow that local, so that it is dropped after `{holder}`" }
 
 [diag.cases.temporary]
 message = "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"

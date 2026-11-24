@@ -2894,7 +2894,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "use", text: "borrow used later here: `{holder}` is dropped after `{place}` on this exit, and its drop reads the borrow" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "`{place}` is bound by its pattern, where its block begins: declare a local before `{holder}`, copy or move `{place}` into it, and borrow that local, so that it is dropped after `{holder}`",
+                    description: "`{place}` is bound by its pattern, where its block begins: declare an initialized local before `{holder}`, copy `{place}` into it (or move it in, which drops the first value), and borrow that local, so that it is dropped after `{holder}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2922,7 +2922,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "use", text: "borrow used later here: the temporary `{holder}` of {before} is dropped after `{place}` on this exit, and its drop reads the borrow" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "`{place}` is bound by its pattern, where its block begins: declare a local before {before}, copy or move `{place}` into it, and borrow that local, so that it is dropped after the temporary `{holder}`",
+                    description: "`{place}` is bound by its pattern, where its block begins: declare an initialized local before {before}, copy `{place}` into it (or move it in, which drops the first value), and borrow that local, so that it is dropped after the temporary `{holder}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
