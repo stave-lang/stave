@@ -372,6 +372,21 @@ impl Lexer {
         finish(out, &mut errs, stop);
     }
 
+    // The end offset of token i of a file (`kind` and `start` are the file's columns): the token
+    // scanned again, cut at the start of the next one. EOF ends where it starts.
+    pub fn token_end(&self, src: &[u8], kind: &[u8], start: &[u32], i: usize) -> usize {
+        let s = start[i] as usize;
+        if kind[i] == T_EOF || s >= src.len() { return s; }
+        let after_dot = i > 0 && kind[i - 1] == T_DOT && start[i - 1] as usize + 1 == s;
+        let mut errs = Errs.new();
+        let (_, end) = self.scan(src, s, after_dot, &mut errs);
+        if i + 1 < kind.len() && start[i + 1] as usize >= s {
+            let next = start[i + 1] as usize;
+            return if end < next then end else next;
+        }
+        return end;
+    }
+
     // The token starting at i (not whitespace, not a comment): its kind and end.
     fn scan(&self, src: &[u8], i: usize, after_dot: bool, errs: &mut Errs) -> (u8, usize) {
         let c = src[i];

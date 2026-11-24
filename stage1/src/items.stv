@@ -1,0 +1,326 @@
+// The item cut: the bracket check and the items of every file, as stage0's `items` pass.
+//
+// - Bracket depth is a prefix sum over +1 (`( [ { .{`), -1 (`) ] }`), and 0 (every other token),
+//   per file. A file is balanced iff the sum never goes below 0, ends at 0, and the openers and
+//   closers of each level pair up (in position order, a level's brackets alternate opener,
+//   closer) with matching kinds: the pairing is a stable sort of the brackets by level. An
+//   unbalanced file, one deeper than `MAX_DEPTH`, and one the lexer stopped (E0001, E0002) have
+//   no items.
+// - A token starts an item iff its depth is 0, it is an item keyword, and it is the first token
+//   of the file or follows `;` or `}`: a mark per token, the starts are the marked tokens in
+//   order. The tokens before the first start are an item (kind `ITEM_PRE`); an `import` after
+//   the first start that is no `import` is `ITEM_LATE_IMPORT`. An item ends where the next
+//   starts, the last one before the file's EOF.
+// - An item is `ok` iff it is `ITEM_IMPORT` or `ITEM_ITEM`, holds no error token, its tokens
+//   derive from `Import` / `Item` (`recognize`), and no `unsafe(` is followed by the empty
+//   string. Items are independent of each other.
+// - Item ids are the ranks of (file, start): files in order, an item's id is its row.
+//
+// Token and item columns are program-wide; a token index is the global index into `Tokens`.
+import generated.node_kinds;
+import generated.terminals;
+import lex;
+import recognize;
+import source;
+import std.vec;
+
+pub const ITEM_PRE: u8 = 0;
+pub const ITEM_IMPORT: u8 = 1;
+pub const ITEM_LATE_IMPORT: u8 = 2;
+pub const ITEM_ITEM: u8 = 3;
+
+// Why a file has no items.
+pub const FILE_OK: u8 = 0;
+pub const FILE_LEX_STOP: u8 = 1;
+pub const FILE_UNBALANCED: u8 = 2;
+pub const FILE_TOO_DEEP: u8 = 3;
+
+pub const MAX_DEPTH: i32 = 10000;
+pub const NONE: u32 = 4294967295;
+
+const T_SEMI: u8 = terminals.T_SEMI as% u8;
+const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
+const T_KW_IMPORT: u8 = terminals.T_KW_IMPORT as% u8;
+const T_KW_UNSAFE: u8 = terminals.T_KW_UNSAFE as% u8;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
+
+const B_OPEN: u8 = 1;
+const B_CLOSE: u8 = 2;
+
+// The items of every file, and the bracket structure they came from. `depth` and `mate` are
+// per token (`mate`: the paired bracket, `NONE` for another token; `depth` and `mate` are
+// meaningful only in files with items). File F's items are `file_item[F]..file_item[F + 1]`;
+// item I is the token run `tok_lo[I]..tok_hi[I]` of file `file[I]` (the file's EOF belongs to no
+// item), the bytes `off_start[I]..off_end[I]` of that file, of kind `kind[I]`, `ok[I]`.
+pub struct Items {
+    pub depth: vec.Vec<i32>,
+    pub mate: vec.Vec<u32>,
+    pub file_state: vec.Vec<u8>,
+    pub file_item: vec.Vec<u32>,
+    pub file: vec.Vec<u32>,
+    pub tok_lo: vec.Vec<u32>,
+    pub tok_hi: vec.Vec<u32>,
+    pub off_start: vec.Vec<u32>,
+    pub off_end: vec.Vec<u32>,
+    pub kind: vec.Vec<u8>,
+    pub ok: vec.Vec<bool>,
+}
+
+impl Items {
+    pub fn len(&self) -> usize {
+        return self.file.len();
+    }
+}
+
+// Token classes by kind.
+struct Classes {
+    bracket: [u8; 256],
+    closer: [u8; 256],
+    item_kw: [bool; 256],
+}
+
+fn classes() -> Classes {
+    let mut c = Classes.{ bracket: [0u8; 256], closer: [0u8; 256], item_kw: [false; 256] };
+    let open = [terminals.T_L_PAREN, terminals.T_L_BRACKET, terminals.T_L_BRACE, terminals.T_DOT_L_BRACE];
+    let shut = [terminals.T_R_PAREN, terminals.T_R_BRACKET, terminals.T_R_BRACE, terminals.T_R_BRACE];
+    for k in 0usize..4 {
+        c.bracket[open[k] as usize] = B_OPEN;
+        c.closer[open[k] as usize] = shut[k] as% u8;
+        c.bracket[shut[k] as usize] = B_CLOSE;
+    }
+    let kws = [
+        terminals.T_KW_IMPORT,
+        terminals.T_KW_PUB,
+        terminals.T_KW_TEST,
+        terminals.T_KW_UNSAFE,
+        terminals.T_KW_REC,
+        terminals.T_KW_FN,
+        terminals.T_KW_STRUCT,
+        terminals.T_KW_ENUM,
+        terminals.T_KW_VIEW,
+        terminals.T_KW_TRAIT,
+        terminals.T_KW_IMPL,
+        terminals.T_KW_CONST,
+        terminals.T_KW_STATIC,
+        terminals.T_KW_DISPATCH,
+        terminals.T_KW_EXTERN,
+        terminals.T_KW_TYPE,
+        terminals.T_KW_ALLOCATOR,
+        terminals.T_KW_KERNEL,
+    ];
+    for k in 0usize..18 {
+        c.item_kw[kws[k] as usize] = true;
+    }
+    return c;
+}
+
+// Scratch of the bracket pairing.
+struct Pairing {
+    level_end: vec.Vec<u32>,
+    order: vec.Vec<u32>,
+}
+
+// Inclusive prefix sum of the bracket deltas of kind[lo..hi] into depth; returns (min, max).
+fn scan_depth(cls: &Classes, kind: &[u8], depth: &mut [i32], lo: usize, hi: usize) -> (i32, i32) {
+    let mut run: i32 = 0;
+    let mut mn: i32 = 0;
+    let mut mx: i32 = 0;
+    for i in lo..hi {
+        let b = cls.bracket[kind[i] as usize];
+        if b == B_OPEN {
+            run = run + 1;
+        } else if b == B_CLOSE {
+            run = run - 1;
+        }
+        depth[i] = run;
+        if run < mn { mn = run; }
+        if run > mx { mx = run; }
+    }
+    return (mn, mx);
+}
+
+// The level of the bracket at i: an opener's depth, a closer's depth before it.
+fn level(cls: &Classes, kind: &[u8], depth: &[i32], i: usize) -> usize {
+    let b = cls.bracket[kind[i] as usize];
+    return depth[i] as% usize + (if b == B_OPEN then 0 else 1);
+}
+
+// Pairs the brackets of kind[lo..hi] (depth never below 0, ending at 0, at most `maxd`) by a
+// stable counting sort on the level: the sorted brackets of one level alternate opener, closer.
+// Fills `mate` and returns whether every pair has matching kinds.
+fn pair_brackets(cls: &Classes, kind: &[u8], depth: &[i32], mate: &mut [u32], lo: usize, hi: usize, maxd: usize, sc: &mut Pairing) -> bool {
+    sc.level_end.clear();
+    for _ in 0..maxd + 2 {
+        sc.level_end.push(0);
+    }
+    let cnt = sc.level_end.as_mut_slice();
+    let mut total: usize = 0;
+    for i in lo..hi {
+        if cls.bracket[kind[i] as usize] == 0 { continue; }
+        let l = level(cls, kind, depth, i);
+        cnt[l] = cnt[l] + 1;
+        total = total + 1;
+    }
+    // counts to start offsets
+    let mut run: u32 = 0;
+    for l in 0..maxd + 2 {
+        let c = cnt[l];
+        cnt[l] = run;
+        run = run + c;
+    }
+    sc.order.clear();
+    for _ in 0..total {
+        sc.order.push(0);
+    }
+    let order = sc.order.as_mut_slice();
+    for i in lo..hi {
+        if cls.bracket[kind[i] as usize] == 0 { continue; }
+        let l = level(cls, kind, depth, i);
+        order[cnt[l] as usize] = i as% u32;
+        cnt[l] = cnt[l] + 1;
+    }
+    // cnt[l] is now the end of level l's run; level l starts where level l - 1 ends
+    let mut good = true;
+    let mut s: usize = 0;
+    for l in 0..maxd + 2 {
+        let e = cnt[l] as usize;
+        let mut k = s;
+        while k + 1 < e {
+            let o = order[k] as usize;
+            let c = order[k + 1] as usize;
+            if cls.closer[kind[o] as usize] != kind[c] { good = false; }
+            mate[o] = c as% u32;
+            mate[c] = o as% u32;
+            k = k + 2;
+        }
+        s = e;
+    }
+    return good;
+}
+
+// Whether an `unsafe(` of kind[lo..hi] is followed by the empty string `""`.
+fn empty_obligation(kind: &[u8], start: &[u32], src: &[u8], lo: usize, hi: usize) -> bool {
+    if hi < lo + 3 { return false; }
+    for i in lo..hi - 2 {
+        if kind[i] == T_KW_UNSAFE && kind[i + 1] == T_L_PAREN && kind[i + 2] == T_STR_LIT {
+            let s = start[i + 2] as usize;
+            if src[s] == 34 && src[s + 1] == 34 { return true; }
+        }
+    }
+    return false;
+}
+
+fn has_error(kind: &[u8], lo: usize, hi: usize) -> bool {
+    for i in lo..hi {
+        if kind[i] >= lex.KIND_ERROR { return true; }
+    }
+    return false;
+}
+
+fn push_item(out: &mut Items, f: usize, lo: usize, hi: usize, k: u8) {
+    out.file.push(f as% u32);
+    out.tok_lo.push(lo as% u32);
+    out.tok_hi.push(hi as% u32);
+    out.kind.push(k);
+}
+
+// The cut of every file of `t`; `lx` and `set` give the byte offsets of the items.
+pub fn build(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens) -> Items {
+    let nt = t.kind.len();
+    let nf = t.files();
+    let cls = classes();
+    let kind = t.kind.as_slice();
+    let start = t.start.as_slice();
+    let ft = t.file_tok.as_slice();
+    let mut out = Items.{
+        depth: vec.Vec::<i32>.with_capacity(nt),
+        mate: vec.Vec::<u32>.with_capacity(nt),
+        file_state: vec.Vec::<u8>.with_capacity(nf),
+        file_item: vec.Vec::<u32>.with_capacity(nf + 1),
+        file: vec.Vec::<u32>.new(),
+        tok_lo: vec.Vec::<u32>.new(),
+        tok_hi: vec.Vec::<u32>.new(),
+        off_start: vec.Vec::<u32>.new(),
+        off_end: vec.Vec::<u32>.new(),
+        kind: vec.Vec::<u8>.new(),
+        ok: vec.Vec::<bool>.new(),
+    };
+    for _ in 0..nt {
+        out.depth.push(0);
+        out.mate.push(NONE);
+    }
+    out.file_item.push(0);
+    let mut sc = Pairing.{ level_end: vec.Vec::<u32>.new(), order: vec.Vec::<u32>.new() };
+    let mut starts = vec.Vec::<u32>.new();
+    let mut rz = recognize.Recognizer.new();
+    for f in 0..nf {
+        let lo = ft[f] as usize;
+        // the file's EOF token
+        let eof = ft[f + 1] as usize - 1;
+        let mut state = FILE_OK;
+        if t.stop.as_slice()[f] != lex.STOP_NONE {
+            state = FILE_LEX_STOP;
+        } else {
+            let (mn, mx) = scan_depth(&cls, kind, out.depth.as_mut_slice(), lo, eof);
+            if mn < 0 || (eof > lo && out.depth.as_slice()[eof - 1] != 0) {
+                state = FILE_UNBALANCED;
+            } else if mx > MAX_DEPTH {
+                state = FILE_TOO_DEEP;
+            } else if !pair_brackets(&cls, kind, out.depth.as_slice(), out.mate.as_mut_slice(), lo, eof, mx as% usize, &mut sc) {
+                state = FILE_UNBALANCED;
+            }
+        }
+        out.file_state.push(state);
+        if state != FILE_OK {
+            out.file_item.push(out.file.len() as% u32);
+            continue;
+        }
+        // the marks, compacted: the starts, in order
+        starts.clear();
+        {
+            let depth = out.depth.as_slice();
+            for i in lo..eof {
+                let prev_ends = i == lo || kind[i - 1] == T_SEMI || kind[i - 1] == T_R_BRACE;
+                if depth[i] == 0 && cls.item_kw[kind[i] as usize] && prev_ends { starts.push(i as% u32); }
+            }
+        }
+        let ns = starts.len();
+        let first = if ns == 0 then eof else starts.as_slice()[0] as usize;
+        // the first start that is no `import`: a later `import` is late
+        let mut first_other = eof;
+        for k in 0..ns {
+            if kind[starts.as_slice()[k] as usize] != T_KW_IMPORT {
+                first_other = starts.as_slice()[k] as usize;
+                break;
+            }
+        }
+        let first_item = out.file.len();
+        if first > lo { push_item(&mut out, f, lo, first, ITEM_PRE); }
+        for k in 0..ns {
+            let s = starts.as_slice()[k] as usize;
+            let e = if k + 1 < ns then starts.as_slice()[k + 1] as usize else eof;
+            let kd = if kind[s] != T_KW_IMPORT then ITEM_ITEM else if s > first_other then ITEM_LATE_IMPORT else ITEM_IMPORT;
+            push_item(&mut out, f, s, e, kd);
+        }
+        // status and byte offsets of the new items
+        let src = set.file(f);
+        let fkind = &kind[lo..eof + 1];
+        let fstart = &start[lo..eof + 1];
+        for r in first_item..out.file.len() {
+            let a = out.tok_lo.as_slice()[r] as usize;
+            let b = out.tok_hi.as_slice()[r] as usize;
+            let kd = out.kind.as_slice()[r];
+            let mut ok = false;
+            if (kd == ITEM_IMPORT || kd == ITEM_ITEM) && !has_error(kind, a, b) {
+                let root = if kd == ITEM_IMPORT then node_kinds.KIND_IMPORT else node_kinds.KIND_ITEM;
+                ok = rz.accepts(kind, a, b, root) && !empty_obligation(kind, start, src, a, b);
+            }
+            out.ok.push(ok);
+            out.off_start.push(start[a]);
+            out.off_end.push(lx.token_end(src, fkind, fstart, b - 1 - lo) as% u32);
+        }
+        out.file_item.push(out.file.len() as% u32);
+    }
+    return out;
+}
