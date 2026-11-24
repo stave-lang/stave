@@ -474,7 +474,14 @@ fn context(c: &Cols, items: usize) -> Ctx {
             let mut con = NONE;
             if p != NONE {
                 let pu = p as usize;
-                st = child_state(c, par, clo_s, fl, pu, sts[pu], rules[kind[pu] as usize], g);
+                let ps = sts[pu];
+                let rule = rules[kind[pu] as usize];
+                // the usual cases without the call: a parent not visited, a leaf, a plain parent
+                if ps == S_NO || (ps == S_YES && rule == K_NONE) {
+                    st = S_NO;
+                } else if ps != S_YES || rule != K_ALL {
+                    st = child_state(c, par, clo_s, fl, pu, ps, rule, g);
+                }
                 fnl = fnl_s[pu];
                 clo = clo_s[pu];
                 cla = cla_s[pu];
@@ -791,9 +798,22 @@ fn pattern(u: &mut Uses, b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, roo
     }
 }
 
+// The kinds `collect` reads a use or a binding at.
+fn work_kinds() -> vec.Vec<bool> {
+    let mut w = col.filled(256, false);
+    let ks = [node_kinds.KIND_PRIMARY, node_kinds.KIND_TYPE_BASE, node_kinds.KIND_BOUND_ITEM, node_kinds.KIND_NAME, node_kinds.KIND_ORIGIN, node_kinds.KIND_GENERICS, node_kinds.KIND_TAIL_CLAUSE, node_kinds.KIND_STMT, node_kinds.KIND_FOR_STMT, node_kinds.KIND_STMT_ARM, node_kinds.KIND_EXPR_ARM];
+    let ws = w.as_mut_slice();
+    for j in 0..ks.len() {
+        ws[ks[j] as usize] = true;
+    }
+    return w;
+}
+
 // Uses, bindings, and E0105 groups of every ok item.
 fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &Cols, x: &CtxV, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, rows: &mut resdiag.Rows) {
     let mut chain = vec.Vec::<u32>.new();
+    let work_c = work_kinds();
+    let work = work_c.as_slice();
     for i in 0..c.ifile.len() {
         if !tree.ok(i) { continue; }
         let base = c.inode[i] as usize;
@@ -810,6 +830,7 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
             }
             if st != S_YES { continue; }
             let k = c.kind[g];
+            if !work[k as usize] { continue; }
             if k == node_kinds.KIND_PRIMARY {
                 primary(u, su, it, c, x, t, nm, set, g, rows, file);
             } else if k == node_kinds.KIND_TYPE_BASE {
@@ -948,51 +969,129 @@ fn sweep(b: &Binds, q_item: &[u32], q_class: &[u8], q_sym: &[u32], q_pos: &[u32]
         }
     }
     let hx = hindex.HashIndex.build(uniq.as_slice());
+    // names some binding has: the others skip the probe
+    let mut max_sym: u32 = 0;
+    for e in 0..nb {
+        if bs[e] != NONE && bs[e] > max_sym { max_sym = bs[e]; }
+    }
+    let mut bound_c = col.filled(max_sym as usize + 1, false);
+    {
+        let bd = bound_c.as_mut_slice();
+        for e in 0..nb {
+            if bs[e] != NONE { bd[bs[e] as usize] = true; }
+        }
+    }
+    let bound = bound_c.as_slice();
     let mut qmap = vec.Vec::<u32>.new();
     for e in 0..nq {
-        if hx.probe(search.pair(q_item[e], q_sym[e])) != NONE { qmap.push(e as% u32); }
+        let s = q_sym[e];
+        if s != NONE && (s as usize >= bound.len() || !bound[s as usize]) { continue; }
+        if hx.probe(search.pair(q_item[e], s)) != NONE { qmap.push(e as% u32); }
     }
     let qm = qmap.as_slice();
     let n = nb + qm.len();
-    // events: bindings open at lo, lookups at pos; at one position opens go first, by node. Key
-    // k2 = class (2 bits) | position (30) | lookup (1) | node or lookup index (30): positions and
-    // nodes are item-relative
-    let mut k2 = col.filled(n, 0u64);
-    let mut k1 = col.filled(n, 0u64);
-    {
-        let a2 = k2.as_mut_slice();
-        let a1 = k1.as_mut_slice();
-        for e in 0..nb {
-            a2[e] = ((bc[e] as u64) << 61) | ((blo[e] as u64) << 31) | (bn[e] as u64);
-            a1[e] = search.pair(bi[e], bs[e]);
-        }
-        for x in 0..qm.len() {
-            let e = qm[x] as usize;
-            a2[nb + x] = ((q_class[e] as u64) << 61) | ((q_pos[e] as u64) << 31) | (1u64 << 30) | (x as u64);
-            a1[nb + x] = search.pair(q_item[e], q_sym[e]);
-        }
+    // events: bindings open at lo, lookups at pos; at one position opens go first, by node (a
+    // lookup's place among lookups is its input order, which the stable sort keeps). Order:
+    // (item, name, class, position, lookup, node); positions and nodes are item-relative.
+    let mut mi: u32 = 0;
+    let mut ms: u32 = 0;
+    let mut mp: u32 = 0;
+    let mut mn: u32 = 0;
+    for e in 0..nb {
+        mi = if bi[e] > mi then bi[e] else mi;
+        ms = if bs[e] > ms then bs[e] else ms;
+        mp = if blo[e] > mp then blo[e] else mp;
+        mn = if bn[e] > mn then bn[e] else mn;
     }
-    let mut order = sort.sort_perm(k2.as_slice());
-    let g1 = perm.gather(k1.as_slice(), order.as_slice());
-    order = perm.gather(order.as_slice(), sort.sort_perm(g1.as_slice()).as_slice());
+    for x in 0..qm.len() {
+        let e = qm[x] as usize;
+        mi = if q_item[e] > mi then q_item[e] else mi;
+        ms = if q_sym[e] > ms then q_sym[e] else ms;
+        mp = if q_pos[e] > mp then q_pos[e] else mp;
+    }
+    let wn = bits_for(mn) as u64;
+    let wp = bits_for(mp) as u64;
+    let wl = wn + 1;
+    let wg = wl + wp;
+    let ws = bits_for(ms) as u64;
+    // the group (item, name, class) of event e is `grp[e]`, its position `at[e]`
+    let mut grp = col.filled(n, 0u64);
+    let mut at = col.filled(n, 0u32);
+    let mut order = col.filled(0, 0u32);
+    if wg + 2 + ws + (bits_for(mi) as u64) <= 64 {
+        // one key: item | name | class (2) | position | lookup (1) | node
+        let mut key = col.filled(n, 0u64);
+        {
+            let ks = key.as_mut_slice();
+            let gs = grp.as_mut_slice();
+            let ats = at.as_mut_slice();
+            for e in 0..nb {
+                let g = ((((bi[e] as u64) << ws) | (bs[e] as u64)) << 2) | (bc[e] as u64);
+                gs[e] = g;
+                ats[e] = blo[e];
+                ks[e] = (g << wg) | ((blo[e] as u64) << wl) | (bn[e] as u64);
+            }
+            for x in 0..qm.len() {
+                let e = qm[x] as usize;
+                let g = ((((q_item[e] as u64) << ws) | (q_sym[e] as u64)) << 2) | (q_class[e] as u64);
+                gs[nb + x] = g;
+                ats[nb + x] = q_pos[e];
+                ks[nb + x] = (g << wg) | ((q_pos[e] as u64) << wl) | (1u64 << wn);
+            }
+        }
+        order = sort.sort_perm(key.as_slice());
+    } else {
+        // two keys: (class (2) | position (30) | lookup (1) | node (30)), then (item, name)
+        let mut k2 = col.filled(n, 0u64);
+        let mut k1 = col.filled(n, 0u64);
+        {
+            let a2 = k2.as_mut_slice();
+            let a1 = k1.as_mut_slice();
+            let gs = grp.as_mut_slice();
+            let ats = at.as_mut_slice();
+            for e in 0..nb {
+                a2[e] = ((bc[e] as u64) << 61) | ((blo[e] as u64) << 31) | (bn[e] as u64);
+                a1[e] = search.pair(bi[e], bs[e]);
+                ats[e] = blo[e];
+            }
+            for x in 0..qm.len() {
+                let e = qm[x] as usize;
+                a2[nb + x] = ((q_class[e] as u64) << 61) | ((q_pos[e] as u64) << 31) | (1u64 << 30);
+                a1[nb + x] = search.pair(q_item[e], q_sym[e]);
+                ats[nb + x] = q_pos[e];
+            }
+            // a group number: (item, name) runs cut again by class
+            let p = sort.sort_perm(a1);
+            let ps = p.as_slice();
+            let mut r: u64 = 0;
+            for k in 0..n {
+                let e = ps[k] as usize;
+                if k > 0 {
+                    let pe = ps[k - 1] as usize;
+                    if a1[pe] != a1[e] { r = r + 4; }
+                }
+                gs[e] = r | (a2[e] >> 61);
+            }
+        }
+        order = sort.sort_perm(k2.as_slice());
+        let g1 = perm.gather(k1.as_slice(), order.as_slice());
+        order = perm.gather(order.as_slice(), sort.sort_perm(g1.as_slice()).as_slice());
+    }
     let mut ans = col.filled(nq, NONE);
     // the open ranges, innermost on top
     let mut stack = col.filled(nb, 0u32);
     {
         let os = order.as_slice();
-        let a1 = k1.as_slice();
-        let a2 = k2.as_slice();
+        let gs = grp.as_slice();
+        let ats = at.as_slice();
         let an = ans.as_mut_slice();
         let st = stack.as_mut_slice();
         let mut top: usize = 0;
         for k in 0..n {
             let e = os[k] as usize;
-            if k > 0 {
-                let pe = os[k - 1] as usize;
-                if a1[pe] != a1[e] || (a2[pe] >> 61) != (a2[e] >> 61) { top = 0; }
-            }
-            let at = ((a2[e] >> 31) & 1073741823) as% u32;
-            while top > 0 && bhi[st[top - 1] as usize] < at {
+            if k > 0 && gs[os[k - 1] as usize] != gs[e] { top = 0; }
+            let pos = ats[e];
+            while top > 0 && bhi[st[top - 1] as usize] < pos {
                 top = top - 1;
             }
             if e < nb {
@@ -1006,6 +1105,15 @@ fn sweep(b: &Binds, q_item: &[u32], q_class: &[u8], q_sym: &[u32], q_pos: &[u32]
         }
     }
     return ans;
+}
+
+// The number of bits a value up to x needs.
+fn bits_for(x: u32) -> u32 {
+    let mut w: u32 = 0;
+    while w < 32 && (x >> w) != 0 {
+        w = w + 1;
+    }
+    return w;
 }
 
 // What a resolution leads to when the chain goes on.
