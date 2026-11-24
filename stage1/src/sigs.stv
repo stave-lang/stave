@@ -1133,7 +1133,7 @@ fn run(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &
 
 // The generic arguments at `GenericArgs` row ga (NONE: none) for the params of decl d, into
 // out (3 words each); false on a count mismatch (E0201).
-fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, d: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) -> bool {
+pub fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, d: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) -> bool {
     out.clear();
     let base = tree.item_node.as_slice()[it as usize] as usize;
     let glo = cx.gens.lo.as_slice()[d as usize] as usize;
@@ -1152,6 +1152,23 @@ fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Token
     out.extend_from_slice(&lw.gas.as_slice()[g0..lw.gas.len()]);
     lw.gas.truncate(g0);
     return true;
+}
+
+// The generic arguments at `GenericArgs` row ga, each for a type param (a callee with no decl:
+// a built-in fn), into out as `lower_gargs` writes them.
+pub fn lower_type_args(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let n = tree.kids.row(ga as usize).len();
+    let f0 = lw.op.len();
+    let g0 = lw.gas.len();
+    for j in 0..n {
+        let a = base + tree.kids.row(ga as usize)[n - 1 - j] as usize;
+        lw.frame(OP_GARG, a, NONE, 0);
+    }
+    run(cx, lw, tree, t, nm, set, cut, ds, it, f0, sc);
+    out.extend_from_slice(&lw.gas.as_slice()[g0..lw.gas.len()]);
+    lw.gas.truncate(g0);
 }
 
 // The trait a `BoundItem` or `TypeBase` path row names, with its arguments: a row of `bounds`,

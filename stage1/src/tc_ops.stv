@@ -1,0 +1,86 @@
+// User operators of the body checker (types/check, see `typeck`), as stage0's `user_op`: an
+// operator on a type no built-in rule covers (a struct, enum, generic param, reference, tuple,
+// `char`, ..) goes through its operator trait (`traits.OPS`). Its value is the operand type when
+// that type implements the trait and is Copy where the operator is used, both goals of the one
+// solver in the body's environment (a generic param: its bounds); else a type error, left
+// unknown. A goal not answered yet leaves the operator unknown for this round (`tc_traits`).
+import generated.terminals;
+import sigs;
+import tc_rows;
+import tc_traits;
+import types;
+
+const NONE: u32 = tc_rows.NONE;
+const UNK: u32 = tc_rows.UNK;
+
+const T_PLUS: u8 = terminals.T_PLUS as% u8;
+const T_PLUS_PERCENT: u8 = terminals.T_PLUS_PERCENT as% u8;
+const T_PLUS_PIPE: u8 = terminals.T_PLUS_PIPE as% u8;
+const T_MINUS: u8 = terminals.T_MINUS as% u8;
+const T_MINUS_PERCENT: u8 = terminals.T_MINUS_PERCENT as% u8;
+const T_MINUS_PIPE: u8 = terminals.T_MINUS_PIPE as% u8;
+const T_STAR: u8 = terminals.T_STAR as% u8;
+const T_STAR_PERCENT: u8 = terminals.T_STAR_PERCENT as% u8;
+const T_STAR_PIPE: u8 = terminals.T_STAR_PIPE as% u8;
+const T_SLASH: u8 = terminals.T_SLASH as% u8;
+const T_PERCENT: u8 = terminals.T_PERCENT as% u8;
+const T_LT_LT: u8 = terminals.T_LT_LT as% u8;
+const T_LT_LT_PERCENT: u8 = terminals.T_LT_LT_PERCENT as% u8;
+const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
+const T_AMP: u8 = terminals.T_AMP as% u8;
+const T_PIPE: u8 = terminals.T_PIPE as% u8;
+const T_CARET: u8 = terminals.T_CARET as% u8;
+
+// The positions of `Neg` and `Not` in `traits.OPS`.
+pub const OP_NEG: usize = 17;
+pub const OP_NOT: usize = 18;
+
+// Whether an operator on type ty goes through its trait: no built-in rule covers ty.
+pub fn user_ty(tab: &types.Table, ty: u32) -> bool {
+    if ty == NONE || ty == types.ERR { return false; }
+    let tag = tab.tag_of(ty);
+    return tag != types.TK_INT && tag != types.TK_FLOAT && tag != types.TK_BOOL && tag != types.TK_MASK && tag != types.TK_VECTOR && tag != types.TK_NEVER;
+}
+
+// The position in `traits.OPS` of the trait of binary operator token op, or NONE.
+pub fn binop_trait(op: u8) -> usize {
+    if op == T_PLUS { return 0; }
+    if op == T_PLUS_PERCENT { return 1; }
+    if op == T_PLUS_PIPE { return 2; }
+    if op == T_MINUS { return 3; }
+    if op == T_MINUS_PERCENT { return 4; }
+    if op == T_MINUS_PIPE { return 5; }
+    if op == T_STAR { return 6; }
+    if op == T_STAR_PERCENT { return 7; }
+    if op == T_STAR_PIPE { return 8; }
+    if op == T_SLASH { return 9; }
+    if op == T_PERCENT { return 10; }
+    if op == T_LT_LT { return 11; }
+    if op == T_LT_LT_PERCENT { return 12; }
+    if op == T_GT_GT { return 13; }
+    if op == T_AMP { return 14; }
+    if op == T_PIPE { return 15; }
+    if op == T_CARET { return 16; }
+    return NONE as usize;
+}
+
+impl tc_rows.Typeck {
+    // An operator of trait k (a position in `traits.OPS`, NONE: none) on operands of type t.
+    pub fn user_op(&mut self, sg: &mut sigs.Sigs, k: usize, t: u32) -> u32 {
+        if k == NONE as usize { return self.err(); }
+        let tr = self.tq.tr.lang.ops.as_slice()[k];
+        let cp = self.tq.tr.lang.copy_tr;
+        if tr == NONE || cp == NONE { return self.err(); }
+        let e = self.tq.env_of(sg, self.sc);
+        let a = self.tq.holds(sg, e, t, tr);
+        let c = self.tq.holds(sg, e, t, cp);
+        // stage0's E0206 / E0422: the operator's value is the error type, the rest of the body is
+        // typed as without it
+        if a == tc_traits.A_NO || c == tc_traits.A_NO { return UNK; }
+        if a == tc_traits.A_WAIT || c == tc_traits.A_WAIT {
+            if self.tq.last { self.bad = true; }
+            return UNK;
+        }
+        return t;
+    }
+}

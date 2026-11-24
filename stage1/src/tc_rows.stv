@@ -11,15 +11,21 @@
 // Entry points: `resolve`, `force`, `poison`, `fix`, `unite` (literal groups); `coerce` (a
 // coercion site), `coercible`, `unify` (stage0's `unify_operands`); `set_hint`; `known` (a type
 // from the signatures); `err` (a type error: the body prints `?`); `poison_kids`, `unknown` (a
-// form not checked yet); `expr_kid`; `tok_text`, `is_lit`.
+// form not checked yet); `expr_kid`; `tok_text`, `is_lit`; the calls of the built-ins of
+// `tc_builtins` (`bi_call`, `bi_hint`, `bi_targs`); the methods of impls with no struct or enum
+// head (`headless_impls`, looked up by `tc_method.headless_method`).
 import ast;
 import consteval;
+import decls;
+import generated.terminals;
 import items;
 import lex;
 import sigs;
 import source;
 import tc_builtins;
+import tc_traits;
 import types;
+import prims.sort;
 import std.vec;
 
 pub const NONE: u32 = 4294967295;
@@ -69,6 +75,9 @@ pub struct Typeck {
     pub args: vec.Vec<u32>,
     // the names of the methods of impls with no struct or enum head, sorted
     pub headless: vec.Vec<u32>,
+    // the same methods: their names, sorted, and their decls (`headless_impls`)
+    pub hl_name: vec.Vec<u32>,
+    pub hl_m: vec.Vec<u32>,
     // the pattern walk of `tc_pat`: pattern rows, the type each matches, the binding mode
     pub pat_row: vec.Vec<u32>,
     pub pat_ty: vec.Vec<u32>,
@@ -89,6 +98,11 @@ pub struct Typeck {
     pub mt_k: vec.Vec<u32>,
     // the built-in methods and type-relative built-ins
     pub bt: tc_builtins.Builtins,
+    // the trait questions, asked in rounds (`tc_traits`)
+    pub tq: tc_traits.Tq,
+    // `std.core.Option`, `std.core.Result` (NONE: none in this program)
+    pub opt: u32,
+    pub res: u32,
     pub t_bool: u32,
     pub t_char: u32,
     pub t_unit: u32,
@@ -325,6 +339,146 @@ impl Typeck {
         self.bad = true;
         return UNK;
     }
+}
+
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
+const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
+const T_COMMA: u8 = terminals.T_COMMA as% u8;
+const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
+
+impl Typeck {
+    // A call of built-in callee on c (the receiver, or the type of a type-relative call) with the
+    // arguments of `Args` row args (NONE: none), each checked by its kind; its value.
+    pub fn bi_call(&mut self, tab: &mut types.Table, tree: &ast.Ast, callee: u32, c: u32, args: u32) -> u32 {
+        let np = self.bt.params(callee, c);
+        if np == UNK {
+            if args != NONE { self.poison_kids(tree, args as usize); }
+            return UNK;
+        }
+        let nb = if args == NONE then 0usize else tree.kids.row(args as usize).len();
+        if nb != np as usize { return self.err(); }
+        let mut x = NONE;
+        let mut y = NONE;
+        for j in 0..nb {
+            let a = self.base + tree.kids.row(args as usize)[j] as usize;
+            let kd = self.bt.arg_kind(tab, callee, c, j);
+            if kd == tc_builtins.A_SEL || kd == tc_builtins.A_FREE {
+                let v = if kd == tc_builtins.A_SEL then self.resolve_at(a) else self.force_at(a);
+                if j == 0 { x = v; } else { y = v; }
+                continue;
+            }
+            let want = self.bt.param(tab, callee, c, j);
+            if kd == tc_builtins.A_ALIGNED {
+                let v = self.force_at(a);
+                if v != UNK && !aligned_ok(tab, v, want) { self.bad = true; }
+                continue;
+            }
+            if kd == tc_builtins.A_INDEX {
+                let v = self.force_at(a);
+                if v == UNK || index_ok(tab, v, want) { continue; }
+            }
+            self.coerce(tab, a, want);
+        }
+        if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_SEL { return self.unify(tab, x, y); }
+        if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_FREE {
+            if x == UNK || y == UNK { return UNK; }
+            let r = self.bt.select_ret(tab, c, x, y);
+            return if r == NONE then self.err() else r;
+        }
+        return self.bt.ret(tab, callee, c);
+    }
+
+    // The context of argument j of the call of a built-in at `Args` row r (its callee in `acc`,
+    // the type it is called on in `pos`, the call's context in `hint`).
+    pub fn bi_hint(&mut self, tab: &mut types.Table, tree: &ast.Ast, r: usize, j: usize) -> u32 {
+        let callee = self.acc.as_slice()[r];
+        let c = self.pos.as_slice()[r];
+        let kd = self.bt.arg_kind(tab, callee, c, j);
+        if kd == tc_builtins.A_FREE || kd == tc_builtins.A_ALIGNED { return NONE; }
+        if kd == tc_builtins.A_SEL {
+            // the first operand takes the call's context, the second the first's type
+            let h = self.hint.as_slice()[r];
+            if j == 0 { return h; }
+            let v = self.resolve_at(self.base + tree.kids.row(r)[0] as usize);
+            if v == UNK { return UNK; }
+            if v == NONE || v == self.t_never || is_lit(v) { return h; }
+            return v;
+        }
+        return self.bt.param(tab, callee, c, j);
+    }
+
+    // A built-in method m on c called with generic arguments (`GenericArgs` row ga) and the `()`
+    // right after them: its value; NONE when m is no built-in or the call is not that form (then
+    // an error if m is one).
+    pub fn bi_targs(&mut self, tab: &mut types.Table, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, tree: &ast.Ast, m: u32, c: u32, ga: u32) -> u32 {
+        if !tc_builtins.is_builtin(m) { return NONE; }
+        let q = tree.tok_end.as_slice()[ga as usize];
+        if !self.bt.takes_targs(m) || consteval.tk(t, q) != T_L_PAREN || consteval.tk(t, q + 1) != T_R_PAREN {
+            self.bad = true;
+            return NONE;
+        }
+        // `permute::<[i0, ..]>`: one index per lane, each a plain int literal below the lanes
+        let n = tab.b_of(c);
+        if n == types.LANES_N { return self.bt.ret(tab, m, c); }
+        let ks = tree.kids.row(ga as usize);
+        if ks.len() != 1 { return self.err(); }
+        let a = tree.tok.as_slice()[self.base + ks[0] as usize];
+        if consteval.tk(t, a) != T_L_BRACKET { return self.err(); }
+        let close = cut.mate.as_slice()[a as usize];
+        if close == NONE { return self.err(); }
+        let mut count: u32 = 0;
+        for tok in a + 1..close {
+            let k = consteval.tk(t, tok);
+            if k == T_COMMA { continue; }
+            if k != T_INT_LIT { return self.err(); }
+            let (v, big, suf) = consteval.parse_int(tok_text(t, set, cut, self.it, tok, false));
+            if big || suf != 0 || v >= n as u64 { return self.err(); }
+            count = count + 1;
+        }
+        if count != n { return self.err(); }
+        return self.bt.ret(tab, m, c);
+    }
+}
+
+// The methods of impls with no struct or enum head: their names, sorted (methods of one name in
+// declaration order), and the method decl of each.
+pub fn headless_impls(ds: &decls.Decls) -> (vec.Vec<u32>, vec.Vec<u32>) {
+    let mut xs = vec.Vec::<u32>.new();
+    let mut ps = vec.Vec::<u32>.new();
+    for m in 0..ds.decls() {
+        if ds.kind.as_slice()[m] != decls.DK_METHOD { continue; }
+        let p = ds.parent.as_slice()[m];
+        if p == NONE || ds.kind.as_slice()[p as usize] != decls.DK_IMPL || ds.impl_head.as_slice()[p as usize] != NONE { continue; }
+        xs.push(ds.name.as_slice()[m]);
+        ps.push(m as% u32);
+    }
+    let perm = sort.sort_perm(xs.as_slice());
+    let mut names = vec.Vec::<u32>.with_capacity(xs.len());
+    let mut imps = vec.Vec::<u32>.with_capacity(xs.len());
+    for k in 0..perm.len() {
+        let i = perm.as_slice()[k] as usize;
+        names.push(xs.as_slice()[i]);
+        imps.push(ps.as_slice()[i]);
+    }
+    return (names, imps);
+}
+
+// Whether v (decided) passes as want, `&[T align A]` (`&mut` when want is): a reference of that
+// mutability or `&mut`, to a slice of T aligned to at least A.
+fn aligned_ok(tab: &types.Table, v: u32, want: u32) -> bool {
+    if v == NONE || tab.tag_of(v) != types.TK_REF || (tab.a_of(want) == 1 && tab.a_of(v) != 1) { return false; }
+    let s = tab.b_of(v);
+    let ws = tab.b_of(want);
+    return tab.tag_of(s) == types.TK_SLICE && tab.a_of(s) == tab.a_of(ws) && tab.b_of(s) >= tab.b_of(ws);
+}
+
+// Whether v (decided) is a gather / scatter index for want as it is: a vector of unsigned lanes
+// with want's fixed lane count.
+fn index_ok(tab: &types.Table, v: u32, want: u32) -> bool {
+    if v == NONE || tab.tag_of(v) != types.TK_VECTOR || tab.b_of(want) == types.LANES_N || tab.b_of(v) != tab.b_of(want) { return false; }
+    let l = tab.a_of(v);
+    return tab.tag_of(l) == types.TK_INT && !tab.is_signed(l);
 }
 
 // The source bytes of global token tok of item it, up to the end of its word (letters, digits,
