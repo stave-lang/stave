@@ -2,13 +2,17 @@
 // data is flat columns of ids and offsets, and each stage is a pass over whole arrays, the shape
 // it keeps on the GPU.
 //
-// Command line (a subset of stage0's): `stage1 build|check [PATH] --dump=tokens,items,ast --dump-dir DIR
-// [--target T] [-o OUT]`. PATH (default `.`) is a `.stv` file or a package directory; the build
-// covers it, its path dependencies, and the shipped `std` and `runtime` from the library
-// directory (`$STAVE_STD_DIR`, else next to the binary as for stage0). It writes the requested
-// dumps of `tokens`, `items`, `ast` as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for byte
-// stage0's. `-o` is accepted and
-// unused: no code is generated yet. Exit codes: 0 done, 2 usage.
+// Command line (a subset of stage0's): `stage1 build|check [PATH] [--dump=tokens,items,ast,diags
+// --dump-dir DIR] [--diagnostics human|json] [--target T] [-o OUT]`. PATH (default `.`) is a
+// `.stv` file or a package directory; the build covers it, its path dependencies, and the shipped
+// `std` and `runtime` from the library directory (`$STAVE_STD_DIR`, else next to the binary as for
+// stage0). It writes the requested dumps as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for
+// byte stage0's for the stages stage1 has, and prints its diagnostics to stderr in stage0's text
+// (or JSON lines). `-o` is accepted and unused: no code is generated yet. Exit codes: 0 done,
+// 1 diagnostics, 2 usage.
+import diag;
+import diag_lex;
+import diag_out;
 import dump;
 import files;
 import items;
@@ -24,6 +28,7 @@ import std.string;
 import std.vec;
 
 const EXIT_OK: i32 = 0;
+const EXIT_USER: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 
 fn usage(msg: &str) -> i32 {
@@ -36,9 +41,11 @@ struct Cli {
     dump: string.String,
     dump_dir: string.String,
     target: string.String,
+    json: bool,
     want_tokens: bool,
     want_items: bool,
     want_ast: bool,
+    want_diags: bool,
 }
 
 fn arg(i: usize) -> string.String {
@@ -59,7 +66,7 @@ fn split_flag(a: &string.String) -> (string.String, Option<string.String>) {
 
 fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
     let n = env.count();
-    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] --dump=tokens,items,ast --dump-dir DIR")); }
+    if n < 2 { return Result.Err(string.String.from_str("usage: stage1 build|check [PATH] [--dump=tokens,items,ast,diags --dump-dir DIR]")); }
     let cmd = arg(1);
     if !text.eq_str(cmd.as_bytes(), "build") && !text.eq_str(cmd.as_bytes(), "check") {
         return Result.Err(f"unknown command `{cmd}` (stage1 runs build and check)");
@@ -78,7 +85,7 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
         }
         let (flag, inline) = split_flag(&a);
         let fb = flag.as_bytes();
-        let known = text.eq_str(fb, "--dump") || text.eq_str(fb, "--dump-dir") || text.eq_str(fb, "--target") || text.eq_str(fb, "-o");
+        let known = text.eq_str(fb, "--dump") || text.eq_str(fb, "--dump-dir") || text.eq_str(fb, "--target") || text.eq_str(fb, "-o") || text.eq_str(fb, "--diagnostics");
         if !known { return Result.Err(f"unknown or unsupported flag `{flag}`"); }
         let mut value = string.String.new();
         match inline {
@@ -96,9 +103,16 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
             cli.dump_dir = value;
         } else if text.eq_str(fb, "--target") {
             cli.target = value;
+        } else if text.eq_str(fb, "--diagnostics") {
+            if text.eq_str(value.as_bytes(), "json") {
+                cli.json = true;
+            } else if !text.eq_str(value.as_bytes(), "human") {
+                return Result.Err(f"--diagnostics takes human or json, not `{value}`");
+            }
         }
     }
-    if cli.dump.len() == 0 || cli.dump_dir.len() == 0 { return Result.Err(string.String.from_str("stage1 needs --dump=tokens,items,ast and --dump-dir DIR")); }
+    if cli.dump.len() > 0 && cli.dump_dir.len() == 0 { return Result.Err(string.String.from_str("--dump needs --dump-dir DIR")); }
+    if cli.dump.len() == 0 && cli.dump_dir.len() > 0 { return Result.Err(string.String.from_str("--dump-dir needs --dump=STAGE,...")); }
     let d = cli.dump.as_bytes();
     let mut lo: usize = 0;
     for k in 0..d.len() + 1 {
@@ -110,7 +124,9 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
                 cli.want_items = true;
             } else if text.eq_str(st.as_bytes(), "ast") {
                 cli.want_ast = true;
-            } else {
+            } else if text.eq_str(st.as_bytes(), "diags") {
+                cli.want_diags = true;
+            } else if d.len() > 0 {
                 return Result.Err(f"dump `{st}` is not implemented in stage1");
             }
             lo = k + 1;
@@ -195,8 +211,15 @@ fn write_dump(dir: &str, name: &str, bytes: &[u8]) -> i32 {
     return EXIT_OK;
 }
 
+// The directory diagnostic paths are relative to: the root package's, or the parent of a root
+// `.stv` file.
+fn root_dir(root: &str) -> string.String {
+    if paths.has_extension(root, "stv") && files.is_file(root) { return paths.parent(root); }
+    return string.String.from_str(root);
+}
+
 fn main() -> i32 {
-    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), want_tokens: false, want_items: false, want_ast: false };
+    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), json: false, want_tokens: false, want_items: false, want_ast: false, want_diags: false };
     match parse_args(&mut cli) {
         Result.Ok(_) => {}
         Result.Err(m) => { return usage(m.as_str()); }
@@ -227,21 +250,28 @@ fn main() -> i32 {
     for f in 0..set.files() {
         lx.lex_file(set.file(f), &mut toks);
     }
-    match io.create_dir_all(cli.dump_dir.as_str()) {
-        Result.Ok(_) => {}
-        Result.Err(e) => {
-            let d = cli.dump_dir.as_str();
-            return usage(f"cannot create {d}: {e}");
+    let mut d = diag.Diags.new();
+    diag_lex.unreadable(&mut d, &set);
+    diag_lex.lexical(&mut d, &toks, &set);
+    let cut = items.build(&lx, &set, &toks);
+    let tree = parse.build(&set, &toks, &cut);
+    let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
+    let rows = d.order(ft.rank.as_slice());
+    let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);
+    let _ = io.write_all(2, shown.as_slice());
+    if cli.dump_dir.len() > 0 {
+        match io.create_dir_all(cli.dump_dir.as_str()) {
+            Result.Ok(_) => {}
+            Result.Err(e) => {
+                let dir = cli.dump_dir.as_str();
+                return usage(f"cannot create {dir}: {e}");
+            }
         }
-    }
-    if cli.want_tokens {
-        let out = dump.tokens(&lx, &toks);
-        let code = write_dump(cli.dump_dir.as_str(), "tokens.txt", out.as_slice());
-        if code != EXIT_OK { return code; }
-    }
-    if cli.want_items || cli.want_ast {
-        let cut = items.build(&lx, &set, &toks);
-        let tree = parse.build(&set, &toks, &cut);
+        if cli.want_tokens {
+            let out = dump.tokens(&lx, &toks);
+            let code = write_dump(cli.dump_dir.as_str(), "tokens.txt", out.as_slice());
+            if code != EXIT_OK { return code; }
+        }
         if cli.want_items {
             let out = dump.items_txt(&cut, &tree);
             let code = write_dump(cli.dump_dir.as_str(), "items.txt", out.as_slice());
@@ -252,6 +282,12 @@ fn main() -> i32 {
             let code = write_dump(cli.dump_dir.as_str(), "ast.txt", out.as_slice());
             if code != EXIT_OK { return code; }
         }
+        if cli.want_diags {
+            let out = dump.diags(&d, rows.as_slice(), &ft, &set);
+            let code = write_dump(cli.dump_dir.as_str(), "diags.txt", out.as_slice());
+            if code != EXIT_OK { return code; }
+        }
     }
+    if d.has_errors(rows.as_slice()) { return EXIT_USER; }
     return EXIT_OK;
 }
