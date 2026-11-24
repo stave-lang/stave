@@ -50,6 +50,7 @@ import sigs;
 import source;
 import tc_builtins;
 import tc_chain;
+import tc_closure;
 import tc_ops;
 import tc_pat;
 import tc_rows;
@@ -118,6 +119,7 @@ const T_KW_MASKED: u8 = terminals.T_KW_MASKED as% u8;
 const T_KW_SCALAR: u8 = terminals.T_KW_SCALAR as% u8;
 const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
 const T_DOT_DOT_EQ: u8 = terminals.T_DOT_DOT_EQ as% u8;
+const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
 const T_KW_TRUE: u8 = terminals.T_KW_TRUE as% u8;
 const T_KW_FALSE: u8 = terminals.T_KW_FALSE as% u8;
 const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
@@ -312,6 +314,7 @@ impl tc_rows.Typeck {
             }
             return ck == K_BLOCK || ck == K_IF_STMT;
         }
+        if pk == K_PRIMARY && tk(t, first_tok(tree, r)) == T_KW_FN { return self.enter_closure(sg, ds, nm, set, t, cut, tree, r, c); }
         if pk == K_PRIMARY { return self.enter_primary(sg, t, tree, r, k, c, h); }
         if pk == K_UNARY { return self.enter_unary(sg, t, tree, r, c, h); }
         if pk == K_CAST {
@@ -748,10 +751,9 @@ impl tc_rows.Typeck {
         if ft == T_IDENT { return self.path_head(sg, ds, t, tree, r); }
         if ft == T_L_PAREN { return self.paren(sg, t, tree, r); }
         if ft == T_L_BRACKET { return self.array_lit(sg, ds, nm, set, t, cut, tree, r, h); }
-        // closures, f-strings: not checked yet
-        let v = self.unknown(tree, r);
-        if tk(t, a) == terminals.T_KW_FN as% u8 { self.rets.truncate(self.rets.len() - 1); }
-        return v;
+        if ft == T_KW_FN { return self.closure_value(sg, tree, r); }
+        // f-strings: not checked yet
+        return self.unknown(tree, r);
     }
 
     // An identifier Primary: a bare name, or the head of a postfix chain. A local, a const, or a

@@ -53,6 +53,10 @@ pub const S_VAR: u8 = 6;
 // A method named through its type (`Type.m`): its decl in `acc`, its bindings row in `blo`.
 pub const S_ASSOC: u8 = 7;
 
+// The callee of a call through a fn value (on its `Args` row: the fn type in `pos`); no decl or
+// built-in has this id.
+const FN_VALUE: u32 = 4294967039;
+
 // The chain step waiting for the child being checked: none, generic arguments, a call's arguments,
 // an index, a struct literal.
 pub const P_NONE: u8 = 0;
@@ -382,6 +386,25 @@ impl tc_rows.Typeck {
             if ty == T_L_PAREN {
                 let close = close_of(cut, p);
                 let st = self.chain.as_slice()[r];
+                let fv0 = if st == S_VAL then self.acc.as_slice()[r] else UNK;
+                let fv = self.resolve(fv0);
+                if fv != UNK && fv != NONE && !is_lit(fv) && sg.cx.tab.tag_of(fv) == types.TK_FN {
+                    // a call through a fn value: its type gives the params and the result
+                    if close == p + 1 {
+                        let v = self.call_value(sg, ds, tree, FN_VALUE, fv, NONE);
+                        self.set_chain(r, S_VAL, v);
+                        p = close + 1;
+                        continue;
+                    }
+                    if c == NONE || kind(tree, c as usize) != K_ARGS { return self.chain_lost(r); }
+                    self.set_chain(r, S_VAL, UNK);
+                    self.pos.as_mut_slice()[r] = close + 1;
+                    self.pend.as_mut_slice()[r] = P_CALL;
+                    self.acc.as_mut_slice()[c as usize] = FN_VALUE;
+                    self.pos.as_mut_slice()[c as usize] = fv;
+                    self.blo.as_mut_slice()[c as usize] = NONE;
+                    return true;
+                }
                 let mut callee = if st == S_FN || st == S_VAR || st == S_ASSOC then self.acc.as_slice()[r] else NONE;
                 if st == S_NOVAL { return self.chain_lost(r); }
                 // a variant is called only with a payload
@@ -482,6 +505,17 @@ impl tc_rows.Typeck {
         if callee == NONE {
             if args != NONE { self.poison_kids(tree, args as usize); }
             return UNK;
+        }
+        if callee == FN_VALUE {
+            let np = sg.cx.tab.a_of(inst) as usize;
+            let n = if args == NONE then 0usize else tree.kids.row(args as usize).len();
+            if n != np { return self.err(); }
+            for j in 0..n {
+                let a = self.base + tree.kids.row(args as usize)[j] as usize;
+                let p = sg.cx.tab.x(inst)[j];
+                self.coerce(&sg.cx.tab, a, p);
+            }
+            return sg.cx.tab.x(inst)[np];
         }
         if tc_builtins.is_builtin(callee) {
             let np = self.bt.params(callee, inst);
@@ -894,6 +928,11 @@ impl tc_rows.Typeck {
     pub fn arg_hint(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, r: usize, j: usize) -> u32 {
         let callee = self.acc.as_slice()[r];
         if callee == NONE || callee == UNK { return UNK; }
+        if callee == FN_VALUE {
+            let inst = self.pos.as_slice()[r];
+            let np = sg.cx.tab.a_of(inst) as usize;
+            return if j < np then sg.cx.tab.x(inst)[j] else NONE;
+        }
         let b = self.blo.as_slice()[r];
         if b == UNK { return UNK; }
         if b != NONE { return self.gen_hint(sg, ds, tree, r, j); }
