@@ -8,9 +8,11 @@ import std.vec;
 
 // out[i] = src[idx[i]].
 pub fn gather<T: Copy>(src: &[T], idx: &[u32]) -> vec.Vec<T> {
-    let mut out = vec.Vec::<T>.with_capacity(idx.len());
+    if idx.len() == 0 { return vec.Vec::<T>.new(); }
+    let mut out = col.filled(idx.len(), src[idx[0] as usize]);
+    let o = out.as_mut_slice();
     for i in 0..idx.len() {
-        out.push(src[idx[i] as usize]);
+        o[i] = src[idx[i] as usize];
     }
     return out;
 }
@@ -31,8 +33,9 @@ pub fn scatter<T: Copy>(dst: &mut [T], idx: &[u32], vals: &[T]) {
 pub fn invert(p: &[u32]) -> vec.Vec<u32> {
     let _ = col.ids(p.len());
     let mut out = col.filled(p.len(), idx.NONE);
+    let o = out.as_mut_slice();
     for i in 0..p.len() {
-        out.as_mut_slice()[p[i] as usize] = i as% u32;
+        o[p[i] as usize] = i as% u32;
     }
     return out;
 }
