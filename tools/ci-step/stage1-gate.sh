@@ -3,9 +3,10 @@
 # (contracts/stage-gates.md): builds stage0 (the debug build `test` leaves, or
 # STAVE_GATE_PROFILE=release), builds stage1 with it, then runs both once per root of the corpus
 # with `build --dump=tokens,items,ast,strings,names,sigs,diags` and compares the `tokens.txt`,
-# `items.txt`, `ast.txt`, `strings.txt`, `names.txt`, and `sigs.txt` of the two byte for byte, and stage1's
-# `diags.txt` with stage0's restricted to the codes of the stages stage1 has (S1_CODES: read, lex,
-# item cut, parse, modules, decls, resolve). Every dump covers the whole program, so each root
+# `items.txt`, `ast.txt`, `strings.txt`, `names.txt`, and `sigs.txt` of the two byte for byte,
+# and stage1's `diags.txt` with stage0's restricted to the codes of the stages stage1 has
+# (S1_CODES: read, lex, item cut, parse, modules, decls, resolve, signatures). Every dump covers
+# the whole program, so each root
 # also compares std, runtime, and the arch package.
 #
 # Stage0 raises some of those codes in later stages too (a type or trait expected: E0101; a field
