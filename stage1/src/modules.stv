@@ -627,27 +627,26 @@ fn cycles(md: &mut Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Toke
             }
         }
     }
-    // per component: from its smallest module path, follow each module's first import into the
-    // component until a module repeats; the loop starts at its smallest module path
+    // per component: from its smallest module path (M ranks by path text), follow each module's
+    // first import into the component until a module repeats; the loop starts at its smallest
+    // module path
+    let mut comp_min = col.filled(ncomp as usize, NONE);
+    for m in 0..n {
+        let c = md.cycle_comp.as_slice()[m];
+        if c != NONE && comp_min.as_slice()[c as usize] == NONE { comp_min.as_mut_slice()[c as usize] = m as% u32; }
+    }
+    let mut at = col.filled(n, NONE);
     let mut walk_m = vec.Vec::<u32>.new();
     let mut walk_e = vec.Vec::<u32>.new();
     for c in 0..ncomp as usize {
-        let mut start = NONE;
-        for m in 0..n {
-            if md.cycle_comp.as_slice()[m] != c as% u32 { continue; }
-            if start == NONE || text.cmp(md.text(m), md.text(start as usize)) < 0 { start = m as% u32; }
-        }
         walk_m.clear();
         walk_e.clear();
-        let mut cur = start;
+        let mut cur = comp_min.as_slice()[c];
         let mut cut_at: usize = 0;
         loop {
-            let mut seen = walk_m.len();
-            for j in 0..walk_m.len() {
-                if walk_m.as_slice()[j] == cur { seen = j; }
-            }
-            if seen < walk_m.len() {
-                cut_at = seen;
+            let seen = at.as_slice()[cur as usize];
+            if seen != NONE {
+                cut_at = seen as usize;
                 break;
             }
             let v = cur as usize;
@@ -659,15 +658,19 @@ fn cycles(md: &mut Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Toke
                 cut_at = walk_m.len();
                 break;
             }
+            at.as_mut_slice()[v] = walk_m.len() as% u32;
             walk_m.push(cur);
             walk_e.push(sedge.as_slice()[e as usize]);
             cur = succ.as_slice()[e as usize];
+        }
+        for j in 0..walk_m.len() {
+            at.as_mut_slice()[walk_m.as_slice()[j] as usize] = NONE;
         }
         let len = walk_m.len() - cut_at;
         if len == 0 { continue; }
         let mut first = cut_at;
         for j in cut_at..walk_m.len() {
-            if text.cmp(md.text(walk_m.as_slice()[j] as usize), md.text(walk_m.as_slice()[first] as usize)) < 0 { first = j; }
+            if walk_m.as_slice()[j] < walk_m.as_slice()[first] { first = j; }
         }
         for r in 1..len {
             let j = cut_at + (first - cut_at + r) % len;

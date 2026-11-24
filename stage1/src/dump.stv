@@ -15,10 +15,12 @@
 // lowercase hex digits, the bytes 0x20..0x7E as themselves except `\` and `"` (backslash
 // escaped), `\n`, `\t`, and `\xHH` for every other byte.
 import ast;
+import files;
 import generated.ll1_table;
 import intern;
 import items;
 import lex;
+import resdiag;
 import resolve;
 import text;
 import std.mem;
@@ -159,6 +161,26 @@ pub fn names_txt(r: &resolve.Names) -> vec.Vec<u8> {
             buf.extend_from_slice(mem.str_bytes(" -> decl "));
         }
         text.push_u32(&mut buf, r.target.as_slice()[k]);
+        buf.push(10);
+    }
+    return buf;
+}
+
+// `resrows` (stage1 only, not a gate dump): one line `E<code> <file path> <offset> <length>` per
+// diagnostic row of the name stages, in row order, to compare with stage0's diagnostics.
+pub fn resrows_txt(rows: &resdiag.Rows, fl: &files.FileList) -> vec.Vec<u8> {
+    let mut buf = vec.Vec::<u8>.new();
+    for k in 0..rows.len() {
+        let c = rows.code.as_slice()[k];
+        buf.push(69);
+        if c < 1000 { buf.push(48); }
+        text.push_u32(&mut buf, c as u32);
+        buf.push(32);
+        buf.extend_from_slice(fl.abs_path.get_ref(rows.file.as_slice()[k] as usize).as_bytes());
+        buf.push(32);
+        text.push_u32(&mut buf, rows.off.as_slice()[k]);
+        buf.push(32);
+        text.push_u32(&mut buf, rows.len.as_slice()[k]);
         buf.push(10);
     }
     return buf;

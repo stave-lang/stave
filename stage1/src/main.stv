@@ -6,7 +6,8 @@
 // [--target T] [-o OUT]`. PATH (default `.`) is a `.stv` file or a package directory; the build
 // covers it, its path dependencies, and the shipped `std` and `runtime` from the library
 // directory (`$STAVE_STD_DIR`, else next to the binary as for stage0). It writes the requested
-// dumps of `tokens`, `items`, `ast`, `strings`, `names` as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for byte
+// dumps of `tokens`, `items`, `ast`, `strings`, `names` (and the stage1-only `resrows`, the
+// name stages' diagnostic rows) as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for byte
 // stage0's. `-o` is accepted and
 // unused: no code is generated yet. Exit codes: 0 done, 2 usage.
 import decls;
@@ -46,6 +47,7 @@ struct Cli {
     want_ast: bool,
     want_strings: bool,
     want_names: bool,
+    want_resrows: bool,
 }
 
 fn arg(i: usize) -> string.String {
@@ -121,6 +123,9 @@ fn parse_args(cli: &mut Cli) -> Result<(), string.String> {
                 cli.want_strings = true;
             } else if text.eq_str(st.as_bytes(), "names") {
                 cli.want_names = true;
+            } else if text.eq_str(st.as_bytes(), "resrows") {
+                cli.want_names = true;
+                cli.want_resrows = true;
             } else {
                 return Result.Err(f"dump `{st}` is not implemented in stage1");
             }
@@ -207,7 +212,7 @@ fn write_dump(dir: &str, name: &str, bytes: &[u8]) -> i32 {
 }
 
 fn main() -> i32 {
-    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), want_tokens: false, want_items: false, want_ast: false, want_strings: false, want_names: false };
+    let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), want_tokens: false, want_items: false, want_ast: false, want_strings: false, want_names: false, want_resrows: false };
     match parse_args(&mut cli) {
         Result.Ok(_) => {}
         Result.Err(m) => { return usage(m.as_str()); }
@@ -273,6 +278,11 @@ fn main() -> i32 {
             let out = dump.names_txt(&res);
             let code = write_dump(cli.dump_dir.as_str(), "names.txt", out.as_slice());
             if code != EXIT_OK { return code; }
+            if cli.want_resrows {
+                let rr = dump.resrows_txt(&rows, &fl);
+                let rc = write_dump(cli.dump_dir.as_str(), "resrows.txt", rr.as_slice());
+                if rc != EXIT_OK { return rc; }
+            }
         }
         if cli.want_items {
             let out = dump.items_txt(&cut, &tree);

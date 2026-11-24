@@ -852,10 +852,22 @@ fn check_vis(ds: &decls.Decls, md: &modules.Modules, lx: &lex.Lexer, set: &sourc
     }
 }
 
-// The first enum visible from module m, in (module, offset) order, with a variant named s.
+// The first enum visible from module m, in (module, offset) order, with a variant named s. A
+// global lookup from m gives an enum only of m's own scope or of the prelude, so only the enums
+// of m and of `std.core` are candidates, the smaller module first.
 fn enum_with_variant(ds: &decls.Decls, md: &modules.Modules, m: u32, s: u32) -> u32 {
-    let mut k = search.lower_bound(ds.var_key.as_slice(), search.pair(s, 0));
-    while k < ds.var_key.len() && (ds.var_key.as_slice()[k] >> 32) as% u32 == s {
+    let c = md.core_mod;
+    let first = if c != NONE && c < m then c else m;
+    let second = if first == m then c else m;
+    let e = visible_enum_of(ds, md, m, s, first);
+    if e != NONE || second == NONE || second == first { return e; }
+    return visible_enum_of(ds, md, m, s, second);
+}
+
+fn visible_enum_of(ds: &decls.Decls, md: &modules.Modules, m: u32, s: u32, owner: u32) -> u32 {
+    let key = search.pair(s, owner);
+    let mut k = search.lower_bound(ds.var_key.as_slice(), key);
+    while k < ds.var_key.len() && ds.var_key.as_slice()[k] == key {
         let e = ds.var_enum.as_slice()[k];
         let (tag, id) = ds.global(md, m, ds.name.as_slice()[e as usize]);
         if tag == decls.G_DECL && id == e { return e; }
@@ -884,7 +896,7 @@ impl Lines {
 }
 
 // Follows chain u from its head; adds a line per segment that resolves to a decl or local.
-fn follow(u: &Uses, b: &Binds, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, cut: &items.Items, cx: &Ctx, k: usize, out: &mut Lines, rows: &mut resdiag.Rows) {
+fn follow(u: &Uses, b: &Binds, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, cut: &items.Items, cx: &Ctx, k: usize, out: &mut Lines, pend: &mut vec.Vec<u32>, rows: &mut resdiag.Rows) {
     let item = u.item.as_slice()[k];
     let node = u.node.as_slice()[k];
     let ns = u.ns.as_slice()[k];
@@ -953,12 +965,10 @@ fn follow(u: &Uses, b: &Binds, ds: &decls.Decls, md: &modules.Modules, nm: &inte
             rows.add(resdiag.E0101, file, hoff, hlen, hs, 0, NONE);
             return;
         }
+        // E0103 or E0101: settled once per (module, name) after every chain
         if u.variant_ok.as_slice()[k] {
-            let e = enum_with_variant(ds, md, m, hs);
-            if e != NONE {
-                rows.add(resdiag.E0103, file, hoff, hlen, hs, e, NONE);
-                return;
-            }
+            pend.push(k as% u32);
+            return;
         }
         rows.add(resdiag.E0101, file, hoff, hlen, hs, 0, NONE);
         return;
@@ -1012,6 +1022,34 @@ fn follow(u: &Uses, b: &Binds, ds: &decls.Decls, md: &modules.Modules, nm: &inte
         }
         if !ambiguous && !ds.is_poisoned(ds.name.as_slice()[sid as usize]) { rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE); }
         break;
+    }
+}
+
+// E0103 for an unresolved head a visible enum has a variant of, else E0101; the enum is looked
+// up once per (module, name).
+fn unresolved_heads(u: &Uses, ds: &decls.Decls, md: &modules.Modules, cut: &items.Items, pend: &[u32], rows: &mut resdiag.Rows) {
+    let mut keys = vec.Vec::<u64>.with_capacity(pend.len());
+    for q in 0..pend.len() {
+        let k = pend[q] as usize;
+        let file = cut.file.as_slice()[u.item.as_slice()[k] as usize];
+        let s = u.seg_sym.as_slice()[u.seg_lo.as_slice()[k] as usize];
+        keys.push(search.pair(md.file_mod.as_slice()[file as usize], s));
+    }
+    let p = sort.sort_perm(keys.as_slice());
+    let mut e = NONE;
+    for r in 0..p.len() {
+        let q = p.as_slice()[r] as usize;
+        let key = keys.as_slice()[q];
+        if r == 0 || keys.as_slice()[p.as_slice()[r - 1] as usize] != key { e = enum_with_variant(ds, md, (key >> 32) as% u32, (key & 4294967295) as% u32); }
+        let k = pend[q] as usize;
+        let lo = u.seg_lo.as_slice()[k] as usize;
+        let file = cut.file.as_slice()[u.item.as_slice()[k] as usize];
+        let s = u.seg_sym.as_slice()[lo];
+        if e != NONE {
+            rows.add(resdiag.E0103, file, u.seg_off.as_slice()[lo], u.seg_len.as_slice()[lo], s, e, NONE);
+        } else {
+            rows.add(resdiag.E0101, file, u.seg_off.as_slice()[lo], u.seg_len.as_slice()[lo], s, 0, NONE);
+        }
     }
 }
 
@@ -1093,9 +1131,11 @@ pub fn build(md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, lx: &
         }
     }
     let mut out = Lines.{ item: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), tag: vec.Vec::<u8>.new(), target: vec.Vec::<u32>.new() };
+    let mut pend = vec.Vec::<u32>.new();
     for k in 0..u.item.len() {
-        follow(&u, &b, ds, md, nm, lx, set, t, tree, cut, &cx, k, &mut out, rows);
+        follow(&u, &b, ds, md, nm, lx, set, t, tree, cut, &cx, k, &mut out, &mut pend, rows);
     }
+    unresolved_heads(&u, ds, md, cut, pend.as_slice(), rows);
     // import and allocator paths: a line per segment that names a module
     for k in 0..md.imp_item.len() {
         let i = md.imp_item.as_slice()[k];
