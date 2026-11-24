@@ -70,7 +70,9 @@ fn retype(r: &mut Rng, base: &[u8]) -> Vec<u8> {
     let slots: Vec<usize> = (0..toks.len())
         .filter(|&j| {
             let t = toks[j].trim_end_matches([',', ')']);
-            let num = |p: char| t.strip_prefix(p).is_some_and(|d| !d.is_empty() && d.bytes().all(|c| c.is_ascii_digit()));
+            let num = |p: char| {
+                t.strip_prefix(p).is_some_and(|d| !d.is_empty() && d.bytes().all(|c| c.is_ascii_digit()))
+            };
             num('t') || num('%')
         })
         .collect();
