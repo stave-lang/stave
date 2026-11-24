@@ -1,0 +1,248 @@
+// Rows of bits: `rows` sets over the universe 0..bits, one flat column of u64 words, row r in
+// words[r * w .. (r + 1) * w] with w = ceil(bits / 64), bit b in word b / 64 at position b % 64.
+// Bits at and above `bits` in the last word of a row are always zero, so `any`, `count`, and
+// equality need no mask. Whole-row operations run on 128-bit vectors with a scalar tail, so
+// they are exact for any word count; each returns whether the destination changed, the
+// test of a fixed-point loop.
+import col;
+import std.debug;
+import std.vec;
+
+pub struct BitRows {
+    rows: usize,
+    bits: usize,
+    w: usize,
+    words: vec.Vec<u64>,
+}
+
+// Row d |= row s, within one buffer (d == s is allowed). `w` words per row.
+fn or_in(buf: &mut [u64], d: usize, s: usize, w: usize) -> bool {
+    let mut diff = u64x2.splat(0);
+    let mut i: usize = 0;
+    while i + 2 <= w {
+        let a = u64x2.load(buf, d + i);
+        let r = a | u64x2.load(buf, s + i);
+        diff = diff | (a ^ r);
+        r.store(buf, d + i);
+        i = i + 2;
+    }
+    let mut rest: u64 = 0;
+    while i < w {
+        let a = buf[d + i];
+        let r = a | buf[s + i];
+        rest = rest | (a ^ r);
+        buf[d + i] = r;
+        i = i + 1;
+    }
+    return (diff.reduce_or() | rest) != 0;
+}
+
+// Row d &= row s.
+fn and_in(buf: &mut [u64], d: usize, s: usize, w: usize) -> bool {
+    let mut diff = u64x2.splat(0);
+    let mut i: usize = 0;
+    while i + 2 <= w {
+        let a = u64x2.load(buf, d + i);
+        let r = a & u64x2.load(buf, s + i);
+        diff = diff | (a ^ r);
+        r.store(buf, d + i);
+        i = i + 2;
+    }
+    let mut rest: u64 = 0;
+    while i < w {
+        let a = buf[d + i];
+        let r = a & buf[s + i];
+        rest = rest | (a ^ r);
+        buf[d + i] = r;
+        i = i + 1;
+    }
+    return (diff.reduce_or() | rest) != 0;
+}
+
+// Row d &= ~row s.
+fn andnot_in(buf: &mut [u64], d: usize, s: usize, w: usize) -> bool {
+    let mut diff = u64x2.splat(0);
+    let mut i: usize = 0;
+    while i + 2 <= w {
+        let a = u64x2.load(buf, d + i);
+        let r = a.andnot(u64x2.load(buf, s + i));
+        diff = diff | (a ^ r);
+        r.store(buf, d + i);
+        i = i + 2;
+    }
+    let mut rest: u64 = 0;
+    while i < w {
+        let a = buf[d + i];
+        let r = a & ~buf[s + i];
+        rest = rest | (a ^ r);
+        buf[d + i] = r;
+        i = i + 1;
+    }
+    return (diff.reduce_or() | rest) != 0;
+}
+
+impl BitRows {
+    // `rows` empty sets over 0..bits.
+    pub fn new(rows: usize, bits: usize) -> BitRows {
+        let w = (bits + 63) / 64;
+        return BitRows.{ rows: rows, bits: bits, w: w, words: col.filled(rows * w, 0u64) };
+    }
+
+    pub fn rows(&self) -> usize {
+        return self.rows;
+    }
+
+    // The universe size: bits are 0..bits().
+    pub fn bits(&self) -> usize {
+        return self.bits;
+    }
+
+    // Row r as words (`Bounds` unless r < rows()).
+    pub fn row(&self, r: usize) -> &[u64] from self {
+        debug.assert(r < self.rows, "bits: row out of range");
+        let a = r * self.w;
+        return &self.words.as_slice()[a..a + self.w];
+    }
+
+    // Adds b to row r (`Assert` unless r < rows() and b < bits()).
+    pub fn set(&mut self, r: usize, b: usize) {
+        debug.assert(r < self.rows && b < self.bits, "bits: set out of range");
+        let sh = (b % 64) as u64;
+        let k = r * self.w + b / 64;
+        let old = self.words.as_slice()[k];
+        self.words.as_mut_slice()[k] = old | (1u64 << sh);
+    }
+
+    // Removes b from row r.
+    pub fn clear(&mut self, r: usize, b: usize) {
+        debug.assert(r < self.rows && b < self.bits, "bits: clear out of range");
+        let sh = (b % 64) as u64;
+        let k = r * self.w + b / 64;
+        let old = self.words.as_slice()[k];
+        self.words.as_mut_slice()[k] = old & ~(1u64 << sh);
+    }
+
+    // Whether b is in row r (`test` is a keyword).
+    pub fn has(&self, r: usize, b: usize) -> bool {
+        debug.assert(r < self.rows && b < self.bits, "bits: has out of range");
+        let sh = (b % 64) as u64;
+        let x = self.words.as_slice()[r * self.w + b / 64];
+        return ((x >> sh) & 1) == 1;
+    }
+
+    // Empties row r.
+    pub fn clear_row(&mut self, r: usize) {
+        debug.assert(r < self.rows, "bits: row out of range");
+        let a = r * self.w;
+        let s = self.words.as_mut_slice();
+        for i in 0..self.w {
+            s[a + i] = 0;
+        }
+    }
+
+    // Row r becomes the whole universe 0..bits().
+    pub fn fill_row(&mut self, r: usize) {
+        debug.assert(r < self.rows, "bits: row out of range");
+        let a = r * self.w;
+        let w = self.w;
+        let rest = self.bits % 64;
+        let s = self.words.as_mut_slice();
+        for i in 0..w {
+            s[a + i] = ~0u64;
+        }
+        if rest != 0 {
+            let sh = rest as u64;
+            s[a + w - 1] = (1u64 << sh) - 1;
+        }
+    }
+
+    // Row dst becomes a copy of row src.
+    pub fn copy_row(&mut self, dst: usize, src: usize) {
+        debug.assert(dst < self.rows && src < self.rows, "bits: row out of range");
+        let a = dst * self.w;
+        let b = src * self.w;
+        let s = self.words.as_mut_slice();
+        for i in 0..self.w {
+            s[a + i] = s[b + i];
+        }
+    }
+
+    // Row dst |= row src; whether dst changed.
+    pub fn or_row(&mut self, dst: usize, src: usize) -> bool {
+        debug.assert(dst < self.rows && src < self.rows, "bits: row out of range");
+        let w = self.w;
+        return or_in(self.words.as_mut_slice(), dst * w, src * w, w);
+    }
+
+    // Row dst &= row src; whether dst changed.
+    pub fn and_row(&mut self, dst: usize, src: usize) -> bool {
+        debug.assert(dst < self.rows && src < self.rows, "bits: row out of range");
+        let w = self.w;
+        return and_in(self.words.as_mut_slice(), dst * w, src * w, w);
+    }
+
+    // Row dst &= ~row src (removes src's members); whether dst changed.
+    pub fn andnot_row(&mut self, dst: usize, src: usize) -> bool {
+        debug.assert(dst < self.rows && src < self.rows, "bits: row out of range");
+        let w = self.w;
+        return andnot_in(self.words.as_mut_slice(), dst * w, src * w, w);
+    }
+
+    // Whether rows a and b hold the same members.
+    pub fn same_rows(&self, a: usize, b: usize) -> bool {
+        return self.row(a).eq(self.row(b));
+    }
+
+    // Whether row r has any member.
+    pub fn any(&self, r: usize) -> bool {
+        let mut acc = u64x2.splat(0);
+        let mut rest: u64 = 0;
+        for v: u64x2 in self.row(r) {
+            acc = acc | v;
+        } tail scalar (x) {
+            rest = rest | x;
+        }
+        return (acc.reduce_or() | rest) != 0;
+    }
+
+    // The number of members of row r.
+    pub fn count(&self, r: usize) -> usize {
+        let mut acc = u64x2.splat(0);
+        let mut rest: u64 = 0;
+        for v: u64x2 in self.row(r) {
+            acc = acc +% v.popcount();
+        } tail scalar (x) {
+            rest = rest + (x.popcount() as u64);
+        }
+        return (acc.reduce_add_wrap() + rest) as usize;
+    }
+
+    // The least member of row r that is >= at, if any.
+    pub fn next_set(&self, r: usize, at: usize) -> Option<usize> {
+        let row = self.row(r);
+        if at >= self.bits { return Option.None; }
+        let mut wi = at / 64;
+        let sh = (at % 64) as u64;
+        let mut x = row[wi] & ((~0u64) << sh);
+        loop {
+            if x != 0 { return Option.Some(wi * 64 + (x.ctz() as usize)); }
+            wi = wi + 1;
+            if wi >= row.len() { return Option.None; }
+            x = row[wi];
+        }
+    }
+
+    // The members of row r, ascending.
+    pub fn members(&self, r: usize) -> vec.Vec<u32> {
+        let row = self.row(r);
+        let mut out = vec.Vec::<u32>.with_capacity(self.count(r));
+        for wi in 0..row.len() {
+            let mut x = row[wi];
+            while x != 0 {
+                out.push(col.ids(wi * 64 + (x.ctz() as usize)));
+                x = x & (x - 1);
+            }
+        }
+        return out;
+    }
+}

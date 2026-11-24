@@ -2,8 +2,12 @@
 //
 // `tokens`: one line `F O KIND` per token, by (F, O); KIND is the terminal's name or spelling,
 // `ERROR` for an error token. `EOF` has no line.
+//
+// `items`: one line `I F O_start O_end ok|dropped` per item, by I.
+import items;
 import lex;
 import text;
+import std.mem;
 import std.vec;
 
 pub fn tokens(lx: &lex.Lexer, t: &lex.Tokens) -> vec.Vec<u8> {
@@ -23,6 +27,26 @@ pub fn tokens(lx: &lex.Lexer, t: &lex.Tokens) -> vec.Vec<u8> {
             buf.extend_from_slice(lx.kind_name(kind[i]));
             buf.push(10);
         }
+    }
+    return buf;
+}
+
+pub fn items_txt(it: &items.Items) -> vec.Vec<u8> {
+    let n = it.len();
+    let mut buf = vec.Vec::<u8>.with_capacity(n * 24);
+    let file = it.file.as_slice();
+    let off_start = it.off_start.as_slice();
+    let off_end = it.off_end.as_slice();
+    let ok = it.ok.as_slice();
+    for i in 0..n {
+        text.push_u32(&mut buf, i as% u32);
+        buf.push(32);
+        text.push_u32(&mut buf, file[i]);
+        buf.push(32);
+        text.push_u32(&mut buf, off_start[i]);
+        buf.push(32);
+        text.push_u32(&mut buf, off_end[i]);
+        buf.extend_from_slice(if ok[i] then mem.str_bytes(" ok\n") else mem.str_bytes(" dropped\n"));
     }
     return buf;
 }
