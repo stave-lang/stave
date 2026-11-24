@@ -482,8 +482,14 @@ fn paths(md: &mut Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.So
             continue;
         }
         // an allocator is a direct child of the ItemBody under the item root
-        for n in lo..root {
-            if alloc_node == NONE && tree.kind.as_slice()[n] == node_kinds.KIND_ALLOCATOR_DECL { alloc_node = (n - lo) as% u32; }
+        let rk = tree.kids.row(root);
+        for j in 0..rk.len() {
+            let b = lo + rk[j] as usize;
+            if tree.kind.as_slice()[b] != node_kinds.KIND_ITEM_BODY { continue; }
+            let bk = tree.kids.row(b);
+            for q in 0..bk.len() {
+                if alloc_node == NONE && tree.kind.as_slice()[lo + bk[q] as usize] == node_kinds.KIND_ALLOCATOR_DECL { alloc_node = bk[q]; }
+            }
         }
         if alloc_node == NONE { continue; }
         ident_chain(kind, tree.tok.as_slice()[lo + alloc_node as usize] as usize + 1, &mut chain);

@@ -30,6 +30,7 @@ import items;
 import lex;
 import modules;
 import prims.col;
+import prims.hindex;
 import prims.perm;
 import prims.search;
 import prims.sort;
@@ -270,69 +271,96 @@ fn for_has_block(tree: &ast.Ast, base: usize, g: usize) -> bool {
     return false;
 }
 
-// The visit state of child c of row p.
-fn child_state(tree: &ast.Ast, t: &lex.Tokens, cx: &Ctx, base: usize, p: usize, c: usize) -> u8 {
-    let ps = cx.state.as_slice()[p];
-    let pk = tree.kind.as_slice()[p];
-    let ck = tree.kind.as_slice()[c];
+// How a parent's kind decides its children's visit state (`K_*`, by kind).
+const K_ALL: u8 = 0;
+const K_NONE: u8 = 1;
+const K_LIST: u8 = 2;
+const K_PARAM: u8 = 3;
+const K_STMT: u8 = 4;
+const K_FOR: u8 = 5;
+const K_ARM: u8 = 6;
+
+fn kind_rules() -> [u8; 256] {
+    let mut r = [K_ALL; 256];
+    for k in 0usize..256 {
+        if leaf_kind(k as% u8) { r[k] = K_NONE; }
+    }
+    r[node_kinds.KIND_PARAMS as usize] = K_LIST;
+    r[node_kinds.KIND_X_PARAMS as usize] = K_LIST;
+    r[node_kinds.KIND_PARAM as usize] = K_PARAM;
+    r[node_kinds.KIND_STMT as usize] = K_STMT;
+    r[node_kinds.KIND_FOR_STMT as usize] = K_FOR;
+    r[node_kinds.KIND_STMT_ARM as usize] = K_ARM;
+    r[node_kinds.KIND_EXPR_ARM as usize] = K_ARM;
+    return r;
+}
+
+// The visit state of child c of row p, whose state is ps and rule rule (`state`, `parent`, `clo`
+// filled for p and above).
+fn child_state(tree: &ast.Ast, t: &lex.Tokens, parent: &[u32], clo: &[u32], base: usize, p: usize, ps: u8, rule: u8, c: usize) -> u8 {
     if ps == S_PARAM {
         // the list visits every parameter's `from` clause after binding them all (not in a closure)
-        let pp = cx.parent.as_slice()[p] as usize;
+        let pp = parent[p] as usize;
         let pk2 = tree.kind.as_slice()[pp];
-        let from_ok = (pk2 == node_kinds.KIND_PARAMS || pk2 == node_kinds.KIND_X_PARAMS) && cx.clo.as_slice()[pp] == NONE;
+        let from_ok = (pk2 == node_kinds.KIND_PARAMS || pk2 == node_kinds.KIND_X_PARAMS) && clo[pp] == NONE;
         if from_ok && c as% u32 == child(tree, base, p, node_kinds.KIND_PARAM_FROM) { return S_YES; }
         if child(tree, base, p, node_kinds.KIND_SELF_PARAM) != NONE { return S_NO; }
         if c as% u32 == child(tree, base, p, node_kinds.KIND_TYPE) { return S_YES; }
         return S_NO;
     }
-    if ps != S_YES || leaf_kind(pk) { return S_NO; }
-    if pk == node_kinds.KIND_PARAMS || pk == node_kinds.KIND_X_PARAMS || pk == node_kinds.KIND_PARAM {
-        if ck == node_kinds.KIND_PARAM { return S_PARAM; }
-        if pk != node_kinds.KIND_PARAM { return S_YES; }
-    }
-    if pk == node_kinds.KIND_PARAM {
+    if ps != S_YES || rule == K_NONE { return S_NO; }
+    if rule == K_ALL { return S_YES; }
+    let ck = tree.kind.as_slice()[c];
+    if rule == K_LIST { return if ck == node_kinds.KIND_PARAM then S_PARAM else S_YES; }
+    if rule == K_PARAM {
         // a parameter visited on its own: its type only
+        if ck == node_kinds.KIND_PARAM { return S_PARAM; }
         if child(tree, base, p, node_kinds.KIND_SELF_PARAM) != NONE { return S_NO; }
         return if c as% u32 == child(tree, base, p, node_kinds.KIND_TYPE) then S_YES else S_NO;
     }
-    if pk == node_kinds.KIND_STMT && kind_at(t, tree.tok.as_slice()[p] as usize) == T_KW_LET {
+    if rule == K_STMT {
+        if kind_at(t, tree.tok.as_slice()[p] as usize) != T_KW_LET { return S_YES; }
         return if c as% u32 == first_kid(tree, base, p) then S_NO else S_YES;
     }
-    if pk == node_kinds.KIND_FOR_STMT {
+    if rule == K_FOR {
         if !for_has_block(tree, base, p) { return S_NO; }
         return if c as% u32 == first_kid(tree, base, p) then S_NO else S_YES;
     }
-    if pk == node_kinds.KIND_STMT_ARM || pk == node_kinds.KIND_EXPR_ARM {
-        return if c as% u32 == first_kid(tree, base, p) then S_NO else S_YES;
-    }
-    return S_YES;
+    return if c as% u32 == first_kid(tree, base, p) then S_NO else S_YES;
 }
 
 fn context(tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items) -> Ctx {
     let n = tree.nodes();
-    let mut cx = Ctx.{
-        parent: col.filled(n, NONE),
-        state: col.filled(n, S_NO),
-        fnl: col.filled(n, NONE),
-        clo: col.filled(n, NONE),
-        cla: col.filled(n, NONE),
-        con: col.filled(n, NONE),
-    };
+    let rules = kind_rules();
+    let mut parent = col.filled(n, NONE);
+    let mut state = col.filled(n, S_NO);
+    let mut fnl_c = col.filled(n, NONE);
+    let mut clo_c = col.filled(n, NONE);
+    let mut cla_c = col.filled(n, NONE);
+    let mut con_c = col.filled(n, NONE);
+    let kind = tree.kind.as_slice();
+    let tok = tree.tok.as_slice();
+    let inode = tree.item_node.as_slice();
+    let par = parent.as_mut_slice();
+    let sts = state.as_mut_slice();
+    let fnl_s = fnl_c.as_mut_slice();
+    let clo_s = clo_c.as_mut_slice();
+    let cla_s = cla_c.as_mut_slice();
+    let con_s = con_c.as_mut_slice();
     for i in 0..cut.len() {
-        let base = tree.item_node.as_slice()[i] as usize;
-        let end = tree.item_node.as_slice()[i + 1] as usize;
+        let base = inode[i] as usize;
+        let end = inode[i + 1] as usize;
         for g in base..end {
-            let ks = kids(tree, g);
+            let ks = tree.kids.row(g);
             for j in 0..ks.len() {
-                cx.parent.as_mut_slice()[base + ks[j] as usize] = g as% u32;
+                par[base + ks[j] as usize] = g as% u32;
             }
         }
-        if end == base { continue; }
         // parents before children: descending rows
         let mut g = end;
         while g > base {
             g = g - 1;
-            let p = cx.parent.as_slice()[g];
+            let p = par[g];
             let mut st = S_YES;
             let mut fnl = NONE;
             let mut clo = NONE;
@@ -340,25 +368,30 @@ fn context(tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items) -> Ctx {
             let mut con = NONE;
             if p != NONE {
                 let pu = p as usize;
-                st = child_state(tree, t, &cx, base, pu, g);
-                fnl = cx.fnl.as_slice()[pu];
-                clo = cx.clo.as_slice()[pu];
-                cla = cx.cla.as_slice()[pu];
-                con = cx.con.as_slice()[pu];
+                st = child_state(tree, t, par, clo_s, base, pu, sts[pu], rules[kind[pu] as usize], g);
+                fnl = fnl_s[pu];
+                clo = clo_s[pu];
+                cla = cla_s[pu];
+                con = con_s[pu];
             }
-            let k = tree.kind.as_slice()[g];
-            if is_fn_like(tree, base, g) { fnl = g as% u32; }
-            if k == node_kinds.KIND_PRIMARY && kind_at(t, tree.tok.as_slice()[g] as usize) == T_KW_FN { clo = g as% u32; }
-            if k == node_kinds.KIND_REQUIRES || k == node_kinds.KIND_ENSURES { cla = g as% u32; }
-            if k == node_kinds.KIND_IMPL_DECL || k == node_kinds.KIND_TRAIT_DECL { con = g as% u32; }
-            cx.state.as_mut_slice()[g] = st;
-            cx.fnl.as_mut_slice()[g] = fnl;
-            cx.clo.as_mut_slice()[g] = clo;
-            cx.cla.as_mut_slice()[g] = cla;
-            cx.con.as_mut_slice()[g] = con;
+            let k = kind[g];
+            if k == node_kinds.KIND_FN_DECL || k == node_kinds.KIND_KERNEL_DECL || k == node_kinds.KIND_DISPATCH_DECL || k == node_kinds.KIND_EXTERN_FN || k == node_kinds.KIND_TRAIT_FN || (k == node_kinds.KIND_EXTERN_ITEM && is_fn_like(tree, base, g)) {
+                fnl = g as% u32;
+            } else if k == node_kinds.KIND_PRIMARY && kind_at(t, tok[g] as usize) == T_KW_FN {
+                clo = g as% u32;
+            } else if k == node_kinds.KIND_REQUIRES || k == node_kinds.KIND_ENSURES {
+                cla = g as% u32;
+            } else if k == node_kinds.KIND_IMPL_DECL || k == node_kinds.KIND_TRAIT_DECL {
+                con = g as% u32;
+            }
+            sts[g] = st;
+            fnl_s[g] = fnl;
+            clo_s[g] = clo;
+            cla_s[g] = cla;
+            con_s[g] = con;
         }
     }
-    return cx;
+    return Ctx.{ parent: parent, state: state, fnl: fnl_c, clo: clo_c, cla: cla_c, con: con_c };
 }
 
 // The end of the generic argument list opening at global token lt (a `<`): (next token,
@@ -772,24 +805,39 @@ fn origin(u: &mut Uses, su: &mut SelfUses, it: Item, tree: &ast.Ast, t: &lex.Tok
 fn sweep(b: &Binds, q_item: &[u32], q_class: &[u8], q_sym: &[u32], q_pos: &[u32]) -> vec.Vec<u32> {
     let nb = b.item.len();
     let nq = q_item.len();
-    let n = nb + nq;
-    // events: bindings open at lo, lookups at pos; at one position opens go first, by node
-    let mut k3 = vec.Vec::<u64>.with_capacity(n);
+    // a lookup of a name no binding of its item has stays out of the sort: a hash index over the
+    // distinct (item, name) keys of the bindings decides it
+    let mut bkeys = vec.Vec::<u64>.with_capacity(nb);
+    for e in 0..nb {
+        bkeys.push(search.pair(b.item.as_slice()[e], b.sym.as_slice()[e]));
+    }
+    let bp = sort.sort_perm(bkeys.as_slice());
+    let mut uniq = vec.Vec::<u64>.new();
+    for k in 0..bp.len() {
+        let x = bkeys.as_slice()[bp.as_slice()[k] as usize];
+        if k == 0 || uniq.as_slice()[uniq.len() - 1] != x { uniq.push(x); }
+    }
+    let hx = hindex.HashIndex.build(uniq.as_slice());
+    let mut qmap = vec.Vec::<u32>.new();
+    for e in 0..nq {
+        if hx.probe(search.pair(q_item[e], q_sym[e])) != NONE { qmap.push(e as% u32); }
+    }
+    let n = nb + qmap.len();
+    // events: bindings open at lo, lookups at pos; at one position opens go first, by node. Key
+    // k2 = class (2 bits) | position (30) | lookup (1) | node or lookup index (30): positions and
+    // nodes are item-relative
     let mut k2 = vec.Vec::<u64>.with_capacity(n);
     let mut k1 = vec.Vec::<u64>.with_capacity(n);
     for e in 0..nb {
-        k3.push(b.node.as_slice()[e] as u64);
-        k2.push(((b.class.as_slice()[e] as u64) << 32) | (b.lo.as_slice()[e] as u64));
+        k2.push(((b.class.as_slice()[e] as u64) << 61) | ((b.lo.as_slice()[e] as u64) << 31) | (b.node.as_slice()[e] as u64));
         k1.push(search.pair(b.item.as_slice()[e], b.sym.as_slice()[e]));
     }
-    for e in 0..nq {
-        k3.push((1u64 << 32) | (e as u64));
-        k2.push(((q_class[e] as u64) << 32) | (q_pos[e] as u64));
+    for x in 0..qmap.len() {
+        let e = qmap.as_slice()[x] as usize;
+        k2.push(((q_class[e] as u64) << 61) | ((q_pos[e] as u64) << 31) | (1u64 << 30) | (x as u64));
         k1.push(search.pair(q_item[e], q_sym[e]));
     }
-    let mut order = sort.sort_perm(k3.as_slice());
-    let g2 = perm.gather(k2.as_slice(), order.as_slice());
-    order = perm.gather(order.as_slice(), sort.sort_perm(g2.as_slice()).as_slice());
+    let mut order = sort.sort_perm(k2.as_slice());
     let g1 = perm.gather(k1.as_slice(), order.as_slice());
     order = perm.gather(order.as_slice(), sort.sort_perm(g1.as_slice()).as_slice());
     let mut ans = col.filled(nq, NONE);
@@ -798,16 +846,16 @@ fn sweep(b: &Binds, q_item: &[u32], q_class: &[u8], q_sym: &[u32], q_pos: &[u32]
         let e = order.as_slice()[k] as usize;
         if k > 0 {
             let pe = order.as_slice()[k - 1] as usize;
-            if k1.as_slice()[pe] != k1.as_slice()[e] || (k2.as_slice()[pe] >> 32) != (k2.as_slice()[e] >> 32) { stack.clear(); }
+            if k1.as_slice()[pe] != k1.as_slice()[e] || (k2.as_slice()[pe] >> 61) != (k2.as_slice()[e] >> 61) { stack.clear(); }
         }
-        let at = (k2.as_slice()[e] & 4294967295) as% u32;
+        let at = ((k2.as_slice()[e] >> 31) & 1073741823) as% u32;
         while stack.len() > 0 && b.hi.as_slice()[stack.as_slice()[stack.len() - 1] as usize] < at {
             let _ = stack.pop();
         }
         if e < nb {
             if b.lo.as_slice()[e] <= b.hi.as_slice()[e] { stack.push(e as% u32); }
         } else if stack.len() > 0 {
-            ans.as_mut_slice()[e - nb] = stack.as_slice()[stack.len() - 1];
+            ans.as_mut_slice()[qmap.as_slice()[e - nb] as usize] = stack.as_slice()[stack.len() - 1];
         }
     }
     return ans;
