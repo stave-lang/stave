@@ -13,6 +13,7 @@
 import diag;
 import diag_lex;
 import diag_out;
+import diag_syn;
 import dump;
 import files;
 import items;
@@ -255,6 +256,7 @@ fn main() -> i32 {
     diag_lex.lexical(&mut d, &toks, &set);
     let cut = items.build(&lx, &set, &toks);
     let tree = parse.build(&set, &toks, &cut);
+    diag_syn.syntactic(&mut d, &lx, &set, &toks, &cut, &tree);
     let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
     let rows = d.order(ft.rank.as_slice());
     let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);

@@ -1,10 +1,11 @@
 #!/bin/sh
 # stage1 `tokens`, `items`, `ast`, and `diags` equivalence gate (contracts/stage-gates.md): builds
 # stage0 (the debug build `test` leaves, or STAVE_GATE_PROFILE=release), builds stage1 with it, then
-# runs both with `build --dump=tokens,items,ast,diags` on every root of the corpus (one run each) and
-# compares the two `tokens.txt`, `items.txt`, and `ast.txt` byte for byte, and stage1's `diags.txt`
-# with stage0's restricted to the codes of the stages stage1 has (S1_CODES: lex, read). Every dump
-# covers the whole program, so each root also compares std, runtime, and the arch package.
+# runs both with `build --dump=tokens,items,ast,diags` on every root of the corpus (one run each)
+# and compares the two `tokens.txt`, `items.txt`, and `ast.txt` byte for byte, and stage1's
+# `diags.txt` with stage0's restricted to the codes of the stages stage1 has (S1_CODES: read, lex,
+# item cut, parse). Every dump covers the whole program, so each root also compares std, runtime,
+# and the arch package.
 #
 # Exit status: stage1 exits 1 exactly when it printed a diagnostic, else 0 (a root with an error
 # of a stage stage1 lacks still exits 0 there). Where stage0's diagnostics are all in S1_CODES and
@@ -25,8 +26,9 @@ PROFILE="${STAVE_GATE_PROFILE:-debug}"
 S0="$ROOT/target/$PROFILE/stave"
 S1="$OUT/stage1"
 export STAVE_STD_DIR="$ROOT"
-# Codes of the stages stage1 has so far; add a stage's codes with its dump.
-S1_CODES='E0001|E0002|E0003|E0006|E0015|E0017|E0018|E0024|E0029|E1003'
+# Codes of the stages stage1 has so far; add a stage's codes with its dump. E0005 is stage1's only
+# as the bracket depth form (the item cut); its expression and type forms are later stages'.
+S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E1003'
 
 if [ "${1:-}" = "--one" ]; then
   d="$OUT/w/$2"
@@ -52,7 +54,7 @@ if [ "${1:-}" = "--one" ]; then
   elif ! cmp -s "$d/0/ast.txt" "$d/1/ast.txt"; then
     echo "DIFF ast $root $* (first: $(cmp "$d/0/ast.txt" "$d/1/ast.txt" 2>&1 | head -1))"
   else
-    grep -E "^\{\"kind\":\"diagnostic\",\"code\":\"($S1_CODES)\"" "$d/0/diags.txt" > "$d/0/diags.in" || true
+    grep -E "^\{\"kind\":\"diagnostic\",\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)" "$d/0/diags.txt" > "$d/0/diags.in" || true
     ours=$(wc -l < "$d/0/diags.in")
     all=$(wc -l < "$d/0/diags.txt")
     if ! cmp -s "$d/0/diags.in" "$d/1/diags.txt"; then
