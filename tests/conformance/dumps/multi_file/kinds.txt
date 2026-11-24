@@ -1,0 +1,19 @@
+t0 copy,sized depth 1 size 8 align 8
+t1 copy,sized depth 1 size 4 align 4
+t2 - depth 1 size unsized
+t3 copy,view,sized depth 2 size 8 align 8
+t4 copy,view,sized depth 2 size 16 align 8
+t5 copy,view,sized depth 2 size 8 align 8
+t6 view,sized depth 2 size 8 align 8
+t7 view,sized depth 2 size 8 align 8
+t8 view,sized depth 2 size 8 align 8
+t9 copy,sized depth 1 size 0 align 1 fields[]
+t10 sized depth 2 size 8 align 8 fields[0]
+t11 sized,drop depth 1 size param
+t12 sized depth 1 size param
+impl d14 trait d10 head i32 gen 0 methods[d15]
+impl d16 trait d10 head str gen 0 methods[d17]
+impl d20 trait d12 head d18 gen 0 methods[d21]
+apply t1 d10 [d14]
+apply t2 d10 [d16]
+apply t10 d12 [d20]

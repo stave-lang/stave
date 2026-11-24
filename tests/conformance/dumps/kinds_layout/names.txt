@@ -1,0 +1,80 @@
+0 0 -> decl 2
+3 0 -> decl 25
+3 2 -> decl 69
+5 6 -> decl 69
+6 2 -> local 6 0
+9 0 -> decl 29
+9 2 -> decl 45
+10 4 -> decl 2
+10 4 -> decl 7
+12 0 -> decl 66
+12 2 -> decl 69
+13 0 -> decl 66
+14 0 -> decl 66
+14 4 -> decl 66
+14 6 -> local 14 2
+14 9 -> decl 50
+15 2 -> local 15 0
+15 5 -> decl 50
+16 0 -> decl 43
+17 0 -> decl 69
+17 12 -> decl 73
+17 15 -> decl 60
+18 3 -> decl 50
+18 6 -> decl 69
+18 9 -> decl 50
+18 12 -> decl 45
+18 15 -> decl 50
+19 0 -> decl 55
+19 3 -> decl 47
+19 12 -> decl 2
+19 12 -> decl 10
+19 24 -> decl 69
+20 2 -> local 20 0
+20 5 -> decl 50
+20 10 -> local 20 0
+21 9 -> local 21 2
+23 2 -> local 23 0
+24 3 -> local 24 0
+32 0 -> decl 31
+32 6 -> local 32 2
+33 0 -> decl 27
+33 4 -> decl 31
+33 10 -> local 33 6
+34 0 -> decl 27
+34 4 -> decl 31
+34 10 -> local 34 6
+34 16 -> local 34 14
+36 0 -> decl 4
+38 0 -> decl 4
+38 0 -> decl 31
+38 2 -> decl 37
+39 0 -> decl 4
+40 0 -> decl 3
+41 8 -> decl 3
+41 8 -> decl 17
+41 11 -> local 41 0
+41 14 -> decl 3
+41 14 -> decl 17
+42 1 -> decl 4
+42 1 -> decl 20
+42 8 -> decl 4
+42 8 -> decl 19
+42 10 -> local 42 3
+42 12 -> local 42 6
+42 15 -> decl 10
+43 5 -> local 43 0
+43 7 -> local 43 3
+43 10 -> decl 10
+44 1 -> decl 4
+44 1 -> decl 19
+44 8 -> decl 4
+44 8 -> decl 19
+44 10 -> local 44 3
+44 12 -> local 44 6
+44 15 -> decl 7
+45 5 -> decl 4
+45 5 -> decl 29
+45 7 -> local 45 0
+45 9 -> local 45 3
+45 12 -> decl 7

@@ -1,0 +1,78 @@
+//~ CHECK-ONLY
+// Dump golden (sigs): the declaration forms and signature facts. Generics with bounds and const
+// params, trait and impl headers, enum payloads, array lengths from a literal, a const, a
+// const-expr, `size_of`, and a const param, `needs`, `without`, return and parameter `from`,
+// a type alias, consts, a static, and fn types (two that differ only in `without` print the
+// same key).
+const LEN: usize = 4;
+const TWICE: usize = LEN * 2;
+static LIMIT: u32 = 7;
+
+type Grid = [i32; LEN];
+
+pub struct Point { pub x: i32, pub y: i32 }
+
+struct Buf<T, const N: usize> { data: [T; N], n: usize }
+
+view struct Cursor { src: &str, pos: usize }
+
+enum Shape { Dot, Circle(Point, u32), Rect { lo: Point, hi: Point } }
+
+trait Area {
+    fn area(&self) -> u64;
+}
+
+trait Scale<T> {
+    fn scale(&mut self, by: T);
+}
+
+impl Area for Shape {
+    fn area(&self) -> u64 {
+        return 0;
+    }
+}
+
+impl Scale<u32> for Point {
+    fn scale(&mut self, by: u32) {
+    }
+}
+
+impl<T: Area, const N: usize> Buf<T, N> {
+    pub fn first(&self) -> &T from self {
+        return &self.data[0];
+    }
+}
+
+impl Cursor {
+    fn reset(&mut self from s, s: &str) {
+        self.src = s;
+    }
+
+    fn rest(&self) -> &str from copy self {
+        return self.src;
+    }
+}
+
+fn total<A: Area + Scale<u32>>(xs: &[A], extra: [u8; TWICE], g: Grid, w: [u16; size_of::<u64>()]) -> u64 {
+    return 0;
+}
+
+fn lanes(x: f32x8) -> f32x8 needs(avx2, fma) {
+    return x;
+}
+
+fn quiet(xs: &[u32]) -> u32 without(alloc, io) {
+    return 0;
+}
+
+fn pick<const K: usize>(b: &Buf<Shape, K>) -> [u8; K] {
+    return [0; K];
+}
+
+fn apply(f: fn(u32) -> u32, g: fn(u32) -> u32 without(alloc), x: u32) -> u32 {
+    return f(g(x));
+}
+
+fn main() -> i32 {
+    return 0;
+}

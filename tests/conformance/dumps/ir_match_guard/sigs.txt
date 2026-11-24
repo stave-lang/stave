@@ -1,0 +1,48 @@
+t0 int u 8
+t1 int u 32
+t2 int u size
+t3 int s 32
+t4 bool
+t5 str
+t6 ref t3
+t7 ref t5
+t8 ref t16
+t9 ref mut t13
+t10 ref mut t15
+t11 ref mut t16
+t12 tuple
+t13 adt d17
+t14 adt d24
+t15 param 0
+t16 self
+d0 module d0 - 34 - - 0 pub file 0 path[34]
+d1 module d1 - 18 - - 0 pub file 1 path[1 18]
+d2 module d2 - 16 - - 0 pub file 2 path[15 16]
+d3 module d3 - 23 - - 0 pub file 4 path[15 23]
+d4 module d4 - 29 - - 0 pub file 3 path[15 29]
+d5 enum d2 - 20 4 6 0 pub gen[11 0]
+d6 variant d2 d5 4 4 2 0 pub
+d7 variant d2 d5 13 4 5 1 pub,tuple payload[t15]
+d8 trait d2 - 25 5 0 0 pub gen[]
+d9 trait d2 - 30 7 13 0 pub gen[]
+d10 trait-method d2 d9 24 7 12 0 pub,has-self gen[14 2 bound d11] params[t8 t10] ret t12 self ref abi stave needs[] deny[] from[] pfrom[]
+d11 trait d2 - 38 6 9 0 pub gen[]
+d12 trait-method d2 d11 26 6 8 0 pub,has-self gen[] params[t11 t7] ret t12 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d13 impl d2 - - 8 18 0 trait-impl gen[] self t3 trait d9
+d14 method d2 d13 24 8 17 0 trait-impl,has-self gen[14 6 bound d11] params[t6 t10] ret t12 self ref abi stave needs[] deny[] from[] pfrom[]
+d15 impl d2 - - 9 24 0 trait-impl gen[] self t5 trait d9
+d16 method d2 d15 24 9 23 0 trait-impl,has-self gen[14 6 bound d11] params[t7 t10] ret t12 self ref abi stave needs[] deny[] from[] pfrom[]
+d17 struct d3 - 5 12 4 0 pub gen[]
+d18 field d3 d17 2 12 2 0 - ty t2
+d19 impl d3 - - 13 14 0 trait-impl gen[] self t13 trait d11
+d20 method d3 d19 26 13 13 0 trait-impl,has-self gen[] params[t9 t7] ret t12 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d21 fn d4 - 39 10 7 0 pub gen[] params[t7] ret t12 self - abi stave needs[] deny[] from[] pfrom[]
+d22 fn d0 - 0 1 65 0 - gen[] params[t14 t4] ret t1 self - abi stave needs[] deny[] from[] pfrom[]
+d23 fn d0 - 27 2 29 0 - gen[] params[t0 t4] ret t1 self - abi stave needs[] deny[] from[] pfrom[]
+d24 enum d0 - 31 0 12 0 - gen[]
+d25 variant d0 d24 3 0 11 2 pub,record
+d26 field d0 d25 19 0 9 1 - ty t1
+d27 field d0 d25 33 0 6 0 - ty t1
+d28 variant d0 d24 28 0 3 1 pub,tuple payload[t1]
+d29 variant d0 d24 40 0 0 0 pub
+d30 fn d0 - 34 3 32 0 - gen[] params[] ret t3 self - abi stave needs[] deny[] from[] pfrom[]

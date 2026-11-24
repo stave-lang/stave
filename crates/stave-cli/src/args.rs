@@ -87,8 +87,9 @@ pub enum DiagFormat {
 }
 
 /// `--dump` stages, in contract order (stage-gates.md).
-pub const DUMP_STAGES: [&str; 10] =
-    ["tokens", "items", "ast", "strings", "names", "types", "borrow", "ir", "diags", "stats"];
+pub const DUMP_STAGES: [&str; 12] = [
+    "tokens", "items", "ast", "strings", "names", "sigs", "kinds", "types", "borrow", "ir", "diags", "stats",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Args {
@@ -185,8 +186,8 @@ flags of build, run, check, test:
   --features F,...      add features to the target baseline (not implemented yet)
   --compiler auto|cpu|gpu
   --dump=STAGE,... --dump-dir DIR
-                        stages: tokens items ast strings names types borrow ir diags
-                        stats
+                        stages: tokens items ast strings names sigs kinds types
+                        borrow ir diags stats
   --diagnostics human|json
   --timings             per-stage times on stderr
   --cache DIR           incremental cache (not implemented yet)
