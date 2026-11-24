@@ -101,7 +101,30 @@ impl Registry {
         };
     }
 
-    // The row of a code number (`E0018` is 18).
+    // Whether `number` is a code of the registry.
+    pub fn has_code(&self, number: u16) -> bool {
+        let n = self.number.as_slice();
+        let r = search.lower_bound(n, number);
+        return r < n.len() && n[r] == number;
+    }
+
+    // Whether the code at `row` has a shape named `case`.
+    pub fn has_case(&self, row: usize, case: &[u8]) -> bool {
+        for k in (self.shape_first.as_slice()[row] as usize)..(self.shape_first.as_slice()[row + 1] as usize) {
+            if self.shape_case.get(k).eq(case) { return true; }
+        }
+        return false;
+    }
+
+    // Whether the code at `row` declares a hole `name`.
+    pub fn has_hole(&self, row: usize, name: &[u8]) -> bool {
+        for k in (self.hole_first.as_slice()[row] as usize)..(self.hole_first.as_slice()[row + 1] as usize) {
+            if self.hole_name.get(k).eq(name) { return true; }
+        }
+        return false;
+    }
+
+    // The row of a code number (`E0018` is 18); the code must be in the registry.
     pub fn row(&self, number: u16) -> usize {
         let n = self.number.as_slice();
         let r = search.lower_bound(n, number);

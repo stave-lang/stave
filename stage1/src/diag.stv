@@ -16,6 +16,7 @@ import diag_reg;
 import prims.col;
 import prims.perm;
 import prims.sort;
+import std.cell;
 import std.debug;
 import std.idx;
 import std.mem;
@@ -39,7 +40,14 @@ pub struct Diags {
     pub rel_file: vec.Vec<u32>,
     pub rel_start: vec.Vec<u32>,
     pub rel_size: vec.Vec<u32>,
+    // Set when a stage misused the builder (a code, case, or hole the registry lacks, a span that
+    // does not fit the code, a template hole it never gave, a newline in one-line text): the
+    // rows are then not rendered and the build is an internal error.
+    pub bad: cell.Cell<bool>,
 }
+
+// The `find_arg` result for a hole that was not given.
+const NO_ARG: usize = 4294967295;
 
 // Whitespace of a `source` hole in one-line text.
 fn is_collapsed_space(c: u8) -> bool {
@@ -112,6 +120,7 @@ impl Diags {
             rel_file: vec.Vec::<u32>.new(),
             rel_start: vec.Vec::<u32>.new(),
             rel_size: vec.Vec::<u32>.new(),
+            bad: cell.Cell::<bool>.new(false),
         };
     }
 
@@ -122,9 +131,12 @@ impl Diags {
     // Opens a diagnostic of code number `number` (`E0018` is 18) in shape `case` ("" is the
     // base shape). It is closed by `end`; its `arg`s and `role`s come between.
     pub fn begin(&mut self, number: u16, case: &str) {
-        let row = self.reg.row(number);
-        let shape = self.reg.shape(row, mem.str_bytes(case));
-        self.code.push(number);
+        let known = self.reg.has_code(number);
+        let row = if known then self.reg.row(number) else 0;
+        let known_case = known && self.reg.has_case(row, mem.str_bytes(case));
+        if !known_case { self.bad.set(true); }
+        let shape = if known_case then self.reg.shape(row, mem.str_bytes(case)) else (self.reg.shape_first.as_slice()[row] as usize);
+        self.code.push(self.reg.number.as_slice()[row]);
         self.shape.push(shape as% u32);
         self.file.push(idx.NONE);
         self.start.push(0);
@@ -144,6 +156,10 @@ impl Diags {
     // The value of the declared hole `hole` of the open diagnostic.
     pub fn arg(&mut self, hole: &str, value: &[u8]) {
         let row = self.reg.row(self.code.as_slice()[self.code.len() - 1]);
+        if !self.reg.has_hole(row, mem.str_bytes(hole)) {
+            self.bad.set(true);
+            return;
+        }
         let h = self.reg.hole(row, mem.str_bytes(hole));
         self.push_value(h as% u32, value);
     }
@@ -162,7 +178,7 @@ impl Diags {
     pub fn end(&mut self, file: u32, start: u32, size: u32) {
         let k = self.code.len() - 1;
         let row = self.reg.row(self.code.as_slice()[k]);
-        debug.assert(self.reg.located.as_slice()[row] == (file != idx.NONE), "a diagnostic has a span exactly when its code is located");
+        if self.reg.located.as_slice()[row] != (file != idx.NONE) { self.bad.set(true); }
         self.file.as_mut_slice()[k] = file;
         self.start.as_mut_slice()[k] = start;
         self.size.as_mut_slice()[k] = size;
@@ -183,8 +199,8 @@ impl Diags {
             let h = self.arg_hole.as_slice()[k];
             if h != idx.NONE && self.reg.hole_name.get(h as usize).eq(name) { return k; }
         }
-        debug.assert(false, "a hole of the template was not given");
-        return lo;
+        self.bad.set(true);
+        return NO_ARG;
     }
 
     // 0 error, 1 warning.
@@ -211,13 +227,15 @@ impl Diags {
                 while e < n && template[e] != 125 { e = e + 1; }
                 debug.assert(e < n, "a template has an unclosed hole");
                 let k = self.find_arg(i, &template[(p + 1)..e]);
-                let v = self.arg_value(k);
-                let h = self.arg_hole.as_slice()[k] as usize;
-                if one_line && self.reg.hole_kind.as_slice()[h] == diag_reg.KIND_SOURCE {
-                    push_collapsed(out, v);
-                } else {
-                    debug.assert(!one_line || v.find_byte(10).is_none(), "a hole value in one-line text has a newline");
-                    out.extend_from_slice(v);
+                if k != NO_ARG {
+                    let v = self.arg_value(k);
+                    let h = self.arg_hole.as_slice()[k] as usize;
+                    if one_line && self.reg.hole_kind.as_slice()[h] == diag_reg.KIND_SOURCE {
+                        push_collapsed(out, v);
+                    } else {
+                        if one_line && v.find_byte(10).is_some() { self.bad.set(true); }
+                        out.extend_from_slice(v);
+                    }
                 }
                 p = e + 1;
             } else {

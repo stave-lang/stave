@@ -81,3 +81,38 @@ test fn ranks_are_byte_order_with_ties_by_position() {
     s.push(mem.str_bytes(""));
     same(diag.ranks(&s).as_slice(), &[4u32, 1, 3, 2, 0], "a prefix first, equal strings by position");
 }
+
+// A misused builder never traps: it marks the diagnostics unusable.
+test fn builder_misuse_is_flagged() {
+    let mut d = diag.Diags.new();
+    bad_char(&mut d, 0, 0);
+    debug.assert(!d.bad.get(), "a well-formed diagnostic is no misuse");
+    d.begin(9999, "");
+    d.end(0, 0, 1);
+    debug.assert(d.bad.get(), "a code the registry lacks");
+    let mut d = diag.Diags.new();
+    d.begin(18, "no-such-case");
+    debug.assert(d.bad.get(), "a case the code lacks");
+    let mut d = diag.Diags.new();
+    d.begin(18, "");
+    d.arg("no-such-hole", mem.str_bytes("x"));
+    debug.assert(d.bad.get(), "a hole the code lacks");
+    let mut d = diag.Diags.new();
+    d.begin(18, "");
+    d.end(idx.NONE, 0, 0);
+    debug.assert(d.bad.get(), "a located code with no span");
+    let mut d = diag.Diags.new();
+    d.begin(4, "");
+    d.arg("found", mem.str_bytes("a\nb"));
+    d.arg("expected", mem.str_bytes("x"));
+    d.end(0, 0, 1);
+    let mut m = vec.Vec::<u8>.new();
+    d.message(0, &mut m);
+    debug.assert(d.bad.get(), "a newline in one-line text");
+    let mut d = diag.Diags.new();
+    d.begin(4, "");
+    d.arg("found", mem.str_bytes("a"));
+    d.end(0, 0, 1);
+    d.message(0, &mut m);
+    debug.assert(d.bad.get(), "a hole the template needs and nobody gave");
+}

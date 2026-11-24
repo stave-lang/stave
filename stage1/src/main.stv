@@ -9,7 +9,7 @@
 // stage0). It writes the requested dumps as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for
 // byte stage0's for the stages stage1 has, and prints its diagnostics to stderr in stage0's text
 // (or JSON lines). `-o` is accepted and unused: no code is generated yet. Exit codes: 0 done,
-// 1 diagnostics, 2 usage.
+// 1 diagnostics, 2 usage, 3 internal error (a diagnostic the registry cannot build).
 import diag;
 import diag_lex;
 import diag_out;
@@ -31,6 +31,7 @@ import std.vec;
 const EXIT_OK: i32 = 0;
 const EXIT_USER: i32 = 1;
 const EXIT_USAGE: i32 = 2;
+const EXIT_BUG: i32 = 3;
 
 fn usage(msg: &str) -> i32 {
     io.eprint(f"stage1: {msg}\n");
@@ -260,6 +261,10 @@ fn main() -> i32 {
     let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
     let rows = d.order(ft.rank.as_slice());
     let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);
+    if d.bad.get() {
+        io.eprint("stage1: internal compiler error: a diagnostic could not be built from its registry template\n");
+        return EXIT_BUG;
+    }
     let _ = io.write_all(2, shown.as_slice());
     if cli.dump_dir.len() > 0 {
         match io.create_dir_all(cli.dump_dir.as_str()) {
