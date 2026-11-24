@@ -38,8 +38,8 @@ import modules;
 import resolve;
 import sigs;
 import source;
+import tc_rows;
 import text;
-import typeck;
 import types;
 import std.mem;
 import std.vec;
@@ -211,13 +211,13 @@ pub fn sigs_txt(sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules) -> vec.V
 // `types`: the type table of the types the node lines name (and their components), `t<T> key` by
 // T, T the canonical rank among them; then `I N t<T>`, `I N -` (no value), or `I N ?` (not decided
 // by stage1 yet) per expression node of every item not dropped, by (I, N).
-pub fn types_txt(tc: &typeck.Typeck, tab: &types.Table, tree: &ast.Ast) -> vec.Vec<u8> {
+pub fn types_txt(tc: &tc_rows.Typeck, tab: &types.Table, tree: &ast.Ast) -> vec.Vec<u8> {
     let nty = tc.nty.as_slice();
     let kind = tree.kind.as_slice();
     let mut roots = vec.Vec::<u32>.new();
     for g in 0..tree.nodes() {
         let v = nty[g];
-        if consteval.is_expr_kind(kind[g]) && v != types.NONE && v != types.ERR && v != typeck.UNK { roots.push(v); }
+        if consteval.is_expr_kind(kind[g]) && v != types.NONE && v != types.ERR && v != tc_rows.UNK { roots.push(v); }
     }
     let (num, order) = tab.rank(roots.as_slice());
     let nt = order.len() as% u32;
@@ -240,7 +240,7 @@ pub fn types_txt(tc: &typeck.Typeck, tab: &types.Table, tree: &ast.Ast) -> vec.V
             text.push_u32(&mut buf, (g - lo) as% u32);
             buf.push(32);
             let v = nty[g];
-            if v == typeck.UNK {
+            if v == tc_rows.UNK {
                 buf.push(63);
             } else {
                 push_ty(&mut buf, v, num.as_slice(), nt);

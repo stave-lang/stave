@@ -1,0 +1,32 @@
+// Pattern bindings of the body checker (types/check, see `typeck`): the types of the names a
+// pattern binds, given the type of the value it matches, as stage0's `patterns.rs` gives them in
+// move mode (`let`, `for`, `match` arms, parameters with patterns).
+//
+// Owns: the `loc` rows of binding nodes inside patterns (`Pattern` `x` / `mut x`, `FieldPat`
+// shorthand). Entry point: `bind_pattern`. A form not done leaves its bindings `UNK` (their
+// default), so every use of them prints `?`.
+import ast;
+import consteval;
+import generated.terminals;
+import lex;
+import tc_rows;
+
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
+
+impl tc_rows.Typeck {
+    // Binds the names of pattern row p to the parts of a value of type ty: a pattern that binds
+    // the value whole to one name (`x`, `mut x`) gives it ty; other forms are not done yet.
+    pub fn bind_pattern(&mut self, t: &lex.Tokens, tree: &ast.Ast, p: usize, ty: u32) {
+        if binds_one(t, tree, p) { self.loc.as_mut_slice()[p] = ty; }
+    }
+}
+
+// Whether pattern row p binds its value whole to one name (`x`, `mut x`).
+fn binds_one(t: &lex.Tokens, tree: &ast.Ast, p: usize) -> bool {
+    if tree.kids.row(p).len() != 0 { return false; }
+    let a = tree.tok.as_slice()[p];
+    let n = tree.tok_end.as_slice()[p] - a;
+    if consteval.tk(t, a) == T_KW_MUT { return n == 2; }
+    return consteval.tk(t, a) == T_IDENT && n == 1;
+}

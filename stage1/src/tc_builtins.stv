@@ -1,0 +1,97 @@
+// Built-in methods and type-relative built-ins of the body checker (types/check, see `typeck`),
+// as a table: stage0's `builtins.rs` (`builtin_method`, `builtin_method_sig`) and the
+// type-relative built-ins of `expr.rs` (`f32x8.splat`, `mask32x8.first_n`).
+//
+// Owns: which built-in a method call or a type-relative call names, and its signature. A built-in
+// is a callee id (`is_builtin`) the chain module (`tc_chain`) calls through `params`, `param`, and
+// `ret`, with the receiver type, or the type a type-relative call names, as `c`. Every entry is
+// (receiver kind or type head, name) -> (parameter count, parameter types, result type); `UNK`
+// is the answer until the entry is in the table, so an entry not written yet prints `?`, never a
+// guess.
+//
+// Entry points: `table` (the `Builtins` of a program); `method` (a method call's built-in on a
+// receiver at one level of auto-deref), `type_head` (the built-in type a path head names),
+// `type_rel` (a type-relative built-in of such a type), `params`, `param`, `ret`; `is_builtin`.
+import intern;
+import modules;
+import types;
+import std.mem;
+
+pub const NONE: u32 = 4294967295;
+// A type or callee the checker does not decide (printed `?`); `tc_rows.UNK` is this value.
+pub const UNK: u32 = 4294967293;
+
+// Callee ids of the built-ins: `B_BASE + k` for built-in k.
+const B_BASE: u32 = 4294967040;
+const B_END: u32 = 4294967280;
+// `len` of an array, slice, or `str`: no parameters, `usize`.
+const B_LEN: u32 = 4294967040;
+
+// Whether callee x is a built-in of this table.
+pub fn is_builtin(x: u32) -> bool {
+    return x >= B_BASE && x < B_END;
+}
+
+// The names the table looks up, as interned strings (NONE: not in this program).
+pub struct Builtins {
+    s_len: u32,
+}
+
+// The table of a program whose strings are tab.
+pub fn table(tab: &intern.Table) -> Builtins {
+    return Builtins.{ s_len: modules.lookup(tab, mem.str_bytes("len")) };
+}
+
+impl Builtins {
+    // The built-in method named s of a receiver of type c at one level of auto-deref (c is no
+    // reference, struct, enum, or generic param; no impl has a method of that name for it): a
+    // callee, or `UNK`.
+    pub fn method(&self, tab: &types.Table, c: u32, s: u32) -> u32 {
+        if s == NONE { return UNK; }
+        let tag = tab.tag_of(c);
+        if tag == types.TK_SLICE || tag == types.TK_ARRAY || tag == types.TK_STR {
+            if s == self.s_len { return B_LEN; }
+            return UNK;
+        }
+        return UNK;
+    }
+
+    // The built-in scalar, vector, or mask type a path head spelled `name` names (a head no
+    // use resolves), or `UNK`.
+    pub fn type_head(&self, tab: &mut types.Table, name: &[u8]) -> u32 {
+        let _ = tab;
+        let _ = name;
+        return UNK;
+    }
+
+    // The type-relative built-in named s of built-in type ty (`f32x8.splat`): a callee, or `UNK`.
+    pub fn type_rel(&self, tab: &types.Table, ty: u32, s: u32) -> u32 {
+        let _ = tab;
+        let _ = ty;
+        let _ = s;
+        return UNK;
+    }
+
+    // The number of arguments built-in b takes on c, or `UNK`.
+    pub fn params(&self, b: u32, c: u32) -> u32 {
+        let _ = c;
+        if b == B_LEN { return 0; }
+        return UNK;
+    }
+
+    // The type of argument j of built-in b on c (its context and coercion target), or `UNK`.
+    pub fn param(&self, tab: &mut types.Table, b: u32, c: u32, j: usize) -> u32 {
+        let _ = tab;
+        let _ = b;
+        let _ = c;
+        let _ = j;
+        return UNK;
+    }
+
+    // The result type of built-in b on c, or `UNK`.
+    pub fn ret(&self, tab: &mut types.Table, b: u32, c: u32) -> u32 {
+        let _ = c;
+        if b == B_LEN { return tab.usize_t(); }
+        return UNK;
+    }
+}
