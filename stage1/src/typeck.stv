@@ -470,7 +470,7 @@ impl tc_rows.Typeck {
                 self.set_hint(c, h);
                 return true;
             }
-            let th = self.tuple_hint(h);
+            let th = tuple_elem_hint(&sg.cx.tab, h, n, k);
             self.set_hint(c, th);
             return true;
         }
@@ -480,11 +480,6 @@ impl tc_rows.Typeck {
         return true;
     }
 
-    // The context of a tuple element: none without one for the tuple; a tuple with a context is
-    // not checked yet.
-    fn tuple_hint(&self, h: u32) -> u32 {
-        return if h == NONE then NONE else UNK;
-    }
 
     // Before element c (the k-th) of array literal row r, stage0's `array_lit`: a repeat's value
     // has the context's element type as its context, its count `usize`. A list's element type so
@@ -787,16 +782,35 @@ impl tc_rows.Typeck {
         let close = tree.tok_end.as_slice()[r] - 1;
         if ks.len() == 1 && tk(t, close - 1) != T_COMMA { return self.nty.as_slice()[self.base + ks[0] as usize]; }
         let h = self.hint.as_slice()[r];
-        if h != NONE { return self.unknown(tree, r); }
+        if h == UNK { return self.unknown(tree, r); }
+        let n = ks.len();
+        let tab = &mut sg.cx.tab;
+        let hinted = h != NONE && tab.tag_of(h) == types.TK_TUPLE;
+        // a tuple context of another length: E0201
+        if hinted && tab.x(h).len() != n { return self.err(); }
         let mut elems = vec.Vec::<u32>.new();
         let mut unk = false;
-        for j in 0..ks.len() {
-            let e = self.force_at(self.base + ks[j] as usize);
-            if e == UNK || e == NONE { unk = true; }
+        for j in 0..n {
+            let c = self.base + ks[j] as usize;
+            let mut e = UNK;
+            if hinted {
+                // an element with a context: a pending group takes it, a type stays as it is
+                let eh = tab.x(h)[j];
+                let v = self.resolve_at(c);
+                if is_lit(v) {
+                    self.coerce(tab, c, eh);
+                    e = eh;
+                } else {
+                    e = v;
+                }
+            } else {
+                e = self.force_at(c);
+            }
+            if e == NONE { return self.err(); }
+            if e == UNK { unk = true; }
             elems.push(e);
         }
         if unk { return self.unknown(tree, r); }
-        let tab = &mut sg.cx.tab;
         tab.begin();
         for j in 0..elems.len() {
             tab.push(elems.as_slice()[j]);
@@ -1208,6 +1222,15 @@ fn is_expr(k: u8) -> bool {
 
 fn is_chain(k: u8) -> bool {
     return k == K_ADD || k == K_MUL || k == K_SHIFT || k == K_BIT_AND || k == K_BIT_OR || k == K_BIT_XOR;
+}
+
+// The context of element k of an n-element tuple under context type h (stage0 `paren`): a tuple
+// context's element, none for any other context.
+fn tuple_elem_hint(tab: &types.Table, h: u32, n: usize, k: usize) -> u32 {
+    if h == UNK { return UNK; }
+    if h == NONE || tab.tag_of(h) != types.TK_TUPLE { return NONE; }
+    let xs = tab.x(h);
+    return if xs.len() == n then xs[k] else NONE;
 }
 
 // Whether array literal row r is a repeat `[e; n]`.
