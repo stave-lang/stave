@@ -576,20 +576,28 @@ fn a_report_past_its_stack_ends_the_process() {
 
 /// Runs `bin` (through `how`) with a time limit; `None` if it did not end within it (then killed).
 fn run_limited(bin: &Path, how: Option<&str>, secs: u64) -> Option<std::process::ExitStatus> {
-    let mut cmd = match how {
-        Some(r) => {
-            let mut c = Command::new(r);
-            c.arg(bin);
-            c
+    // ETXTBSY: another test thread's fork still holds a just-written binary open.
+    let mut tries = 0;
+    let mut child = loop {
+        let mut cmd = match how {
+            Some(r) => {
+                let mut c = Command::new(r);
+                c.arg(bin);
+                c
+            }
+            None => Command::new(bin),
+        };
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(26) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => break r.unwrap(),
         }
-        None => Command::new(bin),
     };
-    let mut child = cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
     let start = std::time::Instant::now();
     loop {
         if let Some(s) = child.try_wait().unwrap() {
