@@ -1881,13 +1881,13 @@ pub fn build(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &i
         sg.pfrom.push_row(empty.as_slice());
     }
     // 7. names in fn types and dispatch arms, `from` clauses of closure params
-    syntactic(&mut sg, tree, t, nm, cut, ds);
+    syntactic(&mut sg, tree, t, nm, cut);
     return sg;
 }
 
 // E0708 E1404 for the `needs` and `without` names of every written fn type, E0708 for the
 // feature names of every dispatch arm, E0514 for the `from` clause of every closure parameter.
-fn syntactic(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, cut: &items.Items, ds: &decls.Decls) {
+fn syntactic(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, cut: &items.Items) {
     let inode = tree.item_node.as_slice();
     for i in 0..tree.items() {
         let base = inode[i] as usize;
@@ -1919,7 +1919,6 @@ fn syntactic(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned
             }
         }
     }
-    let _ = ds;
 }
 
 // Whether every alias and const that item it's uses name is done.
