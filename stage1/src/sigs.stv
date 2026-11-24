@@ -455,7 +455,7 @@ pub struct Lw {
 }
 
 impl Lw {
-    fn new() -> Lw {
+    pub fn new() -> Lw {
         return Lw.{ op: vec.Vec::<u8>.new(), row: vec.Vec::<u32>.new(), fx: vec.Vec::<u32>.new(), fy: vec.Vec::<u32>.new(), vals: vec.Vec::<u32>.new(), gas: vec.Vec::<u32>.new(), tmp: vec.Vec::<u32>.new(), prim: vec.Vec::<u32>.new() };
     }
 
@@ -1171,7 +1171,7 @@ fn trait_ref_at(sg: &mut Sigs, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: 
 }
 
 // The scope of decl d's signature: a method's container params, then its own.
-fn scope_of(cx: &consteval.Cx, ds: &decls.Decls, d: u32, self_ty: u32) -> consteval.Scope {
+pub fn scope_of(cx: &consteval.Cx, ds: &decls.Decls, d: u32, self_ty: u32) -> consteval.Scope {
     let k = ds.kind.as_slice()[d as usize];
     let p = ds.parent.as_slice()[d as usize];
     let lo = cx.gens.lo.as_slice()[d as usize];
@@ -1183,7 +1183,7 @@ fn scope_of(cx: &consteval.Cx, ds: &decls.Decls, d: u32, self_ty: u32) -> conste
 }
 
 // `Self` in the signature of member d: its impl's self type, or a trait's `Self`; NONE else.
-fn self_of(cx: &mut consteval.Cx, ds: &decls.Decls, d: u32) -> u32 {
+pub fn self_of(cx: &mut consteval.Cx, ds: &decls.Decls, d: u32) -> u32 {
     let k = ds.kind.as_slice()[d as usize];
     let p = ds.parent.as_slice()[d as usize];
     if (k != decls.DK_METHOD && k != decls.DK_TRAIT_METHOD) || p == NONE { return NONE; }
