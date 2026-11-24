@@ -15,9 +15,7 @@ use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
-use crate::cfg::{
-    Body, GuardEffect, LoanId, LocalId, MoveOut, OpKind, PartFix, Place, Proj, StmtKind, TempEnd,
-};
+use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, OpKind, PartFix, Place, Proj, StmtKind, TempEnd};
 use crate::check::{Access, Finding, Unfit};
 use crate::ty::Tys;
 
@@ -197,7 +195,7 @@ pub fn diagnostics(
     body: &Body,
     tys: &mut Tys<'_>,
     findings: Vec<Finding>,
-    later_use: &mut dyn FnMut((u32, u32), LoanId) -> Option<(Span, bool, Option<LocalId>)>,
+    later_use: &mut dyn FnMut((u32, u32), LoanId) -> Option<crate::check::LaterUse>,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     // E0502: one per move site, at its first (smallest offset) use

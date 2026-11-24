@@ -1172,6 +1172,9 @@ pub(crate) fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
     }
 }
 
+/// What [`later_use`] finds: the use's span, whether it is in a later iteration, the holder.
+pub type LaterUse = (Span, bool, Option<LocalId>);
+
 /// The first use, in the order the code runs, after statement `at` (inclusive) of a value whose
 /// origin set holds `loan` (E0501 "later use"): the use the fewest statements away on a path from
 /// `at`, the first in source order among those. `true` with it: the path to it goes back to the
@@ -1179,7 +1182,7 @@ pub(crate) fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
 /// ([`Body::loops`]). On an exit path (`at` at an exit's token, [`Body::exit_spans`]) a use that
 /// is the drop of a local on that same path is named by that local, the holder, given third:
 /// every drop there is at the exit's token.
-pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(Span, bool, Option<LocalId>)> {
+pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<LaterUse> {
     use std::cmp::Reverse;
     let body = flow.body;
     let nb = body.blocks.len();
