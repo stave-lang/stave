@@ -638,10 +638,11 @@ it is not dumped, not compared with a golden, and not given to a backend.
   - *end*: the locals of a block when it is left by its end, `break`, or `continue`, after
     their drops; the temporaries of a statement at its end, or where a `break`, `continue`,
     `return`, or `?` leaves it, after the drops of the ones with drop glue. Each in the order
-    of the exit's drops (contracts/lang-details.md, "Leaving early"). A `return` and a `?` emit
-    none for the locals of the fn's block and its params: the return of the frame ends every
-    slot of it; the locals of a block inside a statement they leave end as on `break`, before
-    the temporaries of that statement are dropped. Between its end
+    of the exit's drops (contracts/lang-details.md, "Leaving early"). A `return` and a `?` end
+    the locals of every block inside a statement they leave as `break` does, after their drops
+    and before anything outside that block is dropped; they emit none for the locals of the
+    fn's or closure's own body block and its params (the block inside no statement): the return
+    of the frame ends every slot of it. Between its end
     and its next begin the root of a slot is `Dead`.
   - *gone*: a by-value use of a place whose type is not Copy, after its read; `p.read()` of
     such a type; the end of a drop, after the glue (M9, M12). The bytes end through the tag of
