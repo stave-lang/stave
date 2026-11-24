@@ -11,16 +11,12 @@
 //   order. The tokens before the first start are an item (kind `ITEM_PRE`); an `import` after
 //   the first start that is no `import` is `ITEM_LATE_IMPORT`. An item ends where the next
 //   starts, the last one before the file's EOF.
-// - An item is `ok` iff it is `ITEM_IMPORT` or `ITEM_ITEM`, holds no error token, its tokens
-//   derive from `Import` / `Item` (`recognize`), and no `unsafe(` is followed by the empty
-//   string. Items are independent of each other.
+// - Whether an item is dropped is the parser's verdict (`parse`).
 // - Item ids are the ranks of (file, start): files in order, an item's id is its row.
 //
 // Token and item columns are program-wide; a token index is the global index into `Tokens`.
-import generated.node_kinds;
 import generated.terminals;
 import lex;
-import recognize;
 import source;
 import std.vec;
 
@@ -41,9 +37,6 @@ pub const NONE: u32 = 4294967295;
 const T_SEMI: u8 = terminals.T_SEMI as% u8;
 const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
 const T_KW_IMPORT: u8 = terminals.T_KW_IMPORT as% u8;
-const T_KW_UNSAFE: u8 = terminals.T_KW_UNSAFE as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
 
 const B_OPEN: u8 = 1;
 const B_CLOSE: u8 = 2;
@@ -52,7 +45,7 @@ const B_CLOSE: u8 = 2;
 // per token (`mate`: the paired bracket, `NONE` for another token; `depth` and `mate` are
 // meaningful only in files with items). File F's items are `file_item[F]..file_item[F + 1]`;
 // item I is the token run `tok_lo[I]..tok_hi[I]` of file `file[I]` (the file's EOF belongs to no
-// item), the bytes `off_start[I]..off_end[I]` of that file, of kind `kind[I]`, `ok[I]`.
+// item), the bytes `off_start[I]..off_end[I]` of that file, of kind `kind[I]`.
 pub struct Items {
     pub depth: vec.Vec<i32>,
     pub mate: vec.Vec<u32>,
@@ -64,7 +57,6 @@ pub struct Items {
     pub off_start: vec.Vec<u32>,
     pub off_end: vec.Vec<u32>,
     pub kind: vec.Vec<u8>,
-    pub ok: vec.Vec<bool>,
 }
 
 impl Items {
@@ -199,25 +191,6 @@ fn pair_brackets(cls: &Classes, kind: &[u8], depth: &[i32], mate: &mut [u32], lo
     return good;
 }
 
-// Whether an `unsafe(` of kind[lo..hi] is followed by the empty string `""`.
-fn empty_obligation(kind: &[u8], start: &[u32], src: &[u8], lo: usize, hi: usize) -> bool {
-    if hi < lo + 3 { return false; }
-    for i in lo..hi - 2 {
-        if kind[i] == T_KW_UNSAFE && kind[i + 1] == T_L_PAREN && kind[i + 2] == T_STR_LIT {
-            let s = start[i + 2] as usize;
-            if src[s] == 34 && src[s + 1] == 34 { return true; }
-        }
-    }
-    return false;
-}
-
-fn has_error(kind: &[u8], lo: usize, hi: usize) -> bool {
-    for i in lo..hi {
-        if kind[i] >= lex.KIND_ERROR { return true; }
-    }
-    return false;
-}
-
 fn push_item(out: &mut Items, f: usize, lo: usize, hi: usize, k: u8) {
     out.file.push(f as% u32);
     out.tok_lo.push(lo as% u32);
@@ -244,7 +217,6 @@ pub fn build(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens) -> Items {
         off_start: vec.Vec::<u32>.new(),
         off_end: vec.Vec::<u32>.new(),
         kind: vec.Vec::<u8>.new(),
-        ok: vec.Vec::<bool>.new(),
     };
     for _ in 0..nt {
         out.depth.push(0);
@@ -253,7 +225,6 @@ pub fn build(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens) -> Items {
     out.file_item.push(0);
     let mut sc = Pairing.{ level_end: vec.Vec::<u32>.new(), order: vec.Vec::<u32>.new() };
     let mut starts = vec.Vec::<u32>.new();
-    let mut rz = recognize.Recognizer.new();
     for f in 0..nf {
         let lo = ft[f] as usize;
         // the file's EOF token
@@ -303,20 +274,13 @@ pub fn build(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens) -> Items {
             let kd = if kind[s] != T_KW_IMPORT then ITEM_ITEM else if s > first_other then ITEM_LATE_IMPORT else ITEM_IMPORT;
             push_item(&mut out, f, s, e, kd);
         }
-        // status and byte offsets of the new items
+        // byte offsets of the new items
         let src = set.file(f);
         let fkind = &kind[lo..eof + 1];
         let fstart = &start[lo..eof + 1];
         for r in first_item..out.file.len() {
             let a = out.tok_lo.as_slice()[r] as usize;
             let b = out.tok_hi.as_slice()[r] as usize;
-            let kd = out.kind.as_slice()[r];
-            let mut ok = false;
-            if (kd == ITEM_IMPORT || kd == ITEM_ITEM) && !has_error(kind, a, b) {
-                let root = if kd == ITEM_IMPORT then node_kinds.KIND_IMPORT else node_kinds.KIND_ITEM;
-                ok = rz.accepts(kind, a, b, root) && !empty_obligation(kind, start, src, a, b);
-            }
-            out.ok.push(ok);
             out.off_start.push(start[a]);
             out.off_end.push(lx.token_end(src, fkind, fstart, b - 1 - lo) as% u32);
         }
