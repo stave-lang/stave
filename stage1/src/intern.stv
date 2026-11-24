@@ -117,12 +117,13 @@ fn order3(a: &[u8], b: &[u8]) -> i32 {
 
 // Where t is or belongs in `reps`, the candidates of distinct strings in byte order: the
 // position of the first one not less than t, and whether it is equal to t.
-fn find(c: &Cands, reps: &[u32], t: &[u8]) -> (usize, bool) {
+fn find(bytes: &[u8], co: &[u32], reps: &[u32], t: &[u8]) -> (usize, bool) {
     let mut lo: usize = 0;
     let mut hi: usize = reps.len();
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let o = order3(c.text(reps[mid] as usize), t);
+        let r = reps[mid] as usize;
+        let o = order3(&bytes[co[r] as usize..co[r + 1] as usize], t);
         if o == 0 { return (mid, true); }
         if o < 0 { lo = mid + 1; } else { hi = mid; }
     }
@@ -131,17 +132,23 @@ fn find(c: &Cands, reps: &[u32], t: &[u8]) -> (usize, bool) {
 
 // The candidates at the sorted positions lo..hi share one hash. Gives each the ordinal of its
 // string among the run's distinct strings in byte order (`local[lo..hi]`), and returns how many
-// distinct strings there are. `reps` is scratch.
-fn split_run(c: &Cands, order: &[u32], lo: usize, hi: usize, local: &mut [u32], reps: &mut vec.Vec<u32>) -> u32 {
+// distinct strings there are. `reps` is scratch; candidate k is `bytes[co[k]..co[k + 1]]`.
+fn split_run(bytes: &[u8], co: &[u32], order: &[u32], lo: usize, hi: usize, local: &mut [u32], reps: &mut vec.Vec<u32>) -> u32 {
     // the usual run: every candidate equals the first, one string, ordinal 0 (`local` is 0 on entry)
-    let head = c.text(order[lo] as usize);
+    let h0 = order[lo] as usize;
+    let head = &bytes[co[h0] as usize..co[h0 + 1] as usize];
     let mut j = lo + 1;
-    while j < hi && c.text(order[j] as usize).eq(head) { j = j + 1; }
+    while j < hi {
+        let k = order[j] as usize;
+        if !bytes[co[k] as usize..co[k + 1] as usize].eq(head) { break; }
+        j = j + 1;
+    }
     if j == hi { return 1; }
     reps.clear();
     for k in lo..hi {
         let cand = order[k];
-        let (at, same) = find(c, reps.as_slice(), c.text(cand as usize));
+        let cu = cand as usize;
+        let (at, same) = find(bytes, co, reps.as_slice(), &bytes[co[cu] as usize..co[cu + 1] as usize]);
         if same { continue; }
         reps.push(cand);
         let s = reps.as_mut_slice();
@@ -153,7 +160,8 @@ fn split_run(c: &Cands, order: &[u32], lo: usize, hi: usize, local: &mut [u32], 
         s[at] = cand;
     }
     for k in lo..hi {
-        let (at, _) = find(c, reps.as_slice(), c.text(order[k] as usize));
+        let cu = order[k] as usize;
+        let (at, _) = find(bytes, co, reps.as_slice(), &bytes[co[cu] as usize..co[cu + 1] as usize]);
         local[k] = at as% u32;
     }
     return reps.len() as% u32;
@@ -163,9 +171,14 @@ fn split_run(c: &Cands, order: &[u32], lo: usize, hi: usize, local: &mut [u32], 
 pub fn rank(c: &Cands) -> Table {
     let n = c.len();
     let _ = col.ids(n);
-    let mut h = vec.Vec::<u32>.with_capacity(n);
-    for k in 0..n {
-        h.push(xxhash.hash32(c.text(k), 0));
+    let bytes = c.bytes.as_slice();
+    let co = c.off.as_slice();
+    let mut h = col.filled(n, 0u32);
+    {
+        let hs = h.as_mut_slice();
+        for k in 0..n {
+            hs[k] = xxhash.hash32(&bytes[co[k] as usize..co[k + 1] as usize], 0);
+        }
     }
     let order = sort.sort_perm(h.as_slice());
     let hs = perm.gather(h.as_slice(), order.as_slice());
@@ -176,15 +189,15 @@ pub fn rank(c: &Cands) -> Table {
 
     // the ordinal of each sorted position's string within its run, and the strings per run
     let mut local = col.filled(n, 0u32);
-    let mut ndist = vec.Vec::<u32>.with_capacity(nr);
+    let mut ndist = col.filled(nr, 1u32);
     let mut reps = vec.Vec::<u32>.new();
-    for r in 0..nr {
-        let lo = rs[r] as usize;
-        let hi = rs[r + 1] as usize;
-        if hi - lo == 1 {
-            ndist.push(1);
-        } else {
-            ndist.push(split_run(c, ord, lo, hi, local.as_mut_slice(), &mut reps));
+    {
+        let ls = local.as_mut_slice();
+        let nd = ndist.as_mut_slice();
+        for r in 0..nr {
+            let lo = rs[r] as usize;
+            let hi = rs[r + 1] as usize;
+            if hi - lo > 1 { nd[r] = split_run(bytes, co, ord, lo, hi, ls, &mut reps); }
         }
     }
 
@@ -207,20 +220,31 @@ pub fn rank(c: &Cands) -> Table {
     let mut rep = col.filled(total, 0u32);
     perm.scatter(rep.as_mut_slice(), ids.as_slice(), ord);
 
-    let mut str_hash = vec.Vec::<u32>.with_capacity(total);
-    for r in 0..nr {
-        for _ in 0..ndist.as_slice()[r] {
-            str_hash.push(runs.value.as_slice()[r]);
+    let mut str_hash = col.filled(total, 0u32);
+    {
+        let sh = str_hash.as_mut_slice();
+        let nd = ndist.as_slice();
+        let rv = runs.value.as_slice();
+        for r in 0..nr {
+            for s in fs[r] as usize..fs[r] as usize + nd[r] as usize {
+                sh[s] = rv[r];
+            }
         }
     }
-    let mut lens = vec.Vec::<u32>.with_capacity(total);
-    for s in 0..total {
-        lens.push(c.text(rep.as_slice()[s] as usize).len() as% u32);
+    let rp = rep.as_slice();
+    let mut lens = col.filled(total, 0u32);
+    {
+        let ln = lens.as_mut_slice();
+        for s in 0..total {
+            let k = rp[s] as usize;
+            ln[s] = co[k + 1] - co[k];
+        }
     }
     let str_off = scan.offsets(lens.as_slice());
     let mut str_bytes = vec.Vec::<u8>.with_capacity(str_off.as_slice()[total] as usize);
     for s in 0..total {
-        str_bytes.extend_from_slice(c.text(rep.as_slice()[s] as usize));
+        let k = rp[s] as usize;
+        str_bytes.extend_from_slice(&bytes[co[k] as usize..co[k + 1] as usize]);
     }
     return Table.{ str_off: str_off, str_hash: str_hash, str_bytes: str_bytes, cand_str: cand_str };
 }
@@ -230,20 +254,17 @@ fn is_idcont(b: u8) -> bool {
 }
 
 // The candidates of the token and name columns: token candidates first (`tok` is the global
-// token and `hole` whether it is a hole segment), then the package names, then the module path
-// segments.
+// token: a hole segment's is a `FmtLit`), then the package names, then the module path segments.
 struct Gather {
     cands: Cands,
     tok: vec.Vec<u32>,
-    hole: vec.Vec<bool>,
     pend: vec.Vec<u32>,
 }
 
 impl Gather {
-    fn add(&mut self, b: &[u8], tok: u32, hole: bool) {
+    fn add(&mut self, b: &[u8], tok: u32) {
         self.cands.push(b);
         self.tok.push(tok);
-        self.hole.push(hole);
     }
 }
 
@@ -288,7 +309,7 @@ fn fmt_holes(src: &[u8], start: usize, tok: u32, g: &mut Gather) {
             while p < g.pend.len() {
                 let s = g.pend.as_slice()[p] as usize;
                 let e = g.pend.as_slice()[p + 1] as usize;
-                if !src[s..e].eq(mem.str_bytes("self")) { g.add(&src[s..e], tok, true); }
+                if !src[s..e].eq(mem.str_bytes("self")) { g.add(&src[s..e], tok); }
                 p = p + 2;
             }
         }
@@ -299,18 +320,27 @@ fn fmt_holes(src: &[u8], start: usize, tok: u32, g: &mut Gather) {
 // Interns the names of the build: identifiers and f-string hole segments of every file's tokens,
 // the package names, and the module path of every file (`fl.module` split at `/`).
 pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Interned {
-    let mut g = Gather.{ cands: Cands.new(), tok: vec.Vec::<u32>.new(), hole: vec.Vec::<bool>.new(), pend: vec.Vec::<u32>.new() };
+    let mut g = Gather.{ cands: Cands.new(), tok: vec.Vec::<u32>.new(), pend: vec.Vec::<u32>.new() };
     let kind = t.kind.as_slice();
     let start = t.start.as_slice();
     let ft = t.file_tok.as_slice();
+    // identifier bytes by value: a table read, not a call per byte
+    let mut idc_c = col.filled(256, false);
+    {
+        let idc = idc_c.as_mut_slice();
+        for b in 0usize..256 {
+            idc[b] = is_idcont(b as% u8);
+        }
+    }
+    let idc = idc_c.as_slice();
     for f in 0..t.files() {
         let src = set.file(f);
         for i in ft[f] as usize..ft[f + 1] as usize {
             if kind[i] == T_IDENT {
                 let s = start[i] as usize;
                 let mut e = s;
-                while e < src.len() && is_idcont(src[e]) { e = e + 1; }
-                g.add(&src[s..e], i as% u32, false);
+                while e < src.len() && idc[src[e] as usize] { e = e + 1; }
+                g.add(&src[s..e], i as% u32);
             } else if kind[i] == T_FMT {
                 fmt_holes(src, start[i] as usize, i as% u32, &mut g);
             }
@@ -318,7 +348,7 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
     }
     let ntok = g.cands.len();
     for p in 0..fl.pkg_name.len() {
-        g.add(fl.pkg_name.get_ref(p).as_bytes(), idx.NONE, false);
+        g.add(fl.pkg_name.get_ref(p).as_bytes(), idx.NONE);
     }
     let mut file_seg = vec.Vec::<u32>.new();
     file_seg.push(0);
@@ -328,7 +358,7 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
         let mut lo: usize = 0;
         for k in 0..m.len() + 1 {
             if k == m.len() || m[k] == B_SLASH {
-                g.add(&m[lo..k], idx.NONE, false);
+                g.add(&m[lo..k], idx.NONE);
                 nseg = nseg + 1;
                 lo = k + 1;
             }
@@ -337,15 +367,28 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
     }
     let tab = rank(&g.cands);
     let cs = tab.cand_str.as_slice();
+    let gt = g.tok.as_slice();
     let mut tok_str = col.filled(t.kind.len(), idx.NONE);
-    let mut hole_tok = vec.Vec::<u32>.new();
-    let mut hole_str = vec.Vec::<u32>.new();
-    for k in 0..ntok {
-        if g.hole.as_slice()[k] {
-            hole_tok.push(g.tok.as_slice()[k]);
-            hole_str.push(cs[k]);
-        } else {
-            tok_str.as_mut_slice()[g.tok.as_slice()[k] as usize] = cs[k];
+    let mut nhole: usize = 0;
+    {
+        let ts = tok_str.as_mut_slice();
+        for k in 0..ntok {
+            let x = gt[k] as usize;
+            if kind[x] == T_FMT { nhole = nhole + 1; } else { ts[x] = cs[k]; }
+        }
+    }
+    let mut hole_tok = col.filled(nhole, 0u32);
+    let mut hole_str = col.filled(nhole, 0u32);
+    {
+        let ht = hole_tok.as_mut_slice();
+        let hs = hole_str.as_mut_slice();
+        let mut h: usize = 0;
+        for k in 0..ntok {
+            if kind[gt[k] as usize] == T_FMT {
+                ht[h] = gt[k];
+                hs[h] = cs[k];
+                h = h + 1;
+            }
         }
     }
     let npkg = fl.pkg_name.len();
