@@ -19,18 +19,25 @@ pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
     let _ = col.ids(n);
     let mut pa = col.iota(n);
     if n < 2 { return pa; }
-    let mut ka = vec.Vec::<T>.with_capacity(n);
-    ka.extend_from_slice(keys);
-    let mut kb = col.filled(n, T.zero());
+    // the keys widened once: a digit is then a shift and a mask, not a call per element and pass
+    let mut ka = col.filled(n, 0u64);
+    {
+        let kw = ka.as_mut_slice();
+        for i in 0..n {
+            kw[i] = keys[i].wide();
+        }
+    }
+    let mut kb = col.filled(n, 0u64);
     let mut pb = col.filled(n, 0u32);
     let passes = T.bits() / 8;
     let mut pass: u32 = 0;
     while pass < passes {
+        let sh = (pass * 8) as u64;
         let mut count = [0u32; 256];
         {
             let ks = ka.as_slice();
             for i in 0..n {
-                let d = ks[i].byte(pass);
+                let d = ((ks[i] >> sh) & 255) as usize;
                 count[d] = count[d] + 1;
             }
         }
@@ -46,7 +53,7 @@ pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
                 let kd = kb.as_mut_slice();
                 let pd = pb.as_mut_slice();
                 for i in 0..n {
-                    let d = ks[i].byte(pass);
+                    let d = ((ks[i] >> sh) & 255) as usize;
                     let o = count[d] as usize;
                     count[d] = count[d] + 1;
                     kd[o] = ks[i];
