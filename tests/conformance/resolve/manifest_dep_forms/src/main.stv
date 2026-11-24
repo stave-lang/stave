@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// E1002 in a dependency table: `non-path-dependency` for a quoted name and a non-table value,
+// `wrong-type` for a `path` that is no string, `missing-dependency` for a dotted `path`.
+fn main() -> i32 {
+    return 0;
+}

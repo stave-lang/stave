@@ -1,0 +1,4 @@
+name = "manifest_dup_dotted"
+kind = "bin"
+run.stack = "8MiB"
+run.stack = "9MiB" #~ ERROR E1002
