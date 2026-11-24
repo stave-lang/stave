@@ -175,6 +175,7 @@ impl tc_rows.Typeck {
         self.lg_parent.clear();
         self.lg_fixed.clear();
         self.lg_float.clear();
+        self.binds.clear();
         self.rets.clear();
         let k = ds.kind.as_slice()[d as usize];
         if k == decls.DK_FN || k == decls.DK_METHOD {
@@ -388,7 +389,7 @@ impl tc_rows.Typeck {
             return self.chain_steps(sg, ds, nm, set, t, cut, tree, r, c as% u32);
         }
         if pk == K_ARGS {
-            let ah = self.arg_hint(sg, ds, r, k);
+            let ah = self.arg_hint(sg, ds, tree, r, k);
             self.set_hint(c, ah);
             return true;
         }
@@ -624,7 +625,7 @@ impl tc_rows.Typeck {
                 self.chain_apply(sg, ds, tree, r, last);
             }
             let _ = self.chain_steps(sg, ds, nm, set, t, cut, tree, r, NONE);
-            return self.chain_value(r);
+            return self.chain_final(sg, ds, r);
         }
         if k == K_IF_EXPR { return self.if_value(sg, tree, r); }
         if k == K_MATCH {
@@ -1291,6 +1292,14 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &in
         pat_ty: vec.Vec::<u32>.new(),
         pat_mode: vec.Vec::<u8>.new(),
         arm: col.filled(n, NONE),
+        binds: vec.Vec::<u32>.new(),
+        blo: col.filled(n, NONE),
+        waits: col.filled(n, false),
+        mt_p: vec.Vec::<u32>.new(),
+        mt_x: vec.Vec::<u32>.new(),
+        mt_new: vec.Vec::<u32>.new(),
+        mt_h: vec.Vec::<u32>.new(),
+        mt_k: vec.Vec::<u32>.new(),
         bt: tc_builtins.table(&nm.tab),
         t_bool: t_bool,
         t_char: t_char,

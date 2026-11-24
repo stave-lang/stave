@@ -52,7 +52,7 @@ export STAVE_STD_DIR="$ROOT"
 # Codes of the stages stage1 has so far; add a stage's codes with its dump. E0005 is stage1's only
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
 TYPES_EXACT_MIN=0
-TYPES_UNKNOWN_MAX=7969345
+TYPES_UNKNOWN_MAX=7567784
 S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0410|E0414|E0416|E0419|E0420|E0421|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
 # Messages of the shapes of those codes that later stages raise.
 LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)|"code":"E0414".*"message":"[^"]*is a view, (but|and) '

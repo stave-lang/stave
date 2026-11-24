@@ -75,6 +75,18 @@ pub struct Typeck {
     pub pat_mode: vec.Vec<u8>,
     // per value `match` row: the type of its arms so far (NONE before the first)
     pub arm: vec.Vec<u32>,
+    // generic calls (`tc_chain`): the bindings of every call of the body, per `Args` row the start
+    // of its call's (NONE: no generics), per argument or `Args` row whether it waits (an
+    // argument for the second pass; a call: its inference met an unknown type); the scratch
+    // stacks of type matching
+    pub binds: vec.Vec<u32>,
+    pub blo: vec.Vec<u32>,
+    pub waits: vec.Vec<bool>,
+    pub mt_p: vec.Vec<u32>,
+    pub mt_x: vec.Vec<u32>,
+    pub mt_new: vec.Vec<u32>,
+    pub mt_h: vec.Vec<u32>,
+    pub mt_k: vec.Vec<u32>,
     // the built-in methods and type-relative built-ins
     pub bt: tc_builtins.Builtins,
     pub t_bool: u32,
