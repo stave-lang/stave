@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use stave_ir::types::{GenericArg, Lanes as IrLanes, TypeKey, TypeTable as IrTypes};
+use stave_ir::types::{AdtKind, DeclInfo, GenericArg, Lanes as IrLanes, TypeKey, TypeTable as IrTypes};
 use stave_ir::{AdtShape, DeclId as IrDecl, FuncId, InstanceId, Module, Site, SiteInfo, Static};
 use stave_target::FeatureSet;
 
@@ -490,6 +490,7 @@ fn lower_in_pool(
         // value only outside an `UnsafeCell`.
         if !sigs.lang.unsafe_cell.is_none() {
             module.cell = Some(IrDecl(sigs.lang.unsafe_cell.0));
+            record_decl(&mut module, prog, sigs, sigs.lang.unsafe_cell);
         }
         if borrows {
             let frozen = |d: &DeclId| prog.decl(*d).is_some_and(|x| !x.flags.has(DeclFlags::MUT));
@@ -509,6 +510,19 @@ fn lower_in_pool(
 const LOWER_INST_DEPTH: u32 = 4 * crate::mono::INST_DEPTH;
 
 /// How many instances of `decl` are on the request chain ending at job `j`.
+fn adt_kind(sigs: &crate::sigs::Sigs, d: DeclId) -> AdtKind {
+    if sigs.adt(d).is_some_and(|a| a.is_enum) { AdtKind::Enum } else { AdtKind::Struct }
+}
+
+/// Records the path and kind of an ADT declaration the module refers to (`Module.decls`,
+/// ascending by id, one entry per id).
+fn record_decl(module: &mut Module, prog: &Program, sigs: &crate::sigs::Sigs, d: DeclId) {
+    let id = IrDecl(d.0);
+    if let Err(at) = module.decls.binary_search_by_key(&id, |x| x.id) {
+        module.decls.insert(at, DeclInfo { id, kind: adt_kind(sigs, d), path: prog.decl_path(d) });
+    }
+}
+
 fn same_decl_depth(jobs: &[Job], parent: &[Option<usize>], j: usize, decl: DeclId) -> u32 {
     let mut n = 0;
     let mut cur = Some(j);
@@ -999,7 +1013,7 @@ fn assemble(
         adts.sort();
         for (i, s) in adts {
             let is_enum = match table.kind(s) {
-                TypeKind::Adt { def, .. } => sigs.adt(*def).is_some_and(|a| a.is_enum),
+                TypeKind::Adt { def, .. } => adt_kind(sigs, *def) == AdtKind::Enum,
                 _ => false,
             };
             let vs = crate::mono::adt_fields(sigs, table, s).unwrap_or_default();
@@ -1330,6 +1344,18 @@ fn assemble(
     module.funcs = funcs;
     module.clauses = clauses;
     module.types = types;
+    let defs: Vec<DeclId> = module
+        .types
+        .keys()
+        .iter()
+        .filter_map(|k| match k {
+            TypeKey::Adt { def, .. } => Some(DeclId(def.0)),
+            _ => None,
+        })
+        .collect();
+    for d in defs {
+        record_decl(&mut module, prog, sigs, d);
+    }
     module.sites = sites;
     // 7. statics
     let layouts = stave_ir::layout::Layouts::compute(&module.types);
