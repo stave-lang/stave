@@ -212,6 +212,7 @@ fn dump_inputs_as_conformance_tests() {
         names,
         [
             ("dropped_item/input", &Outcome::Passed),
+            ("intern_collision/input", &Outcome::Passed),
             ("multi_file/input", &Outcome::Passed),
             ("sigs_decls/input", &Outcome::Passed),
             ("sigs_errors/input", &Outcome::Passed),
