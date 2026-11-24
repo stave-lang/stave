@@ -320,7 +320,6 @@ fn fmt_holes(src: &[u8], start: usize, tok: u32, g: &mut Gather) {
 // Interns the names of the build: identifiers and f-string hole segments of every file's tokens,
 // the package names, and the module path of every file (`fl.module` split at `/`).
 pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Interned {
-    let mut g = Gather.{ cands: Cands.new(), tok: vec.Vec::<u32>.new(), pend: vec.Vec::<u32>.new() };
     let kind = t.kind.as_slice();
     let start = t.start.as_slice();
     let ft = t.file_tok.as_slice();
@@ -333,6 +332,12 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
         }
     }
     let idc = idc_c.as_slice();
+    // the identifier count and bytes, and the f-string hole segments; then the identifier
+    // candidates are written in place, each identifier read again (cheaper than a length column
+    // per token). The holes follow them: a candidate's id does not depend on its position.
+    let mut holes = Gather.{ cands: Cands.new(), tok: vec.Vec::<u32>.new(), pend: vec.Vec::<u32>.new() };
+    let mut nid: usize = 0;
+    let mut nbytes: usize = 0;
     for f in 0..t.files() {
         let src = set.file(f);
         for i in ft[f] as usize..ft[f + 1] as usize {
@@ -340,11 +345,42 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
                 let s = start[i] as usize;
                 let mut e = s;
                 while e < src.len() && idc[src[e] as usize] { e = e + 1; }
-                g.add(&src[s..e], i as% u32);
+                nid = nid + 1;
+                nbytes = nbytes + (e - s);
             } else if kind[i] == T_FMT {
-                fmt_holes(src, start[i] as usize, i as% u32, &mut g);
+                fmt_holes(src, start[i] as usize, i as% u32, &mut holes);
             }
         }
+    }
+    let _ = col.ids(nbytes);
+    let mut bytes = col.filled(nbytes, 0u8);
+    let mut off = col.filled(nid + 1, 0u32);
+    let mut tok = col.filled(nid, 0u32);
+    {
+        let bs = bytes.as_mut_slice();
+        let os = off.as_mut_slice();
+        let ts = tok.as_mut_slice();
+        let mut k: usize = 0;
+        let mut o: usize = 0;
+        for f in 0..t.files() {
+            let src = set.file(f);
+            for i in ft[f] as usize..ft[f + 1] as usize {
+                if kind[i] != T_IDENT { continue; }
+                let mut e = start[i] as usize;
+                while e < src.len() && idc[src[e] as usize] {
+                    bs[o] = src[e];
+                    o = o + 1;
+                    e = e + 1;
+                }
+                ts[k] = i as% u32;
+                k = k + 1;
+                os[k] = o as% u32;
+            }
+        }
+    }
+    let mut g = Gather.{ cands: Cands.{ bytes: bytes, off: off }, tok: tok, pend: vec.Vec::<u32>.new() };
+    for k in 0..holes.cands.len() {
+        g.add(holes.cands.text(k), holes.tok.as_slice()[k]);
     }
     let ntok = g.cands.len();
     for p in 0..fl.pkg_name.len() {
