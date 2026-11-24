@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// Dump golden (sigs): signatures with errors. An unknown type is the error type (`-` in a decl
+// line); a key that has it as a component keeps it; an array length that is no valid const-expr
+// makes the array the error type; a bad const arg prints `_` in the key.
+struct Tag<const W: u8> { w: u32 }
+
+struct Bad {
+    a: Missing, //~ ERROR E0101
+    b: [u8; 0 - 1], //~ ERROR E0203
+    c: Tag<300>, //~ ERROR E0203
+}
+
+fn f(x: &Missing) -> u32 { //~ ERROR E0101
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

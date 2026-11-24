@@ -8,7 +8,8 @@
 //! packages (`F` = rank of (package, path), `I` numbered file after file, `S`/`D`/`T` the
 //! canonical stave-sema ids).
 //!
-//! Implemented: `tokens items ast strings names types borrow ir diags stats` (`types` is
+//! Implemented: `tokens items ast strings names sigs types borrow ir diags stats` (`sigs` is
+//! [`stave_sema::dump_sigs`], the printer of the decl table and signature types; `types` is
 //! [`stave_sema::dump_types`], the one printer of the expression-node set and TypeKey text; `ir` is
 //! [`stave_ir::print_checked`] of the lowered module (module `ir`), and no `ir.txt` exists when the
 //! build has error diagnostics). `borrow` is stave-borrow's per-access lines (module `borrow`).
@@ -19,6 +20,7 @@ mod diags;
 mod ir;
 mod items;
 mod names;
+mod sigs;
 mod stats;
 mod strings;
 mod tokens;
@@ -40,6 +42,7 @@ pub enum DumpStage {
     Ast,
     Strings,
     Names,
+    Sigs,
     Types,
     Borrow,
     Ir,
@@ -48,12 +51,13 @@ pub enum DumpStage {
 }
 
 impl DumpStage {
-    pub const ALL: [DumpStage; 10] = [
+    pub const ALL: [DumpStage; 11] = [
         DumpStage::Tokens,
         DumpStage::Items,
         DumpStage::Ast,
         DumpStage::Strings,
         DumpStage::Names,
+        DumpStage::Sigs,
         DumpStage::Types,
         DumpStage::Borrow,
         DumpStage::Ir,
@@ -68,6 +72,7 @@ impl DumpStage {
             DumpStage::Ast => "ast",
             DumpStage::Strings => "strings",
             DumpStage::Names => "names",
+            DumpStage::Sigs => "sigs",
             DumpStage::Types => "types",
             DumpStage::Borrow => "borrow",
             DumpStage::Ir => "ir",
@@ -116,6 +121,10 @@ pub fn render(stage: DumpStage, out: &Output, w: &mut dyn Write) -> Result<(), D
         DumpStage::Ast => per_file(out, w, ast::file).map_err(io),
         DumpStage::Strings => strings::write(out, w).map_err(io),
         DumpStage::Names => per_file(out, w, names::file).map_err(io),
+        DumpStage::Sigs => match &out.typeck {
+            Some(tc) => sigs::write(out, tc, w).map_err(io),
+            None => Err(DumpError::NotRun(stage)),
+        },
         DumpStage::Types => match &out.typeck {
             Some(tc) => types::write(out, tc, w).map_err(io),
             None => Err(DumpError::NotRun(stage)),
@@ -224,7 +233,7 @@ mod tests {
         let all: Vec<&str> = DumpStage::ALL.iter().map(|s| s.name()).collect();
         assert_eq!(
             all,
-            ["tokens", "items", "ast", "strings", "names", "types", "borrow", "ir", "diags", "stats"]
+            ["tokens", "items", "ast", "strings", "names", "sigs", "types", "borrow", "ir", "diags", "stats"]
         );
     }
 }

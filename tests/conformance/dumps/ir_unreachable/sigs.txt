@@ -1,0 +1,40 @@
+t0 int u 32
+t1 int u size
+t2 int s 32
+t3 str
+t4 ref t2
+t5 ref t3
+t6 ref t14
+t7 ref mut t11
+t8 ref mut t12
+t9 ref mut t14
+t10 tuple
+t11 adt d17
+t12 param 0
+t13 never
+t14 self
+d0 module d0 - 28 - - 0 pub file 0 path[28]
+d1 module d1 - 15 - - 0 pub file 1 path[1 15]
+d2 module d2 - 13 - - 0 pub file 2 path[12 13]
+d3 module d3 - 18 - - 0 pub file 4 path[12 18]
+d4 module d4 - 25 - - 0 pub file 3 path[12 25]
+d5 enum d2 - 16 3 6 0 pub gen[8 0]
+d6 variant d2 d5 3 3 2 0 pub
+d7 variant d2 d5 9 3 5 1 pub,tuple payload[t12]
+d8 trait d2 - 21 4 0 0 pub gen[]
+d9 trait d2 - 26 6 13 0 pub gen[]
+d10 trait-method d2 d9 19 6 12 0 pub,has-self gen[11 2 bound d11] params[t6 t8] ret t10 self ref abi stave needs[] deny[] from[] pfrom[]
+d11 trait d2 - 30 5 9 0 pub gen[]
+d12 trait-method d2 d11 23 5 8 0 pub,has-self gen[] params[t9 t5] ret t10 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d13 impl d2 - - 7 18 0 trait-impl gen[] self t2 trait d9
+d14 method d2 d13 19 7 17 0 trait-impl,has-self gen[11 6 bound d11] params[t4 t8] ret t10 self ref abi stave needs[] deny[] from[] pfrom[]
+d15 impl d2 - - 8 24 0 trait-impl gen[] self t3 trait d9
+d16 method d2 d15 19 8 23 0 trait-impl,has-self gen[11 6 bound d11] params[t5 t8] ret t10 self ref abi stave needs[] deny[] from[] pfrom[]
+d17 struct d3 - 4 11 4 0 pub gen[]
+d18 field d3 d17 2 11 2 0 - ty t1
+d19 impl d3 - - 12 14 0 trait-impl gen[] self t11 trait d11
+d20 method d3 d19 23 12 13 0 trait-impl,has-self gen[] params[t7 t5] ret t10 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d21 fn d4 - 31 9 7 0 pub gen[] params[t5] ret t10 self - abi stave needs[] deny[] from[] pfrom[]
+d22 fn d0 - 5 1 45 0 - gen[] params[t0] ret t0 self - abi stave needs[] deny[] from[] pfrom[]
+d23 fn d0 - 10 0 6 0 - gen[] params[] ret t13 self - abi stave needs[] deny[] from[] pfrom[]
+d24 fn d0 - 28 2 15 0 - gen[] params[] ret t2 self - abi stave needs[] deny[] from[] pfrom[]
