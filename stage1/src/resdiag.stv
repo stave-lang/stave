@@ -1,0 +1,115 @@
+// The diagnostics of `modules`, `decls`, and `resolve` as rows, not rendered: `diag_names` turns
+// them into rows of `diag.Diags`. One row per diagnostic stage0 raises there: its code, its
+// primary span (file F, byte offset, byte length), up to four ids, and a row of related spans
+// (`rel`: (F, offset, length) triples, in stage0's label order).
+//
+// The ids by code (NONE where unused):
+// - E0101 not found: a = the name S (NONE for `self` / `Self`), b = 1 for `self`, 2 for `Self`, else 0.
+// - E0102 import cycle: a = the module M the message names; the primary span is its import of
+//   the next module, `rel` the other imports of the loop in order.
+// - E0103 unqualified variant: a = the name S, b = the enum D whose variant it is.
+// - E0104 second allocator: `rel` = the first allocator item's first token.
+// - E0105 name declared twice: a = the name S, b = the scope kind (`SCOPE_*`), c = its id; `rel`
+//   = the first declaration's name. `SCOPE_ITEM`: d = the name S of the fn the binding is in
+//   (NONE: outside a fn).
+// - E0106 private: a = the name S, b = the decl D whose visibility applies (its module and span
+//   are the message's).
+// - E0107 module path: a = the segment S, b = the case (`CASE_*`), c = the module M (dotted,
+//   builtin) or the importing package rank (ambiguous).
+// - E0811 extern ABI: a = the case (`ABI_*`), the span is the ABI string or the `extern` /
+//   `unsafe` keyword as stage0 places it.
+import prims.ragged;
+import std.vec;
+
+pub const E0101: u16 = 101;
+pub const E0102: u16 = 102;
+pub const E0103: u16 = 103;
+pub const E0104: u16 = 104;
+pub const E0105: u16 = 105;
+pub const E0106: u16 = 106;
+pub const E0107: u16 = 107;
+pub const E0811: u16 = 811;
+
+pub const NONE: u32 = 4294967295;
+
+// E0105 scopes: a module (id M), a type, trait, or variant (its decl D), the methods of an impl
+// head (the impl decl D of the first impl of that head), and the locals of an item (c = the item
+// I; the enclosing names are those of the use's item).
+pub const SCOPE_MODULE: u32 = 0;
+pub const SCOPE_DECL: u32 = 1;
+pub const SCOPE_IMPL: u32 = 2;
+pub const SCOPE_ITEM: u32 = 3;
+
+pub const CASE_DOTTED: u32 = 1;
+pub const CASE_BUILTIN: u32 = 2;
+pub const CASE_AMBIGUOUS: u32 = 3;
+
+// E0811 cases: a "C" import block without `unsafe(..)`, an intrinsic block with one, any other ABI.
+pub const ABI_OBLIGATION: u32 = 1;
+pub const ABI_INTRINSIC: u32 = 2;
+pub const ABI_OTHER: u32 = 3;
+
+pub struct Rows {
+    pub code: vec.Vec<u16>,
+    pub file: vec.Vec<u32>,
+    pub off: vec.Vec<u32>,
+    pub len: vec.Vec<u32>,
+    pub a: vec.Vec<u32>,
+    pub b: vec.Vec<u32>,
+    pub c: vec.Vec<u32>,
+    pub d: vec.Vec<u32>,
+    pub rel: ragged.Ragged<u32>,
+}
+
+impl Rows {
+    pub fn new() -> Rows {
+        return Rows.{
+            code: vec.Vec::<u16>.new(),
+            file: vec.Vec::<u32>.new(),
+            off: vec.Vec::<u32>.new(),
+            len: vec.Vec::<u32>.new(),
+            a: vec.Vec::<u32>.new(),
+            b: vec.Vec::<u32>.new(),
+            c: vec.Vec::<u32>.new(),
+            d: vec.Vec::<u32>.new(),
+            rel: ragged.Ragged::<u32>.new(),
+        };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.code.len();
+    }
+
+    // Adds a row whose related spans are those pushed by `related` since the last row.
+    pub fn add(&mut self, code: u16, file: u32, off: u32, len: u32, a: u32, b: u32, c: u32) {
+        self.add_in(code, file, off, len, a, b, c, NONE);
+    }
+
+    pub fn add_in(&mut self, code: u16, file: u32, off: u32, len: u32, a: u32, b: u32, c: u32, d: u32) {
+        self.code.push(code);
+        self.file.push(file);
+        self.off.push(off);
+        self.len.push(len);
+        self.a.push(a);
+        self.b.push(b);
+        self.c.push(c);
+        self.d.push(d);
+        self.rel.end_row();
+    }
+
+    // A related span of the next row.
+    pub fn related(&mut self, file: u32, off: u32, len: u32) {
+        self.rel.push(file);
+        self.rel.push(off);
+        self.rel.push(len);
+    }
+
+    // How many rows have code `code`.
+    pub fn count(&self, code: u16) -> usize {
+        let mut n: usize = 0;
+        for k in 0..self.code.len() {
+            if self.code.as_slice()[k] == code { n = n + 1; }
+        }
+        return n;
+    }
+}

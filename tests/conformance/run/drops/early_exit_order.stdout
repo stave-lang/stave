@@ -1,0 +1,20 @@
+match normal: 2 1 |
+match return: 2 1
+match break: 2 1 |
+match continue: 2 1 2 1 |
+match ?: 2 1
+match borrowed temp return: 2 1
+match outer local return: 3 2 1 0
+for header normal: 2 1 |
+for header return: 2 1
+for header break: 2 1 |
+for header continue: 2 2 1 |
+for header ?: 2 1
+nested return: 4 3 2 1
+nested break: 4 3 2 1 |
+nested continue: 4 3 2 4 3 2 1 |
+nested ?: 4 3 2 1
+two matches return: 4 3 2 1
+loop break in arm: 4 3 2 4 3 2 |
+? in arm value: 3 2 1 0
+continue in arm in for: 4 3 2 n 4 3 2 5 |

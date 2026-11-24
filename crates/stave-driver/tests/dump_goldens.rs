@@ -24,11 +24,12 @@ use stave_driver::dump::{DumpStage, render_to_vec, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
 
-const CASES: [&str; 8] = [
+const CASES: [&str; 9] = [
     "valid_small",
     "dropped_item",
     "unbalanced",
     "multi_file",
+    "intern_collision",
     "sigs_decls",
     "sigs_errors",
     "kinds_layout",
@@ -180,7 +181,9 @@ fn golden_properties() {
                 assert!(read(&dir.join("diags.txt")).contains("\"code\":\"E0016\""));
             }
             "dropped_item" => assert_eq!(items.lines().filter(|l| l.ends_with(" dropped")).count(), 1),
-            "valid_small" | "sigs_decls" | "kinds_layout" => assert!(read(&dir.join("diags.txt")).is_empty()),
+            "valid_small" | "intern_collision" | "sigs_decls" | "kinds_layout" => {
+                assert!(read(&dir.join("diags.txt")).is_empty())
+            }
             "sigs_errors" => {
                 let d = read(&dir.join("diags.txt"));
                 assert!(d.contains("\"code\":\"E0101\"") && d.contains("\"code\":\"E0203\""), "{d}");

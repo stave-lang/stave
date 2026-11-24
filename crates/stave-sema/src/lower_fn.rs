@@ -283,6 +283,9 @@ pub(crate) struct LoopCx {
     pub exit: usize,
     pub scope: usize,
     pub kind: LoopKind,
+    /// The lengths of `temps` and `stmt_slots` where the loop began: a `break` or `continue`
+    /// leaves what lies above them ([`crate::drops::Leave::Outside`]).
+    pub marks: (usize, usize),
 }
 
 /// One function being built (the instance, a closure, or drop glue).
@@ -302,8 +305,9 @@ pub(crate) struct FnState {
     pub open: Vec<u32>,
     /// The node being lowered: a temporary made now is made by it.
     pub cur: u32,
-    /// Per scope depth: the length of `stmts` when the scope at that depth was last pushed.
-    pub scope_stmts: Vec<usize>,
+    /// Per open statement: the number of scopes open when it was opened
+    /// ([`crate::drops::exit_order`]).
+    pub stmt_depth: Vec<usize>,
     /// The owners from this number on are this fn's own temporaries; those below belong to the
     /// fns around a closure body (and are the locals).
     pub own_temps: usize,
@@ -1820,32 +1824,30 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// Drops the droppable locals of scopes `from..` (innermost first), keeping their states.
-    pub fn drop_scopes(&mut self, from: usize) {
-        let n = self.f.scopes.len();
-        for s in (from..n).rev() {
-            let wbs: Vec<WriteBack> =
-                self.f.write_backs.iter().rev().filter(|w| w.0 == s + 1).map(|w| w.1).collect();
-            for w in wbs {
-                self.write_back(w);
-            }
-            // threads spawned in a `scope` block are joined before its locals are dropped
-            let hs: Vec<Operand> =
-                self.f.scope_handles.iter().rev().filter(|h| h.0 == s + 1).map(|h| h.1).collect();
-            for h in hs {
-                self.scope_join(h);
-            }
-            let ls = self.f.scopes[s].clone();
-            for &l in ls.iter().rev() {
-                self.drop_owner(l);
-            }
+    /// Drops the droppable locals of scope `s` (a depth index) on a path that leaves it,
+    /// keeping their states: first the chunk write-backs and the joins of the threads spawned
+    /// in a `scope` block whose scope it is; `end`: then their slots end.
+    fn exit_scope(&mut self, s: usize, end: bool) {
+        let wbs: Vec<WriteBack> =
+            self.f.write_backs.iter().rev().filter(|w| w.0 == s + 1).map(|w| w.1).collect();
+        for w in wbs {
+            self.write_back(w);
+        }
+        let hs: Vec<Operand> =
+            self.f.scope_handles.iter().rev().filter(|h| h.0 == s + 1).map(|h| h.1).collect();
+        for h in hs {
+            self.scope_join(h);
+        }
+        let ls = self.f.scopes.get(s).cloned().unwrap_or_default();
+        for &l in ls.iter().rev() {
+            self.drop_owner(l);
+        }
+        if end {
+            self.end_locals(&ls);
         }
     }
 
     pub fn push_scope(&mut self) {
-        let d = self.f.scopes.len();
-        self.f.scope_stmts.truncate(d);
-        self.f.scope_stmts.push(self.f.stmts.len());
         self.f.scopes.push(Vec::new());
     }
 
@@ -1918,6 +1920,7 @@ impl<'a> FnCx<'a> {
         self.f.stmts.push(self.f.temps.len());
         self.f.slot_marks.push(self.f.stmt_slots.len());
         self.f.open.push(b);
+        self.f.stmt_depth.push(self.f.scopes.len());
         let icx = self.icx;
         let local_due = |n: u32| self.by_node.get(&n).is_none_or(|&l| self.locals[l].drop);
         let tok = |p, o| Self::row_tok(&icx, p, o);
@@ -1941,42 +1944,64 @@ impl<'a> FnCx<'a> {
         self.f.temps.truncate(from);
         self.trim_temps();
         let at = self.f.slot_marks.pop().unwrap_or(0);
-        self.end_slots(at);
+        self.end_slots(at, self.f.stmt_slots.len());
         self.f.stmt_slots.truncate(at);
         self.f.open.pop();
+        self.f.stmt_depth.pop();
     }
 
-    /// Drops, on a path that leaves them, the temporaries of the open statements from index
-    /// `from` on (0: all, a `return` or `?`), keeping them for the paths that stay.
-    pub fn exit_temps(&mut self, from: usize) {
-        let at = if from == 0 { 0 } else { self.f.stmts.get(from).copied().unwrap_or(self.f.temps.len()) };
-        let ts: Vec<usize> = self.f.temps.get(at..).unwrap_or(&[]).to_vec();
+    /// Drops, on a path that leaves it, the temporaries of open statement `i` (keeping them for
+    /// the paths that stay), last made first; `end`: then ends the slots of the rvalues it took
+    /// the address of.
+    fn exit_stmt(&mut self, i: usize, end: bool) {
+        let t0 = self.f.stmts[i];
+        let s0 = self.f.slot_marks.get(i).copied().unwrap_or(self.f.stmt_slots.len());
+        self.exit_temps((t0, s0), i + 1, end);
+    }
+
+    /// The temporaries from `temps[from.0]` and the slots from `stmt_slots[from.1]` up to where
+    /// open statement `to` (none open: the last) begins: drops, last made first, then, `end`,
+    /// the slot ends.
+    fn exit_temps(&mut self, from: (usize, usize), to: usize, end: bool) {
+        let t1 = self.f.stmts.get(to).copied().unwrap_or(self.f.temps.len());
+        let ts: Vec<usize> = self.f.temps.get(from.0..t1.max(from.0)).unwrap_or(&[]).to_vec();
         for &l in ts.iter().rev() {
             self.drop_owner(l);
         }
-        let at = if from == 0 {
-            0
-        } else {
-            self.f.slot_marks.get(from).copied().unwrap_or(self.f.stmt_slots.len())
-        };
-        self.end_slots(at);
+        if end {
+            let s1 = self.f.slot_marks.get(to).copied().unwrap_or(self.f.stmt_slots.len());
+            self.end_slots(from.1, s1);
+        }
     }
 
-    /// The drops of exit `point`: the temporaries of the open statements from index `stmts` on,
-    /// then the locals of scopes `scopes..`.
-    pub fn exit_drops(&mut self, point: Point, stmts: usize, scopes: usize) {
+    /// The drops of exit `point`, which leaves the open statements from index `stmts` on, the
+    /// scopes `scopes..`, and the temporaries and slots above `marks` (lengths of `temps` and
+    /// `stmt_slots`; a frame exit: 0), in the order [`crate::drops::exit_order`] gives, with the
+    /// ends it says run there.
+    pub fn exit_drops(&mut self, point: Point, stmts: usize, scopes: usize, marks: (usize, usize)) {
         let outer = std::mem::replace(&mut self.f.point, point);
         self.begin_run();
-        self.exit_temps(stmts);
-        self.drop_scopes(scopes);
+        let frame = !matches!(point, Point::Jump(_));
+        let order = crate::drops::exit_order(&self.f.stmt_depth, stmts, scopes, self.f.scopes.len(), frame);
+        for (step, end) in order {
+            match step {
+                crate::drops::Leave::Stmt(i) => self.exit_stmt(i, end),
+                crate::drops::Leave::Scope(s) => self.exit_scope(s, end),
+                crate::drops::Leave::Outside => self.exit_temps(marks, stmts, end),
+            }
+        }
         self.end_run();
         self.f.point = outer;
     }
 
-    /// The end of the rvalue slots of the open statements from `stmt_slots[at]` on, last
-    /// taken first.
-    fn end_slots(&mut self, at: usize) {
-        let ss: Vec<(Operand, Ty)> = self.f.stmt_slots.get(at..).unwrap_or(&[]).to_vec();
+    /// The statements opened inside the scopes `scope..`: those from this index on.
+    pub fn stmts_inside(&self, scope: usize) -> usize {
+        self.f.stmt_depth.partition_point(|&d| d <= scope)
+    }
+
+    /// The end of the rvalue slots `stmt_slots[at..to]`, last taken first.
+    fn end_slots(&mut self, at: usize, to: usize) {
+        let ss: Vec<(Operand, Ty)> = self.f.stmt_slots.get(at..to.max(at)).unwrap_or(&[]).to_vec();
         for &(s, st) in ss.iter().rev() {
             self.event(stave_ir::EventKind::End, s, st);
         }
@@ -2134,7 +2159,7 @@ impl FnState {
             stmts: Vec::new(),
             open: Vec::new(),
             cur: crate::temps::NONE,
-            scope_stmts: Vec::new(),
+            stmt_depth: Vec::new(),
             own_temps: 0,
             ret,
             site_consts: Vec::new(),

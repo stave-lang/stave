@@ -1,14 +1,20 @@
 #!/bin/sh
-# stage1 `tokens`, `items`, `ast`, and `diags` equivalence gate (contracts/stage-gates.md): builds
-# stage0 (the debug build `test` leaves, or STAVE_GATE_PROFILE=release), builds stage1 with it, then
-# runs both with `build --dump=tokens,items,ast,diags` on every root of the corpus (one run each)
-# and compares the two `tokens.txt`, `items.txt`, and `ast.txt` byte for byte, and stage1's
+# stage1 `tokens`, `items`, `ast`, `strings`, `names`, and `diags` equivalence gate
+# (contracts/stage-gates.md): builds stage0 (the debug build `test` leaves, or
+# STAVE_GATE_PROFILE=release), builds stage1 with it, then runs both once per root of the corpus
+# with `build --dump=tokens,items,ast,strings,names,diags` and compares the `tokens.txt`,
+# `items.txt`, `ast.txt`, `strings.txt`, and `names.txt` of the two byte for byte, and stage1's
 # `diags.txt` with stage0's restricted to the codes of the stages stage1 has (S1_CODES: read, lex,
-# item cut, parse). Every dump covers the whole program, so each root also compares std, runtime,
-# and the arch package.
+# item cut, parse, modules, decls, resolve). Every dump covers the whole program, so each root
+# also compares std, runtime, and the arch package.
+#
+# Stage0 raises some of those codes in later stages too (a type or trait expected: E0101; a field
+# given twice in a literal or pattern: E0105; a private field or column: E0106). The shapes with
+# a message of their own (LATER) are cut from stage0's lines; a private field or method reached
+# by a value has E0106's plain message, so the E0106 lines of stage1 need only be among stage0's.
 #
 # Exit status: stage1 exits 1 exactly when it printed a diagnostic, else 0 (a root with an error
-# of a stage stage1 lacks still exits 0 there). Where stage0's diagnostics are all in S1_CODES and
+# of a stage stage1 lacks still exits 0 there). Where stage0's diagnostics are all stage1's and
 # there is one, stage0's exit status must be stage1's.
 #
 # Roots: every package directory (a `stave.toml`, not descending into it) and every other `.stv`
@@ -28,43 +34,60 @@ S1="$OUT/stage1"
 export STAVE_STD_DIR="$ROOT"
 # Codes of the stages stage1 has so far; add a stage's codes with its dump. E0005 is stage1's only
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
-S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E1003'
+S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0811|E1003'
+# Messages of the shapes of those codes that later stages raise.
+LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)'
 
 if [ "${1:-}" = "--one" ]; then
   d="$OUT/w/$2"
   mkdir -p "$d"
-  rm -f "$d/0/tokens.txt" "$d/1/tokens.txt" "$d/0/items.txt" "$d/1/items.txt" "$d/0/ast.txt" "$d/1/ast.txt" "$d/0/diags.txt" "$d/1/diags.txt"
+  for k in 0 1; do
+    rm -f "$d/$k/tokens.txt" "$d/$k/items.txt" "$d/$k/ast.txt" "$d/$k/strings.txt" "$d/$k/names.txt" "$d/$k/diags.txt"
+  done
   if [ -n "${4:-}" ]; then set -- "$2" "$3" --target "$4"; else set -- "$2" "$3"; fi
   root="$2"
   shift 2
   s0=0
   s1=0
-  "$S0" build "$root" "$@" -o "$d/exe" --dump=tokens,items,ast,diags --dump-dir "$d/0" >/dev/null 2>&1 || s0=$?
-  "$S1" build "$root" "$@" --dump=tokens,items,ast,diags --dump-dir "$d/1" >"$d/stage1.err" 2>&1 || s1=$?
+  dumps=tokens,items,ast,strings,names,diags
+  "$S0" build "$root" "$@" -o "$d/exe" --dump=$dumps --dump-dir "$d/0" >/dev/null 2>&1 || s0=$?
+  "$S1" build "$root" "$@" --dump=$dumps --dump-dir "$d/1" >"$d/stage1.err" 2>&1 || s1=$?
   if [ "$s1" -gt 1 ]; then
     echo "FAIL stage1 exit $s1: $root $* ($(head -c 200 "$d/stage1.err"))"
-  elif [ ! -f "$d/0/tokens.txt" ] || [ ! -f "$d/0/items.txt" ] || [ ! -f "$d/0/ast.txt" ] || [ ! -f "$d/0/diags.txt" ]; then
+  elif [ ! -f "$d/0/tokens.txt" ] || [ ! -f "$d/0/items.txt" ] || [ ! -f "$d/0/ast.txt" ] || [ ! -f "$d/0/strings.txt" ] || [ ! -f "$d/0/names.txt" ] || [ ! -f "$d/0/diags.txt" ]; then
     echo "FAIL no stage0 dump: $root $*"
-  elif [ ! -f "$d/1/diags.txt" ]; then
-    echo "FAIL no stage1 diags.txt: $root $* ($(head -c 200 "$d/stage1.err"))"
+  elif [ ! -f "$d/1/strings.txt" ] || [ ! -f "$d/1/names.txt" ] || [ ! -f "$d/1/diags.txt" ]; then
+    echo "FAIL no stage1 dump: $root $* ($(head -c 200 "$d/stage1.err"))"
   elif ! cmp -s "$d/0/tokens.txt" "$d/1/tokens.txt"; then
     echo "DIFF tokens $root $* (first: $(cmp "$d/0/tokens.txt" "$d/1/tokens.txt" 2>&1 | head -1))"
   elif ! cmp -s "$d/0/items.txt" "$d/1/items.txt"; then
     echo "DIFF items $root $* (first: $(cmp "$d/0/items.txt" "$d/1/items.txt" 2>&1 | head -1))"
   elif ! cmp -s "$d/0/ast.txt" "$d/1/ast.txt"; then
     echo "DIFF ast $root $* (first: $(cmp "$d/0/ast.txt" "$d/1/ast.txt" 2>&1 | head -1))"
+  elif ! cmp -s "$d/0/strings.txt" "$d/1/strings.txt"; then
+    echo "DIFF strings $root $* (first: $(cmp "$d/0/strings.txt" "$d/1/strings.txt" 2>&1 | head -1))"
+  elif ! cmp -s "$d/0/names.txt" "$d/1/names.txt"; then
+    echo "DIFF names $root $* (first: $(cmp "$d/0/names.txt" "$d/1/names.txt" 2>&1 | head -1))"
   else
-    grep -E "^\{\"kind\":\"diagnostic\",\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)" "$d/0/diags.txt" > "$d/0/diags.in" || true
-    ours=$(wc -l < "$d/0/diags.in")
+    grep -E "^\{\"kind\":\"diagnostic\",\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)" "$d/0/diags.txt" | grep -vE "$LATER" > "$d/0/diags.in" || true
+    priv='^{"kind":"diagnostic","code":"E0106"'
+    grep -v "$priv" "$d/0/diags.in" > "$d/0/diags.rest" || true
+    grep -v "$priv" "$d/1/diags.txt" > "$d/1/diags.rest" || true
+    grep "$priv" "$d/0/diags.in" > "$d/0/diags.priv" || true
+    grep "$priv" "$d/1/diags.txt" > "$d/1/diags.priv" || true
+    extra=$(grep -cvxFf "$d/0/diags.priv" "$d/1/diags.priv" || true)
+    ours=$(wc -l < "$d/1/diags.txt")
     all=$(wc -l < "$d/0/diags.txt")
-    if ! cmp -s "$d/0/diags.in" "$d/1/diags.txt"; then
-      echo "DIFF diags $root $* (first: $(cmp "$d/0/diags.in" "$d/1/diags.txt" 2>&1 | head -1))"
+    if ! cmp -s "$d/0/diags.rest" "$d/1/diags.rest"; then
+      echo "DIFF diags $root $* (first: $(cmp "$d/0/diags.rest" "$d/1/diags.rest" 2>&1 | head -1))"
+    elif [ "$extra" -gt 0 ]; then
+      echo "DIFF diags E0106 of stage1 not among stage0's: $root $*"
     elif [ "$s1" != "$([ "$ours" -gt 0 ] && echo 1 || echo 0)" ]; then
       echo "FAIL stage1 exit $s1 with $ours diagnostics: $root $*"
     elif [ "$ours" -gt 0 ] && [ "$ours" = "$all" ] && [ "$s0" != "$s1" ]; then
       echo "FAIL exit stage0 $s0 stage1 $s1: $root $*"
     else
-      echo "SAME $(wc -l < "$d/0/tokens.txt") $(wc -l < "$d/0/items.txt") $(wc -l < "$d/0/ast.txt") $ours"
+      echo "SAME $(wc -l < "$d/0/tokens.txt") $(wc -l < "$d/0/items.txt") $(wc -l < "$d/0/ast.txt") $(wc -l < "$d/0/strings.txt") $(wc -l < "$d/0/names.txt") $ours"
     fi
   fi
   exit 0
@@ -98,8 +121,10 @@ same=$(grep -c '^SAME' "$OUT/result.txt" || true)
 tlines=$(awk '$1 == "SAME" { s += $2 } END { print s + 0 }' "$OUT/result.txt")
 ilines=$(awk '$1 == "SAME" { s += $3 } END { print s + 0 }' "$OUT/result.txt")
 alines=$(awk '$1 == "SAME" { s += $4 } END { print s + 0 }' "$OUT/result.txt")
-dlines=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
-echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines, ast $alines lines, diags $dlines lines), $((end - start)) s"
+slines=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
+nlines=$(awk '$1 == "SAME" { s += $6 } END { print s + 0 }' "$OUT/result.txt")
+dlines=$(awk '$1 == "SAME" { s += $7 } END { print s + 0 }' "$OUT/result.txt")
+echo "stage1-gate: $same of $runs roots equal (tokens $tlines lines, items $ilines lines, ast $alines lines, strings $slines lines, names $nlines lines, diags $dlines lines), $((end - start)) s"
 if grep -v '^SAME' "$OUT/result.txt"; then
   echo "stage1-gate: FAILED" >&2
   exit 1

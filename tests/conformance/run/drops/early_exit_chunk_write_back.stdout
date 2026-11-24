@@ -1,0 +1,7 @@
+heap return: W len64 first101 junk7
+array return: A2
+array block return: A2
+array ?: A2
+closure return: A2 r1
+arm local, return: 7 A2
+break of the chunk loop: A2
