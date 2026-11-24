@@ -1,13 +1,16 @@
-// `stave.toml`: the TOML subset of stage0's manifest reader, and the keys package discovery
-// needs (`name`, `[dependencies]`, `[target.<t>.dependencies]`).
+// `stave.toml`: the TOML subset of stage0's manifest reader, with the byte span of every key and
+// value, and the keys package discovery needs (`name`, `kind`, `[dependencies]`,
+// `[target.<t>.dependencies]`).
 //
 // The parse is stage0's line by line: comments `#`, bare, quoted, and dotted keys, `[a.b]`
 // headers (parents created implicitly), one-line inline tables, basic and literal strings,
 // integers, floats, booleans, arrays (over lines). A syntax error or a redefined key stops the
-// parse; every line before it stays, so the keys read back are the ones stage0 reads.
+// parse and is returned with its offset (`TErr`); every line before it stays, so the keys read
+// back are the ones stage0 reads. `manifest_check` validates the result.
 //
-// Tables are flat: ids (0 = the root) with a kind, and entry rows naming their table, in
-// insertion order.
+// Tables are flat: ids (0 = the root) with a kind and a span, and entry rows naming their table,
+// in insertion order. The span of a table is the span of its `{ .. }` (inline), of the last key
+// of its header, or of the key that first named it (implicit).
 import text;
 import std.mem;
 import std.string;
@@ -17,50 +20,95 @@ const TK_HEADER: u8 = 1;
 const TK_IMPLICIT: u8 = 2;
 const TK_INLINE: u8 = 3;
 
-const V_STR: u8 = 0;
-const V_OTHER: u8 = 1;
-const V_TABLE: u8 = 2;
+pub const V_STR: u8 = 0;
+pub const V_OTHER: u8 = 1;
+pub const V_TABLE: u8 = 2;
+
+// "No span" in the spans of `Manifest` and `Dep`.
+pub const NO_SPAN: u32 = 4294967295;
 
 // Nesting bound of arrays and inline tables.
 const MAX_DEPTH: usize = 64;
 
-struct Doc {
-    table_kind: vec.Vec<u8>,
-    e_table: vec.Vec<u32>,
-    e_key: vec.Vec<vec.Vec<u8>>,
-    e_kind: vec.Vec<u8>,
-    e_str: vec.Vec<vec.Vec<u8>>,
-    e_sub: vec.Vec<u32>,
+// A syntax error at `offset`, or (`dup`) a key or table defined a second time, at that key.
+pub struct TErr {
+    pub offset: u32,
+    pub dup: bool,
 }
 
-// A parsed value: a string's bytes, a table id, or another value (array, number, boolean).
+fn syntax_at(o: u32) -> TErr {
+    return TErr.{ offset: o, dup: false };
+}
+
+fn dup_at(o: u32) -> TErr {
+    return TErr.{ offset: o, dup: true };
+}
+
+// A dotted key: its parts and their spans (a quoted part's span holds the quotes).
+struct KeyPath {
+    names: vec.Vec<vec.Vec<u8>>,
+    lo: vec.Vec<u32>,
+    hi: vec.Vec<u32>,
+}
+
+pub struct Doc {
+    pub table_kind: vec.Vec<u8>,
+    pub table_lo: vec.Vec<u32>,
+    pub table_hi: vec.Vec<u32>,
+    pub e_table: vec.Vec<u32>,
+    pub e_key: vec.Vec<vec.Vec<u8>>,
+    pub e_klo: vec.Vec<u32>,
+    pub e_khi: vec.Vec<u32>,
+    pub e_kind: vec.Vec<u8>,
+    pub e_str: vec.Vec<vec.Vec<u8>>,
+    pub e_sub: vec.Vec<u32>,
+    pub e_vlo: vec.Vec<u32>,
+    pub e_vhi: vec.Vec<u32>,
+}
+
+// A parsed value: a string's bytes, a table id, or another value (array, number, boolean), and
+// its span.
 struct Val {
     kind: u8,
     s: vec.Vec<u8>,
     sub: u32,
+    lo: u32,
+    hi: u32,
 }
 
 impl Doc {
     fn new() -> Doc {
         let mut k = vec.Vec::<u8>.new();
         k.push(0);
+        let mut lo = vec.Vec::<u32>.new();
+        lo.push(0);
+        let mut hi = vec.Vec::<u32>.new();
+        hi.push(0);
         return Doc.{
             table_kind: k,
+            table_lo: lo,
+            table_hi: hi,
             e_table: vec.Vec::<u32>.new(),
             e_key: vec.Vec::<vec.Vec<u8>>.new(),
+            e_klo: vec.Vec::<u32>.new(),
+            e_khi: vec.Vec::<u32>.new(),
             e_kind: vec.Vec::<u8>.new(),
             e_str: vec.Vec::<vec.Vec<u8>>.new(),
             e_sub: vec.Vec::<u32>.new(),
+            e_vlo: vec.Vec::<u32>.new(),
+            e_vhi: vec.Vec::<u32>.new(),
         };
     }
 
-    fn new_table(&mut self, kind: u8) -> u32 {
+    fn new_table(&mut self, kind: u8, lo: u32, hi: u32) -> u32 {
         self.table_kind.push(kind);
+        self.table_lo.push(lo);
+        self.table_hi.push(hi);
         return (self.table_kind.len() - 1) as% u32;
     }
 
     // The entry of table t named key.
-    fn find(&self, t: u32, key: &[u8]) -> Option<usize> {
+    pub fn find(&self, t: u32, key: &[u8]) -> Option<usize> {
         for i in 0..self.e_table.len() {
             if self.e_table.as_slice()[i] == t && text.eq(self.e_key.get_ref(i).as_slice(), key) {
                 return Option.Some(i);
@@ -69,19 +117,23 @@ impl Doc {
         return Option.None;
     }
 
-    fn push(&mut self, t: u32, key: &[u8], v: Val) {
+    fn push(&mut self, t: u32, key: &[u8], klo: u32, khi: u32, v: Val) {
         let mut k = vec.Vec::<u8>.new();
         k.extend_from_slice(key);
-        let Val.{ kind, s, sub } = v;
+        let Val.{ kind, s, sub, lo, hi } = v;
         self.e_table.push(t);
         self.e_key.push(k);
+        self.e_klo.push(klo);
+        self.e_khi.push(khi);
         self.e_kind.push(kind);
         self.e_str.push(s);
         self.e_sub.push(sub);
+        self.e_vlo.push(lo);
+        self.e_vhi.push(hi);
     }
 
     // The table an entry holds, if it holds one.
-    fn sub_table(&self, e: usize) -> Option<u32> {
+    pub fn sub_table(&self, e: usize) -> Option<u32> {
         if self.e_kind.as_slice()[e] != V_TABLE { return Option.None; }
         return Option.Some(self.e_sub.as_slice()[e]);
     }
@@ -90,46 +142,68 @@ impl Doc {
         return self.table_kind.as_slice()[t as usize];
     }
 
-    // Inserts v under the dotted key below table t; Err on a redefinition or a step through a
-    // non-table (parents made on the way stay).
-    fn insert_dotted(&mut self, t: u32, key: &vec.Vec<vec.Vec<u8>>, v: Val) -> Result<(), u32> {
-        let n = key.len();
+    // The span of an entry's value; of a table, the table's span.
+    pub fn value_span(&self, e: usize) -> (u32, u32) {
+        if self.e_kind.as_slice()[e] == V_TABLE {
+            let t = self.e_sub.as_slice()[e] as usize;
+            return (self.table_lo.as_slice()[t], self.table_hi.as_slice()[t]);
+        }
+        return (self.e_vlo.as_slice()[e], self.e_vhi.as_slice()[e]);
+    }
+
+    // The entries of table t, in insertion order.
+    pub fn entries(&self, t: u32) -> vec.Vec<usize> {
+        let mut out = vec.Vec::<usize>.new();
+        for e in 0..self.e_table.len() {
+            if self.e_table.as_slice()[e] == t { out.push(e); }
+        }
+        return out;
+    }
+
+    // Inserts v under the dotted key below table t; Err (at the part that clashes) on a
+    // redefinition or a step through a non-table (parents made on the way stay).
+    fn insert_dotted(&mut self, t: u32, key: &KeyPath, v: Val) -> Result<(), TErr> {
+        let n = key.names.len();
         let mut cur = t;
         for k in 0..n {
-            let name = key.get_ref(k).as_slice();
+            let name = key.names.get_ref(k).as_slice();
+            let lo = key.lo.as_slice()[k];
+            let hi = key.hi.as_slice()[k];
             if k + 1 == n {
-                if self.find(cur, name).is_some() { return Result.Err(0); }
-                self.push(cur, name, v);
+                if self.find(cur, name).is_some() { return Result.Err(dup_at(lo)); }
+                self.push(cur, name, lo, hi, v);
                 return Result.Ok(());
             }
             let mut pos: usize = 0;
             match self.find(cur, name) {
                 Option.Some(p) => { pos = p; }
                 Option.None => {
-                    let id = self.new_table(TK_IMPLICIT);
-                    self.push(cur, name, table_val(id));
+                    let id = self.new_table(TK_IMPLICIT, lo, hi);
+                    self.push(cur, name, lo, hi, table_val(id));
                     pos = self.e_kind.len() - 1;
                 }
             }
             match self.sub_table(pos) {
                 Option.Some(tt) => {
-                    if self.kind_of(tt) == TK_INLINE { return Result.Err(0); }
+                    if self.kind_of(tt) == TK_INLINE { return Result.Err(dup_at(lo)); }
                     cur = tt;
                 }
-                Option.None => { return Result.Err(0); }
+                Option.None => { return Result.Err(dup_at(lo)); }
             }
         }
         return Result.Ok(());
     }
 
-    // The table at a header path, made as needed; Err if a step is no table or the table was
-    // already made by a header.
-    fn header_table(&mut self, path: &vec.Vec<vec.Vec<u8>>) -> Result<u32, u32> {
-        let n = path.len();
+    // The table at a header path, made as needed; Err (at the part that clashes) if a step is no
+    // table or the table was already made by a header.
+    fn header_table(&mut self, path: &KeyPath) -> Result<u32, TErr> {
+        let n = path.names.len();
         let mut cur: u32 = 0;
         for k in 0..n {
             let last = k + 1 == n;
-            let name = path.get_ref(k).as_slice();
+            let name = path.names.get_ref(k).as_slice();
+            let lo = path.lo.as_slice()[k];
+            let hi = path.hi.as_slice()[k];
             let mut pos: usize = 0;
             match self.find(cur, name) {
                 Option.Some(p) => {
@@ -139,16 +213,18 @@ impl Doc {
                             let tk = self.kind_of(tt);
                             if tk == TK_IMPLICIT && last {
                                 *self.table_kind.get_mut(tt as usize) = TK_HEADER;
+                                *self.table_lo.get_mut(tt as usize) = lo;
+                                *self.table_hi.get_mut(tt as usize) = hi;
                             } else if tk == TK_INLINE || last {
-                                return Result.Err(0);
+                                return Result.Err(dup_at(lo));
                             }
                         }
-                        Option.None => { return Result.Err(0); }
+                        Option.None => { return Result.Err(dup_at(lo)); }
                     }
                 }
                 Option.None => {
-                    let id = self.new_table(if last then TK_HEADER else TK_IMPLICIT);
-                    self.push(cur, name, table_val(id));
+                    let id = self.new_table(if last then TK_HEADER else TK_IMPLICIT, lo, hi);
+                    self.push(cur, name, lo, hi, table_val(id));
                     pos = self.e_kind.len() - 1;
                 }
             }
@@ -175,11 +251,11 @@ impl Doc {
     }
 }
 fn table_val(id: u32) -> Val {
-    return Val.{ kind: V_TABLE, s: vec.Vec::<u8>.new(), sub: id };
+    return Val.{ kind: V_TABLE, s: vec.Vec::<u8>.new(), sub: id, lo: 0, hi: 0 };
 }
 
-fn other_val() -> Val {
-    return Val.{ kind: V_OTHER, s: vec.Vec::<u8>.new(), sub: 0 };
+fn other_val(lo: u32, hi: u32) -> Val {
+    return Val.{ kind: V_OTHER, s: vec.Vec::<u8>.new(), sub: 0, lo: lo, hi: hi };
 }
 
 // Parser state: the input and the offset.
@@ -204,6 +280,11 @@ impl P {
 
     fn pos(&self) -> u32 {
         return self.i as% u32;
+    }
+
+    // A syntax error at the current offset.
+    fn err(&self) -> TErr {
+        return syntax_at(self.pos());
     }
 
     // Spaces and tabs.
@@ -233,7 +314,7 @@ impl P {
     }
 
     // Optional whitespace and comment, then a newline or the end.
-    fn eol(&mut self) -> Result<(), u32> {
+    fn eol(&mut self) -> Result<(), TErr> {
         self.ws();
         self.comment();
         if self.peek() == 10 {
@@ -245,56 +326,60 @@ impl P {
             return Result.Ok(());
         }
         if self.at_end() { return Result.Ok(()); }
-        return Result.Err(self.pos());
+        return Result.Err(self.err());
     }
 
-    fn simple_key(&mut self) -> Result<vec.Vec<u8>, u32> {
+    fn simple_key(&mut self) -> Result<vec.Vec<u8>, TErr> {
         let c = self.peek();
         if c == 34 { return self.basic_string(); }
         if c == 39 { return self.literal_string(); }
         let lo = self.i;
         while is_bare(self.peek()) { self.i = self.i + 1; }
-        if self.i == lo { return Result.Err(self.pos()); }
+        if self.i == lo { return Result.Err(self.err()); }
         let mut k = vec.Vec::<u8>.new();
         k.extend_from_slice(&self.s[lo..self.i]);
         return Result.Ok(k);
     }
 
-    fn key(&mut self) -> Result<vec.Vec<vec.Vec<u8>>, u32> {
-        let mut parts = vec.Vec::<vec.Vec<u8>>.new();
-        parts.push(self.simple_key()?);
+    fn key(&mut self) -> Result<KeyPath, TErr> {
+        let mut kp = KeyPath.{ names: vec.Vec::<vec.Vec<u8>>.new(), lo: vec.Vec::<u32>.new(), hi: vec.Vec::<u32>.new() };
+        kp.lo.push(self.pos());
+        kp.names.push(self.simple_key()?);
+        kp.hi.push(self.pos());
         loop {
             let save = self.i;
             self.ws();
             if self.peek() == 46 {
                 self.i = self.i + 1;
                 self.ws();
-                parts.push(self.simple_key()?);
+                kp.lo.push(self.pos());
+                kp.names.push(self.simple_key()?);
+                kp.hi.push(self.pos());
             } else {
                 self.i = save;
-                return Result.Ok(parts);
+                return Result.Ok(kp);
             }
         }
     }
 
-    fn hex_char(&mut self, digits: usize, out: &mut vec.Vec<u8>) -> Result<(), u32> {
+    fn hex_char(&mut self, digits: usize, out: &mut vec.Vec<u8>) -> Result<(), TErr> {
         let mut v: u32 = 0;
         for k in 0..digits {
             let c = self.peek();
             let d: u32 = if c >= 48 && c <= 57 then (c - 48) as u32 else if c >= 97 && c <= 102 then (c - 87) as u32 else if c >= 65 && c <= 70 then (c - 55) as u32 else 16;
-            if d == 16 { return Result.Err(self.pos()); }
+            if d == 16 { return Result.Err(self.err()); }
             v = v * 16 + d;
             self.i = self.i + 1;
         }
-        if v > 1114111 || (v >= 55296 && v <= 57343) { return Result.Err(self.pos()); }
+        if v > 1114111 || (v >= 55296 && v <= 57343) { return Result.Err(self.err()); }
         push_utf8(out, v);
         return Result.Ok(());
     }
 
-    fn basic_string(&mut self) -> Result<vec.Vec<u8>, u32> {
+    fn basic_string(&mut self) -> Result<vec.Vec<u8>, TErr> {
         self.i = self.i + 1;
         // multi-line strings are not supported
-        if self.peek() == 34 && self.peek_at(1) == 34 { return Result.Err(self.pos()); }
+        if self.peek() == 34 && self.peek_at(1) == 34 { return Result.Err(self.err()); }
         let mut out = vec.Vec::<u8>.new();
         loop {
             let c = self.peek();
@@ -326,55 +411,56 @@ impl P {
                     self.hex_char(8, &mut out)?;
                 } else {
                     self.i = self.i - 1;
-                    return Result.Err(self.pos());
+                    return Result.Err(self.err());
                 }
                 continue;
             }
-            if c == 10 || c == 13 || self.at_end() { return Result.Err(self.pos()); }
+            if c == 10 || c == 13 || self.at_end() { return Result.Err(self.err()); }
             out.push(c);
             self.i = self.i + 1;
         }
         let (ok, bad) = text.utf8_valid_up_to(out.as_slice());
-        if ok != out.len() { return Result.Err(self.pos()); }
+        if ok != out.len() { return Result.Err(self.err()); }
         return Result.Ok(out);
     }
 
-    fn literal_string(&mut self) -> Result<vec.Vec<u8>, u32> {
+    fn literal_string(&mut self) -> Result<vec.Vec<u8>, TErr> {
         self.i = self.i + 1;
         let lo = self.i;
         loop {
             let c = self.peek();
             if c == 39 { break; }
-            if c == 10 || c == 13 || self.at_end() { return Result.Err(self.pos()); }
+            if c == 10 || c == 13 || self.at_end() { return Result.Err(self.err()); }
             self.i = self.i + 1;
         }
         let mut out = vec.Vec::<u8>.new();
         out.extend_from_slice(&self.s[lo..self.i]);
         self.i = self.i + 1;
         let (ok, bad) = text.utf8_valid_up_to(out.as_slice());
-        if ok != out.len() { return Result.Err(self.pos()); }
+        if ok != out.len() { return Result.Err(self.err()); }
         return Result.Ok(out);
     }
 
-    fn number(&mut self) -> Result<Val, u32> {
+    fn number(&mut self) -> Result<Val, TErr> {
         let lo = self.i;
         while is_number_byte(self.peek()) { self.i = self.i + 1; }
         let t = &self.s[lo..self.i];
-        if is_int(t) || is_float(t) { return Result.Ok(other_val()); }
+        if is_int(t) || is_float(t) { return Result.Ok(other_val(lo as% u32, self.pos())); }
         self.i = lo;
-        return Result.Err(self.pos());
+        return Result.Err(self.err());
     }
 
-    rec fn value(&mut self, d: &mut Doc, depth: usize) -> Result<Val, u32> {
-        if depth > MAX_DEPTH { return Result.Err(self.pos()); }
+    rec fn value(&mut self, d: &mut Doc, depth: usize) -> Result<Val, TErr> {
+        if depth > MAX_DEPTH { return Result.Err(self.err()); }
         let c = self.peek();
+        let lo = self.pos();
         if c == 34 {
             let s = self.basic_string()?;
-            return Result.Ok(Val.{ kind: V_STR, s: s, sub: 0 });
+            return Result.Ok(Val.{ kind: V_STR, s: s, sub: 0, lo: lo, hi: self.pos() });
         }
         if c == 39 {
             let s = self.literal_string()?;
-            return Result.Ok(Val.{ kind: V_STR, s: s, sub: 0 });
+            return Result.Ok(Val.{ kind: V_STR, s: s, sub: 0, lo: lo, hi: self.pos() });
         }
         if c == 91 {
             self.i = self.i + 1;
@@ -393,14 +479,14 @@ impl P {
                     self.i = self.i + 1;
                     break;
                 } else {
-                    return Result.Err(self.pos());
+                    return Result.Err(self.err());
                 }
             }
-            return Result.Ok(other_val());
+            return Result.Ok(other_val(lo, self.pos()));
         }
         if c == 123 {
             self.i = self.i + 1;
-            let t = d.new_table(TK_INLINE);
+            let t = d.new_table(TK_INLINE, lo, lo);
             loop {
                 self.ws();
                 if self.peek() == 125 {
@@ -409,7 +495,7 @@ impl P {
                 }
                 let key = self.key()?;
                 self.ws();
-                if self.peek() != 61 { return Result.Err(self.pos()); }
+                if self.peek() != 61 { return Result.Err(self.err()); }
                 self.i = self.i + 1;
                 self.ws();
                 let v = self.value(d, depth + 1)?;
@@ -422,42 +508,44 @@ impl P {
                     self.i = self.i + 1;
                     break;
                 } else {
-                    return Result.Err(self.pos());
+                    return Result.Err(self.err());
                 }
             }
+            *d.table_hi.get_mut(t as usize) = self.pos();
             return Result.Ok(table_val(t));
         }
         if c == 116 && text.starts_with(&self.s[self.i..self.s.len()], mem.str_bytes("true")) {
             self.i = self.i + 4;
-            return Result.Ok(other_val());
+            return Result.Ok(other_val(lo, self.pos()));
         }
         if c == 102 && text.starts_with(&self.s[self.i..self.s.len()], mem.str_bytes("false")) {
             self.i = self.i + 5;
-            return Result.Ok(other_val());
+            return Result.Ok(other_val(lo, self.pos()));
         }
         if (c >= 48 && c <= 57) || c == 43 || c == 45 || c == 105 || c == 110 { return self.number(); }
-        return Result.Err(self.pos());
+        return Result.Err(self.err());
     }
 
     // One header or key/value line.
-    fn line(&mut self, d: &mut Doc, current: &mut vec.Vec<vec.Vec<u8>>) -> Result<(), u32> {
+    fn line(&mut self, d: &mut Doc, current: &mut vec.Vec<vec.Vec<u8>>) -> Result<(), TErr> {
         if self.peek() == 91 {
             self.i = self.i + 1;
             // arrays of tables are not supported
-            if self.peek() == 91 { return Result.Err(self.pos()); }
+            if self.peek() == 91 { return Result.Err(self.err()); }
             self.ws();
             let path = self.key()?;
             self.ws();
-            if self.peek() != 93 { return Result.Err(self.pos()); }
+            if self.peek() != 93 { return Result.Err(self.err()); }
             self.i = self.i + 1;
             self.eol()?;
             let t = d.header_table(&path)?;
-            *current = path;
+            let KeyPath.{ names, lo, hi } = path;
+            *current = names;
             return Result.Ok(());
         }
         let key = self.key()?;
         self.ws();
-        if self.peek() != 61 { return Result.Err(self.pos()); }
+        if self.peek() != 61 { return Result.Err(self.err()); }
         self.i = self.i + 1;
         self.ws();
         let v = self.value(d, 0)?;
@@ -465,7 +553,7 @@ impl P {
         let t = if current.len() == 0 then Option.Some(0u32) else d.existing(&*current);
         return match t {
             Option.Some(t) => d.insert_dotted(t, &key, v),
-            Option.None => Result.Err(0),
+            Option.None => Result.Err(syntax_at(key.lo.as_slice()[0])),
         };
     }
 }
@@ -582,27 +670,38 @@ fn push_utf8(out: &mut vec.Vec<u8>, v: u32) {
     }
 }
 
-// One dependency entry: its name and, for a `{ path = "…" }` table, the path.
+// One dependency entry: its name, the path of a `{ path = "…" }` table, and the spans of the
+// entry's key and of the `path` value (`NO_SPAN` when absent).
 pub struct Dep {
     pub name: string.String,
     pub path: Option<string.String>,
+    pub key_lo: u32,
+    pub key_hi: u32,
+    pub path_lo: u32,
+    pub path_hi: u32,
 }
 
-// What discovery reads from a manifest: `name` and `kind` (strings), and the dependency tables in
-// manifest order, each with the target it applies to ("" for `[dependencies]`).
+// What discovery reads from a manifest: `name` and `kind` (strings) with their value spans
+// (`NO_SPAN` when the key is absent; a `kind` that is no string has none), and the dependency
+// tables in manifest order, each with the target it applies to ("" for `[dependencies]`).
 pub struct Manifest {
     pub name: Option<string.String>,
+    pub name_lo: u32,
+    pub name_hi: u32,
     pub kind: Option<string.String>,
+    pub kind_lo: u32,
+    pub kind_hi: u32,
     pub dep_target: vec.Vec<string.String>,
     pub deps: vec.Vec<Dep>,
 }
 
 // The names a `[target.<t>]` table may use.
-fn known_target(t: &[u8]) -> bool {
+pub fn known_target(t: &[u8]) -> bool {
     return text.eq_str(t, "x86_64-linux") || text.eq_str(t, "x86_64-linux-v2") || text.eq_str(t, "x86_64-linux-v3") || text.eq_str(t, "x86_64-linux-v4") || text.eq_str(t, "aarch64-linux") || text.eq_str(t, "aarch64-linux+sve") || text.eq_str(t, "aarch64-linux+sve2") || text.eq_str(t, "gpu-sm86");
 }
 
-pub fn parse(src: &[u8]) -> Manifest {
+// The tables and entries of src, and the error that stopped the parse, if any.
+pub fn read(src: &[u8]) -> (Doc, Option<TErr>) {
     let mut d = Doc.new();
     let mut p = P.{ s: src, i: 0 };
     let mut current = vec.Vec::<vec.Vec<u8>>.new();
@@ -611,9 +710,14 @@ pub fn parse(src: &[u8]) -> Manifest {
         if p.at_end() { break; }
         match p.line(&mut d, &mut current) {
             Result.Ok(_) => {}
-            Result.Err(_) => { break; }
+            Result.Err(e) => { return (d, Option.Some(e)); }
         }
     }
+    return (d, Option.None);
+}
+
+pub fn parse(src: &[u8]) -> Manifest {
+    let (d, err) = read(src);
     return read_back(&d);
 }
 
@@ -626,30 +730,44 @@ fn read_deps(d: &Doc, t: u32, target: &[u8], m: &mut Manifest) {
     for e in 0..d.e_table.len() {
         if d.e_table.as_slice()[e] != t { continue; }
         let mut path: Option<string.String> = Option.None;
+        let mut path_lo = NO_SPAN;
+        let mut path_hi = NO_SPAN;
         match d.sub_table(e) {
             Option.Some(dt) => {
                 for k in 0..d.e_table.len() {
                     if d.e_table.as_slice()[k] == dt && text.eq_str(d.e_key.get_ref(k).as_slice(), "path") {
                         path = entry_string(d, k);
+                        let (lo, hi) = d.value_span(k);
+                        path_lo = lo;
+                        path_hi = hi;
                     }
                 }
             }
             Option.None => {}
         }
         m.dep_target.push(text.string_of(target));
-        m.deps.push(Dep.{ name: text.string_of(d.e_key.get_ref(e).as_slice()), path: path });
+        m.deps.push(Dep.{ name: text.string_of(d.e_key.get_ref(e).as_slice()), path: path, key_lo: d.e_klo.as_slice()[e], key_hi: d.e_khi.as_slice()[e], path_lo: path_lo, path_hi: path_hi });
     }
 }
 
-fn read_back(d: &Doc) -> Manifest {
-    let mut m = Manifest.{ name: Option.None, kind: Option.None, dep_target: vec.Vec::<string.String>.new(), deps: vec.Vec::<Dep>.new() };
+// The manifest as discovery reads it: the keys of the tables that parsed.
+pub fn read_back(d: &Doc) -> Manifest {
+    let mut m = Manifest.{ name: Option.None, name_lo: NO_SPAN, name_hi: NO_SPAN, kind: Option.None, kind_lo: NO_SPAN, kind_hi: NO_SPAN, dep_target: vec.Vec::<string.String>.new(), deps: vec.Vec::<Dep>.new() };
     for e in 0..d.e_table.len() {
         if d.e_table.as_slice()[e] != 0 { continue; }
         let key = d.e_key.get_ref(e).as_slice();
         if text.eq_str(key, "name") {
             m.name = entry_string(d, e);
+            let (lo, hi) = d.value_span(e);
+            m.name_lo = lo;
+            m.name_hi = hi;
         } else if text.eq_str(key, "kind") {
             m.kind = entry_string(d, e);
+            if m.kind.is_some() {
+                let (lo, hi) = d.value_span(e);
+                m.kind_lo = lo;
+                m.kind_hi = hi;
+            }
         } else if text.eq_str(key, "dependencies") {
             match d.sub_table(e) {
                 Option.Some(t) => { read_deps(d, t, mem.str_bytes(""), &mut m); }
@@ -700,7 +818,7 @@ fn copy_dep(d: &Dep) -> Dep {
         Option.Some(p) => Option.Some(string.String.from_str(p.as_str())),
         Option.None => Option.None,
     };
-    return Dep.{ name: string.String.from_str(d.name.as_str()), path: path };
+    return Dep.{ name: string.String.from_str(d.name.as_str()), path: path, key_lo: d.key_lo, key_hi: d.key_hi, path_lo: d.path_lo, path_hi: d.path_hi };
 }
 
 fn apply(m: &Manifest, target: &[u8], out: &mut vec.Vec<Dep>) {

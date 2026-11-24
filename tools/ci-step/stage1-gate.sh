@@ -5,7 +5,7 @@
 # with `build --dump=tokens,items,ast,strings,names,diags` and compares the `tokens.txt`,
 # `items.txt`, `ast.txt`, `strings.txt`, and `names.txt` of the two byte for byte, and stage1's
 # `diags.txt` with stage0's restricted to the codes of the stages stage1 has (S1_CODES: read, lex,
-# item cut, parse, modules, decls, resolve). Every dump covers the whole program, so each root
+# item cut, parse, modules, decls, resolve, manifests). Every dump covers the whole program, so each root
 # also compares std, runtime, and the arch package.
 #
 # Stage0 raises some of those codes in later stages too (a type or trait expected: E0101; a field
@@ -16,6 +16,10 @@
 # Exit status: stage1 exits 1 exactly when it printed a diagnostic, else 0 (a root with an error
 # of a stage stage1 lacks still exits 0 there). Where stage0's diagnostics are all stage1's and
 # there is one, stage0's exit status must be stage1's.
+#
+# Manifests the tree cannot hold are written below target/stage1-gate/gen and are roots too: one
+# without read permission (E1002 `unreadable`; read as the owner), and ones with invalid UTF-8, a
+# byte-order mark, and CRLF line ends in the text of an E1002 `syntax` row.
 #
 # Roots: every package directory (a `stave.toml`, not descending into it) and every other `.stv`
 # file below tests/conformance (fixtures and negative lexical cases included), the stage1 package
@@ -34,7 +38,7 @@ S1="$OUT/stage1"
 export STAVE_STD_DIR="$ROOT"
 # Codes of the stages stage1 has so far; add a stage's codes with its dump. E0005 is stage1's only
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
-S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0811|E1003'
+S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0811|E1002|E1003|E1203'
 # Messages of the shapes of those codes that later stages raise.
 LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)'
 
@@ -97,6 +101,21 @@ if [ "$PROFILE" = release ]; then cargo build -q --locked --release -p stave-cli
 mkdir -p "$OUT"
 "$S0" build "$ROOT/stage1" -o "$S1" >"$OUT/build.log" 2>&1 || { cat "$OUT/build.log"; exit 1; }
 
+GEN="$OUT/gen"
+gen() {
+  mkdir -p "$GEN/$1/src"
+  chmod u+rw "$GEN/$1/stave.toml" 2>/dev/null || true
+  printf "$2" > "$GEN/$1/stave.toml"
+  printf 'fn main() -> i32 {\n    return 0;\n}\n' > "$GEN/$1/src/main.stv"
+}
+gen unreadable 'name = "unreadable"\n'
+chmod 000 "$GEN/unreadable/stave.toml"
+gen invalid_utf8 'name = "invalid_utf8"\n\377\376 = 1\n'
+gen invalid_utf8_value 'name = "invalid_utf8_value"\nversion = "\377"\n'
+gen utf8_cut 'name = "utf8_cut"\nx = \342\202'
+gen bom '\357\273\277name = "bom"\n'
+gen crlf 'name = "crlf"\r\nkind = "bin"\r\ncolour = 1\r\nx = 1 y\r\n'
+
 # The corpus: one line `N ROOT [TARGET]` per run.
 LIST="$OUT/roots.txt"
 CONF="$ROOT/tests/conformance"
@@ -109,6 +128,7 @@ find "$CONF" -name stave.toml | sed 's|/stave.toml$||' | sort > "$OUT/pkgs.txt"
     BEGIN { while ((getline p < pk) > 0) pkgs[++n] = p }
     { inside = 0; for (i = 1; i <= n; i++) if (index($0, pkgs[i] "/") == 1) { inside = 1; break }
       if (!inside) print }'
+  for g in "$GEN"/*; do echo "$g"; done
   echo "$ROOT/stage1"
   echo "$ROOT/stage1 aarch64-linux"
 } | awk '{ print NR, $0 }' > "$LIST"

@@ -100,6 +100,58 @@ pub fn utf8_valid_up_to(b: &[u8]) -> (usize, usize) {
     return (n, 0);
 }
 
+// `String::from_utf8_lossy`: every maximal invalid sequence becomes one U+FFFD.
+pub fn lossy(b: &[u8]) -> vec.Vec<u8> {
+    let mut out = vec.Vec::<u8>.new();
+    let mut i: usize = 0;
+    while i < b.len() {
+        let (ok, bad) = utf8_valid_up_to(&b[i..b.len()]);
+        out.extend_from_slice(&b[i..i + ok]);
+        i = i + ok;
+        if i >= b.len() { break; }
+        out.push(239);
+        out.push(191);
+        out.push(189);
+        i = i + bad;
+    }
+    return out;
+}
+
+// The length of the Unicode white-space character (`char::is_whitespace`) at b[i], 0 if none.
+fn white_len(b: &[u8], i: usize) -> usize {
+    let c = b[i];
+    if (c >= 9 && c <= 13) || c == 32 { return 1; }
+    let n = b.len();
+    if c == 194 && i + 1 < n && (b[i + 1] == 133 || b[i + 1] == 160) { return 2; }
+    if i + 2 >= n { return 0; }
+    let (c1, c2) = (b[i + 1], b[i + 2]);
+    if c == 225 && c1 == 154 && c2 == 128 { return 3; }
+    if c == 226 && c1 == 128 && ((c2 >= 128 && c2 <= 138) || c2 == 168 || c2 == 169 || c2 == 175) { return 3; }
+    if c == 226 && c1 == 129 && c2 == 159 { return 3; }
+    if c == 227 && c1 == 128 && c2 == 128 { return 3; }
+    return 0;
+}
+
+// The range of valid UTF-8 `b` without its leading and trailing Unicode white space (`str::trim`).
+pub fn trim_range(b: &[u8]) -> (usize, usize) {
+    let mut lo: usize = 0;
+    let mut hi = b.len();
+    while lo < hi {
+        let w = white_len(b, lo);
+        if w == 0 { break; }
+        lo = lo + w;
+    }
+    while hi > lo {
+        let mut cut: usize = 0;
+        for k in 1..4usize {
+            if cut == 0 && hi - lo >= k && white_len(b, hi - k) == k { cut = k; }
+        }
+        if cut == 0 { break; }
+        hi = hi - cut;
+    }
+    return (lo, hi);
+}
+
 // Stable merge sort of the indices 0..n by `less`.
 pub fn sorted(n: usize, less: fn(u32, u32) -> bool) -> vec.Vec<u32> {
     let mut a = vec.Vec::<u32>.with_capacity(n);

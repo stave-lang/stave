@@ -13,6 +13,7 @@
 import decls;
 import diag;
 import diag_lex;
+import diag_manifest;
 import diag_names;
 import diag_out;
 import diag_syn;
@@ -266,6 +267,7 @@ fn main() -> i32 {
     }
     let mut d = diag.Diags.new();
     diag_lex.unreadable(&mut d, &set);
+    diag_manifest.manifests(&mut d, &fl, set.files());
     diag_lex.lexical(&mut d, &toks, &set);
     let cut = items.build(&lx, &set, &toks);
     let tree = parse.build(&set, &toks, &cut);
