@@ -7,11 +7,15 @@
 //   `tc_traits`, answered in rounds).
 // The call then infers the method's generic arguments as a generic call (`tc_chain.gen_call`):
 // its bindings row holds the impl's (or the bound trait's) arguments, then the method's own
-// generics unbound; `self` is the receiver, not an argument.
+// generics unbound; `self` is the receiver, not an argument. A method without generics of its
+// own in an impl with a const param has nothing to infer: its call is a plain call (no bindings
+// row) with the impl's arguments.
 //
-// Not decided here (the call is unknown): an impl without a head with the name (it may come
-// first), two trait impls or bound traits with the name (ambiguous), a const generic param, an
-// impl param the self type does not bind, a method without `self`, a question not answered yet.
+// Not decided here (the call is unknown): an impl without a struct or enum head with the name on
+// a struct or enum receiver (it may come first), two trait impls or bound traits with the name
+// (ambiguous), a const generic param of the method, or of its impl or trait when the method has
+// generics, an impl param the self type does not bind, a method without `self`, a question not
+// answered yet.
 import decls;
 import sigs;
 import tc_rows;
@@ -166,14 +170,26 @@ impl tc_rows.Typeck {
     }
 
     // Impl method m found at type c, its impl's generic arguments in `tq.qargs`.
-    fn impl_method(&mut self, sg: &sigs.Sigs, ds: &decls.Decls, m: u32, c: u32) -> (u32, u32, u32) {
+    fn impl_method(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, m: u32, c: u32) -> (u32, u32, u32) {
         if sg.sflags.as_slice()[m as usize] & sigs.SF_SELF_MASK == 0 { return (NONE, NONE, NONE); }
         let imp = ds.parent.as_slice()[m as usize];
-        if has_const(sg, imp) || has_const(sg, m) { return (NONE, NONE, NONE); }
         let gl = sg.cx.gens.lo.as_slice();
         let np = (gl[imp as usize + 1] - gl[imp as usize]) as usize;
         let own = (gl[m as usize + 1] - gl[m as usize]) as usize;
         if self.tq.qargs.len() != 3 * np { return (NONE, NONE, NONE); }
+        if has_const(sg, imp) && own == 0 {
+            // nothing to infer: the call is checked with the impl's arguments, the type of the
+            // impl decl with them instantiating it (a type no node has)
+            let tab = &mut sg.cx.tab;
+            tab.begin();
+            for i in 0..np {
+                let q = self.tq.qargs.as_slice();
+                if q[3 * i] == types.GA_ERROR || q[3 * i] == types.GA_TYPE && (q[3 * i + 1] == ERR || q[3 * i + 1] == NONE) { return (NONE, NONE, NONE); }
+                tab.push_garg(q[3 * i], q[3 * i + 1], q[3 * i + 2]);
+            }
+            return (m, tab.intern(types.TK_ADT, imp, 0), NONE);
+        }
+        if has_const(sg, imp) || has_const(sg, m) { return (NONE, NONE, NONE); }
         let b = self.binds.len();
         for i in 0..np {
             let k = self.tq.qargs.as_slice()[3 * i];
