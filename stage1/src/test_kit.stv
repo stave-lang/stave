@@ -1,6 +1,7 @@
-// A build in memory for the tests of `modules`: packages and files are
+// A build in memory for the tests of `modules` and `decls`: packages and files are
 // added in rank order (packages by name, files by package name then path), then every stage
 // runs on them as `main` runs them on a discovered build.
+import decls;
 import files;
 import intern;
 import items;
@@ -29,6 +30,7 @@ pub struct Out {
     pub tree: ast.Ast,
     pub nm: intern.Interned,
     pub md: modules.Modules,
+    pub ds: decls.Decls,
     pub rows: resdiag.Rows,
 }
 
@@ -89,8 +91,9 @@ impl Kit {
         let nm = intern.build(&k.set, &toks, &k.fl);
         let mut rows = resdiag.Rows.new();
         let md = modules.build(&k.fl, &nm, &lx, &k.set, &toks, &cut, &tree, &mut rows);
+        let ds = decls.build(&md, &nm, &lx, &k.set, &toks, &cut, &tree, &mut rows);
         let Kit.{ fl: _, set, dep_counts: _ } = k;
-        return Out.{ set: set, lx: lx, toks: toks, cut: cut, tree: tree, nm: nm, md: md, rows: rows };
+        return Out.{ set: set, lx: lx, toks: toks, cut: cut, tree: tree, nm: nm, md: md, ds: ds, rows: rows };
     }
 }
 
@@ -106,6 +109,12 @@ impl Out {
             if text.eq_str(self.md.text(m), s) { return m as% u32; }
         }
         return modules.NONE;
+    }
+
+    // The decl of module m's scope named s (NONE).
+    pub fn item(&self, m: u32, s: &str) -> u32 {
+        let (d, _) = self.ds.entry(m, self.sym(s));
+        return d;
     }
 
     // The byte offset of the k-th occurrence (0 first) of `pat` in file f.
