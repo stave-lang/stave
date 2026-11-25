@@ -34,6 +34,7 @@ import ir.types;
 import prims.col;
 import prims.ragged;
 import prims.search;
+import prims.sort;
 import std.idx;
 import std.mem;
 import std.vec;
@@ -251,6 +252,7 @@ pub fn scalar_ty(tab: &mut types.Table, s: u32) -> u32 {
 
 // Diagnostic codes signature building raises (code numbers).
 pub const D_E0201: u16 = 201;
+pub const D_E0203: u16 = 203;
 pub const D_E0410: u16 = 410;
 pub const D_E0413: u16 = 413;
 pub const D_E0514: u16 = 514;
@@ -272,6 +274,7 @@ pub const W_RUNTIME: u32 = 5;
 // The diagnostics of signature building, as rows: the code, the item, the first and last global
 // token of the primary span, and by code:
 // - E0201 (case `const-param-type`): a = the const generic param's row, `ty` its type;
+// - E0203: the span is a const generic argument's int literal, `ty` its param's type;
 // - E0413: b = the const or static, `ty` its type;
 // - E0410: a = the field's name token (NONE: a tuple payload element, `_`), b = the struct or
 //   enum, `ty` its type;
@@ -427,11 +430,16 @@ pub struct Lw {
     tmp: vec.Vec<u32>,
     // per string S naming a built-in scalar, vector, or mask type: its type (NONE: not yet)
     prim: vec.Vec<u32>,
+    // E0203 met while lowering: a const generic argument's int literal (item, token) its
+    // param's type cannot hold (the type)
+    ev_it: vec.Vec<u32>,
+    ev_tok: vec.Vec<u32>,
+    ev_ty: vec.Vec<u32>,
 }
 
 impl Lw {
     pub fn new() -> Lw {
-        return Lw.{ op: vec.Vec::<u8>.new(), row: vec.Vec::<u32>.new(), fx: vec.Vec::<u32>.new(), fy: vec.Vec::<u32>.new(), vals: vec.Vec::<u32>.new(), gas: vec.Vec::<u32>.new(), tmp: vec.Vec::<u32>.new(), prim: vec.Vec::<u32>.new() };
+        return Lw.{ op: vec.Vec::<u8>.new(), row: vec.Vec::<u32>.new(), fx: vec.Vec::<u32>.new(), fy: vec.Vec::<u32>.new(), vals: vec.Vec::<u32>.new(), gas: vec.Vec::<u32>.new(), tmp: vec.Vec::<u32>.new(), prim: vec.Vec::<u32>.new(), ev_it: vec.Vec::<u32>.new(), ev_tok: vec.Vec::<u32>.new(), ev_ty: vec.Vec::<u32>.new() };
     }
 
     fn frame(&mut self, op: u8, row: usize, x: u32, y: u32) {
@@ -773,6 +781,9 @@ fn visit_garg(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens
             let bits = cx.tab.int_bits(cty);
             let hi: u64 = if bits == 0 || bits == 64 then (if cx.tab.is_signed(cty) then 0x7fff_ffff_ffff_ffffu64 else 0xffff_ffff_ffff_ffffu64) else if cx.tab.is_signed(cty) then (1u64 << (bits - 1) as u64) - 1 else (1u64 << bits as u64) - 1;
             if big || v > hi {
+                lw.ev_it.push(it);
+                lw.ev_tok.push(a);
+                lw.ev_ty.push(cty);
                 lw.garg(types.GA_ERROR, 0, 0);
                 return;
             }
@@ -1819,6 +1830,16 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
     }
     // 7. names in fn types and dispatch arms, `from` clauses of closure params
     syntactic(&mut sg, tree, t, nm, cut);
+    // E0203 once per literal the signatures lowered (a written type may be lowered twice)
+    let perm = sort.sort_perm(lw.ev_tok.as_slice());
+    let mut last = NONE;
+    for j in 0..perm.len() {
+        let x = perm.as_slice()[j] as usize;
+        let a = lw.ev_tok.as_slice()[x];
+        if a == last { continue; }
+        last = a;
+        sg.rows.add(D_E0203, lw.ev_it.as_slice()[x], a, a, NONE, NONE, lw.ev_ty.as_slice()[x], consteval.no_scope());
+    }
     return sg;
 }
 

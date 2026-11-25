@@ -173,7 +173,9 @@ impl Builtins {
         if (k == F_FENCE) != (ty == NONE) { return types.ERR; }
         if (k == F_SIZE_OF || k == F_ALIGN_OF || k == F_NEEDS_DROP) && !has_params(tab, ty) {
             let tag = tab.tag_of(ty);
-            let laid = tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_REF || tag == types.TK_PTR;
+            // `needs_drop` of a struct, enum, array, or tuple is a `bool` whatever its layout
+            let sized = k == F_NEEDS_DROP && (tag == types.TK_ADT || tag == types.TK_ARRAY || tag == types.TK_TUPLE);
+            let laid = sized || tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_REF || tag == types.TK_PTR;
             if !laid { return UNK; }
         }
         let us = tab.usize_t();

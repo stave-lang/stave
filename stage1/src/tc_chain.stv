@@ -181,6 +181,15 @@ impl tc_rows.Typeck {
         }
         let ft = self.bt.fn_type(&mut sg.cx.tab, s, ty);
         if ft == ERR {
+            // no turbofish where one is needed: E0202 case `infer` at the chain; a turbofish on
+            // `fence_stream`: E0201 case `type-args` at it
+            if ty == NONE {
+                self.report(202, tc_rows.C_INFER, r as% u32, NONE, NONE, NONE);
+            } else {
+                let lo = tree.tok.as_slice()[ga as usize];
+                let hi = tree.tok_end.as_slice()[ga as usize] - 1;
+                self.report_span(201, tc_rows.C_TYPE_ARGS, lo, hi, NONE, 0, 1, NONE);
+            }
             let e = self.err();
             self.set_chain(r, S_ERR, e);
         } else if ft == UNK {
@@ -254,15 +263,38 @@ impl tc_rows.Typeck {
             return;
         }
         if dk == decls.DK_TRAIT {
-            if ga == NONE { self.set_chain(r, S_TRAIT, target); }
+            // `Tr::<A>`: the written type arguments, a row of `binds` kept in `blo` (NONE: none)
+            let mut row = NONE;
+            if ga != NONE {
+                if has_const_param(sg, target) { return; }
+                let mut out = vec.Vec::<u32>.new();
+                if !sigs.lower_gargs(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, ga, target, self.sc, &mut out) { return; }
+                row = self.binds.len() as% u32;
+                for i in 0..out.len() / 3 {
+                    if out.as_slice()[3 * i] != types.GA_TYPE || out.as_slice()[3 * i + 1] == ERR { return; }
+                    self.binds.push(out.as_slice()[3 * i + 1]);
+                }
+            }
+            self.set_chain(r, S_TRAIT, target);
+            self.blo.as_mut_slice()[r] = row;
             return;
         }
         if dk == decls.DK_TRAIT_METHOD {
-            // `Tr.m`: the trait's arguments and `Self` are inferred from the call
+            // `Tr.m`: the trait's arguments (unless written on the trait) and `Self` are inferred
+            // from the call
             if ga != NONE || prev != S_TRAIT || has_const_param(sg, pv) || has_const_param(sg, target) { return; }
             let b = self.binds.len();
             for _ in 0..self.call_n(sg, ds, target) + 1 {
                 self.binds.push(NONE);
+            }
+            // the trait's params come first in the row
+            if pt != NONE {
+                let gl = sg.cx.gens.lo.as_slice();
+                let ntr = (gl[pv as usize + 1] - gl[pv as usize]) as usize;
+                for i in 0..ntr {
+                    let a = self.binds.as_slice()[pt as usize + i];
+                    self.binds.as_mut_slice()[b + i] = a;
+                }
             }
             self.set_chain(r, S_TCALL, target);
             self.blo.as_mut_slice()[r] = b as% u32;

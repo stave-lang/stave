@@ -96,6 +96,11 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
         if code == 201 && case == tc_rows.C_NOT_IN_LOOP {
             d.begin(201, "not-in-loop");
             d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+        } else if code == 201 && case == tc_rows.C_TYPE_ARGS {
+            d.begin(201, "type-args");
+            d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            num_arg(d, &mut buf, "count", g.a.as_slice()[k]);
+            num_arg(d, &mut buf, "given", g.b.as_slice()[k]);
         } else if code == 201 && case == tc_rows.C_ARITY {
             d.begin(201, "arity");
             let (_, s0, z0) = tok_range(lx, set, t, g.x.as_slice()[k], lo - 1);
