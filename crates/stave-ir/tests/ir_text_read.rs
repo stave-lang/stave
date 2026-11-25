@@ -1266,6 +1266,29 @@ b0(%0: t2):
     assert!(es[0].msg.contains("access without a bounds check or proof"), "{}", es[0].msg);
 }
 
+/// Level `opt` is trusted as the release passes' output: loading it runs no audit. The same
+/// body is refused at the levels below.
+#[test]
+fn level_opt_loads_without_the_audit() {
+    let body = "type t0 int s 32
+type t1 slice t0
+type t2 ref t1
+type t3 ref t0
+fn @0 a(t2) -> t0 {
+b0(%0: t2):
+  %1 = addr.elem t3 %0 5
+  %2 = load t0 %1
+  ret %2
+}
+";
+    let head = |level: &str| format!("stave.ir 4 \"x86_64-linux-v2\" release {level}\n{body}");
+    assert_eq!(load(&head("opt")).header.level, Level::Opt);
+    for level in ["checked", "lowered"] {
+        let es = rejects(&head(level), "t.ir:8: verify: ");
+        assert_eq!(es[0].kind, ErrorKind::Audit, "{level}");
+    }
+}
+
 #[test]
 fn one_error_per_bad_line_at_most_one_hundred() {
     let mut src = String::from(HEAD);

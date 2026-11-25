@@ -2,8 +2,8 @@
 //! runs, as glue over [`stave_ir::text::read`], [`build`] and [`interp`].
 //!
 //! - [`load`]: contracts/checked-ir.md "Loading": the reader (lines, structure, verification,
-//!   audit), then the canonical numbering ([`build::canonical_moving`]); at level `lowered` the
-//!   removal of proven checks (step 4) and the verifier by the build's own
+//!   the audit below level `opt`), then the canonical numbering ([`build::canonical_moving`]);
+//!   at level `lowered` the removal of proven checks (step 4) and the verifier by the build's own
 //!   [`build::checked_module`], at the other levels the verifier ([`build::verified_final`]).
 //! - [`fmt`], [`opt`]: the canonical text of the loaded module, or of the release passes' output.
 //! - [`build`]: the image, as `stave build` makes it from the same module.
@@ -147,7 +147,7 @@ pub fn opt(l: &LoadedIr) -> Result<String, IrError> {
 }
 
 /// `build`: the image for the header's target, as `stave build` makes it: a `release` file at
-/// level `opt` skips the release passes (the loader verified and audited it). The stack table
+/// level `opt` skips the release passes (the loader verified it). The stack table
 /// comes from the stack section, empty without one.
 pub fn build(l: &LoadedIr, threads: Option<usize>) -> Result<Built, IrError> {
     if l.module.main.is_none() {

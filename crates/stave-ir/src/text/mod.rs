@@ -9,8 +9,9 @@
 //! - [`line`]: one line parsed on the generated LL(1) table and typed; no line looks at another,
 //!   so lines can be parsed in parallel.
 //! - [`build`]: the structure pass over the parsed lines and the module build.
-//! - [`read`]: lines, structure, then verification (type table, statics, every fn) and the
-//!   bounds audit. A module that fails any step is never returned.
+//! - [`read`]: lines, structure, then verification (type table, statics, every fn) and, at
+//!   levels `lowered` and `checked`, the bounds audit. A module that fails any step is never
+//!   returned.
 
 mod build;
 mod lex;
@@ -213,7 +214,8 @@ impl fmt::Display for ReadError {
 }
 
 /// Reads IR text: every step of contracts/checked-ir.md "Loading" the reader owns (lines,
-/// structure, verification, audit), each only when the one before had no error.
+/// structure, verification, the audit at levels `lowered` and `checked`), each only when the one
+/// before had no error.
 pub fn read(src: &[u8]) -> Result<Loaded, Vec<ReadError>> {
     let mut errs = Vec::new();
     let mut lines = Vec::new();
@@ -236,7 +238,11 @@ pub fn read(src: &[u8]) -> Result<Loaded, Vec<ReadError>> {
     let built = build::structure(lines)?;
     let loaded = lay_out_statics(built)?;
     verify(&loaded)?;
-    audit(&loaded)?;
+    // The release passes inline calls and substitute arguments for params, and the audit takes
+    // its facts from calls and params: level `opt` is trusted as their output, not audited.
+    if loaded.header.level != Level::Opt {
+        audit(&loaded)?;
+    }
     Ok(loaded)
 }
 
@@ -325,8 +331,8 @@ fn verify(l: &Loaded) -> Result<(), Vec<ReadError>> {
     if errs.is_empty() { Ok(()) } else { Err(errs.iter().map(|e| locate(l, e)).take(MAX_ERRORS).collect()) }
 }
 
-/// Step 5: the bounds audit of every fn, reading calls by the loaded `claim` rows (levels
-/// `checked` and `opt`) or by the summaries computed from the bodies (`lowered`).
+/// Step 5: the bounds audit of every fn, reading calls by the loaded `claim` rows (level
+/// `checked`) or by the summaries computed from the bodies (`lowered`).
 fn audit(l: &Loaded) -> Result<(), Vec<ReadError>> {
     let m = &l.module;
     let mut errs = Vec::new();

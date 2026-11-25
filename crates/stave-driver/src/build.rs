@@ -424,7 +424,7 @@ pub fn codegen_link(
 }
 
 /// [`codegen_link`] of a release build whose module is already the output of the release passes
-/// (level `opt`, verified and audited): the passes do not run again.
+/// (level `opt`, verified): the passes do not run again.
 pub fn codegen_link_optimized(
     m: &Module,
     triple: Triple,
@@ -500,7 +500,8 @@ pub fn release_passes(m: &Module) -> Result<Module, Failure> {
     }
     prof::mark("opt-canonical");
     // The optimizer's output is checked like the lowering's: it must be valid IR in which every
-    // element access still has its check or a proof.
+    // element access still has its check or a proof. The audit is stage0's self-check of its
+    // base passes; level `opt` itself does not require it, and loading `opt` text skips it.
     verified(&c, Stage::Opt)?;
     prof::mark("opt-verify");
     audited(&c, Stage::Opt)?;
