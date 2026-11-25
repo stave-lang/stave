@@ -24,10 +24,11 @@ b2():
   %12 = add.wrap t1 %5 %6
   %13 = cast.wrap t0 %12
   %14 = add.wrap t0 %11 %13
-  %15 = load t0 %7
-  %16 = add.wrap t0 %14 %15
-  %17 = add.wrap t1 %2 1
-  br b1(%17, %16)
+  %15 = addr.elem t3 %7 %2
+  %16 = load t0 %15
+  %17 = add.wrap t0 %14 %16
+  %18 = add.wrap t1 %2 1
+  br b1(%18, %17)
 b3():
   ret %3
 }
