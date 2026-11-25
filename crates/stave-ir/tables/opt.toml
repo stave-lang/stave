@@ -1,6 +1,8 @@
 # The release optimizer's tunables and op attributes (contracts/opt-passes.md): the one table
 # both compilers read. `tools/gen-tables` checks it and writes stave-ir's form
-# (`crates/stave-ir/src/generated/opt_table.rs`, included by `opt_table.rs`).
+# (`crates/stave-ir/src/generated/opt_table.rs`, included by `opt_table.rs`) and stage1's
+# (`stage1/ir/src/generated/opt_table.stv`). The known items it inlines are the `inline` column
+# of `known.toml`.
 #
 # The numbers in [limits], [term] and the `weight` column are starting values: a measured sweep
 # may change them, and every change re-blesses the optimizer goldens. The `removable` and `fold`
@@ -15,10 +17,6 @@
 #   rounds       ROUNDS: how many times decision, expansion and clean-up run
 #
 # [term]: the weight of each terminator.
-#
-# [known] inline: the compiler-known items (stave-ir `Known` variants) that are inlined like
-# ordinary fns; every other known item is never inlined. An item with an ABI signature may not
-# be listed.
 #
 # [[op]]: one row per op name; a name ending in `*` stands for every op name with that prefix
 # that no other row names. Every op of stave-ir `Op` matches exactly one row.
@@ -44,9 +42,6 @@ cbr = 1
 switch = 2
 ret = 0
 unreachable = 0
-
-[known]
-inline = ["SetUserSite"]
 
 [[op]]
 name = "add"

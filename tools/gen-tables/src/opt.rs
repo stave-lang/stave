@@ -1,14 +1,14 @@
 //! The release optimizer's table (`crates/stave-ir/tables/opt.toml`, contracts/opt-passes.md
-//! "Constants"): its limits, terminator weights, op rows, and the known items it inlines.
-//! stave-ir's form is `crates/stave-ir/src/generated/opt_table.rs` (included by `opt_table.rs`).
-//! stage1's form ([`emit_stave`]) belongs to the `stage1/ir` package and is written once that
-//! package exists ([`STAVE_OUT`]).
+//! "Constants"): its limits, terminator weights, and op rows. stave-ir's form is
+//! `crates/stave-ir/src/generated/opt_table.rs` (included by `opt_table.rs`), stage1's is
+//! `stage1/ir/src/generated/opt_table.stv`. The known items it inlines are the `inline` column of
+//! the known-item table ([`crate::known`]).
 //!
 //! Checks: every limit is set and `rounds` is at least 1; the five terminators have a weight;
 //! op names are unique and well formed; a family name (`prefix*`) is the prefix of no other row;
-//! `removable` and `fold` take their listed values; the inlined known items are unique variant
-//! names; `call_saved` is at most the weight of `call` and `br` weighs what `ret` weighs, so the
-//! closed sizes of the inlining decision stay non-negative and exact.
+//! `removable` and `fold` take their listed values; `call_saved` is at most the weight of `call`
+//! and `br` weighs what `ret` weighs, so the closed sizes of the inlining decision stay
+//! non-negative and exact.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -36,7 +36,6 @@ pub const FOLD: [(&str, &str); 3] = [("no", "No"), ("int", "Int"), ("cond", "Con
 struct RawTable {
     limits: Limits,
     term: Terms,
-    known: KnownRows,
     op: Vec<RawOp>,
 }
 
@@ -63,12 +62,6 @@ struct Terms {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KnownRows {
-    inline: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawOp {
     name: String,
     weight: u32,
@@ -91,7 +84,6 @@ pub struct Table {
     pub limits: Limits,
     /// Weights in [`TERMS`] order.
     pub term: [u32; 5],
-    pub known_inline: Vec<String>,
     pub ops: Vec<OpRow>,
 }
 
@@ -111,17 +103,6 @@ pub fn parse(text: &str) -> Result<Table, String> {
     }
     let t = &raw.term;
     let term = [t.br, t.cbr, t.switch, t.ret, t.unreachable];
-    let mut known = BTreeSet::new();
-    for k in &raw.known.inline {
-        let ok =
-            k.starts_with(|c: char| c.is_ascii_uppercase()) && k.bytes().all(|c| c.is_ascii_alphanumeric());
-        if !ok {
-            return Err(format!("{TABLE}: known.inline: `{k}` is not a `Known` variant name"));
-        }
-        if !known.insert(k.as_str()) {
-            return Err(format!("{TABLE}: known.inline: `{k}` listed twice"));
-        }
-    }
     let mut ops = Vec::new();
     let mut names = BTreeSet::new();
     for r in &raw.op {
@@ -157,15 +138,15 @@ pub fn parse(text: &str) -> Result<Table, String> {
     if t.br != t.ret {
         return Err(format!("{TABLE}: term.br ({}) must equal term.ret ({})", t.br, t.ret));
     }
-    Ok(Table { limits: raw.limits, term, known_inline: raw.known.inline, ops })
+    Ok(Table { limits: raw.limits, term, ops })
 }
 
 /// stave-ir's form: constants and rows over the types of `opt_table.rs`.
 pub fn emit_rust(t: &Table) -> String {
     let l = &t.limits;
     let mut o = format!("// {HEADER}\n");
-    o += "// The release optimizer's limits, terminator weights, op rows, and inlined known items\n";
-    o += "// (`opt_table.rs` includes this file; contracts/opt-passes.md \"Constants\").\n\n";
+    o += "// The release optimizer's limits, terminator weights, and op rows (`opt_table.rs` includes\n";
+    o += "// this file; contracts/opt-passes.md \"Constants\").\n\n";
     let _ = writeln!(o, "pub const THRESHOLD: u32 = {};", l.threshold);
     let _ = writeln!(o, "pub const CAP: u32 = {};", l.cap);
     let _ = writeln!(o, "pub const CALL_SAVED: u32 = {};", l.call_saved);
@@ -184,24 +165,21 @@ pub fn emit_rust(t: &Table) -> String {
             r.name, r.weight, REMOVABLE[r.removable].1, FOLD[r.fold].1
         );
     }
-    let _ = write!(o, "];\n\npub const KNOWN_INLINE: [Known; {}] = [", t.known_inline.len());
-    o += &t.known_inline.iter().map(|k| format!("Known::{k}")).collect::<Vec<_>>().join(", ");
     o += "];\n";
     o
 }
 
 /// stage1's form, for `stage1/ir/src/generated/opt_table.stv`: the limits and terminator weights
 /// as constants, the op rows as parallel arrays (names packed as bytes with offsets, `removable`
-/// and `fold` as codes), and the inlined known items as their rows of `known_items.stv`, found by
-/// variant in `known_variants` (the `Known` order).
-pub fn emit_stave(t: &Table, known_variants: &[&str]) -> Result<String, String> {
+/// and `fold` as codes).
+pub fn emit_stave(t: &Table) -> String {
     let l = &t.limits;
     let mut o = format!("// {HEADER}\n");
-    o += "// The release optimizer's limits, terminator weights, op rows, and inlined known items\n";
-    o += "// (contracts/opt-passes.md \"Constants\"). Op row i: name OPT_OP_NAME[OPT_OP_NAME_OFF[i]..\n";
-    o += "// OPT_OP_NAME_OFF[i + 1]] (a name ending in `*` stands for every op with that prefix that no\n";
-    o += "// other row names), OPT_OP_WEIGHT[i], OPT_OP_REMOVABLE[i] (`REMOVABLE_*`), OPT_OP_FOLD[i]\n";
-    o += "// (`FOLD_*`). OPT_KNOWN_INLINE: rows of KNOWN_PATH (known_items.stv).\n\n";
+    o += "// The release optimizer's limits, terminator weights, and op rows (contracts/opt-passes.md\n";
+    o += "// \"Constants\"; the inlined known items are KNOWN_INLINE of known_items.stv). Op row i: name\n";
+    o += "// OPT_OP_NAME[OPT_OP_NAME_OFF[i]..OPT_OP_NAME_OFF[i + 1]] (a name ending in `*` stands for\n";
+    o += "// every op with that prefix that no other row names), OPT_OP_WEIGHT[i], OPT_OP_REMOVABLE[i]\n";
+    o += "// (`REMOVABLE_*`), OPT_OP_FOLD[i] (`FOLD_*`).\n\n";
     let _ = writeln!(o, "pub const OPT_THRESHOLD: u32 = {};", l.threshold);
     let _ = writeln!(o, "pub const OPT_CAP: u32 = {};", l.cap);
     let _ = writeln!(o, "pub const OPT_CALL_SAVED: u32 = {};", l.call_saved);
@@ -233,16 +211,7 @@ pub fn emit_stave(t: &Table, known_variants: &[&str]) -> Result<String, String> 
     let codes = |f: fn(&OpRow) -> usize| t.ops.iter().map(|r| f(r).to_string()).collect::<Vec<_>>();
     array(&mut o, "OPT_OP_REMOVABLE", "u8", &codes(|r| r.removable));
     array(&mut o, "OPT_OP_FOLD", "u8", &codes(|r| r.fold));
-    let mut rows = Vec::new();
-    for k in &t.known_inline {
-        let i = known_variants
-            .iter()
-            .position(|v| *v == k.as_str())
-            .ok_or_else(|| format!("{TABLE}: known.inline: `{k}` is not a known item"))?;
-        rows.push(i as u32);
-    }
-    array(&mut o, "OPT_KNOWN_INLINE", "u32", &s(&rows));
-    Ok(o)
+    o
 }
 
 fn array(o: &mut String, name: &str, ty: &str, xs: &[String]) {
@@ -262,10 +231,10 @@ fn array(o: &mut String, name: &str, ty: &str, xs: &[String]) {
     *o += "];\n";
 }
 
-/// The generated files of the table: stave-ir's only, until `stage1/ir` exists.
+/// The two generated files of the table.
 pub fn generate(text: &str) -> Result<Vec<(&'static str, String)>, String> {
     let t = parse(text)?;
-    Ok(vec![(RUST_OUT, emit_rust(&t))])
+    Ok(vec![(RUST_OUT, emit_rust(&t)), (STAVE_OUT, emit_stave(&t))])
 }
 
 #[cfg(test)]
@@ -287,9 +256,6 @@ cbr = 1
 switch = 2
 ret = 0
 unreachable = 0
-
-[known]
-inline = ["SetUserSite"]
 
 [[op]]
 name = "add"
@@ -322,18 +288,17 @@ fold = "no"
             ),
             "{rs}"
         );
-        assert!(rs.ends_with("pub const KNOWN_INLINE: [Known; 1] = [Known::SetUserSite];\n"), "{rs}");
+        assert!(!rs.contains("Known"), "{rs}");
     }
 
     #[test]
     fn stave_form() {
         let t = parse(SMALL).unwrap();
-        let stv = emit_stave(&t, &["Option", "SetUserSite"]).unwrap();
+        let stv = emit_stave(&t);
         assert!(stv.contains("pub const OPT_OP_NAME_OFF: [u32; 4] = [\n    0, 3, 14, 18,\n];\n"), "{stv}");
         assert!(stv.contains("pub const OPT_OP_FOLD: [u8; 3] = [\n    1, 0, 0,\n];\n"), "{stv}");
         assert!(stv.contains("pub const REMOVABLE_CONST_INDEX: u8 = 3;\n"), "{stv}");
-        assert!(stv.ends_with("pub const OPT_KNOWN_INLINE: [u32; 1] = [\n    1,\n];\n"), "{stv}");
-        assert!(emit_stave(&t, &["Option"]).unwrap_err().contains("not a known item"));
+        assert!(stv.ends_with("pub const OPT_OP_FOLD: [u8; 3] = [\n    1, 0, 0,\n];\n"), "{stv}");
     }
 
     #[test]
@@ -344,8 +309,7 @@ fold = "no"
         assert!(bad("fold = \"int\"", "fold = \"float\"").contains("fold `float`"));
         assert!(bad("name = \"add\"", "name = \"intrinsic.x\"").contains("family `intrinsic.*`"));
         assert!(bad("name = \"add\"", "name = \"Add\"").contains("malformed"));
-        assert!(bad("[\"SetUserSite\"]", "[\"SetUserSite\", \"SetUserSite\"]").contains("twice"));
-        assert!(bad("[\"SetUserSite\"]", "[\"set_user_site\"]").contains("variant"));
+        assert!(bad("[term]", "[known]\ninline = [\"SetUserSite\"]\n\n[term]").contains("known"));
         assert!(bad("unreachable = 0\n", "").contains("unreachable"));
         assert!(bad("call_saved = 3", "call_saved = 4").contains("exceeds the weight of `call`"));
         assert!(bad("ret = 0", "ret = 1").contains("must equal term.ret"));

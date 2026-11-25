@@ -108,6 +108,11 @@ const REPORTS: [Known; 6] = [
     Known::EnsuresFailed,
 ];
 
+// The items the release optimizer inlines like ordinary fns.
+const INLINED: [Known; 1] = [
+    Known::SetUserSite,
+];
+
 // The signature of an item the stages call with an argument list of their own.
 fn abi_table(k: Known) -> Option<(&'static [ITy], ITy)> {
     match k {

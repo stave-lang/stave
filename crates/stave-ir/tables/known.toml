@@ -7,7 +7,9 @@
 # `method` for a method of the item `name`. `report = true`: a panic report entry (it runs on the
 # alternate signal stack). `params` and `ret`: the signature of an item the stages call with an
 # argument list of their own (absent: none), each a type of `usize isize u32 u64 unit u32x4
-# mut_ptr_u8 const_ptr_u8 const_ptr_usize`.
+# mut_ptr_u8 const_ptr_u8 const_ptr_usize`. `inline = true`: the release optimizer inlines the
+# item like an ordinary fn (contracts/opt-passes.md rule F8); it never inlines any other known
+# item. An item with `ret` or `report` is never `inline`.
 
 [[item]]
 variant = "Option"
@@ -349,6 +351,7 @@ report = true
 variant = "SetUserSite"
 module = "runtime.panic"
 name = "set_user_site"
+inline = true
 
 [[item]]
 variant = "TestInput"

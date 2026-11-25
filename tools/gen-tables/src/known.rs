@@ -1,7 +1,7 @@
 //! The compiler-known items (`crates/stave-ir/tables/known.toml`): stave-ir's `Known` table
 //! (`crates/stave-ir/src/generated/known_items.rs`, included by `known.rs`) and stage1's
 //! (`stage1/ir/src/generated/known_items.stv`), so both compilers read one list of paths, panic
-//! report entries, and ABI signatures.
+//! report entries, ABI signatures, and the items the release optimizer inlines.
 
 use std::fmt::Write;
 
@@ -44,6 +44,8 @@ pub struct Item {
     pub params: Option<Vec<String>>,
     #[serde(default)]
     pub ret: Option<String>,
+    #[serde(default)]
+    pub inline: bool,
 }
 
 impl Item {
@@ -60,7 +62,8 @@ fn ity(name: &str) -> Result<usize, String> {
 }
 
 /// Parses and checks the table: unique variants and paths, Rust-identifier variants, known ABI
-/// types, `params` only with `ret`.
+/// types, `params` only with `ret`, `inline` on no item with `ret` or `report` (the optimizer
+/// inlines only items that IR calls alone reach and that run on the caller's stack).
 pub fn parse(text: &str) -> Result<Vec<Item>, String> {
     let t: RawTable = toml::from_str(text).map_err(|e| format!("{TABLE}: {e}"))?;
     let mut seen_v = std::collections::BTreeSet::new();
@@ -81,6 +84,9 @@ pub fn parse(text: &str) -> Result<Vec<Item>, String> {
         }
         if it.params.is_some() && it.ret.is_none() {
             return Err(format!("{TABLE}: `{v}` has `params` without `ret`"));
+        }
+        if it.inline && (it.ret.is_some() || it.report) {
+            return Err(format!("{TABLE}: `{v}` is `inline` but has `ret` or `report`"));
         }
         for p in it.params.iter().flatten() {
             ity(p)?;
@@ -109,6 +115,12 @@ pub fn emit_rust(items: &[Item]) -> Result<String, String> {
     let reports: Vec<&Item> = items.iter().filter(|i| i.report).collect();
     let _ = writeln!(o, "const REPORTS: [Known; {}] = [", reports.len());
     for it in &reports {
+        let _ = writeln!(o, "    Known::{},", it.variant);
+    }
+    o += "];\n\n// The items the release optimizer inlines like ordinary fns.\n";
+    let inlined: Vec<&Item> = items.iter().filter(|i| i.inline).collect();
+    let _ = writeln!(o, "const INLINED: [Known; {}] = [", inlined.len());
+    for it in &inlined {
         let _ = writeln!(o, "    Known::{},", it.variant);
     }
     o += "];\n\n// The signature of an item the stages call with an argument list of their own.\n";
@@ -165,6 +177,7 @@ pub fn emit_stave(items: &[Item]) -> Result<String, String> {
     let mut o = format!("// {HEADER}\n");
     o += "// The compiler-known items by row, in stave-ir `Known` order. The path of item i (UTF-8) is\n";
     o += "// KNOWN_PATH[KNOWN_PATH_OFF[i]..KNOWN_PATH_OFF[i + 1]]; KNOWN_REPORT: a panic report entry;\n";
+    o += "// KNOWN_INLINE: the release optimizer inlines it like an ordinary fn;\n";
     o += "// KNOWN_ABI_RET: the ABI result type (`ITY_NONE`: no ABI signature), its params\n";
     o += "// KNOWN_ABI_PARAM[KNOWN_ABI_OFF[i]..KNOWN_ABI_OFF[i + 1]].\n\n";
     let _ = writeln!(o, "pub const KNOWN_N: usize = {};", items.len());
@@ -203,6 +216,7 @@ pub fn emit_stave(items: &[Item]) -> Result<String, String> {
     array(&mut o, "KNOWN_PATH_OFF", "u32", &s(&off));
     array(&mut o, "KNOWN_PATH", "u8", &bytes.iter().map(u8::to_string).collect::<Vec<_>>());
     array(&mut o, "KNOWN_REPORT", "bool", &items.iter().map(|i| i.report.to_string()).collect::<Vec<_>>());
+    array(&mut o, "KNOWN_INLINE", "bool", &items.iter().map(|i| i.inline.to_string()).collect::<Vec<_>>());
     array(&mut o, "KNOWN_ABI_RET", "u8", &rets);
     array(&mut o, "KNOWN_ABI_OFF", "u32", &s(&aoff));
     array(&mut o, "KNOWN_ABI_PARAM", "u8", &params);
@@ -229,4 +243,35 @@ pub fn emit_stave(items: &[Item]) -> Result<String, String> {
 pub fn generate(text: &str) -> Result<Vec<(&'static str, String)>, String> {
     let items = parse(text)?;
     Ok(vec![(RUST_OUT, emit_rust(&items)?), (STAVE_OUT, emit_stave(&items)?)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SMALL: &str = r#"
+[[item]]
+variant = "Trap"
+module = "runtime.panic"
+name = "trap"
+report = true
+
+[[item]]
+variant = "SetUserSite"
+module = "runtime.panic"
+name = "set_user_site"
+inline = true
+"#;
+
+    #[test]
+    fn the_inline_column() {
+        let items = parse(SMALL).unwrap();
+        let rs = emit_rust(&items).unwrap();
+        assert!(rs.contains("const INLINED: [Known; 1] = [\n    Known::SetUserSite,\n];\n"), "{rs}");
+        let stv = emit_stave(&items).unwrap();
+        assert!(stv.contains("pub const KNOWN_INLINE: [bool; 2] = [\n    false, true,\n];\n"), "{stv}");
+        let bad = |from: &str, to: &str| parse(&SMALL.replacen(from, to, 1)).err().unwrap();
+        assert!(bad("report = true", "report = true\ninline = true").contains("is `inline`"));
+        assert!(bad("inline = true", "inline = true\nret = \"unit\"").contains("is `inline`"));
+    }
 }

@@ -7,8 +7,8 @@ The full pipeline is stage1's (`stage1 ir opt`, [cli-stage1.md](cli-stage1.md));
 implements the base passes only (rule P3), for `stave build --release` and `stave ir opt`.
 
 Every number below that is not a rule of the IR comes from the table
-`crates/stave-ir/tables/opt.toml` ("Constants"); `tools/gen-tables` generates it into both
-compilers.
+`crates/stave-ir/tables/opt.toml` ("Constants"), the inlined known items from the `inline` column
+of `crates/stave-ir/tables/known.toml`; `tools/gen-tables` generates both into both compilers.
 
 ## 0. Terms and kinds
 
@@ -67,7 +67,7 @@ and the output never hold one; only the module after `X` (`--dump-phase=inline`)
 
 ## 2. Constants
 
-**K1.** The table `crates/stave-ir/tables/opt.toml`:
+**K1.** The table `crates/stave-ir/tables/opt.toml`, and one column of `known.toml`:
 
 | Name | Table key | Value | Meaning |
 |---|---|---|---|
@@ -79,7 +79,7 @@ and the output never hold one; only the module after `X` (`--dump-phase=inline`)
 | `ROUNDS` | `limits.rounds` | 1 | rounds of rule P1 (`stage1 ir opt --limit NAME=N` overrides a limit for one run) |
 | `w(term)` | `term.*` | `cbr` 1, `switch` 2, `br` `ret` `unreachable` 0 | terminator weights |
 | `w(op)`, `removable`, `fold` | `[[op]]` | per op | instruction weight; rules C2, C6, B5 |
-| inlined known items | `known.inline` | `SetUserSite` (`runtime.panic.set_user_site`) | rule F8 |
+| inlined known items | `inline` column of `known.toml` | `SetUserSite` (`runtime.panic.set_user_site`) | rule F8 |
 
 Op weights: `slot` 0; `call`, `call.ind` 3; `intrinsic.*` 2; every other op 1. The weights,
 `T`, `CAP`, and the slot limits are tunable data: changing them changes no rule, within K3.
@@ -129,15 +129,15 @@ Fns without a body have level 0. [F: longest path in a finite DAG, a least fixpo
 2. **`noret`**: no block of `g` ends in `ret`.
 3. **`cyclic`**: `cyc(g)`.
 4. **`symbol`**: `g` has a `symbol`.
-5. **`known`**: `g` has the `known` mark and its known item is not one of `known.inline`
-   (an item with an ABI signature, or a panic report entry, is never listed).
+5. **`known`**: `g` has the `known` mark and its known item is not marked `inline` (K1; an
+   item with an ABI signature, or a panic report entry, is never marked).
 6. **`indirect`**: `g`'s body holds a `call.ind` whose operand 0 is a value.
 7. **`gpu`**: `g`'s body holds a `gpu.*` op or an `intrinsic.<name>` of arch `ptx`. No body
    holds either today (the verifier refuses a `ptx` intrinsic on a CPU target, and no `gpu.*` op
    exists); the test becomes reachable when `gpu.*` ops or a PTX target reach the IR.
 
 A callee with the `altstack` mark needs no test of its own: the verifier allows the mark only on
-a panic report entry, which `known.inline` never lists, so it fails `noret` or `known`. An
+a panic report entry, which is never marked `inline`, so it fails `noret` or `known`. An
 `unbuilt` callee has no body (`nobody`) or a trap for a body (`noret`). [N: pointwise.]
 
 **F9. Caller tests** of a row `(f, b, k, g)`, in this order:
