@@ -16,6 +16,10 @@
 # only by the bounds audit, a step stage1 does not have), refused in lines or structure (an
 # `error:` line), or refused by the verifier (a `verify:` line).
 #
+# Optimizer goldens: `stage1 ir opt --dump=inline` on every tests/opt case with an `inline.txt`,
+# under the case's `limits` (each line one `--limit`), on its input and on the input's
+# `stage1 ir fmt` text: both equal `inline.txt` byte for byte.
+#
 # Corpus: the roots of the stage1 gate (every package and other `.stv` file below
 # tests/conformance), the bench programs, and the stage1 package itself (the largest text: its
 # read + print time is printed against stage0's `stave ir fmt`).
@@ -68,6 +72,43 @@ if [ "$PROFILE" = release ]; then cargo build -q --locked --release -p stave-cli
 mkdir -p "$OUT"
 "$S0" build "$ROOT/stage1" -o "$S1" >"$OUT/build.log" 2>&1 || { cat "$OUT/build.log"; exit 1; }
 
+fail=0
+ocases=0
+osame=0
+orounds=0
+for c in "$ROOT"/tests/opt/*/; do
+  [ -f "$c/inline.txt" ] || continue
+  ocases=$((ocases + 1))
+  lims=""
+  if [ -f "$c/limits" ]; then lims=$(sed 's/^/--limit /' "$c/limits" | tr '\n' ' '); fi
+  o="$OUT/opt-$(basename "$c")"
+  # Only round 1 is built: a case with `rounds` above 1 is skipped, and only when stage1 refuses
+  # it for that reason (exit 2 and the one-round message).
+  if [ -f "$c/limits" ] && grep -Eq '^rounds=0*([2-9]|[1-9][0-9]+)$' "$c/limits"; then
+    st=0
+    # shellcheck disable=SC2086
+    "$S1" ir opt --dump=inline $lims "$c/input.ir" > "$o.inline" 2> "$o.err" || st=$?
+    if [ "$st" = 2 ] && grep -q 'only --dump=inline of one round is built' "$o.err"; then
+      orounds=$((orounds + 1))
+    else
+      echo "OPT SKIP $(basename "$c") (exit $st: $(head -c 200 "$o.err"))"
+      fail=1
+    fi
+    continue
+  fi
+  # shellcheck disable=SC2086
+  if "$S1" ir opt --dump=inline $lims "$c/input.ir" > "$o.inline" 2> "$o.err" &&
+     "$S1" ir fmt "$c/input.ir" > "$o.fmt" &&
+     "$S1" ir opt --dump=inline $lims "$o.fmt" > "$o.fmt.inline" &&
+     cmp -s "$c/inline.txt" "$o.inline" && cmp -s "$c/inline.txt" "$o.fmt.inline"; then
+    osame=$((osame + 1))
+  else
+    echo "OPT DIFF $(basename "$c") ($(diff "$c/inline.txt" "$o.inline" 2>&1 | head -3 | tr '\n' ' ')$(head -c 200 "$o.err"))"
+    fail=1
+  fi
+done
+echo "stage1-ir-gate: opt inline dumps $osame / $ocases equal, $orounds need more rounds"
+
 LIST="$OUT/roots.txt"
 CONF="$ROOT/tests/conformance"
 find "$CONF" -name stave.toml | sed 's|/stave.toml$||' | sort > "$OUT/pkgs.txt"
@@ -104,7 +145,6 @@ empty=$(grep -c '^EMPTY' "$OUT/result.txt" || true)
 same=$(grep -c '^SAME' "$OUT/result.txt" || true)
 bytes=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
 echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots, $((end - start)) s; $empty empty files stage0 wrote (no text)"
-fail=0
 if grep -v '^SAME\|^EMPTY' "$OUT/result.txt"; then fail=1; fi
 
 # the largest text: stage1 read + print against stage0's

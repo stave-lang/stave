@@ -1,0 +1,8 @@
+# The release passes of stage1 (contracts/opt-passes.md) over the checked IR. They import the IR
+# library and the sequence primitives; neither imports them.
+name = "opt"
+kind = "lib"
+
+[dependencies]
+ir = { path = "../ir" }
+prims = { path = "../prims/seq" }

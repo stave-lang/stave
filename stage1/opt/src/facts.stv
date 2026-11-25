@@ -1,0 +1,443 @@
+// The facts of the inlining decision (contracts/opt-passes.md F1-F9): tables over the round's
+// canonical input module, each computed once. The decision and the `inline` dump read these
+// tables, never the bodies again.
+//
+// Ids: fns by FuncId (instance-id rank); blocks and instructions by their module-wide rows of the
+// model. A site row's `b` and `k` are the block's index in its fn and the instruction's index in
+// its block: the input numbering.
+//
+// - F1 the site rows, in (f, b, k) order; F2 `size0`; F3 `slot0`; F4 `ret` per block (backward
+//   reachability from the `ret` blocks over the reversed edges).
+// - F5 `G`: per fn its distinct callees, ascending. F6 `cyc` and F7 `level` from its strongly
+//   connected components (Tarjan): a component is complete only after every component it has an
+//   edge to, so its level is final when the component is found.
+// - E (F8) per fn: the first callee test it fails. L (F9) per row: the first caller test.
+//
+// A verdict is a `V_*` code; the codes ascend in the test order of D6, so the first test a row
+// fails is the smallest failing code of E and L.
+import ir.features;
+import ir.generated.intrinsic_table;
+import ir.generated.ir_text_terminals;
+import ir.generated.known_items;
+import ir.generated.opt_table;
+import ir.grammar;
+import ir.model;
+import ir.vtypes;
+import prims.col;
+import prims.scan;
+import prims.sort;
+import std.debug;
+import std.idx;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = idx.NONE;
+
+pub const V_INLINE: u8 = 0;
+pub const V_NOBODY: u8 = 1;
+pub const V_NORET: u8 = 2;
+pub const V_CYCLIC: u8 = 3;
+pub const V_ALTSTACK: u8 = 4;
+pub const V_SYMBOL: u8 = 5;
+pub const V_KNOWN: u8 = 6;
+pub const V_INDIRECT: u8 = 7;
+pub const V_GPU: u8 = 8;
+pub const V_FEATURES: u8 = 9;
+pub const V_COLD: u8 = 10;
+pub const V_SIZE: u8 = 11;
+pub const V_SLOTS: u8 = 12;
+pub const V_BUDGET: u8 = 13;
+
+pub struct Facts {
+    // F1: caller, block in the caller, index in the block, callee; the rows of fn f are
+    // `site_off[f]..site_off[f + 1]`
+    pub site_f: vec.Vec<u32>,
+    pub site_b: vec.Vec<u32>,
+    pub site_k: vec.Vec<u32>,
+    pub site_g: vec.Vec<u32>,
+    pub site_off: vec.Vec<u32>,
+    // F2, F3 per fn (0 without a body)
+    pub size0: vec.Vec<u64>,
+    pub slot0: vec.Vec<u64>,
+    // F4 per block
+    pub ret: vec.Vec<bool>,
+    // F5: the callees of fn f are `g_to[g_off[f]..g_off[f + 1]]`
+    pub g_off: vec.Vec<u32>,
+    pub g_to: vec.Vec<u32>,
+    // F6, F7 per fn
+    pub cyc: vec.Vec<bool>,
+    pub level: vec.Vec<u32>,
+    // E per fn, L per site row (`V_INLINE`: every test passed)
+    pub callee: vec.Vec<u8>,
+    pub caller: vec.Vec<u8>,
+}
+
+// The row of op name x in opt.toml's `[[op]]` (K2): the row naming x, else the `*` row with the
+// longest prefix of x, else NONE.
+pub fn op_row(x: &[u8]) -> u32 {
+    let off = opt_table.OPT_OP_NAME_OFF;
+    let names = opt_table.OPT_OP_NAME;
+    let mut best = NONE;
+    let mut best_n: usize = 0;
+    for r in 0..opt_table.OPT_OP_N {
+        let name = &names[off[r] as usize..off[r + 1] as usize];
+        if name.eq(x) { return r as% u32; }
+        let n = name.len();
+        if n == 0 || name[n - 1] != 42 || n - 1 > x.len() { continue; }
+        if x[0..n - 1].eq(&name[0..n - 1]) && (best == NONE || n - 1 > best_n) {
+            best = r as% u32;
+            best_n = n - 1;
+        }
+    }
+    return best;
+}
+
+// The weight of op name x, or NONE when no row covers it.
+pub fn op_weight(x: &[u8]) -> u32 {
+    let r = op_row(x);
+    if r == NONE { return NONE; }
+    let w = opt_table.OPT_OP_WEIGHT;
+    return w[r as usize];
+}
+
+// Whether x is the name of an intrinsic of the CPU table. Any other name (the PTX set) is one the
+// `gpu` test rejects.
+fn cpu_intrinsic(x: &[u8]) -> bool {
+    let off = intrinsic_table.INTR_NAME_OFF;
+    let names = intrinsic_table.INTR_NAME;
+    for r in 0..intrinsic_table.INTR_N {
+        if names[off[r] as usize..off[r + 1] as usize].eq(x) { return true; }
+    }
+    return false;
+}
+
+// Per op: its weight and whether it is a GPU op, by terminal id; the same per name of the
+// module's intrinsic table (`intrinsic.<name>`).
+struct Ops {
+    w: vec.Vec<u32>,
+    gpu: vec.Vec<bool>,
+    intr_w: vec.Vec<u32>,
+    intr_gpu: vec.Vec<bool>,
+}
+
+fn ops(m: &model.Module) -> Ops {
+    let g = grammar.Grammar.new();
+    let gpu_pre = mem.str_bytes("gpu.");
+    let mut o = Ops.{ w: vec.Vec::<u32>.new(), gpu: vec.Vec::<bool>.new(), intr_w: vec.Vec::<u32>.new(), intr_gpu: vec.Vec::<bool>.new() };
+    for t in 0..g.nterm() {
+        let s = g.spell(t as% u32);
+        o.w.push(op_weight(s));
+        o.gpu.push(s.len() >= gpu_pre.len() && s[0..gpu_pre.len()].eq(gpu_pre));
+    }
+    let mut name = vec.Vec::<u8>.new();
+    for i in 0..m.intr.rows() {
+        name.clear();
+        name.extend_from_slice(mem.str_bytes("intrinsic."));
+        name.extend_from_slice(m.intr.row(i));
+        o.intr_w.push(op_weight(name.as_slice()));
+        o.intr_gpu.push(!cpu_intrinsic(m.intr.row(i)));
+    }
+    return o;
+}
+
+impl Ops {
+    // (weight, gpu) of instruction i.
+    fn of(&self, m: &model.Module, i: usize) -> (u32, bool) {
+        let op = m.ins_op.as_slice()[i];
+        let mut w = self.w.as_slice()[op as usize];
+        let mut gpu = self.gpu.as_slice()[op as usize];
+        if op == ir_text_terminals.IR_T_INTR {
+            let x = m.ins_intr.as_slice()[i] as usize;
+            w = self.intr_w.as_slice()[x];
+            gpu = self.intr_gpu.as_slice()[x];
+        }
+        debug.assert(w != NONE, "every op has a row of the op table");
+        return (w, gpu);
+    }
+}
+
+// The weight of terminator kind k: the `model.TM_*` codes are 0 to 4 in the order br, cbr, switch,
+// ret, unreachable.
+fn term_weight(k: u8) -> u64 {
+    let w = [opt_table.OPT_TERM_BR, opt_table.OPT_TERM_CBR, opt_table.OPT_TERM_SWITCH, opt_table.OPT_TERM_RET, opt_table.OPT_TERM_UNREACHABLE];
+    return w[k as usize] as u64;
+}
+
+// What the callee tests read of each fn's body: a `ret`, a `call.ind` through a value, a GPU op.
+struct Scan {
+    has_ret: vec.Vec<bool>,
+    ind: vec.Vec<bool>,
+    gpu: vec.Vec<bool>,
+}
+
+pub fn build(m: &model.Module) -> Facts {
+    let nf = m.fns();
+    let mut fx = Facts.{
+        site_f: vec.Vec::<u32>.new(),
+        site_b: vec.Vec::<u32>.new(),
+        site_k: vec.Vec::<u32>.new(),
+        site_g: vec.Vec::<u32>.new(),
+        site_off: vec.Vec::<u32>.with_capacity(nf + 1),
+        size0: vec.Vec::<u64>.with_capacity(nf),
+        slot0: vec.Vec::<u64>.with_capacity(nf),
+        ret: vec.Vec::<bool>.new(),
+        g_off: vec.Vec::<u32>.new(),
+        g_to: vec.Vec::<u32>.new(),
+        cyc: vec.Vec::<bool>.new(),
+        level: vec.Vec::<u32>.new(),
+        callee: vec.Vec::<u8>.with_capacity(nf),
+        caller: vec.Vec::<u8>.new(),
+    };
+    let sc = fx.scan(m);
+    fx.ret = ret_blocks(m);
+    fx.graph();
+    fx.components();
+    fx.callee_tests(m, &sc);
+    fx.caller_tests(m);
+    return fx;
+}
+
+impl Facts {
+    fn scan(&mut self, m: &model.Module) -> Scan {
+        let nf = m.fns();
+        let o = ops(m);
+        let lay = vtypes.Layouts.compute(m, vtypes.shape_rows(m).as_slice());
+        let mut sc = Scan.{ has_ret: col.filled(nf, false), ind: col.filled(nf, false), gpu: col.filled(nf, false) };
+        for f in 0..nf {
+            self.site_off.push(col.ids(self.site_f.len()));
+            let blo = m.fn_blk_lo.as_slice()[f] as usize;
+            let mut size: u64 = 0;
+            let mut slot: u64 = 0;
+            for b in 0..m.fn_blk_n.as_slice()[f] as usize {
+                let ilo = m.blk_ins_lo.as_slice()[blo + b] as usize;
+                for k in 0..m.blk_ins_n.as_slice()[blo + b] as usize {
+                    let i = ilo + k;
+                    let (w, gpu) = o.of(m, i);
+                    size = size + w as u64;
+                    if gpu { sc.gpu.as_mut_slice()[f] = true; }
+                    let op = m.ins_op.as_slice()[i];
+                    if op == ir_text_terminals.IR_T_KW_SLOT {
+                        let p = vtypes.pointee(m, m.ins_ty.as_slice()[i]);
+                        slot = slot + lay.size.as_slice()[p as usize];
+                    }
+                    let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+                    let fn0 = m.ins_opnd_n.as_slice()[i] > 0 && m.opnd_kind.as_slice()[ol] == model.O_FUNC;
+                    if op == ir_text_terminals.IR_T_KW_CALL && fn0 {
+                        self.site_f.push(f as% u32);
+                        self.site_b.push(b as% u32);
+                        self.site_k.push(k as% u32);
+                        self.site_g.push(m.opnd_id.as_slice()[ol]);
+                    }
+                    if op == ir_text_terminals.IR_T_CALL_DOT_IND && !fn0 { sc.ind.as_mut_slice()[f] = true; }
+                }
+                let tk = m.blk_tkind.as_slice()[blo + b];
+                size = size + term_weight(tk);
+                if tk == model.TM_RET { sc.has_ret.as_mut_slice()[f] = true; }
+            }
+            self.size0.push(size);
+            self.slot0.push(slot);
+        }
+        self.site_off.push(col.ids(self.site_f.len()));
+        return sc;
+    }
+
+    // F5: the distinct (f, g) pairs of the site rows, sorted, as rows per caller.
+    fn graph(&mut self) {
+        let nf = self.site_off.len() - 1;
+        let n = self.site_f.len();
+        let mut keys = vec.Vec::<u64>.with_capacity(n);
+        for r in 0..n {
+            keys.push(((self.site_f.as_slice()[r] as u64) << 32) | (self.site_g.as_slice()[r] as u64));
+        }
+        let p = sort.sort_perm(keys.as_slice());
+        let mut cnt = col.filled(nf, 0u32);
+        let mut last: u64 = 0xffff_ffff_ffff_ffff;
+        for j in 0..n {
+            let key = keys.as_slice()[p.as_slice()[j] as usize];
+            if key == last { continue; }
+            last = key;
+            let f = (key >> 32) as usize;
+            let c = cnt.as_slice()[f] + 1;
+            cnt.as_mut_slice()[f] = c;
+            self.g_to.push((key & 0xffff_ffff) as% u32);
+        }
+        self.g_off = scan.offsets(cnt.as_slice());
+    }
+
+    // F6, F7: Tarjan's components of G, iteratively. A component's level is 0, or 1 + the
+    // largest level of a component one of its members has an edge to (all complete by then).
+    fn components(&mut self) {
+        let nf = self.g_off.len() - 1;
+        let off = self.g_off.as_slice();
+        let to = self.g_to.as_slice();
+        let mut index = col.filled(nf, NONE);
+        let mut low = col.filled(nf, 0u32);
+        let mut comp = col.filled(nf, NONE);
+        let mut on = col.filled(nf, false);
+        let mut stk = vec.Vec::<u32>.new();
+        let mut call_v = vec.Vec::<u32>.new();
+        let mut call_e = vec.Vec::<u32>.new();
+        let mut members = vec.Vec::<u32>.new();
+        let mut clevel = vec.Vec::<u32>.new();
+        let mut cyc = col.filled(nf, false);
+        let mut level = col.filled(nf, 0u32);
+        let mut next: u32 = 0;
+        for s in 0..nf {
+            if index.as_slice()[s] != NONE { continue; }
+            call_v.push(s as% u32);
+            call_e.push(off[s]);
+            index.as_mut_slice()[s] = next;
+            low.as_mut_slice()[s] = next;
+            next = next + 1;
+            stk.push(s as% u32);
+            on.as_mut_slice()[s] = true;
+            while call_v.len() > 0 {
+                let top = call_v.len() - 1;
+                let v = call_v.as_slice()[top] as usize;
+                let e = call_e.as_slice()[top];
+                if e < off[v + 1] {
+                    call_e.as_mut_slice()[top] = e + 1;
+                    let w = to[e as usize] as usize;
+                    if index.as_slice()[w] == NONE {
+                        index.as_mut_slice()[w] = next;
+                        low.as_mut_slice()[w] = next;
+                        next = next + 1;
+                        stk.push(w as% u32);
+                        on.as_mut_slice()[w] = true;
+                        call_v.push(w as% u32);
+                        call_e.push(off[w]);
+                    } else if on.as_slice()[w] && index.as_slice()[w] < low.as_slice()[v] {
+                        low.as_mut_slice()[v] = index.as_slice()[w];
+                    }
+                    continue;
+                }
+                call_v.truncate(top);
+                call_e.truncate(top);
+                if top > 0 {
+                    let u = call_v.as_slice()[top - 1] as usize;
+                    let lv = low.as_slice()[v];
+                    if lv < low.as_slice()[u] { low.as_mut_slice()[u] = lv; }
+                }
+                if low.as_slice()[v] != index.as_slice()[v] { continue; }
+                let c = clevel.len() as% u32;
+                members.clear();
+                loop {
+                    let top_s = stk.len() - 1;
+                    let x = stk.as_slice()[top_s];
+                    stk.truncate(top_s);
+                    on.as_mut_slice()[x as usize] = false;
+                    comp.as_mut_slice()[x as usize] = c;
+                    members.push(x);
+                    if x as usize == v { break; }
+                }
+                let mut lv: u32 = 0;
+                let mut self_edge = false;
+                for j in 0..members.len() {
+                    let x = members.as_slice()[j] as usize;
+                    for k in off[x] as usize..off[x + 1] as usize {
+                        let y = to[k] as usize;
+                        if y == x { self_edge = true; }
+                        let cy = comp.as_slice()[y];
+                        if cy == c { continue; }
+                        let up = clevel.as_slice()[cy as usize] + 1;
+                        if up > lv { lv = up; }
+                    }
+                }
+                clevel.push(lv);
+                let cyclic = members.len() > 1 || self_edge;
+                for j in 0..members.len() {
+                    let x = members.as_slice()[j] as usize;
+                    cyc.as_mut_slice()[x] = cyclic;
+                    level.as_mut_slice()[x] = lv;
+                }
+            }
+        }
+        self.cyc = cyc;
+        self.level = level;
+    }
+
+    // E (F8): per fn, the first callee test it fails. An `unbuilt` fn with a body fails `noret`
+    // whatever its blocks end in; a `known` mark without a known item fails `known`; an
+    // intrinsic outside the CPU table fails `gpu`.
+    fn callee_tests(&mut self, m: &model.Module, sc: &Scan) {
+        let inl = known_items.KNOWN_INLINE;
+        for g in 0..m.fns() {
+            let flags = m.fn_flags.as_slice()[g];
+            let kn = m.fn_known.as_slice()[g];
+            let known = flags & model.F_KNOWN != 0 && (kn == NONE || !inl[kn as usize]);
+            let v = if !m.has_body(g) then V_NOBODY else if !sc.has_ret.as_slice()[g] || flags & model.F_UNBUILT != 0 then V_NORET else if self.cyc.as_slice()[g] then V_CYCLIC else if flags & model.F_SYMBOL != 0 then V_SYMBOL else if known then V_KNOWN else if sc.ind.as_slice()[g] then V_INDIRECT else if sc.gpu.as_slice()[g] then V_GPU else V_INLINE;
+            self.callee.push(v);
+        }
+    }
+
+    // L (F9): per site row, the first caller test it fails. `features`: the callee's needs
+    // outside the closure of the target baseline and the caller's needs.
+    fn caller_tests(&mut self, m: &model.Module) {
+        let base = features.baseline(m.target);
+        for r in 0..self.site_f.len() {
+            let f = self.site_f.as_slice()[r] as usize;
+            let g = self.site_g.as_slice()[r] as usize;
+            let have = features.closure(base | m.fn_feat.as_slice()[f]);
+            let need = features.closure(m.fn_feat.as_slice()[g]);
+            let blk = m.fn_blk_lo.as_slice()[f] as usize + self.site_b.as_slice()[r] as usize;
+            let alt = m.fn_flags.as_slice()[f] & model.F_ALTSTACK != 0;
+            let v = if alt then V_ALTSTACK else if need & ~have != 0 then V_FEATURES else if !self.ret.as_slice()[blk] then V_COLD else V_INLINE;
+            self.caller.push(v);
+        }
+    }
+}
+
+// F4: per block of the module, whether it reaches a block that ends in `ret`: from those blocks
+// backwards over the edges.
+fn ret_blocks(m: &model.Module) -> vec.Vec<bool> {
+    let nb = m.blk_tkind.len();
+    let mut cnt = col.filled(nb, 0u32);
+    for f in 0..m.fns() {
+        let blo = m.fn_blk_lo.as_slice()[f] as usize;
+        for b in blo..blo + m.fn_blk_n.as_slice()[f] as usize {
+            let tlo = m.blk_tgt_lo.as_slice()[b] as usize;
+            for t in tlo..tlo + m.blk_tgt_n.as_slice()[b] as usize {
+                let x = blo + m.tgt_blk.as_slice()[t] as usize;
+                let c = cnt.as_slice()[x] + 1;
+                cnt.as_mut_slice()[x] = c;
+            }
+        }
+    }
+    let off = scan.offsets(cnt.as_slice());
+    let mut at = vec.Vec::<u32>.with_capacity(nb);
+    at.extend_from_slice(&off.as_slice()[0..nb]);
+    let mut pred = col.filled(off.as_slice()[nb] as usize, 0u32);
+    for f in 0..m.fns() {
+        let blo = m.fn_blk_lo.as_slice()[f] as usize;
+        for b in blo..blo + m.fn_blk_n.as_slice()[f] as usize {
+            let tlo = m.blk_tgt_lo.as_slice()[b] as usize;
+            for t in tlo..tlo + m.blk_tgt_n.as_slice()[b] as usize {
+                let x = blo + m.tgt_blk.as_slice()[t] as usize;
+                let a = at.as_slice()[x];
+                pred.as_mut_slice()[a as usize] = b as% u32;
+                at.as_mut_slice()[x] = a + 1;
+            }
+        }
+    }
+    let mut ret = col.filled(nb, false);
+    let mut work = vec.Vec::<u32>.new();
+    for b in 0..nb {
+        if m.blk_tkind.as_slice()[b] == model.TM_RET {
+            ret.as_mut_slice()[b] = true;
+            work.push(b as% u32);
+        }
+    }
+    while work.len() > 0 {
+        let top = work.len() - 1;
+        let x = work.as_slice()[top] as usize;
+        work.truncate(top);
+        for j in off.as_slice()[x] as usize..off.as_slice()[x + 1] as usize {
+            let p = pred.as_slice()[j] as usize;
+            if !ret.as_slice()[p] {
+                ret.as_mut_slice()[p] = true;
+                work.push(p as% u32);
+            }
+        }
+    }
+    return ret;
+}

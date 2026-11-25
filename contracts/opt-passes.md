@@ -97,7 +97,8 @@ outside its range is an error, never replaced by the table's value.
 op is not marked † in checked-ir.md "Vector and mask ops" and is none of the memory ops
 `vec.load`, `vec.store`, `vec.load_aligned`, `vec.store_aligned`, `vec.store_stream`,
 `vec.load_masked`, `vec.store_masked`, `vec.gather`, `vec.scatter`). A row whose name ends in `*`
-covers every op name with that prefix that no other row names; every op has exactly one row.
+covers every op name with that prefix that no other row names; of two `*` rows whose prefixes
+an op name has, the longer covers it. Every op has exactly one row.
 
 **K3.** The table satisfies `W_CALL <= w(call)` and `w(br) = w(ret)`. `tools/gen-tables` refuses
 a table that does not, and `stage1 ir opt --limit` refuses an override that does not. The first
@@ -135,19 +136,20 @@ edges, join = max.]
 **F8. Callee tests**, each a predicate of `g` alone, in this order (the verdict names in bold):
 
 1. **`nobody`**: `g` has no body.
-2. **`noret`**: no block of `g` ends in `ret`.
+2. **`noret`**: no block of `g` ends in `ret`, or `g` has the `unbuilt` mark.
 3. **`cyclic`**: `cyc(g)`.
 4. **`symbol`**: `g` has a `symbol`.
 5. **`known`**: `g` has the `known` mark and its known item is not marked `inline` (K1; an
    item with an ABI signature, or a panic report entry, is never marked).
 6. **`indirect`**: `g`'s body holds a `call.ind` whose operand 0 is a value.
-7. **`gpu`**: `g`'s body holds a `gpu.*` op or an `intrinsic.<name>` of arch `ptx`. No body
-   holds either today (the verifier refuses a `ptx` intrinsic on a CPU target, and no `gpu.*` op
-   exists); the test becomes reachable when `gpu.*` ops or a PTX target reach the IR.
+7. **`gpu`**: `g`'s body holds a `gpu.*` op or an `intrinsic.<name>` whose name is no row of the
+   CPU intrinsic table (the PTX set is such a name). No body holds either today (the verifier
+   refuses such a name on a CPU target, and no `gpu.*` op exists); the test becomes reachable
+   when `gpu.*` ops or a PTX target reach the IR.
 
 A callee with the `altstack` mark needs no test of its own: the verifier allows the mark only on
-a panic report entry, which is never marked `inline`, so it fails `noret` or `known`. An
-`unbuilt` callee has no body (`nobody`) or a trap for a body (`noret`). [N: pointwise.]
+a panic report entry, which is never marked `inline`, so it fails `noret` or `known`.
+[N: pointwise.]
 
 **F9. Caller tests** of a row `(f, b, k, g)`, in this order:
 

@@ -1,0 +1,186 @@
+// The decision's facts and verdicts on hand-written `release checked` texts; the expected tables
+// follow contracts/opt-passes.md sections 2, 3, and 8.
+import decide;
+import facts;
+import ir.bytes;
+import ir.features;
+import ir.load;
+import ir.model;
+import ir.print;
+import ir.read;
+import prims.ragged;
+import std.debug;
+import std.mem;
+import std.vec;
+
+// The loaded module of the text whose lines are `lines`; it must load.
+fn loaded(lines: &[&str]) -> read.Loaded {
+    let mut src = vec.Vec::<u8>.new();
+    for i in 0..lines.len() {
+        src.extend_from_slice(mem.str_bytes(lines[i]));
+        src.push(10);
+    }
+    let ld = load.load(src.as_slice());
+    debug.assert(ld.ok(), "the test module loads");
+    return ld;
+}
+
+// Whether the `inline` dump of the module of `lines` under `lim` is the lines `want`.
+fn dumps(lines: &[&str], lim: &decide.Limits, want: &[&str]) -> bool {
+    let ld = loaded(lines);
+    let got = decide.inline_dump(&ld.m, lim);
+    let mut w = vec.Vec::<u8>.new();
+    for i in 0..want.len() {
+        bytes.push_str(&mut w, want[i]);
+        w.push(10);
+    }
+    return got.as_slice().eq(w.as_slice());
+}
+
+// A leaf, a fn with a `switch`, a loop that never returns, and a trap block; levels 0 to 2.
+fn chain() -> [&str; 32] {
+    return ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 bool", "fn @0 m.leaf(t0) -> t0 {", "b0(%0: t0):", "  %1 = add.wrap t0 %0 1", "  ret %1", "}", "fn @1 m.mid(t0) -> t0 {", "b0(%0: t0):", "  switch %0 0:b1() _:b2()", "b1():", "  %1 = call t0 @0 %0", "  br b3(%1)", "b2():", "  %2 = call t0 @0 %0", "  br b4()", "b3(%3: t0):", "  ret %3", "b4():", "  br b2()", "}", "fn @2 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = call t0 @1 %0", "  %2 = call t0 @0 %1", "  %3 = eq t1 %2 0", "  cbr %3 b1() b2()", "b1():", "  %4 = call t0 @0 %2", "  panic.assert ()", "  unreachable"];
+}
+
+fn chain_text() -> vec.Vec<u8> {
+    let c = chain();
+    let mut src = vec.Vec::<u8>.new();
+    for i in 0..c.len() {
+        bytes.push_str(&mut src, c[i]);
+        src.push(10);
+    }
+    bytes.push_str(&mut src, "b2():\n  ret %2\n}\n");
+    return src;
+}
+
+test fn sizes_ret_cold_and_levels() {
+    let ld = load.load(chain_text().as_slice());
+    debug.assert(ld.ok(), "loads");
+    let fx = facts.build(&ld.m);
+    debug.assert(fx.size0.as_slice().eq(&[1u64, 8, 12]), "size0: add 1, switch 2, call 3, cbr 1, panic 1, the rest 0");
+    debug.assert(fx.level.as_slice().eq(&[0u32, 1, 2]), "levels");
+    let ret = [true, true, true, false, true, false, true, false, true];
+    debug.assert(fx.ret.as_slice().eq(&ret), "ret: a loop without an exit and a trap block reach no ret");
+    debug.assert(fx.site_g.as_slice().eq(&[0u32, 0, 1, 0, 0]), "site rows in (f, b, k) order");
+    debug.assert(fx.g_to.as_slice().eq(&[0u32, 0, 1]) && fx.g_off.as_slice().eq(&[0u32, 0, 1, 3]), "G: distinct pairs");
+    let lim = decide.Limits.table();
+    let out = decide.inline_dump(&ld.m, &lim);
+    let want = "round 1\nfn @0 size 1 closed 1 slots 0 level 0\nfn @1 size 8 closed 6 slots 0 level 1\nsite @1 b1 0 @0 1 inline\nsite @1 b2 0 @0 1 cold\nfn @2 size 12 closed 13 slots 0 level 2\nsite @2 b0 0 @1 6 inline\nsite @2 b0 1 @0 1 inline\nsite @2 b1 0 @0 1 cold\n";
+    debug.assert(out.as_slice().eq(mem.str_bytes(want)), "the dump");
+}
+
+test fn the_dump_of_the_printed_text_is_the_same() {
+    let ld = load.load(chain_text().as_slice());
+    let lim = decide.Limits.table();
+    let a = decide.inline_dump(&ld.m, &lim);
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 bool", "fn @0 m.leaf(t0) -> t0 {", "b0(%7: t0):", "  %3 = add.wrap t0 %7 1", "  ret %3", "}", "fn @2 m.top(t0) -> t0 {", "b0(%9: t0):", "  %1 = call t0 @1 %9", "  %2 = call t0 @0 %1", "  %3 = eq t1 %2 0", "  cbr %3 b8() b5()", "b8():", "  %4 = call t0 @0 %2", "  panic.assert ()", "  unreachable", "b5():", "  ret %2", "}", "fn @1 m.mid(t0) -> t0 {", "b0(%0: t0):", "  switch %0 0:b9() _:b2()", "b9():", "  %1 = call t0 @0 %0", "  br b3(%1)", "b2():", "  %2 = call t0 @0 %0", "  br b4()", "b3(%3: t0):", "  ret %3", "b4():", "  br b2()", "}"];
+    let lb = loaded(&lines);
+    let b = decide.inline_dump(&lb.m, &lim);
+    debug.assert(a.as_slice().eq(b.as_slice()), "numbering and fn order of the text change nothing");
+    let p = print.print(&lb.m);
+    let lc = load.load(p.as_slice());
+    let c = decide.inline_dump(&lc.m, &lim);
+    debug.assert(a.as_slice().eq(c.as_slice()), "the dump of fmt(t) is the dump of t");
+}
+
+test fn cycles_and_their_levels() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "fn @0 m.leaf(t0) -> t0 {", "b0(%0: t0):", "  ret %0", "}", "fn @1 m.a(t0) -> t0 {", "b0(%0: t0):", "  %1 = call t0 @2 %0", "  %2 = call t0 @0 %1", "  ret %2", "}", "fn @2 m.b(t0) -> t0 {", "b0(%0: t0):", "  %1 = call t0 @1 %0", "  ret %1", "}", "fn @3 m.me(t0) -> t0 {", "b0(%0: t0):", "  %1 = call t0 @3 %0", "  ret %1", "}", "fn @4 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = call t0 @1 %0", "  %2 = call t0 @3 %1", "  ret %2", "}"];
+    let ld = loaded(&lines);
+    let fx = facts.build(&ld.m);
+    debug.assert(fx.cyc.as_slice().eq(&[false, true, true, true, false]), "cyc: a two-fn component and a self edge");
+    debug.assert(fx.level.as_slice().eq(&[0u32, 1, 1, 0, 2]), "levels on the condensation");
+    let want = ["round 1", "fn @0 size 0 closed 0 slots 0 level 0", "fn @1 size 6 closed 3 slots 0 level 1 cyclic", "site @1 b0 0 @2 3 cyclic", "site @1 b0 1 @0 0 inline", "fn @2 size 3 closed 3 slots 0 level 1 cyclic", "site @2 b0 0 @1 3 cyclic", "fn @3 size 3 closed 3 slots 0 level 0 cyclic", "site @3 b0 0 @3 3 cyclic", "fn @4 size 6 closed 6 slots 0 level 2", "site @4 b0 0 @1 3 cyclic", "site @4 b0 1 @3 3 cyclic"];
+    debug.assert(dumps(&lines, &decide.Limits.table(), &want), "the dump");
+}
+
+test fn slots_are_pointee_layout_sizes() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 int u 8", "type t2 ref mut t0", "type t3 tuple t1 t0", "type t4 ref mut t3", "type t5 array t0 9", "type t6 ref mut t5", "fn @0 m.a(t0) -> t0 {", "b0(%0: t0):", "  %1 = slot t2", "  %2 = slot t4", "  ret %0", "}", "fn @1 m.big(t0) -> t0 {", "b0(%0: t0):", "  %1 = slot t6", "  ret %0", "}", "fn @2 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = slot t2", "  %2 = call t0 @0 %0", "  %3 = call t0 @1 %2", "  ret %3", "}"];
+    let ld = loaded(&lines);
+    let fx = facts.build(&ld.m);
+    debug.assert(fx.slot0.as_slice().eq(&[24u64, 72, 8]), "slot0: u64 8, (u8, u64) 16, [u64; 9] 72");
+    let want = ["round 1", "fn @0 size 0 closed 0 slots 24 level 0", "fn @1 size 0 closed 0 slots 72 level 0", "fn @2 size 6 closed 3 slots 32 level 1", "site @2 b0 1 @0 0 inline", "site @2 b0 2 @1 0 slots"];
+    debug.assert(dumps(&lines, &decide.Limits.table(), &want), "the dump");
+}
+
+fn verdict_module(target: &str) -> vec.Vec<u8> {
+    let lines = ["type t0 int u 32", "type t1 int u 64", "type t2 int u size", "type t3 int s size", "type t4 fntype t1 -> t1", "type t5 int u 8", "type t6 ref t7", "type t7 slice t5", "fn @0 m.leaf(t1) -> t1 {", "b0(%0: t1):", "  ret %0", "}", "fn @1 m.stop(t1) -> t1 {", "b0(%0: t1):", "  panic.assert ()", "  unreachable", "}", "fn @2 m.ext(t1) -> t1 symbol \"ext\"", "fn @3 runtime.panic.set_user_site(t0) known {", "b0(%0: t0):", "  ret", "}", "fn @4 runtime.panic.test_skip() -> t0 known {", "b0():", "  ret 0", "}", "fn @5 m.ind(t4) -> t1 {", "b0(%0: t4):", "  %1 = call.ind t1 %0 5", "  ret %1", "}", "fn @6 m.sys(t2) -> t3 {", "b0(%0: t2):", "  %1 = intrinsic.syscall0 t3 %0", "  ret %1", "}", "fn @7 m.wide(t1) -> t1 needs(avx2) {", "b0(%0: t1):", "  ret %0", "}", "fn @8 m.v3(t1) -> t1 needs(avx2) {", "b0(%0: t1):", "  %1 = call t1 @7 %0", "  ret %1", "}", "fn @9 m.main(t1) -> t1 {", "b0(%0: t1):", "  call () @3 3", "  %1 = call t1 @0 %0", "  %2 = call t1 @1 %1", "  %3 = call t1 @2 %2", "  %4 = call t0 @4", "  %5 = call t1 @5 @0", "  %6 = call t3 @6 8", "  %7 = call t1 @7 %3", "  ret %7", "}", "fn @10 runtime.panic.abort(t6) known altstack {", "b0(%0: t6):", "  %1 = call t1 @0 7", "  panic.assert ()", "  unreachable", "}"];
+    let mut src = vec.Vec::<u8>.new();
+    bytes.push_str(&mut src, "stave.ir 4 \"");
+    bytes.push_str(&mut src, target);
+    bytes.push_str(&mut src, "\" release checked\n");
+    for i in 0..lines.len() {
+        bytes.push_str(&mut src, lines[i]);
+        src.push(10);
+    }
+    return src;
+}
+
+test fn every_callee_and_caller_verdict() {
+    let ld = load.load(verdict_module("x86_64-linux-v2").as_slice());
+    debug.assert(ld.ok(), "loads");
+    let out = decide.inline_dump(&ld.m, &decide.Limits.table());
+    let want = "round 1\nfn @0 size 0 closed 0 slots 0 level 0\nfn @1 size 1 closed 1 slots 0 level 0\nfn @3 size 0 closed 0 slots 0 level 0\nfn @4 size 0 closed 0 slots 0 level 0\nfn @5 size 3 closed 3 slots 0 level 0\nfn @6 size 2 closed 2 slots 0 level 0\nfn @7 size 0 closed 0 slots 0 level 0\nfn @8 size 3 closed 0 slots 0 level 1\nsite @8 b0 0 @7 0 inline\nfn @9 size 24 closed 17 slots 0 level 1\nsite @9 b0 0 @3 0 inline\nsite @9 b0 1 @0 0 inline\nsite @9 b0 2 @1 1 noret\nsite @9 b0 3 @2 - nobody\nsite @9 b0 4 @4 0 known\nsite @9 b0 5 @5 3 indirect\nsite @9 b0 6 @6 2 inline\nsite @9 b0 7 @7 0 features\nfn @10 size 4 closed 4 slots 0 level 1\nsite @10 b0 0 @0 0 altstack\n";
+    debug.assert(out.as_slice().eq(mem.str_bytes(want)), "the dump");
+    let l3 = load.load(verdict_module("x86_64-linux-v3").as_slice());
+    debug.assert(l3.ok(), "loads on v3");
+    let f3 = facts.build(&l3.m);
+    debug.assert(f3.caller.as_slice()[8] == facts.V_INLINE, "avx2 is in the v3 baseline");
+    debug.assert(features.baseline(1) & features.closure(1u64 << 1) != 0, "the v3 baseline holds avx");
+}
+
+test fn an_intrinsic_outside_the_cpu_table_is_gpu() {
+    let mut ld = load.load(verdict_module("x86_64-linux-v2").as_slice());
+    let fx = facts.build(&ld.m);
+    debug.assert(fx.callee.as_slice()[6] == facts.V_INLINE, "syscall0 is a CPU intrinsic");
+    let mut names = ragged.Ragged::<u8>.new();
+    names.push_row(mem.str_bytes("sreg.tid.x"));
+    ld.m.intr = names;
+    let fg = facts.build(&ld.m);
+    debug.assert(fg.callee.as_slice()[6] == facts.V_GPU, "a PTX intrinsic fails gpu");
+}
+
+test fn an_unbuilt_callee_with_a_returning_body_is_noret() {
+    let mut ld = load.load(verdict_module("x86_64-linux-v2").as_slice());
+    let f0 = ld.m.fn_flags.as_slice()[0];
+    ld.m.fn_flags.as_mut_slice()[0] = f0 | model.F_UNBUILT;
+    let f2 = ld.m.fn_flags.as_slice()[2];
+    ld.m.fn_flags.as_mut_slice()[2] = f2 | model.F_UNBUILT;
+    let fx = facts.build(&ld.m);
+    debug.assert(fx.callee.as_slice()[0] == facts.V_NORET, "the unbuilt mark fails noret whatever the body ends in");
+    debug.assert(fx.callee.as_slice()[2] == facts.V_NOBODY, "without a body: nobody first");
+    let d = decide.decide(&ld.m, &fx, &decide.Limits.table());
+    debug.assert(d.verdict.as_slice()[2] == facts.V_NORET, "the row of @9 that calls it");
+}
+
+fn five_adds() -> [&str; 18] {
+    return ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "fn @0 m.leaf(t0) -> t0 {", "b0(%0: t0):", "  %1 = add.wrap t0 %0 1", "  %2 = add.wrap t0 %1 1", "  %3 = add.wrap t0 %2 1", "  %4 = add.wrap t0 %3 1", "  %5 = add.wrap t0 %4 1", "  ret %5", "}", "fn @1 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = call t0 @0 %0", "  %2 = call t0 @0 %1", "  %3 = call t0 @0 %2", "  ret %3", "}"];
+}
+
+test fn size_and_the_budget_cut_follow_the_limits() {
+    let lines = five_adds();
+    let mut lim = decide.Limits.table();
+    let all = ["round 1", "fn @0 size 5 closed 5 slots 0 level 0", "fn @1 size 9 closed 15 slots 0 level 1", "site @1 b0 0 @0 5 inline", "site @1 b0 1 @0 5 inline", "site @1 b0 2 @0 5 inline"];
+    debug.assert(dumps(&lines, &lim, &all), "all inline");
+    debug.assert(lim.set(mem.str_bytes("cap"), 13), "cap");
+    let cut = ["round 1", "fn @0 size 5 closed 5 slots 0 level 0", "fn @1 size 9 closed 13 slots 0 level 1", "site @1 b0 0 @0 5 inline", "site @1 b0 1 @0 5 inline", "site @1 b0 2 @0 5 budget"];
+    debug.assert(dumps(&lines, &lim, &cut), "CAP - size0 = 4 takes two rows of a = 2, in (b, k) order");
+    let mut lt = decide.Limits.table();
+    debug.assert(lt.set(mem.str_bytes("threshold"), 4), "threshold");
+    let big = ["round 1", "fn @0 size 5 closed 5 slots 0 level 0", "fn @1 size 9 closed 9 slots 0 level 1", "site @1 b0 0 @0 5 size", "site @1 b0 1 @0 5 size", "site @1 b0 2 @0 5 size"];
+    debug.assert(dumps(&lines, &lt, &big), "S(g) > T");
+    let mut ls = decide.Limits.table();
+    debug.assert(ls.set(mem.str_bytes("cap"), 0), "cap 0");
+    let none = ["round 1", "fn @0 size 5 closed 5 slots 0 level 0", "fn @1 size 9 closed 9 slots 0 level 1", "site @1 b0 0 @0 5 budget", "site @1 b0 1 @0 5 budget", "site @1 b0 2 @0 5 budget"];
+    debug.assert(dumps(&lines, &ls, &none), "a caller above CAP grows by nothing");
+}
+
+test fn limits_refuse_what_k3_refuses() {
+    let mut lim = decide.Limits.table();
+    debug.assert(lim.set(mem.str_bytes("call_saved"), 3) && lim.call_saved == 3, "W_CALL = w(call)");
+    debug.assert(!lim.set(mem.str_bytes("call_saved"), 4), "W_CALL above w(call)");
+    debug.assert(!lim.set(mem.str_bytes("rounds"), 0), "no rounds");
+    debug.assert(!lim.set(mem.str_bytes("T"), 1), "an unknown name");
+    debug.assert(lim.set(mem.str_bytes("slot_callee"), 8) && lim.slot_callee == 8, "slot_callee");
+    debug.assert(facts.op_weight(mem.str_bytes("slot")) == 0 && facts.op_weight(mem.str_bytes("intrinsic.syscall0")) == 2 && facts.op_weight(mem.str_bytes("vec.add")) == 1, "op rows: exact, then the longest `*` prefix");
+    debug.assert(facts.op_weight(mem.str_bytes("nosuchop")) == facts.NONE, "no row");
+}
