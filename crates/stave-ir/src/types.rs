@@ -579,21 +579,29 @@ impl TypeTable {
         // Well-formed (in range, acyclic, bounded depth) and interned (distinct keys), so the
         // comparison cannot fail and is a total order.
         order.sort_by(|a, b| self.canonical_cmp(*a, *b).unwrap_or(Ordering::Equal));
-        let mut remap = vec![TypeId(0); n];
+        Ok(self.keep_in_order(&order))
+    }
+
+    /// Keeps exactly the types `order` lists (distinct, in range), renumbered so that `order[k]`
+    /// becomes `t<k>`, and returns the map old id → new id (index = old id; a type not kept maps
+    /// to `TypeId(u32::MAX)`). Keys and shapes are remapped; a component or shape field that is
+    /// not kept maps to `TypeId(u32::MAX)` as well, so `order` must be closed over both.
+    pub fn keep_in_order(&mut self, order: &[TypeId]) -> Vec<TypeId> {
+        let n = self.keys.len();
+        let mut remap = vec![TypeId(u32::MAX); n];
         for (new, old) in order.iter().enumerate() {
             remap[old.0 as usize] = TypeId(new as u32);
         }
-        let mut keys = Vec::with_capacity(n);
-        let mut shapes = Vec::with_capacity(n);
-        for old in &order {
+        let map = |t: TypeId| remap.get(t.0 as usize).copied().unwrap_or(TypeId(u32::MAX));
+        let mut keys = Vec::with_capacity(order.len());
+        let mut shapes = Vec::with_capacity(order.len());
+        for old in order {
             let mut k = self.keys[old.0 as usize].clone();
-            k.map_components(|t| remap[t.0 as usize]);
+            k.map_components(map);
             keys.push(k);
             let s = self.shapes[old.0 as usize].clone().map(|mut s| {
-                for v in &mut s.variants {
-                    for f in v.iter_mut() {
-                        *f = remap.get(f.0 as usize).copied().unwrap_or(*f);
-                    }
+                for f in s.variants.iter_mut().flatten() {
+                    *f = map(*f);
                 }
                 s
             });
@@ -602,7 +610,7 @@ impl TypeTable {
         self.map = keys.iter().cloned().enumerate().map(|(i, k)| (k, TypeId(i as u32))).collect();
         self.keys = keys;
         self.shapes = shapes;
-        Ok(remap)
+        remap
     }
 
     /// The TypeKey text of `t` (checked-ir.md "TypeKey text"), e.g. `int s 32`, `ref mut t4`.

@@ -146,7 +146,13 @@ fn switch_and_select() {
 }
 
 fn struct_ty(p: &mut Prog, d: u32, fields: Vec<TypeId>) -> TypeId {
+    p.m.record_decl(DeclId(d), stave_ir::types::AdtKind::Struct, format!("t.S{d}"));
     p.m.types.adt(DeclId(d), vec![], AdtShape::structure(fields))
+}
+
+fn enum_ty(p: &mut Prog, d: u32, args: Vec<GenericArg>, variants: Vec<Vec<TypeId>>) -> TypeId {
+    p.m.record_decl(DeclId(d), stave_ir::types::AdtKind::Enum, format!("t.E{d}"));
+    p.m.types.adt(DeclId(d), args, AdtShape::enumeration(variants))
 }
 
 /// Aggregates: make/get/set (constant and dynamic indices), structs by value through calls
@@ -158,16 +164,8 @@ fn aggregates_and_enums() {
     let arr = p.m.types.array(t.i64, 5);
     let pair = p.m.types.tuple(vec![t.u8, t.f64]);
     let st = struct_ty(&mut p, 1, vec![t.u32, pair, arr, t.str_ref]);
-    let opt = p.m.types.adt(
-        DeclId(2),
-        vec![GenericArg::Type(t.i64)],
-        AdtShape::enumeration(vec![vec![], vec![t.i64]]),
-    );
-    let en = p.m.types.adt(
-        DeclId(3),
-        vec![],
-        AdtShape::enumeration(vec![vec![t.u8], vec![], vec![t.f32, t.u16, st]]),
-    );
+    let opt = enum_ty(&mut p, 2, vec![GenericArg::Type(t.i64)], vec![vec![], vec![t.i64]]);
+    let en = enum_ty(&mut p, 3, vec![], vec![vec![t.u8], vec![], vec![t.f32, t.u16, st]]);
     let s_hello = p.m.add_string("agg\n");
     // fn mk(a: u32, x: f64, k: i64) -> S
     let mk = p.func("app.mk", &[t.u32, t.f64, t.i64], Some(st), |b, _| {
@@ -310,7 +308,7 @@ fn memory_ops() {
     let pi64 = p.m.types.ref_(true, t.i64);
     let sl = p.m.types.slice(t.u16);
     let psl = p.m.types.ref_(false, sl);
-    let en = p.m.types.adt(DeclId(6), vec![], AdtShape::enumeration(vec![vec![t.u8], vec![t.u32, t.i64]]));
+    let en = enum_ty(&mut p, 6, vec![], vec![vec![t.u8], vec![t.u32, t.i64]]);
     let pen = p.m.types.ref_(true, en);
     let pu32 = p.m.types.ref_(true, t.u32);
     // fn total(s: &[u16]) -> u64: sum over the slice with a loop and check.bounds

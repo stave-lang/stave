@@ -38,7 +38,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use stave_diag::{Diagnostic, Severity, SourceFiles};
-use stave_ir::{FuncId, Module};
+use stave_ir::Module;
 use stave_obj::ObjectImage;
 use stave_sema::{DeclKind, Mode, Program, Typeck};
 use stave_target::Triple;
@@ -217,8 +217,14 @@ pub struct Options {
     /// `stave test`: lower the `test fn`s too ([`Mode::Test`], with `release`
     /// [`Mode::ReleaseTest`]).
     pub tests: bool,
-    /// Lower even when the goal is [`Goal::Check`] (the `ir` dump).
+    /// Lower even when the goal is [`Goal::Check`] (the `lir`, `ir`, and `opt` dumps).
     pub lower: bool,
+    /// Keep the module as lowering leaves it, before the removal of proven checks
+    /// ([`Output::lowered`]; the `lir` dump). Needs [`Options::lower`] or a build.
+    pub keep_lowered: bool,
+    /// `stave ir emit`: a check that is also a build's front end (E0108: no `main`) and lowers,
+    /// without code generation.
+    pub emit_ir: bool,
     /// Collect the borrow checker's per-access lines (the `borrow` dump).
     pub borrow_dump: bool,
     /// Lower with the borrow side table (`Body::borrows`), for the interpreter's borrow
@@ -250,6 +256,8 @@ impl Options {
             release: false,
             tests: false,
             lower: false,
+            keep_lowered: false,
+            emit_ir: false,
             borrow_dump: false,
             borrow_marks: false,
             tracked: crate::interp::borrow_from_env(),
@@ -311,14 +319,19 @@ pub struct Output {
     /// diagnostics): the lowered program after the removal of the bounds checks that have a
     /// checked witness, the same in every build mode.
     pub module: Option<Module>,
+    /// The module as lowering leaves it, canonical, before the removal of proven checks
+    /// (level `lowered`): kept only with [`Options::keep_lowered`].
+    pub lowered: Option<Module>,
+    /// Per fn of [`Output::module`]: the call-graph nodes it stands for.
+    pub nodes_of_func: Vec<Vec<u32>>,
+    /// The build was `--release`.
+    pub release: bool,
     /// [`Output::module`] lowered again with the borrow side table ([`Options::tracked`]): what
     /// the borrow-tracking interpreter runs. Not the canonical checked IR.
     pub tracked: Option<Module>,
     /// The bounds checks [`Output::module`] no longer has, per function: the witness the
     /// checker accepted and the rule behind each row.
     pub removed_checks: Vec<stave_ir::bounds::Proved>,
-    /// The checked-IR function of the root package's `main`, if any.
-    pub main: Option<FuncId>,
     /// The executable ([`Goal::Build`] without errors).
     pub image: Option<ObjectImage>,
     /// The stack bound of the executable ([`crate::stack`]).
@@ -502,9 +515,11 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
             diagnostics,
             timings,
             module: None,
+            lowered: None,
+            nodes_of_func: Vec::new(),
+            release: opts.release,
             tracked: None,
             removed_checks: Vec::new(),
-            main: None,
             image: None,
             stack: None,
             failure: None,
@@ -525,9 +540,11 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
             diagnostics,
             timings,
             module: None,
+            lowered: None,
+            nodes_of_func: Vec::new(),
+            release: opts.release,
             tracked: None,
             removed_checks: Vec::new(),
-            main: None,
             image: None,
             stack: None,
             failure: Some(Failure::Unsupported { stage: Stage::Typeck, message: what }),
@@ -563,7 +580,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     let mut has_errors = diagnostics.iter().any(|d| d.severity() == Severity::Error);
     // E0108: a build needs `main` (reported only without other errors: a dropped or invalid item
     // may be `main`)
-    if opts.goal == Goal::Build
+    if (opts.goal == Goal::Build || opts.emit_ir)
         && !has_errors
         && let Some(d) = build::no_main(&program)
     {
@@ -620,9 +637,11 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         diagnostics,
         timings,
         module: None,
+        lowered: None,
+        nodes_of_func: Vec::new(),
+        release: opts.release,
         tracked: None,
         removed_checks: Vec::new(),
-        main: None,
         image: None,
         stack: None,
         failure,
@@ -646,13 +665,15 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     // ---- mono + lower + verify + removal of the bounds checks with a checked witness.
     let t0 = Instant::now();
     let drops = out.borrowck.as_ref().map(|b| &b.schedules);
-    let lowered = build::lower(&out.program, &tc, opts.mode(), opts.borrow_marks, drops);
+    let lowered =
+        build::lower_keeping(&out.program, &tc, opts.mode(), opts.borrow_marks, drops, opts.keep_lowered);
     let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);
     let (module, nodes_of_func) = match lowered {
         Ok(l) => {
             out.removed_checks = l.removed;
+            out.lowered = l.lowered;
             (l.module, l.nodes_of_func)
         }
         Err(f) => {
@@ -660,8 +681,6 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
             return out;
         }
     };
-    out.main = build::main_path(&out.program).and_then(|p| module.find_func(&p));
-    prof::mark("find-main");
     if opts.tracked
         && !opts.borrow_marks
         && let Some(tc) = &out.typeck
@@ -677,21 +696,16 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     if opts.goal == Goal::Build {
         // ---- codegen + link.
         let triple = opts.target.or_else(Triple::host);
-        match (triple, out.main) {
-            (None, _) => out.failure = Some(Failure::NoHostTarget),
-            (Some(_), None) => out.failure = Some(Failure::NoMain),
-            (Some(t), Some(main)) => {
+        match triple {
+            None => out.failure = Some(Failure::NoHostTarget),
+            Some(t) => {
                 let run_stack = out.program.packages.iter().find(|p| p.is_root).and_then(|p| p.run_stack);
                 let built = match &out.typeck {
                     Some(tc) => {
-                        let input = crate::stack::Input {
-                            graph: &tc.call_graph,
-                            nodes_of_func: &nodes_of_func,
-                            run_stack,
-                        };
-                        build::codegen_link(&module, main, t, opts.release, opts.threads, Some(&input))
+                        let input = crate::stack::input(&tc.call_graph, &nodes_of_func, run_stack);
+                        build::codegen_link(&module, t, opts.release, opts.threads, Some(&input))
                     }
-                    None => build::codegen_link(&module, main, t, opts.release, opts.threads, None),
+                    None => build::codegen_link(&module, t, opts.release, opts.threads, None),
                 };
                 match built {
                     Ok(b) => {
@@ -706,6 +720,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         }
     }
     out.module = Some(module);
+    out.nodes_of_func = nodes_of_func;
     out
 }
 

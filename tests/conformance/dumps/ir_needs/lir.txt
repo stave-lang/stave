@@ -1,0 +1,76 @@
+stave.ir 4 "x86_64-linux-v2" debug lowered
+type t0 int u 32
+type t1 int s 32
+site 0 "src/main.stv" 20 4 main.wide_user
+site 1 "src/main.stv" 21 12 main.wide_user
+site 2 "src/main.stv" 36 13 main.half
+site 3 "src/main.stv" 28 4 main.half_v2
+site 4 "src/main.stv" 29 14 main.half_v2
+site 5 "src/main.stv" 18 13 main.twice
+site 6 "src/main.stv" 9 4 main.twice_v3
+site 7 "src/main.stv" 11 12 main.twice_v3
+site 8 "src/main.stv" 10 13 main.twice_v3
+site 9 "src/main.stv" 10 42 main.twice_v3
+site 10 "src/main.stv" 14 4 main.twice_base
+site 11 "src/main.stv" 15 14 main.twice_base
+site 12 "src/main.stv" 32 4 main.half_base
+site 13 "src/main.stv" 33 14 main.half_base
+site 14 "src/main.stv" 33 18 main.half_base
+site 15 "src/main.stv" 38 4 main.main
+site 16 "src/main.stv" 39 13 main.main
+site 17 "src/main.stv" 41 13 main.main
+site 18 "src/main.stv" 41 18 main.main
+site 19 "src/main.stv" 41 20 main.main
+site 20 "src/main.stv" 42 15 main.main
+main @7
+fn @0 main.wide_user(t0) -> t0 needs(avx2, fma) site 0 {
+b0(%0: t0):
+  %1 = call t0 @4 %0 !1
+  ret %1
+}
+fn @1 main.half(t0) -> t0 site 2 {
+b0(%0: t0):
+  %1 = call t0 @2 %0
+  ret %1
+}
+fn @2 main.half_v2(t0) -> t0 needs(sse42) site 3 {
+b0(%0: t0):
+  %1 = div t0 %0 2 !4
+  ret %1
+}
+fn @3 main.twice(t0) -> t0 site 5 {
+b0(%0: t0):
+  %1 = call t0 @5 %0
+  ret %1
+}
+fn @4 main.twice_v3(t0) -> t0 needs(avx2) site 6 {
+b0(%0: t0):
+  %1 = call.ind t0 @4.0 %0 !7
+  ret %1
+}
+fn @4.0 main.twice_v3(t0) -> t0 needs(avx2) site 8 {
+b0(%0: t0):
+  %1 = mul t0 %0 2 !9
+  ret %1
+}
+fn @5 main.twice_base(t0) -> t0 site 10 {
+b0(%0: t0):
+  %1 = add t0 %0 %0 !11
+  ret %1
+}
+fn @6 main.half_base(t0) -> t0 site 12 {
+b0(%0: t0):
+  %1 = div t0 %0 2 !14
+  %2 = sub t0 %0 %1 !13
+  ret %2
+}
+fn @7 main.main() -> t1 site 15 {
+b0():
+  %0 = call t0 @3 3 !16
+  %1 = call.ind t0 @1 %0 !17
+  %2 = call t0 @2 %0 !19
+  %3 = add t0 %1 %2 !18
+  %4 = sub t0 %3 6 !20
+  %5 = cast.wrap t1 %4
+  ret %5
+}

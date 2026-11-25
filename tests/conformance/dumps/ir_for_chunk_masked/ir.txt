@@ -1,3 +1,4 @@
+stave.ir 4 "x86_64-linux-v2" debug checked
 type t0 int u size
 type t1 int s 32
 type t2 float 32
@@ -6,7 +7,11 @@ type t4 ref t5
 type t5 slice t2
 type t6 vec t2 4
 type t7 mask 32 4
-fn @0 main.sum {
+site 0 "src/main.stv" 3 4 main.sum
+site 1 "src/main.stv" 7 7 main.sum
+site 2 "src/main.stv" 13 4 main.main
+main @1
+fn @0 main.sum(t4) -> t2 site 0 {
 b0(%0: t4):
   %1 = vec.splat t6 0x00000000
   %2 = slice.len t0 %0
@@ -26,7 +31,7 @@ b3():
   cbr %11 b4() b5(%5)
 b4():
   %12 = mask.first_n t7 %10
-  %13 = vec.load_masked t6 %0 %4 %12
+  %13 = vec.load_masked t6 %0 %4 %12 !1
   %14 = vec.splat t6 0x00000000
   %15 = mask.select t6 %12 %13 %14
   %16 = vec.add t6 %5 %15
@@ -35,7 +40,7 @@ b5(%17: t6):
   %18 = vec.reduce_add t2 %17
   ret %18
 }
-fn @1 main.main {
+fn @1 main.main() -> t1 site 2 {
 b0():
   ret 0
 }

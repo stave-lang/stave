@@ -1,0 +1,43 @@
+stave.ir 4 "x86_64-linux-v2" debug lowered
+type t0 int u 32
+type t1 int s 32
+type t2 int s 64
+type t3 bool
+site 0 "src/main.stv" 4 4 main.clamp
+site 1 "src/main.stv" 14 15 main.clamp
+site 2 "src/main.stv" 16 23 main.clamp
+site 3 "src/main.stv" 19 4 main.main
+site 4 "src/main.stv" 20 15 main.main
+main @1
+fn @0 main.clamp(t1, t1) -> t2 site 0 {
+b0(%0: t1, %1: t1):
+  %2 = lt t3 %0 %1
+  cbr %2 b1() b2(%0, 0)
+b1():
+  br b2(%1, 1)
+b2(%3: t1, %4: t0):
+  %5 = gt t3 %3 100
+  cbr %5 b3() b4()
+b3():
+  br b5(100, %4)
+b4():
+  %6 = add t0 %4 2 !1
+  br b5(%3, %6)
+b5(%7: t1, %8: t0):
+  %9 = cast t2 %7
+  %10 = cast t2 %8
+  %11 = add t2 %9 %10 !2
+  ret %11
+}
+fn @1 main.main() -> t1 site 3 {
+b0():
+  %0 = call t2 @0 3 5 !4
+  %1 = eq t3 %0 7
+  cbr %1 b1() b2()
+b1():
+  br b3(0)
+b2():
+  br b3(1)
+b3(%2: t1):
+  ret %2
+}

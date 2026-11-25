@@ -1,0 +1,8 @@
+stave.ir 4 "x86_64-linux-v2" release opt
+type t0 int s 32
+site 0 "src/main.stv" 16 4 main.main
+main @0
+fn @0 main.main() -> t0 site 0 {
+b0():
+  ret 0
+}

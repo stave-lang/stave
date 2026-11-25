@@ -60,6 +60,7 @@ fn reversed(m: &Module) -> Module {
     let remap: Vec<FuncId> = (0..n).map(|i| FuncId((n - 1 - i) as u32)).collect();
     let mut p = m.clone();
     p.funcs.reverse();
+    p.main = m.main.map(|g| remap[g.index()]);
     for f in &mut p.funcs {
         for o in f.body.iter_mut().flat_map(|b| &mut b.operands) {
             if let Operand::Func(g) = o {
@@ -76,13 +77,21 @@ fn reversed(m: &Module) -> Module {
     p
 }
 
+/// The borrow side table, which module equality leaves out (the text does not carry it).
+fn side_table(m: &Module) -> impl PartialEq + std::fmt::Debug + '_ {
+    let bodies: Vec<_> = m.funcs.iter().map(|f| f.body.as_ref().map(|b| (&b.borrows, &b.events))).collect();
+    (&m.frozen, &m.clauses, bodies)
+}
+
 fn assert_canonical(what: &str, m: &Module) {
     let mut again = m.clone();
     assert!(is_identity(&canonicalize(&mut again)), "{what}: functions moved");
     assert!(again == *m, "{what}: renumbering a lowered module changed it");
+    assert!(side_table(&again) == side_table(m), "{what}: renumbering changed the side table");
     let mut back = reversed(m);
     canonicalize(&mut back);
     assert!(back == *m, "{what}: the reversed module does not renumber back");
+    assert!(side_table(&back) == side_table(m), "{what}: the reversed side table does not renumber back");
 }
 
 #[test]

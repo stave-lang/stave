@@ -66,8 +66,7 @@ impl FnVerifier<'_> {
     }
 
     fn usize_operand(&self, b: &Body, o: Operand) -> R {
-        let us = self.find_ty(TypeKey::Int { signed: false, bits: IntBits::Size })?;
-        self.check_operand(b, o, us)
+        self.check_scalar_operand(b, o, &TypeKey::Int { signed: false, bits: IntBits::Size })
     }
 
     fn int_lanes(&self, t: TypeId) -> Result<(TypeId, arith::IntTy, u32), String> {

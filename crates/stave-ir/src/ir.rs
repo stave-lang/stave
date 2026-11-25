@@ -539,8 +539,8 @@ impl Insts {
     }
 }
 
-/// A function body.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// A function body. Equality leaves out the borrow side table ([`Module`]'s equality).
+#[derive(Clone, Debug, Default)]
 pub struct Body {
     pub blocks: Vec<BlockData>,
     pub block_params: Vec<Value>,
@@ -796,10 +796,12 @@ pub enum DataTarget {
     Static(u32),
 }
 
-/// A whole program (or the part of it being printed / run). Equality is structural: two
-/// modules are equal when every table is, row by row (compare canonical modules,
-/// [`crate::canon::canonicalize`]).
-#[derive(Clone, Debug, Default, PartialEq)]
+/// A whole program (or the part of it being printed / run). Two modules are equal when what
+/// their text carries is (contracts/checked-ir.md "Canonical module"): every table row by row,
+/// `stated` by its claim rows; the borrow side table (`frozen`, `clauses`, [`Body::borrows`],
+/// [`Body::events`]) and the proofs inside summaries are not part of it. Compare canonical
+/// modules ([`crate::canon::canonicalize`]).
+#[derive(Clone, Debug, Default)]
 pub struct Module {
     pub types: TypeTable,
     pub funcs: Vec<Func>,
@@ -816,6 +818,9 @@ pub struct Module {
     /// call is no longer provable from the bodies alone once the callee's own checks are gone:
     /// the bounds audit reads calls with these rows.
     pub stated: Vec<Option<std::sync::Arc<crate::witness::Summary>>>,
+    /// The program's entry, the fn `main` of its root module (`None`: a library, or a module
+    /// with no entry). The text's `main` line; code generation makes it `__stave_main`.
+    pub main: Option<FuncId>,
     /// The declaration of `std.cell.UnsafeCell` (`None`: the program has none, or it is
     /// unknown): the bytes of a value of such a type are not read-only behind a `&`. The
     /// bounds pass reads a field behind a `&` parameter as one value only when this is known.
@@ -828,6 +833,60 @@ pub struct Module {
     pub frozen: Vec<bool>,
     /// Per function, in a module lowered with the borrow side table: its `from` clauses.
     pub clauses: Vec<Clauses>,
+}
+
+impl PartialEq for Body {
+    fn eq(&self, o: &Body) -> bool {
+        let Body { blocks, block_params, insts, operands, consts, cases, values, borrows: _, events: _ } =
+            self;
+        *blocks == o.blocks
+            && *block_params == o.block_params
+            && *insts == o.insts
+            && *operands == o.operands
+            && *consts == o.consts
+            && *cases == o.cases
+            && *values == o.values
+    }
+}
+
+impl PartialEq for Module {
+    fn eq(&self, o: &Module) -> bool {
+        let Module {
+            types,
+            funcs,
+            strings,
+            intrinsics,
+            sites,
+            statics,
+            stated,
+            main,
+            cell,
+            decls,
+            frozen: _,
+            clauses: _,
+        } = self;
+        *types == o.types
+            && *funcs == o.funcs
+            && *strings == o.strings
+            && *intrinsics == o.intrinsics
+            && *sites == o.sites
+            && *statics == o.statics
+            && *main == o.main
+            && *cell == o.cell
+            && *decls == o.decls
+            && (0..stated.len().max(o.stated.len())).all(|f| {
+                let rows = |s: &[Option<std::sync::Arc<crate::witness::Summary>>]| {
+                    s.get(f).and_then(|x| x.as_deref()).map(claim_rows).unwrap_or_default()
+                };
+                rows(stated) == rows(&o.stated)
+            })
+    }
+}
+
+/// What a summary's `claim` lines carry: its `pre` rows with their `checked` mark, then its
+/// `post` rows. No rows and no summary print alike.
+fn claim_rows(s: &crate::witness::Summary) -> (Vec<(crate::witness::Row, bool)>, Vec<crate::witness::Row>) {
+    (s.pre.iter().map(|p| (p.row, p.entry != crate::witness::NO_BLOCK)).collect(), s.post.clone())
 }
 
 impl Module {
@@ -902,6 +961,19 @@ impl Module {
         self.func(f).is_some_and(|x| x.known == Some(k))
     }
 
+    /// Records declaration `id` in [`Module::decls`] (ascending, once; an id already there is
+    /// kept): every decl an `adt` key or `cell` names must be recorded.
+    pub fn record_decl(
+        &mut self,
+        id: crate::types::DeclId,
+        kind: crate::types::AdtKind,
+        path: impl Into<String>,
+    ) {
+        if let Err(k) = self.decls.binary_search_by_key(&id, |d| d.id) {
+            self.decls.insert(k, crate::types::DeclInfo { id, kind, path: path.into() });
+        }
+    }
+
     pub fn add_string(&mut self, bytes: impl Into<Vec<u8>>) -> StrId {
         self.strings.push(bytes.into());
         StrId(self.strings.len() as u32 - 1)
@@ -927,32 +999,48 @@ impl Module {
     }
 
     /// Renumbers the type table canonically ([`TypeTable::canonicalize`]) and rewrites every type
-    /// id in the functions.
+    /// id in the functions and statics.
     pub fn canonicalize_types(&mut self) -> Result<(), crate::types::CanonError> {
         let remap = self.types.canonicalize()?;
         let m = |t: TypeId| remap.get(t.index()).copied().unwrap_or(t);
         for f in &mut self.funcs {
-            for a in &mut f.type_args {
-                if let GenericArg::Type(t) = a {
-                    *t = m(*t);
-                }
-            }
-            f.params.iter_mut().for_each(|t| *t = m(*t));
-            f.ret = f.ret.map(m);
-            if let Some(b) = &mut f.body {
-                b.values.iter_mut().for_each(|v| v.ty = m(v.ty));
-                b.insts.ty.iter_mut().for_each(|t| *t = t.map(m));
-                for o in &mut b.operands {
-                    if let Operand::Type(t) = o {
-                        *t = m(*t);
-                    }
-                }
-            }
+            f.map_types(m);
         }
         for st in &mut self.statics {
             st.ty = m(st.ty);
         }
         Ok(())
+    }
+}
+
+impl Func {
+    /// Rewrites every type id of the function, its signature and its body, through `m`.
+    pub fn map_types(&mut self, m: impl Fn(TypeId) -> TypeId) {
+        for a in &mut self.type_args {
+            if let GenericArg::Type(t) = a {
+                *t = m(*t);
+            }
+        }
+        self.params.iter_mut().for_each(|t| *t = m(*t));
+        self.ret = self.ret.map(&m);
+        if let Some(b) = &mut self.body {
+            b.values.iter_mut().for_each(|v| v.ty = m(v.ty));
+            b.insts.ty.iter_mut().for_each(|t| *t = t.map(&m));
+            for o in &mut b.operands {
+                if let Operand::Type(t) = o {
+                    *t = m(*t);
+                }
+            }
+        }
+    }
+
+    /// Every type id of the function's signature (type arguments, params, result).
+    pub fn signature_types(&self) -> impl Iterator<Item = TypeId> + '_ {
+        let targs = self.type_args.iter().filter_map(|a| match a {
+            GenericArg::Type(t) => Some(*t),
+            GenericArg::Const(_) => None,
+        });
+        targs.chain(self.params.iter().copied()).chain(self.ret)
     }
 }
 
