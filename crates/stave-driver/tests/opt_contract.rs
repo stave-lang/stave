@@ -2,7 +2,8 @@
 //! passes only (rule P3), so this checks what it can:
 //!
 //! - cases of the base passes beside the examples: the parts of params placed after the slots
-//!   and a part whose anchor is deleted in the same step (B1, B3).
+//!   and a part whose anchor is deleted in the same step (B1, B3), dead code whose value has 255
+//!   uses and more (B5).
 
 use stave_driver::ir_cmd;
 
@@ -122,4 +123,31 @@ b3():
         at_level(head, "checked", "opt")
     );
     assert_eq!(opt("m1.ir", &input), want);
+}
+
+/// `%1` has `n` uses, all by dead instructions: B5 deletes them and then `%1`, whatever `n`.
+#[test]
+fn dead_code_goes_however_many_uses_it_had() {
+    for n in [1, 254, 255, 256, 300, 600] {
+        let mut text = String::from(
+            "stave.ir 4 \"x86_64-linux-v2\" release checked
+type t0 int u 64
+fn @0 main.f(t0) -> t0 {
+b0(%0: t0):
+  %1 = add.wrap t0 %0 1
+",
+        );
+        for k in 0..n {
+            text.push_str(&format!("  %{} = xor t0 %1 {k}\n", k + 2));
+        }
+        text.push_str("  ret %0\n}\n");
+        let want = "stave.ir 4 \"x86_64-linux-v2\" release opt
+type t0 int u 64
+fn @0 main.f(t0) -> t0 {
+b0(%0: t0):
+  ret %0
+}
+";
+        assert_eq!(opt(&format!("uses{n}.ir"), &text), want, "{n} uses");
+    }
 }
