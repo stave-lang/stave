@@ -9,6 +9,7 @@
 //
 // No i128 type exists: mathematical values are `I128` words, with only the operations the ops need.
 import generated.ir_text_terminals as ops;
+import vtypes;
 
 pub const E_OVERFLOW: u8 = 1;
 pub const E_DIV_ZERO: u8 = 2;
@@ -286,48 +287,27 @@ impl CastTy {
         return CastTy.{ class: class, ty: IntTy.new(bits, false) };
     }
 
-    fn is(self, o: CastTy) -> bool {
-        return self.class == o.class && self.ty.bits == o.ty.bits && self.ty.signed == o.ty.signed;
-    }
-
-    fn int_like(self) -> bool {
-        return self.class != CT_FLOAT;
+    // The class the verifier's cast rule reads (`vtypes.cast_allowed`).
+    fn cls(self) -> vtypes.Cls {
+        if self.class == CT_INT { return vtypes.Cls.{ k: vtypes.K_INT, bits: self.ty.bits as u32, signed: self.ty.signed, fmt: 0 }; }
+        let k = if self.class == CT_BOOL then vtypes.K_BOOL else if self.class == CT_CHAR then vtypes.K_CHAR else if self.class == CT_PTR then vtypes.K_PTR else vtypes.K_FLOAT;
+        return vtypes.cls_of(k);
     }
 }
 
-fn is_char(v: I128) -> bool {
-    return v.hi == 0 && v.lo <= 0x10ffff && !(v.lo >= 0xd800 && v.lo <= 0xdfff);
-}
-
-// Whether a cast `op` (`cast`, `cast.wrap`, `cast.sat`) from `src` to `dst` is defined (the
-// verifier's rule). `cast` is allowed only when lossless for every value.
-pub fn cast_allowed(op: u16, src: CastTy, dst: CastTy) -> bool {
-    if !src.int_like() || !dst.int_like() { return false; }
-    let to_int = dst.class == CT_INT;
-    if op == ops.IR_T_CAST_DOT_WRAP { return to_int; }
-    if op == ops.IR_T_CAST_DOT_SAT { return to_int && (src.class == CT_INT || src.class == CT_CHAR); }
-    if op != ops.IR_T_KW_CAST { return false; }
-    if src.is(dst) { return true; }
-    let (a, b) = (src.ty, dst.ty);
-    if src.class == CT_INT && to_int {
-        return (a.signed == b.signed && b.bits >= a.bits) || (!a.signed && b.signed && b.bits > a.bits);
-    }
-    if src.class == CT_BOOL { return to_int; }
-    if src.class == CT_CHAR { return to_int && b.bits >= 32 && (!b.signed || b.bits > 32); }
-    if src.class == CT_INT && dst.class == CT_CHAR { return !a.signed && a.bits <= 8; }
-    if src.class == CT_PTR { return to_int && b.bits == 64; }
-    return src.class == CT_INT && dst.class == CT_PTR && a.bits == 64;
-}
-
-// The cast of `v` (bits of type `src`) to `dst`: E_OP for a cast that is not allowed, and for a
-// value that is no `char`.
+// The cast of `v` (bits of type `src`) to `dst`, allowed by the verifier's rule (`vtypes.cast_allowed`):
+// E_OP for a cast that is not allowed, for a float, for `cast.round` and `cast.try`, and for a value
+// that is no `char`.
 pub fn int_cast(op: u16, src: CastTy, dst: CastTy, v: u64) -> Result<u64, u8> {
-    if !cast_allowed(op, src, dst) { return Result.Err(E_OP); }
+    let ck = vtypes.cast_kind(op);
+    if ck != vtypes.C_EXACT && ck != vtypes.C_WRAP && ck != vtypes.C_SAT { return Result.Err(E_OP); }
+    if src.class == CT_FLOAT || dst.class == CT_FLOAT { return Result.Err(E_OP); }
+    if !vtypes.cast_allowed(ck, src.cls(), dst.cls()) { return Result.Err(E_OP); }
     let val = src.ty.value(v);
     if dst.class == CT_INT {
-        return Result.Ok(if op == ops.IR_T_CAST_DOT_SAT then dst.ty.clamp(val) else dst.ty.wrap(val));
+        return Result.Ok(if ck == vtypes.C_SAT then dst.ty.clamp(val) else dst.ty.wrap(val));
     }
     if dst.class == CT_PTR { return Result.Ok(val.lo); }
-    if dst.class == CT_CHAR && is_char(val) { return Result.Ok(val.lo); }
+    if dst.class == CT_CHAR && vtypes.is_char(val.hi, val.lo) { return Result.Ok(val.lo); }
     return Result.Err(E_OP);
 }

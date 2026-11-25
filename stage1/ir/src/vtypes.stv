@@ -1,6 +1,7 @@
 // What the verifier knows about types: classes for op typing, record and enum shapes, vector
 // and mask shapes, memory operands, casts, layouts, and int constant ranges (stave-ir `verify`,
 // `layout`, `simd`, `arith`). Every function takes any type id and any key, in range or not.
+import generated.ir_text_terminals;
 import model;
 import types;
 import std.idx;
@@ -257,6 +258,16 @@ pub const C_WRAP: u8 = 1;
 pub const C_SAT: u8 = 2;
 pub const C_ROUND: u8 = 3;
 pub const C_TRY: u8 = 4;
+
+// The kind of cast op `op`, or 255 for another op.
+pub fn cast_kind(op: u16) -> u8 {
+    if op == ir_text_terminals.IR_T_KW_CAST { return C_EXACT; }
+    if op == ir_text_terminals.IR_T_CAST_DOT_WRAP { return C_WRAP; }
+    if op == ir_text_terminals.IR_T_CAST_DOT_SAT { return C_SAT; }
+    if op == ir_text_terminals.IR_T_CAST_DOT_ROUND { return C_ROUND; }
+    if op == ir_text_terminals.IR_T_CAST_DOT_TRY { return C_TRY; }
+    return 255;
+}
 
 // The significand digits of a float format.
 fn digits(f: u32) -> u32 {
