@@ -19,6 +19,7 @@ import decls;
 import sigs;
 import tc_rows;
 import tc_traits;
+import traits;
 import ir.types;
 import prims.search;
 import std.vec;
@@ -196,11 +197,49 @@ impl tc_rows.Typeck {
         return (x, y, z, true);
     }
 
-    // A lookup that is not decided: when it waits for an answer in the last round, the body is
-    // not modeled.
+    // A lookup that is not decided (waiting for an answer, or one this stage does not take): the
+    // call is unknown.
     fn waited(&mut self, wait: bool) -> (u32, u32, u32) {
-        if wait && self.tq.last { self.bad = true; }
+        let _ = wait;
         return (NONE, NONE, NONE);
+    }
+
+    // The reference accessors of type c for E0206 case `deref*` (stage0's `ref_accessors`): of the
+    // methods of the inherent impls of c's head that apply to c (impls in item order, each one's
+    // methods in order), the first this module may call that has no generics of its own, is not
+    // unsafe, takes `&self` alone and returns a `&` (read), and the first that takes `&mut self`
+    // alone and returns a `&mut` (write); NONE for none.
+    pub fn ref_accessors(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, c: u32) -> (u32, u32) {
+        let h = traits.head(&sg.cx.tab, c);
+        let mut read = NONE;
+        let mut write = NONE;
+        if h == traits.H_NONE { return (read, write); }
+        let e = self.tq.env_of(sg, self.sc);
+        let n = ds.decls();
+        for i in 0..n {
+            if ds.kind.as_slice()[i] != decls.DK_IMPL || ds.item.as_slice()[i] == NONE { continue; }
+            if self.tq.tr.im.trait_of.as_slice()[i] != NONE || self.tq.tr.im.head_of.as_slice()[i] != h { continue; }
+            if self.tq.applies(sg, e, i as% u32, c) != tc_traits.A_YES { continue; }
+            let it = ds.item.as_slice()[i];
+            let mut m = i + 1;
+            while m < n && ds.item.as_slice()[m] == it {
+                let ok = ds.kind.as_slice()[m] == decls.DK_METHOD && ds.parent.as_slice()[m] == i as% u32;
+                let vis = ds.flags.as_slice()[m] & decls.F_PUB != 0 || ds.module.as_slice()[m] == self.module;
+                let fl = sg.sflags.as_slice()[m];
+                let gl = sg.cx.gens.lo.as_slice();
+                let plain = fl & sigs.SF_UNSAFE == 0 && sg.params.row(m).len() == 1 && gl[m + 1] == gl[m];
+                let sk = fl & sigs.SF_SELF_MASK;
+                let ret = sg.cx.ty.as_slice()[m];
+                if ok && vis && plain && (sk == sigs.SF_SELF_REF || sk == sigs.SF_SELF_MUT) && ret != ERR && ret != NONE && sg.cx.tab.tag_of(ret) == types.TK_REF {
+                    let by_mut = sk == sigs.SF_SELF_MUT;
+                    let rm = sg.cx.tab.a_of(ret) == 1;
+                    if rm == by_mut && by_mut && write == NONE { write = m as% u32; }
+                    if rm == by_mut && !by_mut && read == NONE { read = m as% u32; }
+                }
+                m = m + 1;
+            }
+        }
+        return (read, write);
     }
 
     // Impl method m found at type c, its impl's generic arguments in `tq.qargs`.

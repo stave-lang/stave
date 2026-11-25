@@ -71,10 +71,7 @@ impl tc_rows.Typeck {
             self.report_span(206, if r then tc_rows.C_REF_OPERAND else 0u8, tok, tok, NONE, t, NONE, NONE);
         }
         if a == tc_traits.A_NO || c == tc_traits.A_NO { return UNK; }
-        if a == tc_traits.A_WAIT || c == tc_traits.A_WAIT {
-            if self.tq.last { self.bad = true; }
-            return UNK;
-        }
+        if a == tc_traits.A_WAIT || c == tc_traits.A_WAIT { return UNK; }
         return t;
     }
 }

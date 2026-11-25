@@ -7,7 +7,8 @@
 // (a shorthand field binds the `FieldPat`), or none. A constructor or tuple pattern matched
 // against a reference peels it, and the names below bind by reference (`&F`, or `&mut F` when
 // every peeled reference is `&mut`). A pattern stage0 rejects (wrong constructor, arity, field,
-// a field named twice) makes the body `bad`.
+// a field named twice) leaves the names below it unknown. A value of the error type binds as
+// stage0's (`err_pattern`).
 //
 // Owns: the `loc` rows of binding nodes inside patterns, and the pattern stack `pat_*` of
 // `tc_rows.Typeck`. Entry point: `bind_pattern`. A pattern under a value of unknown type leaves
@@ -42,12 +43,8 @@ impl tc_rows.Typeck {
     pub fn bind_pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, p: usize, ty: u32) {
         // the pattern's nesting is at most its node count: a pattern that may pass the nesting
         // limit is not modeled
-        if self.depth as usize + tree.size.as_slice()[p] as usize + 1 > tc_rows.MAX_DEPTH as usize { self.bad = true; }
-        if ty == UNK { return; }
-        if ty == NONE || ty == ERR {
-            self.bad = true;
-            return;
-        }
+        if self.depth as usize + tree.size.as_slice()[p] as usize + 1 > tc_rows.MAX_DEPTH as usize { return; }
+        if ty == UNK || ty == NONE { return; }
         self.pat_row.clear();
         self.pat_ty.clear();
         self.pat_mode.clear();
@@ -63,7 +60,6 @@ impl tc_rows.Typeck {
             self.pat_ty.truncate(top);
             self.pat_mode.truncate(top);
             if !self.pattern(sg, ds, nm, t, tree, n, pt, m) {
-                self.bad = true;
                 return;
             }
         }
@@ -121,6 +117,7 @@ impl tc_rows.Typeck {
         let a = tree.tok.as_slice()[n];
         let ft = consteval.tk(t, a);
         if ft == terminals.T_UNDERSCORE { return true; }
+        if ty == ERR { return self.err_pattern(t, tree, n, m); }
         if ft == terminals.T_KW_MUT { return self.bind(&mut sg.cx.tab, n, ty, m); }
         let ks = tree.kids.row(n);
         if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL { return self.lit_pattern(&sg.cx.tab, t, tree, n, ty, m); }
@@ -202,6 +199,25 @@ impl tc_rows.Typeck {
             return true;
         }
         return !tuple && !record;
+    }
+
+    // Pattern n (not `_`) against a value of the error type, as stage0's: a name bound by value
+    // is of the error type, parentheses and a tuple's parts take it. The names of any other
+    // form stay unknown.
+    fn err_pattern(&mut self, t: &lex.Tokens, tree: &ast.Ast, n: usize, m: u8) -> bool {
+        let a = tree.tok.as_slice()[n];
+        let ft = consteval.tk(t, a);
+        let ks = tree.kids.row(n);
+        if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL { return true; }
+        if ft == terminals.T_L_PAREN {
+            for j in 0..ks.len() {
+                self.push_pat(self.base + ks[j] as usize, ERR, m);
+            }
+            return true;
+        }
+        let single = ft == terminals.T_IDENT && !(consteval.tk(t, a + 1) == terminals.T_DOT && consteval.tk(t, a + 2) == terminals.T_IDENT) && consteval.tk(t, a + 1) != terminals.T_L_PAREN && consteval.tk(t, a + 1) != terminals.T_DOT_L_BRACE;
+        if (ft == terminals.T_KW_MUT || single) && m == M_MOVE { self.loc.as_mut_slice()[n] = ERR; }
+        return true;
     }
 
     // A field or payload type with the arguments of the ADT type adt_ty.

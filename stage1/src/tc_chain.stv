@@ -71,6 +71,9 @@ pub const S_TRAIT: u8 = 10;
 pub const S_TCALL: u8 = 11;
 // `old` called in an `ensures` clause: `old(e)` is e's value at entry, of e's type.
 pub const S_OLD: u8 = 12;
+// The method of a generic param's bound named through the param (`T.m`) and not called, as the
+// chain's last step (its decl in `acc`).
+pub const S_BOUND_M: u8 = 13;
 const SELF_VAR: u32 = tc_rows.SELF_VAR;
 
 // The callee of a call through a fn value (on its `Args` row: the fn type in `pos`); no decl or
@@ -78,6 +81,10 @@ const SELF_VAR: u32 = tc_rows.SELF_VAR;
 const FN_VALUE: u32 = 0xffff_feff;
 // The callee of `old(e)` (on its `Args` row); no decl or built-in has this id.
 const OLD_CALL: u32 = 0xffff_fefc;
+// The callee of a call on a value of the error type (a method of one, or one called): its
+// arguments are checked without a context, their pending groups take the error type, and the
+// call's value is of it (stage0's `args_only`).
+const ERR_CALL: u32 = 0xffff_fefb;
 
 // The chain step waiting for the child being checked: none, generic arguments, a call's arguments,
 // an index, a struct literal.
@@ -403,6 +410,12 @@ impl tc_rows.Typeck {
             let h = self.hint.as_slice()[r];
             return self.fn_item_value(sg, r, d, b, h);
         }
+        // a trait method named through its trait or a bound, not called: E0201 case `not-value`
+        // at the chain, of the error type
+        if self.chain.as_slice()[r] == S_TCALL || self.chain.as_slice()[r] == S_BOUND_M {
+            self.report(201, tc_rows.C_NOT_VALUE, r as% u32, NONE, NONE, NONE);
+            return ERR;
+        }
         if self.chain.as_slice()[r] != S_VAR { return self.chain_value(r); }
         let v = self.acc.as_slice()[r];
         let pre = self.blo.as_slice()[r];
@@ -537,6 +550,14 @@ impl tc_rows.Typeck {
                 if tk(t, q) == terminals.T_L_PAREN {
                     let close = close_of(cut, q);
                     let recv0 = if st == S_VAL then self.acc.as_slice()[r] else UNK;
+                    if self.force_e(recv0) == ERR {
+                        self.set_chain(r, S_VAL, ERR);
+                        if close == q + 1 {
+                            p = close + 1;
+                            continue;
+                        }
+                        return self.err_args(tree, r, c, close);
+                    }
                     let recv = self.force(recv0);
                     let (m, inst, b) = self.method_of(sg, ds, nm, r, recv, seg);
                     let ch = if close + 1 == end then self.hint.as_slice()[r] else NONE;
@@ -557,22 +578,32 @@ impl tc_rows.Typeck {
                     return true;
                 }
                 if st != S_VAL {
+                    let ty = self.acc.as_slice()[r];
+                    if st == S_TYPE && q == end && sg.cx.tab.tag_of(ty) == types.TK_PARAM {
+                        let (m, _, _) = self.bound_assoc(sg, ds, ty, nm.tok_str.as_slice()[seg as usize]);
+                        if m != NONE {
+                            self.set_chain(r, S_BOUND_M, m);
+                            p = q;
+                            continue;
+                        }
+                    }
                     let _ = self.chain_value(r);
                     self.set_chain(r, S_ERR, UNK);
                     p = q;
                     continue;
                 }
                 let a0 = self.acc.as_slice()[r];
-                let recv = self.force(a0);
-                let f = self.field_of(sg, ds, nm, recv, seg);
+                let recv = self.force_e(a0);
+                // a field of a value of the error type is of it
+                let f = if recv == ERR then ERR else self.field_of(sg, ds, nm, recv, seg);
                 self.set_chain(r, S_VAL, f);
                 p = q;
                 continue;
             }
             if ty == terminals.T_DOT && tk(t, p + 1) == terminals.T_INT_LIT {
                 let recv0 = self.chain_value(r);
-                let recv = self.force(recv0);
-                let e = self.tuple_field(&sg.cx.tab, set, t, cut, recv, p + 1);
+                let recv = self.force_e(recv0);
+                let e = if recv == ERR then ERR else self.tuple_field(&sg.cx.tab, set, t, cut, recv, p + 1);
                 self.set_chain(r, S_VAL, e);
                 p = p + 2;
                 continue;
@@ -627,6 +658,14 @@ impl tc_rows.Typeck {
                 }
                 // a built-in fn is called as a fn value of its fn type
                 let fv0 = if st == S_VAL || st == S_BIFN then self.acc.as_slice()[r] else UNK;
+                if st == S_VAL && self.force_e(fv0) == ERR {
+                    self.set_chain(r, S_VAL, ERR);
+                    if close == p + 1 {
+                        p = close + 1;
+                        continue;
+                    }
+                    return self.err_args(tree, r, c, close);
+                }
                 let fv = self.resolve(fv0);
                 if fv != UNK && fv != NONE && !is_lit(fv) && sg.cx.tab.tag_of(fv) == types.TK_FN {
                     // a call through a fn value: its type gives the params and the result
@@ -686,7 +725,7 @@ impl tc_rows.Typeck {
             if ty == terminals.T_L_BRACKET {
                 if c == NONE || !is_expr(kind(tree, c as usize)) { return self.chain_lost(r); }
                 let b0 = self.chain_value(r);
-                let b = self.force(b0);
+                let b = self.force_e(b0);
                 self.set_chain(r, S_VAL, b);
                 self.pos.as_mut_slice()[r] = close_of(cut, p) + 1;
                 self.pend.as_mut_slice()[r] = P_INDEX;
@@ -698,8 +737,8 @@ impl tc_rows.Typeck {
             }
             if ty == terminals.T_QUESTION {
                 let b0 = self.chain_value(r);
-                let base = self.force(b0);
-                let v = self.try_value(&sg.cx.tab, base);
+                let base = self.force_e(b0);
+                let v = if base == ERR then ERR else self.try_value(&sg.cx.tab, base);
                 self.set_chain(r, S_VAL, v);
                 p = p + 1;
                 continue;
@@ -737,9 +776,21 @@ impl tc_rows.Typeck {
         return inner;
     }
 
+    // The arguments (`Args` row c, entered) of a call of chain r on a value of the error type
+    // (`ERR_CALL`), its `)` at token close.
+    fn err_args(&mut self, tree: &ast.Ast, r: usize, c: u32, close: u32) -> bool {
+        if c == NONE || kind(tree, c as usize) != K_ARGS { return self.chain_lost(r); }
+        self.pos.as_mut_slice()[r] = close + 1;
+        self.pend.as_mut_slice()[r] = P_CALL;
+        self.acc.as_mut_slice()[c as usize] = ERR_CALL;
+        self.pos.as_mut_slice()[c as usize] = NONE;
+        self.blo.as_mut_slice()[c as usize] = NONE;
+        self.hint.as_mut_slice()[c as usize] = NONE;
+        return true;
+    }
+
     // A chain whose steps do not match its children: not modeled.
     fn chain_lost(&mut self, r: usize) -> bool {
-        self.bad = true;
         self.pos.as_mut_slice()[r] = NONE;
         return false;
     }
@@ -750,6 +801,15 @@ impl tc_rows.Typeck {
         self.pend.as_mut_slice()[r] = P_NONE;
         if p == P_CALL {
             let callee = self.acc.as_slice()[c];
+            if callee == ERR_CALL {
+                let ks = tree.kids.row(c);
+                for j in 0..ks.len() {
+                    let a = self.nty.as_slice()[self.base + ks[j] as usize];
+                    self.fix_err(a);
+                }
+                self.set_chain(r, S_VAL, ERR);
+                return;
+            }
             if callee == OLD_CALL {
                 // one argument, typed under the call's context; its type is the value's
                 self.old_depth = self.old_depth - 1;
@@ -769,7 +829,8 @@ impl tc_rows.Typeck {
             let base = self.acc.as_slice()[r];
             let want = self.hint.as_slice()[c];
             self.coerce(&sg.cx.tab, c, want, NONE);
-            let v = self.index_value(&mut sg.cx.tab, tree, base, c);
+            // an element of a value of the error type is of it
+            let v = if base == ERR then ERR else self.index_value(&mut sg.cx.tab, tree, base, c);
             self.set_chain(r, S_VAL, v);
             return;
         }
@@ -967,7 +1028,8 @@ impl tc_rows.Typeck {
         let mut k: usize = 1;
         if syms.as_slice()[0] == NONE {
             if self.self_row == NONE { return h; }
-            ty = self.loc.as_slice()[self.self_row as usize];
+            let sv = self.loc.as_slice()[self.self_row as usize];
+            ty = self.resolve(sv);
         } else {
             let u = self.use_off(sg, r, segs[0]);
             if u == NONE { return h; }
@@ -996,8 +1058,8 @@ impl tc_rows.Typeck {
         if ty == UNK || ty == NONE || disp == NONE { return h; }
         let inner = peel_refs(&sg.cx.tab, ty);
         let e = self.tq.env_of(sg, self.sc);
-        let ans = self.tq.holds(sg, e, inner, disp);
-        if ans == tc_traits.A_NO || ans == tc_traits.A_WAIT && self.tq.last { self.bad = true; }
+        // the value is a `String` whatever the answer (stage0's E0208 / E0901, not reported here)
+        let _ = self.tq.holds(sg, e, inner, disp);
         return h;
     }
 
@@ -1071,7 +1133,7 @@ impl tc_rows.Typeck {
     // without context and its type matched against the parameter (`infer`), a literal waits.
     // After the arguments, the call's context type is matched against the result while a binding
     // is missing; then the waiting arguments (literals last) are checked against their
-    // parameters. A binding still missing is E0202 (the body is `bad`). A call whose inference
+    // parameters. A binding still missing is E0202. A call whose inference
     // meets an unknown type is unknown (`waits` of its `Args` row).
 
     // The bindings row of a call of callee (a generic fn or a tuple variant) under context type
@@ -1405,7 +1467,6 @@ impl tc_rows.Typeck {
     // want are taken (an `Args` row starts at its first argument); the operand is the chain up
     // to the `(`.
     fn arity(&mut self, sg: &sigs.Sigs, tree: &ast.Ast, args: u32, want: usize, got: usize) -> u32 {
-        self.bad = true;
         if args == NONE { return UNK; }
         // the arguments are checked without a context, their literals the error type
         self.poison_kids(tree, args as usize);
@@ -1558,7 +1619,6 @@ impl tc_rows.Typeck {
         if self.call_n(sg, ds, v) == 0 { return self.call_ret(sg, ds, v); }
         if ch == UNK { return UNK; }
         if ch != NONE && sg.cx.tab.tag_of(ch) == types.TK_ADT && sg.cx.tab.a_of(ch) == adt { return ch; }
-        self.bad = true;
         self.report(202, tc_rows.C_INFER, r as% u32, NONE, NONE, NONE);
         return UNK;
     }
@@ -1569,6 +1629,7 @@ impl tc_rows.Typeck {
         let callee = self.acc.as_slice()[r];
         if callee == NONE || callee == UNK { return UNK; }
         if callee == OLD_CALL { return if j == 0 then self.hint.as_slice()[r] else NONE; }
+        if callee == ERR_CALL { return NONE; }
         if callee == FN_VALUE {
             let inst = self.pos.as_slice()[r];
             let np = sg.cx.tab.a_of(inst) as usize;
@@ -1642,7 +1703,6 @@ impl tc_rows.Typeck {
         let tag = tab.tag_of(inner);
         if tag != types.TK_ARRAY && tag != types.TK_SLICE {
             // E0206 `[]` at the `[`
-            self.bad = true;
             let at = tree.tok.as_slice()[e] - 1;
             self.report_span(206, tc_rows.C_INDEX, at, at, NONE, base, NONE, NONE);
             return UNK;

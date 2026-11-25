@@ -118,6 +118,60 @@ test fn written_generic_arguments() {
     debug.assert(decided(ty.as_slice()), "a variant after its enum's arguments, a fn item with its own");
 }
 
+test fn error_type_operators() {
+    let (d, _, ty) = run("fn f(b: bool, u: u32, x: f32) -> u32 {\n    let a = b + b;\n    let c = a + 1;\n    let e = c < 3;\n    let g = -u;\n    let h = (g, 1u8);\n    let k = x & x;\n    let m = a as u64;\n    let n = 1.5 | 2;\n    let w = u + 1;\n    return w;\n}\nfn main() {}\n");
+    let t = ty.as_slice();
+    debug.assert(d.len() == 4, "E0206 at `b + b`, `-u`, `x & x`; E0201 at `2`");
+    debug.assert(decided(t), "the body is typed around its errors");
+    debug.assert(test_kit.has(t, " -\n"), "an operator on the error type is of it");
+    debug.assert(test_kit.has(t, " bool\n"), "a comparison of the error type is `bool`");
+    debug.assert(test_kit.has(t, " int u 64\n"), "a cast of the error type is the type cast to");
+}
+
+test fn error_type_values() {
+    let (d, _, ty) = run("struct P { x: u32 }\nfn f(v: Nope, p: P) -> u32 {\n    let t: Nope = (1, 2u8);\n    let y = v + 1;\n    let z = v.a.b(1).c;\n    let q = v[0];\n    let (i, j) = v;\n    let s = i + j;\n    let r = if s > 0 then v else 3;\n    let k = match v {\n        w => w,\n    };\n    return p.x;\n}\nfn main() {}\n");
+    let m = messages(&d);
+    debug.assert(test_kit.has(m.as_slice(), "literal `1` has no type context\n"), "a tuple element under the error type has no context");
+    debug.assert(!test_kit.has(m.as_slice(), "literal `0`"), "an index of a value of the error type is still `usize`");
+    debug.assert(decided(ty.as_slice()), "a param, a binding, a field, a call, an index of the error type are of it");
+}
+
+test fn error_type_without_a_rule() {
+    let (_, _, ty) = run("fn f(b: bool) {\n    let a = b + b;\n    let r = [a; 2];\n}\nfn main() {}\n");
+    debug.assert(test_kit.has(ty.as_slice(), " ?\n"), "an array of elements of the error type stays undecided");
+}
+
+test fn deref_of_no_reference() {
+    let (d, _, ty) = run("struct G { v: u64 }\nimpl G {\n    pub fn len(&self) -> usize {\n        return 1;\n    }\n    pub fn get(&self) -> &u64 {\n        return &self.v;\n    }\n    pub fn get_mut(&mut self) -> &mut u64 {\n        return &mut self.v;\n    }\n}\nstruct R { v: u64 }\nimpl R {\n    pub fn peek(&self) -> &u64 {\n        return &self.v;\n    }\n}\nfn f(g: G, r: R, x: u64) -> u64 {\n    let a = *g;\n    let b = *r;\n    let c = *x;\n    return a + 1;\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 3, "one E0206 per `*`");
+    debug.assert(test_kit.has(ms, "`*` cannot dereference `G`: it is no reference or raw pointer\n"), "a struct with both accessors");
+    debug.assert(test_kit.has(ms, "`*` cannot dereference `u64`: it is no reference or raw pointer\n"), "a value with none");
+    debug.assert(decided(ty.as_slice()), "the dereference is of the error type, so is what it reaches");
+}
+
+test fn float_literals_out_of_range() {
+    let (d, _, _) = run("fn f() {\n    let a: f32 = 1e39;\n    let b = 1e39f32;\n    let c: f16 = 70000.0;\n    let e: f32 = 3.4e38;\n    let g: f64 = 1.7e308;\n    let h = -1_0e400f64;\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 4, "`1e39` twice, `70000.0`, `-1_0e400f64`");
+    debug.assert(test_kit.has(ms, "literal `1e39` is out of range for `f32`\n"), "an `f32` context");
+    debug.assert(test_kit.has(ms, "literal `1e39f32` is out of range for `f32`\n"), "an `f32` suffix");
+    debug.assert(test_kit.has(ms, "literal `70000.0` is out of range for `f16`\n"), "an `f16` holds up to 65504");
+    debug.assert(test_kit.has(ms, "literal `-1_0e400f64` is out of range for `f64`\n"), "a negated literal");
+}
+
+test fn trait_method_is_no_value() {
+    let (d, _, ty) = run("trait Tr {\n    fn m(&self) -> u32;\n}\nfn f<T: Tr>(x: &T) -> u32 {\n    let a = T.m;\n    let b = Tr.m;\n    let c = T.m(x);\n    return c;\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 2, "the two methods named and not called");
+    debug.assert(test_kit.has(ms, "`T.m` is not a value\n"), "a bound's method through its param");
+    debug.assert(test_kit.has(ms, "`Tr.m` is not a value\n"), "a trait method through its trait");
+    debug.assert(decided(ty.as_slice()), "no value is of the error type");
+}
+
 test fn nesting_past_the_limit() {
     let mut s = string.String.from_str("fn f(b: bool) -> bool {\n    return ");
     for _ in 0..20005u32 {

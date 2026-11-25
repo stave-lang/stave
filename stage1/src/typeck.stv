@@ -19,10 +19,13 @@
 // context stage0 passes that this stage does not know is `UNK` as a hint: a literal without a
 // suffix under it is unknown (stage0 may have given it that context's type).
 //
-// A body in which this stage finds a type error prints `?` for all its nodes: stage0's types
-// after an error are not modeled. The errors stage0 reports in its words are rows (`report`),
-// rendered after the walk (`diag_tc`); the rows of a body checked again in a later round are its
-// last check's.
+// The error type (`ERR`, printed `-`): the value stage0 gives a node or a literal group where it
+// finds a type error, and everything stage0 derives from it by its forms' rules (an operator, a
+// cast, a field, a call on such a value, a binding of it, ...). A form with such a rule reads its
+// operands with `resolve_e` / `force_e`; every other form reads the error type as unknown
+// (`resolve`, `force`), so a node no rule covers prints `?`, never a guess. The errors stage0
+// reports in its words are rows (`report`), rendered after the walk (`diag_tc`); the rows of a
+// body checked again in a later round are its last check's.
 //
 // `NONE` (printed `-`): a node that denotes no value (the head of a path naming a module, type,
 // or fn), or that the checker never visits (types, patterns, nodes outside any body).
@@ -66,6 +69,8 @@ import tc_traits;
 import ir.types;
 import prims.col;
 import std.mem;
+import std.num;
+import std.string;
 import std.vec;
 
 const NONE: u32 = tc_rows.NONE;
@@ -126,7 +131,6 @@ impl tc_rows.Typeck {
         self.it = it;
         self.base = base;
         self.module = ds.module.as_slice()[d as usize];
-        self.bad = false;
         self.self_row = NONE;
         self.lg_parent.clear();
         self.lg_fixed.clear();
@@ -171,17 +175,13 @@ impl tc_rows.Typeck {
         }
         self.lit_sites(tree, t, lo, g);
         self.int_ranges(&sg.cx.tab, sg.cx.parent.as_slice(), set, t, cut, tree, lo, g);
+        self.float_ranges(&sg.cx.tab, sg.cx.parent.as_slice(), set, t, cut, tree, lo, g);
         // literal values take their group's type
         for r in lo..g + 1 {
             let v = self.nty.as_slice()[r];
             if is_lit(v) {
-                let x = self.resolve(v);
+                let x = self.resolve_e(v);
                 self.nty.as_mut_slice()[r] = if is_lit(x) then UNK else x;
-            }
-        }
-        if self.bad {
-            for r in lo..g + 1 {
-                if is_expr(kind(tree, r)) { self.nty.as_mut_slice()[r] = UNK; }
             }
         }
     }
@@ -192,9 +192,9 @@ impl tc_rows.Typeck {
         for r in lo..hi + 1 {
             let k = kind(tree, r);
             let a = first_tok(tree, r);
-            let neg = k == K_UNARY && folded(t, tree, r);
+            let neg = k == K_UNARY && folded(t, tree, r, terminals.T_INT_LIT);
             let p = parent[r];
-            let inner = p != NONE && kind(tree, p as usize) == K_UNARY && folded(t, tree, p as usize);
+            let inner = p != NONE && kind(tree, p as usize) == K_UNARY && folded(t, tree, p as usize, terminals.T_INT_LIT);
             if !neg && (inner || !(k == K_PRIMARY && tk(t, a) == terminals.T_INT_LIT)) { continue; }
             let b = tc_rows.tok_text(t, set, cut, self.it, if neg then a + 1 else a, false);
             let (mag, big, suf) = consteval.parse_int(b);
@@ -210,6 +210,24 @@ impl tc_rows.Typeck {
         }
     }
 
+    // E0203 case `float` for each float literal of rows lo..=hi (a number token, or `-` folded
+    // into one) whose float type cannot hold its value (`float_fits`).
+    fn float_ranges(&mut self, tab: &types.Table, parent: &[u32], set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, lo: usize, hi: usize) {
+        for r in lo..hi + 1 {
+            let k = kind(tree, r);
+            let a = first_tok(tree, r);
+            let neg = k == K_UNARY && folded(t, tree, r, terminals.T_FLOAT_LIT);
+            let p = parent[r];
+            let inner = p != NONE && kind(tree, p as usize) == K_UNARY && folded(t, tree, p as usize, terminals.T_FLOAT_LIT);
+            let tok = if neg then a + 1 else a;
+            if inner || !(neg || k == K_PRIMARY) || tk(t, tok) != terminals.T_FLOAT_LIT { continue; }
+            let x = self.resolve_at(r);
+            if x == NONE || x == UNK || is_lit(x) || tab.tag_of(x) != types.TK_FLOAT { continue; }
+            let b = tc_rows.tok_text(t, set, cut, self.it, tok, true);
+            if !float_fits(b, tab.a_of(x)) { self.report(203, tc_rows.C_FLOAT_RANGE, r as% u32, x, NONE, NONE); }
+        }
+    }
+
     fn bind_params(&mut self, sg: &sigs.Sigs, tree: &ast.Ast, d: u32, g: usize) {
         let pn = consteval.child(tree, self.base, g, K_PARAMS);
         if pn == NONE { return; }
@@ -219,8 +237,9 @@ impl tc_rows.Typeck {
         for j in 0..ks.len() {
             let p = self.base + ks[j] as usize;
             if kind(tree, p) != K_PARAM { continue; }
+            // a param whose type did not lower is of the error type (stage0's `fn_body`)
             let ty = if i < ps.len() then ps[i] else ERR;
-            let v = if ty == ERR then UNK else ty;
+            let v = if ty == NONE then UNK else ty;
             self.loc.as_mut_slice()[p] = v;
             let sp = consteval.child(tree, self.base, p, K_SELF_PARAM);
             if sp != NONE {
@@ -248,7 +267,7 @@ impl tc_rows.Typeck {
                 let ent = self.enter(sg, ds, nm, set, t, cut, tree, r, k, c);
                 if self.fc_node.len() > 0 { self.node_coercions(&sg.cx.tab, t, tree); }
                 if ent && is_level(kind(tree, c)) && self.depth == tc_rows.MAX_DEPTH {
-                    self.too_deep(t, tree, r, c);
+                    self.too_deep(tree, c);
                 } else if ent {
                     self.st_row.push(c as% u32);
                     self.st_kid.push(0);
@@ -265,14 +284,13 @@ impl tc_rows.Typeck {
     }
 
     // Child c of row r one level past `MAX_DEPTH` (E0005 case `expr`): c and its subtree are not
-    // checked and are of the error type. Only `!` takes an operand of the error type (its value
-    // is `bool` whatever the operand); under any other parent the body is not decided here.
-    fn too_deep(&mut self, t: &lex.Tokens, tree: &ast.Ast, r: usize, c: usize) {
+    // checked and are of the error type; its parent takes it by its form's rule for the error
+    // type.
+    fn too_deep(&mut self, tree: &ast.Ast, c: usize) {
         let lo = c - tree.size.as_slice()[c] as usize;
         for x in lo..c + 1 {
             if is_expr(kind(tree, x)) { self.nty.as_mut_slice()[x] = ERR; }
         }
-        if kind(tree, r) != K_UNARY || tk(t, first_tok(tree, r)) != terminals.T_BANG { self.bad = true; }
     }
 
     // Before child c (the k-th) of row r: whether the walk enters it, and its context type.
@@ -348,8 +366,10 @@ impl tc_rows.Typeck {
                 let v = self.binop(sg, t, tree, prev, acc);
                 self.acc.as_mut_slice()[r] = v;
             }
-            let a = self.resolve_acc(r);
-            let ch = if a == UNK then UNK else if is_lit(a) || a == NONE || a == self.t_never then h else a;
+            // a left operand of the error type is the context (stage0's `binary_chain`)
+            let av = self.acc.as_slice()[r];
+            let a = self.resolve_e(av);
+            let ch = if a == ERR then err_hint(t, tree, c) else if a == UNK then UNK else if is_lit(a) || a == NONE || a == self.t_never then h else a;
             self.set_hint(c, ch);
             return true;
         }
@@ -360,8 +380,8 @@ impl tc_rows.Typeck {
                 return true;
             }
             let ks = tree.kids.row(r);
-            let l = self.resolve_at(self.base + ks[0] as usize);
-            self.set_hint(c, if is_lit(l) then NONE else l);
+            let l = self.resolve_e_at(self.base + ks[0] as usize);
+            self.set_hint(c, if l == ERR then err_hint(t, tree, c) else if is_lit(l) then NONE else l);
             return true;
         }
         if pk == K_MATCH { return self.enter_match(tree, r, k, c); }
@@ -373,8 +393,8 @@ impl tc_rows.Typeck {
                 self.set_hint(c, h);
             } else {
                 let ks = tree.kids.row(r);
-                let at = self.resolve_at(self.base + ks[1] as usize);
-                let bh = if at == UNK then UNK else if is_lit(at) || at == NONE || at == self.t_never then h else at;
+                let at = self.resolve_e_at(self.base + ks[1] as usize);
+                let bh = if at == UNK then UNK else if is_lit(at) || at == NONE || at == self.t_never || at == ERR then h else at;
                 self.set_hint(c, bh);
             }
             return true;
@@ -390,8 +410,8 @@ impl tc_rows.Typeck {
                 return true;
             }
             let ks = tree.kids.row(r);
-            let l = self.resolve_at(self.base + ks[0] as usize);
-            let lh = if l == UNK then UNK else if is_lit(l) || l == self.t_never then eh else l;
+            let l = self.resolve_e_at(self.base + ks[0] as usize);
+            let lh = if l == ERR then err_hint(t, tree, c) else if l == UNK then UNK else if is_lit(l) || l == self.t_never then eh else l;
             self.set_hint(c, lh);
             return true;
         }
@@ -436,15 +456,17 @@ impl tc_rows.Typeck {
         let a = tk(t, first_tok(tree, r));
         if a == terminals.T_KW_LET {
             if ck == K_TYPE {
+                // a type that lowers to the error type is the binding's (stage0's `let_stmt`)
                 let ty = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, c, false, self.sc);
-                let lk = self.known(ty);
+                let lk = if ty == ERR then ERR else self.known(ty);
                 self.acc.as_mut_slice()[r] = lk;
                 return false;
             }
             if is_expr(ck) {
                 let ks = tree.kids.row(r);
                 let typed = ks.len() >= 3;
-                let lh = if typed then self.acc.as_slice()[r] else NONE;
+                let lt = self.acc.as_slice()[r];
+                let lh = if !typed then NONE else if lt == ERR then err_hint(t, tree, c) else lt;
                 self.set_hint(c, lh);
                 return true;
             }
@@ -560,7 +582,7 @@ impl tc_rows.Typeck {
                     et = UNK;
                 } else if eh != NONE {
                     self.coerce(&sg.cx.tab, e, eh, NONE);
-                    et = eh;
+                    et = if self.resolve_at(e) == eh then eh else UNK;
                 } else {
                     et = self.force(v);
                 }
@@ -677,7 +699,7 @@ impl tc_rows.Typeck {
                 ty = self.acc.as_slice()[r];
                 if init != NONE { self.coerce(&sg.cx.tab, init as usize, ty, consteval.child(tree, self.base, r, K_TYPE)); }
             } else if init != NONE {
-                ty = self.force_at(init as usize);
+                ty = self.force_e_at(init as usize);
             }
             self.bind_pattern(sg, ds, nm, t, tree, pat, ty);
             return;
@@ -693,7 +715,6 @@ impl tc_rows.Typeck {
             if e == NONE {
                 // `return;` in a fn that returns a value: E0201 at the `return`, `()` found
                 if ret != self.t_unit && ret != UNK && ret != self.t_never {
-                    self.bad = true;
                     let rt = first_tok(tree, r);
                     let u = self.t_unit;
                     self.report_span(201, tc_rows.C_NO_CAST, rt, rt, NONE, ret, u, why);
@@ -714,7 +735,6 @@ impl tc_rows.Typeck {
         }
         if a == terminals.T_KW_MATCH { return; }
         if (a == terminals.T_KW_BREAK || a == terminals.T_KW_CONTINUE) && !in_loop(sg, t, tree, r) {
-            self.bad = true;
             let at = first_tok(tree, r);
             self.report_span(201, tc_rows.C_NOT_IN_LOOP, at, at, NONE, NONE, NONE, NONE);
             return;
@@ -727,7 +747,7 @@ impl tc_rows.Typeck {
     fn expr_value(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, k: u8) -> u32 {
         let h = self.hint.as_slice()[r];
         if k == K_PRIMARY { return self.primary(sg, ds, nm, set, t, cut, tree, r, h); }
-        if k == K_UNARY { return self.unary(sg, set, t, cut, tree, r, h); }
+        if k == K_UNARY { return self.unary(sg, ds, set, t, cut, tree, r, h); }
         if k == K_CAST { return self.cast(sg, ds, nm, set, t, cut, tree, r); }
         if is_chain(k) {
             let ks = tree.kids.row(r);
@@ -846,26 +866,31 @@ impl tc_rows.Typeck {
         if hinted && tab.x(h).len() != n { return self.err(); }
         let mut elems = vec.Vec::<u32>.new();
         let mut unk = false;
+        let mut err = false;
         for j in 0..n {
             let c = self.base + ks[j] as usize;
             let mut e = UNK;
             if hinted {
-                // an element with a context: a pending group takes it, a type stays as it is
+                // an element with a context: a pending group takes it (one of another kind is of
+                // the error type), a type stays as it is
                 let eh = tab.x(h)[j];
-                let v = self.resolve_at(c);
+                let v = self.resolve_e_at(c);
                 if is_lit(v) {
                     self.coerce(tab, c, eh, NONE);
-                    e = eh;
+                    e = self.resolve_e_at(c);
                 } else {
                     e = v;
                 }
             } else {
-                e = self.force_at(c);
+                e = self.force_e_at(c);
             }
             if e == NONE { return self.err(); }
             if e == UNK { unk = true; }
+            if e == ERR { err = true; }
             elems.push(e);
         }
+        // a tuple with an element of the error type is of it (stage0's `mk_tuple`)
+        if err { return ERR; }
         if unk { return self.unknown(tree, r); }
         tab.begin();
         for j in 0..elems.len() {
@@ -881,7 +906,6 @@ impl tc_rows.Typeck {
             let b = tc_rows.tok_text(t, set, cut, self.it, tok, false);
             let (_, _, suf) = consteval.parse_int(b);
             if suf == 255 {
-                self.bad = true;
                 return UNK;
             }
             if suf >= 1 && suf <= 10 { return consteval.suffix_ty(tab, suf); }
@@ -902,7 +926,6 @@ impl tc_rows.Typeck {
         if suf.len() > 0 {
             let f = float_suffix(suf);
             if f == NONE {
-                self.bad = true;
                 return UNK;
             }
             return tab.key(types.TK_FLOAT, f, 0);
@@ -916,7 +939,7 @@ impl tc_rows.Typeck {
         return g;
     }
 
-    fn unary(&mut self, sg: &mut sigs.Sigs, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
+    fn unary(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
         let a = first_tok(tree, r);
         let op = tk(t, a);
         let ks = tree.kids.row(r);
@@ -927,38 +950,41 @@ impl tc_rows.Typeck {
             self.nty.as_mut_slice()[c] = v;
             return v;
         }
+        // an operand of the error type: the value is of it
+        if op == terminals.T_STAR {
+            let ct = self.force_e_at(c);
+            if ct == UNK || ct == ERR { return ct; }
+            if ct == NONE { return UNK; }
+            let tag = sg.cx.tab.tag_of(ct);
+            if tag == types.TK_REF || tag == types.TK_PTR { return sg.cx.tab.b_of(ct); }
+            // E0206 case `deref*` at the `*`, naming the type's reference accessors
+            let (get, get_mut) = self.ref_accessors(sg, ds, ct);
+            self.report_span(206, tc_rows.C_DEREF_OP, a, a, c as% u32, ct, get, NONE);
+            let k = self.dg.x.len() - 1;
+            self.dg.x.as_mut_slice()[k] = get_mut;
+            return ERR;
+        }
         let tab = &mut sg.cx.tab;
         if op == terminals.T_BANG {
             if self.nty.as_slice()[c] != ERR { self.coerce_bool(tab, c); }
             return self.t_bool;
         }
-        if op == terminals.T_STAR {
-            let ct = self.force_at(c);
-            if ct == UNK { return UNK; }
-            let tag = tab.tag_of(ct);
-            if tag == types.TK_REF || tag == types.TK_PTR { return tab.b_of(ct); }
-            self.bad = true;
-            return UNK;
-        }
         if op == terminals.T_AMP || op == terminals.T_AMP_AMP {
             let outer = op == terminals.T_AMP_AMP && kind(tree, c) == K_UNARY && first_tok(tree, c) == a;
             let mutable = !outer && tk(t, a + 1) == terminals.T_KW_MUT;
-            let ct = self.force_at(c);
-            if ct == UNK { return UNK; }
-            if ct == NONE {
-                self.bad = true;
-                return UNK;
-            }
+            let ct = self.force_e_at(c);
+            if ct == UNK || ct == ERR { return ct; }
+            if ct == NONE { return UNK; }
             return tab.mk_ref(mutable, ct);
         }
-        let ct = self.resolve_at(c);
-        if ct == UNK { return UNK; }
-        if ct == NONE {
-            self.bad = true;
-            return UNK;
-        }
+        let ct = self.resolve_e_at(c);
+        if ct == UNK || ct == ERR { return ct; }
+        if ct == NONE { return UNK; }
         if is_lit(ct) {
-            if op == terminals.T_TILDE && self.lit_kind(ct) == tc_rows.LIT_FLOAT { return self.e0206(tab, a, tc_rows.LIT_FLOAT); }
+            if op == terminals.T_TILDE && self.lit_kind(ct) == tc_rows.LIT_FLOAT {
+                self.fix_err(ct);
+                return self.e0206(tab, a, tc_rows.LIT_FLOAT);
+            }
             return ct;
         }
         let tag = tab.tag_of(ct);
@@ -986,8 +1012,10 @@ impl tc_rows.Typeck {
         let optok = first_tok(tree, c) - 1;
         let op = tk(t, optok);
         let tab = &mut sg.cx.tab;
-        let lt = self.resolve(lv);
-        let rt = self.resolve_at(c);
+        let lt = self.resolve_e(lv);
+        let rt = self.resolve_e_at(c);
+        // an operand of the error type: the value is of it (stage0's `unify_operands`, `op_on`)
+        if lt == ERR || rt == ERR { return self.unify(tab, lt, rt, c as% u32); }
         if lt == UNK || rt == UNK {
             self.poison(lt);
             self.poison(rt);
@@ -995,22 +1023,21 @@ impl tc_rows.Typeck {
         }
         if is_lit(lt) && !is_lit(rt) && rt != NONE && tab.tag_of(rt) == types.TK_VECTOR {
             // E0602: the literal is the error type from then on
-            self.poison(lt);
-            self.bad = true;
-            return UNK;
+            self.fix_err(lt);
+            return ERR;
         }
         if is_shift(op) && is_lit(rt) && !is_lit(lt) && lt != NONE && tab.tag_of(lt) == types.TK_VECTOR {
-            if !self.fix(tab, rt, tab.a_of(lt)) {
-                self.bad = true;
-                return UNK;
-            }
+            if !self.fix(tab, rt, tab.a_of(lt)) { return ERR; }
             return self.op_on(tab, op, lt, optok);
         }
         let u = self.unify(tab, lt, rt, c as% u32);
-        if u == UNK { return UNK; }
+        if u == UNK || u == ERR { return u; }
         if is_lit(u) {
             let float = self.lit_kind(u) == tc_rows.LIT_FLOAT;
-            if float && !is_shift(op) && (is_wrap_sat(op) || is_bit(op)) { return self.e0206(tab, optok, tc_rows.LIT_FLOAT); }
+            if float && !is_shift(op) && (is_wrap_sat(op) || is_bit(op)) {
+                self.fix_err(u);
+                return self.e0206(tab, optok, tc_rows.LIT_FLOAT);
+            }
             return u;
         }
         if tc_ops.user_ty(tab, u) { return self.user_op(sg, tc_ops.binop_trait(op), u, optok); }
@@ -1046,7 +1073,7 @@ impl tc_rows.Typeck {
             let int_lane = tab.tag_of(tab.a_of(ty)) == types.TK_INT;
             if int_lane {
                 // E0604, E0607
-                if is_plain(op) || op == terminals.T_SLASH { return self.err(); }
+                if is_plain(op) || op == terminals.T_SLASH { return ERR; }
                 if op == terminals.T_PERCENT { return self.e0206(tab, optok, ty); }
                 return ty;
             }
@@ -1058,12 +1085,12 @@ impl tc_rows.Typeck {
     }
 
     // E0206: operator token tok on a value of type ty (`LIT_FLOAT`: a float literal), which has
-    // no such operator; on a reference the fix names the value behind it.
+    // no such operator; on a reference the fix names the value behind it. The operator's value
+    // is the error type.
     fn e0206(&mut self, tab: &types.Table, tok: u32, ty: u32) -> u32 {
-        self.bad = true;
         let r = ty != tc_rows.LIT_FLOAT && tab.tag_of(ty) == types.TK_REF;
         self.report_span(206, if r then tc_rows.C_REF_OPERAND else 0u8, tok, tok, NONE, ty, NONE, NONE);
-        return UNK;
+        return ERR;
     }
 
     // A value `if c then a else b`: stage0's `arms_unify` of the arms under the context type.
@@ -1084,7 +1111,7 @@ impl tc_rows.Typeck {
             return true;
         }
         if k == 1 {
-            let s = self.force_at(self.base + tree.kids.row(r)[0] as usize);
+            let s = self.force_e_at(self.base + tree.kids.row(r)[0] as usize);
             self.acc.as_mut_slice()[r] = s;
         }
         return true;
@@ -1111,8 +1138,9 @@ impl tc_rows.Typeck {
         if ck == K_BLOCK { return true; }
         let hm = self.hint.as_slice()[m];
         let so_far = self.arm.as_slice()[m];
-        let rr = if so_far == NONE then NONE else self.resolve(so_far);
-        let typed = rr != NONE && rr != UNK && !is_lit(rr) && rr != self.t_never;
+        // arms of the error type so far give no context (stage0's `match_expr`)
+        let rr = if so_far == NONE then NONE else self.resolve_e(so_far);
+        let typed = rr != NONE && rr != UNK && rr != ERR && !is_lit(rr) && rr != self.t_never;
         let h = if rr == UNK then UNK else if typed && hm == UNK then UNK else if typed && hm == NONE then rr else hm;
         self.set_hint(c, h);
         return true;
@@ -1155,8 +1183,14 @@ impl tc_rows.Typeck {
     // stage0's `arms_unify`: the type of two arms' values a and b (of node rows an, NONE for
     // none, and bn) under context type h.
     fn arms_join(&mut self, sg: &mut sigs.Sigs, a: u32, b: u32, h: u32, an: u32, bn: usize) -> u32 {
-        let at = self.resolve(a);
-        let bt = self.resolve(b);
+        let at = self.resolve_e(a);
+        let bt = self.resolve_e(b);
+        // an arm of the error type: the value is of it unless the other arm is `never` (no
+        // context type takes the error type)
+        if at == ERR || bt == ERR {
+            if at == self.t_never || bt == self.t_never { return ERR; }
+            return self.unify(&sg.cx.tab, at, bt, bn as% u32);
+        }
         if at == UNK || bt == UNK {
             self.poison(at);
             self.poison(bt);
@@ -1183,7 +1217,6 @@ impl tc_rows.Typeck {
     // at the arm not usable as h alone (E0707 when it needs features neither h nor the body
     // has); else case `fn-arms` with the fn type both convert to.
     fn fn_arms(&mut self, tab: &mut types.Table, x: u32, y: u32, h: u32, an: u32, bn: usize) {
-        self.bad = true;
         let n = tab.a_of(x) as usize;
         if h != NONE && tab.tag_of(h) == types.TK_FN && tc_rows.fn_same(tab, h, x) {
             let y_ok = y == h || self.coercible(tab, y, h);
@@ -1220,11 +1253,12 @@ impl tc_rows.Typeck {
         let rr = self.base + ks[2] as usize;
         let op = tk(t, first_tok(tree, opn));
         let tab = &mut sg.cx.tab;
-        let lt = self.resolve_at(l);
-        let rt = self.resolve_at(rr);
+        let lt = self.resolve_e_at(l);
+        let rt = self.resolve_e_at(rr);
         let u = self.unify(tab, lt, rt, rr as% u32);
         if u == UNK { return UNK; }
-        if is_lit(u) { return self.t_bool; }
+        // operands of the error type, or none in common: `bool`, as stage0's `compare`
+        if is_lit(u) || u == ERR { return self.t_bool; }
         let eq_only = op == terminals.T_EQ_EQ || op == terminals.T_BANG_EQ;
         let tag = tab.tag_of(u);
         if tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR { return self.t_bool; }
@@ -1235,7 +1269,8 @@ impl tc_rows.Typeck {
             return tab.key(types.TK_MASK, w, tab.b_of(u));
         }
         if tag == types.TK_MASK && eq_only { return u; }
-        return self.e0206(tab, first_tok(tree, opn), u);
+        let _ = self.e0206(tab, first_tok(tree, opn), u);
+        return self.t_bool;
     }
 
     fn range(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
@@ -1244,34 +1279,41 @@ impl tc_rows.Typeck {
         let rr = self.base + ks[1] as usize;
         let incl = tk(t, first_tok(tree, rr) - 1) == terminals.T_DOT_DOT_EQ;
         let tab = &mut sg.cx.tab;
-        let lt = self.resolve_at(l);
-        let rt = self.resolve_at(rr);
+        let lt = self.resolve_e_at(l);
+        let rt = self.resolve_e_at(rr);
         let u = self.unify(tab, lt, rt, rr as% u32);
         if u == UNK { return UNK; }
-        let e = self.force(u);
-        if e == UNK { return UNK; }
+        let e = self.force_e(u);
+        if e == UNK || e == ERR { return e; }
+        if e == NONE { return UNK; }
         let tag = tab.tag_of(e);
-        if tag != types.TK_INT && tag != types.TK_CHAR { return self.err(); }
+        if tag != types.TK_INT && tag != types.TK_CHAR { return self.e0206(tab, first_tok(tree, rr) - 1, e); }
         return tab.key(types.TK_RANGE, e, if incl then 1u32 else 0u32);
     }
 
     fn cast(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) -> u32 {
         let ks = tree.kids.row(r);
         let first = self.base + ks[0] as usize;
-        let mut acc = self.force_at(first);
+        let mut acc = self.force_e_at(first);
         for j in 1..ks.len() {
             let tn = self.base + ks[j] as usize;
             let op = tk(t, first_tok(tree, tn) - 1);
             let to = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, tn, false, self.sc);
-            if to == ERR || to == NONE { return self.err(); }
-            if acc == UNK || acc == NONE { return UNK; }
+            if to == NONE { return UNK; }
             if op != terminals.T_KW_AS && op != terminals.T_AS_PERCENT && op != terminals.T_AS_PIPE && op != terminals.T_AS_TILDE && op != terminals.T_AS_QUESTION { return UNK; }
+            // stage0's `cast_chain`: a cast of or to the error type is the type cast to (the
+            // error type for an error type written)
+            if acc == ERR || to == ERR {
+                acc = if to == ERR then ERR else if op == terminals.T_AS_QUESTION then self.option_of(&mut sg.cx.tab, to) else to;
+                continue;
+            }
+            if acc == UNK || acc == NONE { return UNK; }
             if !tc_rows.cast_ok(&sg.cx.tab, op, acc, to) {
                 // E0204 from the operator through the type
-                self.bad = true;
                 let e = tree.tok_end.as_slice()[tn];
                 self.report_span(204, 0, first_tok(tree, tn) - 1, e - 1, NONE, acc, to, NONE);
-                return UNK;
+                acc = ERR;
+                continue;
             }
             acc = if op == terminals.T_AS_QUESTION then self.option_of(&mut sg.cx.tab, to) else to;
             if acc == UNK { return UNK; }
@@ -1313,7 +1355,8 @@ impl tc_rows.Typeck {
             // a chunk loop binds its vector annotation whatever the source's element
             if chunk_vec(&sg.cx.tab, b) == NONE {
                 let e = self.element(sg, ds, nm, src);
-                if b != NONE && b != UNK && e != UNK && e != b { self.bad = true; }
+                // an annotation the element does not match is the binding's type (an E0201 of a
+                // later stage)
                 if b == NONE { b = e; }
             }
             let pat = self.base + tree.kids.row(r)[0] as usize;
@@ -1336,7 +1379,6 @@ impl tc_rows.Typeck {
         if b == UNK { return; }
         let v = chunk_vec(tab, b);
         if v == NONE {
-            self.bad = true;
             return;
         }
         let lane = tab.a_of(v);
@@ -1579,6 +1621,42 @@ fn float_suffix(b: &[u8]) -> u32 {
     return NONE;
 }
 
+// Whether float literal text b (its number part and suffix) is finite in the float type of kind
+// fk (0 `f16`, 1 `f32`, 2 `f64`, 3 `bf16`), as stage0's `float_fits`: the number part without
+// `_` read correctly rounded as an `f32` with an `f32` suffix, else as an `f64`; an `f32` holds
+// a value whose magnitude is below 2^128 - 2^103 (rounding past it gives the infinity), `f16` and
+// `bf16` one up to 65504, `f64` any finite one. A number part no float reads fits.
+fn float_fits(b: &[u8], fk: u32) -> bool {
+    let suf = float_lit_suffix(b);
+    let mut digits = vec.Vec::<u8>.new();
+    for i in 0..b.len() - suf.len() {
+        if b[i] != 95 { digits.push(b[i]); }
+    }
+    let f32_suffix = suf.len() > 0 && float_suffix(suf) == 1;
+    let mut bits: u64 = 0;
+    match string.String.from_utf8(digits) {
+        Result.Ok(s) => {
+            if f32_suffix {
+                match num.parse_f32(s.as_str()) {
+                    Option.Some(v) => { bits = mem.f32_bits(v) as u64; }
+                    Option.None => { return true; }
+                }
+            } else {
+                match num.parse_f64(s.as_str()) {
+                    Option.Some(v) => { bits = mem.f64_bits(v); }
+                    Option.None => { return true; }
+                }
+            }
+        }
+        Result.Err(_) => { return true; }
+    }
+    if f32_suffix { return bits & 0x7fff_ffff < 0x7f80_0000; }
+    let mag = bits & 0x7fff_ffff_ffff_ffff;
+    if fk == 1 { return mag < 0x47ef_ffff_f000_0000; }
+    if fk == 2 { return mag < 0x7ff0_0000_0000_0000; }
+    return mag <= 0x40ef_fc00_0000_0000;
+}
+
 // A float literal's suffix (after the number part: digits, `.` digits, an exponent).
 fn float_lit_suffix(b: &[u8]) -> &[u8] from b {
     let mut i: usize = 0;
@@ -1660,7 +1738,6 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         module: NONE,
         sc: consteval.no_scope(),
         self_row: NONE,
-        bad: false,
         lw: sigs.Lw.new(),
         soa: soa,
         soa_mod: md.soa_mod,
@@ -1735,11 +1812,11 @@ fn lane_bits(tab: &types.Table, lane: u32) -> u32 {
     return if f == 1 then 32u32 else if f == 2 then 64u32 else 16u32;
 }
 
-// Whether `Unary` row u is `-` folded into the int literal it negates (its child, row u - 1, a
-// `Primary` at the next token).
-fn folded(t: &lex.Tokens, tree: &ast.Ast, u: usize) -> bool {
+// Whether `Unary` row u is `-` folded into the number literal (token kind lit) it negates (its
+// child, row u - 1, a `Primary` at the next token).
+fn folded(t: &lex.Tokens, tree: &ast.Ast, u: usize, lit: u8) -> bool {
     let a = first_tok(tree, u);
-    return tk(t, a) == terminals.T_MINUS && tk(t, a + 1) == terminals.T_INT_LIT && kind(tree, u - 1) == K_PRIMARY && first_tok(tree, u - 1) == a + 1;
+    return tk(t, a) == terminals.T_MINUS && tk(t, a + 1) == lit && kind(tree, u - 1) == K_PRIMARY && first_tok(tree, u - 1) == a + 1;
 }
 
 // Whether `break` / `continue` statement row r is inside a `loop`, `while`, or `for` of its own
@@ -1754,6 +1831,25 @@ fn in_loop(sg: &sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> bool {
         p = sg.cx.parent.as_slice()[p as usize];
     }
     return false;
+}
+
+// The context of expression row c when stage0's is the error type: none for a form that reads a
+// context only as a shape the error type does not have (a number literal, a tuple, `&`, `!`,
+// `*`, a cast, a comparison, `&&` / `||`), `UNK` for any other form.
+fn err_hint(t: &lex.Tokens, tree: &ast.Ast, c: usize) -> u32 {
+    let k = kind(tree, c);
+    if k == K_CAST || k == K_CMP || k == K_AND || k == K_OR { return NONE; }
+    let a = first_tok(tree, c);
+    let ft = tk(t, a);
+    if k == K_UNARY && (ft == terminals.T_AMP || ft == terminals.T_AMP_AMP || ft == terminals.T_BANG || ft == terminals.T_STAR) { return NONE; }
+    if k != K_PRIMARY { return UNK; }
+    if ft == terminals.T_INT_LIT || ft == terminals.T_FLOAT_LIT { return NONE; }
+    if ft == terminals.T_L_PAREN {
+        let n = tree.kids.row(c).len();
+        let close = tree.tok_end.as_slice()[c] - 1;
+        if n != 1 || tk(t, close - 1) == terminals.T_COMMA { return NONE; }
+    }
+    return UNK;
 }
 
 fn is_lit(v: u32) -> bool {
