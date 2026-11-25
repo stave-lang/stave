@@ -1,0 +1,1 @@
+Base passes only. B7 depth of a loop with two entries (b0 reaches both b1 and b2): the depth-first search meets b2 -> b1 as a back edge, so b0 is in its loop and has depth 1, equal to the depth of the self-loop b4; B1 leaves the slice.len of b4 where it is.

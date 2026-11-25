@@ -371,12 +371,14 @@ removable instruction whose result is not live is deleted. Params are not remove
 
 **B6.** Then `canon` (P1).
 
-**B7. Loop depth** of a block `x`: the number of edges `l -> h` (with multiplicity, section 0)
-such that `h` dominates `l` and `x` is in their natural loop (`h`, and every block that reaches `l`
-without passing through `h`), at most 255. The bodies here are reducible (lowering builds
-structured control flow; expansion substitutes reducible bodies for an instruction; clean-up only
-deletes edges and merges single-edge pairs), so these are the back edges of any depth-first
-search. [F.]
+**B7. Loop depth** of a block `x`: the number of back edges `l -> h` (with multiplicity, section 0)
+whose loop holds `x` (`h`, and every block that reaches `l` without passing through `h`), at most
+255. The back edges are those of a depth-first search from `b0` that takes each block's edges in
+terminator order: an edge into a block still on the search's path. On a reducible body (the
+bodies here: lowering builds structured control flow, expansion substitutes reducible bodies for
+an instruction, clean-up only deletes edges and merges single-edge pairs) they are exactly the
+edges whose head dominates their tail; on an irreducible body the search's edges are the ones
+counted. [F.]
 
 ## 7. Order and invariants of level `opt`
 
