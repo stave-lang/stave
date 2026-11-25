@@ -11,7 +11,7 @@ use std::fmt::Write;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::Program;
-use crate::dump_sigs::SigTable;
+use crate::dump_sigs::TypeRank;
 use crate::ids::DeclId;
 use crate::resolve::TypeHead;
 use crate::sigs::TraitRef;
@@ -26,7 +26,7 @@ const KIND_NAMES: [&str; 10] =
 /// The `kinds` dump: one `t<T>` line per `sigs` table type, by T; one `impl` line per impl, by
 /// (trait, head, item); one `apply` line per (type, trait) with a candidate impl, by (T, trait).
 pub fn dump_kinds(prog: &Program, tc: &Typeck) -> String {
-    let table = SigTable::of(prog, tc);
+    let table = TypeRank::of(prog, tc);
     let sigs = &tc.sigs;
     let w = World { prog, sigs };
     let mut cx = Overlay::new(&tc.types);

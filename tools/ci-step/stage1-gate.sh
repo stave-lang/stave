@@ -15,16 +15,17 @@
 # for a param without `view`: E0414 outside its `drop` case). The shapes with a message of their
 # own (LATER) are cut from stage0's lines; a private field or method reached by a value has
 # E0106's plain message, so the E0106 lines of stage1 need only be among stage0's. The body
-# checker's codes have shapes of later stages too, cut alike: E0201 for a generic argument count
-# on a method (`div_const::<3>`), a path that is no value, and a const generic param passed for
-# one of another int type (an int-to-int mismatch whose fix names no cast: every other names
-# one); E0203 for a const-expression result (an operand with an operator or parentheses), a
-# const array index, and a float literal; E0206 for `*` on what is no reference.
+# checker's codes have shapes of later stages too, cut alike: E0201 for a path that is no value
+# and a const generic param or named const passed for one of another int type (an int-to-int
+# mismatch whose fix names no cast: every other names one); E0203 for a const-expression result
+# (an operand with an operator or parentheses), a const array index, and a float literal; E0206
+# for `*` on what is no reference.
 #
 # Every root's `sigs.txt` and `kinds.txt` must be stage0's.
 #
-# `types.txt`: T is a rank among every type the checker reached, so one type more or less renumbers
-# the rest. Both files are rewritten by key: each `I N t<T>` line becomes `I N c<C>`, C one id per
+# `types.txt`: T is the rank among the types the dump names, as in `sigs`. A root of which stage1
+# prints no `?` line must be byte-equal to stage0's. For the others, one `?` more or less renumbers
+# the rest, so both files are rewritten by key: each `I N t<T>` line becomes `I N c<C>`, C one id per
 # key text whose components are themselves replaced by their C (shared by the two files), and the
 # lines are compared one by one. stage1 prints `?` as T for an expression node it does not type
 # yet; that line is counted, every other difference fails. Two ratchets, each moved only toward
@@ -59,11 +60,11 @@ S1="$OUT/stage1"
 export STAVE_STD_DIR="$ROOT"
 # Codes of the stages stage1 has so far; add a stage's codes with its dump. E0005 is stage1's only
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
-TYPES_EXACT_MIN=0
-TYPES_UNKNOWN_PPM=1075
+TYPES_EXACT_MIN=1014
+TYPES_UNKNOWN_PPM=182
 S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0201|E0202|E0203|E0204|E0206|E0413|E0410|E0414|E0416|E0419|E0420|E0421|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
 # Messages of the shapes of those codes that later stages raise.
-LATER='"code":"E0201".*"message":"`[a-z_][a-z0-9_]*` takes [0-9]+ generic arguments|"code":"E0201".*"message":"`[^"]*` is not a value"|"code":"E0201","severity":"error","message":"mismatched types: expected `[iu](8|16|32|64|size)`, found `[iu](8|16|32|64|size)`".*"description":"write a value of type|"code":"E0203".*"message":"literal `[^`]*([^ `]+ [-+*/%<>|&^]+ |[()])[^`]*` is out of range|"code":"E0203".*"message":"index `|"code":"E0203".*"message":"literal `[^`]*` is out of range for `(f16|bf16|f32|f64)`"|"code":"E0206".*"message":"`\*` cannot dereference|"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)|"code":"E0414".*"message":"[^"]*is a view, (but|and) '
+LATER='"code":"E0201".*"message":"`[^"]*` is not a value"|"code":"E0201","severity":"error","message":"mismatched types: expected `[iu](8|16|32|64|size)`, found `[iu](8|16|32|64|size)`".*"description":"write a value of type|"code":"E0203".*"message":"literal `[^`]*([^ `]+ [-+*/%<>|&^]+ |[()])[^`]*` is out of range|"code":"E0203".*"message":"index `|"code":"E0203".*"message":"literal `[^`]*` is out of range for `(f16|bf16|f32|f64)`"|"code":"E0206".*"message":"`\*` cannot dereference|"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)|"code":"E0414".*"message":"[^"]*is a view, (but|and) '
 
 # types_keyed DIR: compares DIR/0/types.txt and DIR/1/types.txt by key (above); writes
 # DIR/types.count (`LINES UNKNOWN EXACT`) and, on a difference, DIR/types.diff (its first line).
@@ -107,7 +108,11 @@ types_keyed() {
     END {
       print NR, unk + 0, exact > cnt
       if (bad) { print bad > diff; exit 1 }
-    }'
+    }' || return 1
+  if [ "$exact" = 0 ] && ! grep -q ' ?$' "$1/1/types.txt"; then
+    diff "$1/0/types.txt" "$1/1/types.txt" | sed -n 2p > "$1/types.diff"
+    return 1
+  fi
 }
 
 if [ "${1:-}" = "--one" ]; then

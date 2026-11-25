@@ -1,0 +1,1 @@
+Rows that fail two tests get the first in the verdict order: noret before cyclic (a self call that never returns), cyclic before altstack and symbol, altstack before symbol, symbol before indirect, indirect before features, features before cold, cold before size, size before slots; an unbuilt callee with no body (nobody) and with a trap body (noret); a @fn argument makes no edge.

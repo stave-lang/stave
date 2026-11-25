@@ -16,8 +16,9 @@
 // context (`A_FREE`: mask `select`'s operands, whose common type `select_ret` makes the result),
 // the operands of `bool.select` (`A_SEL`: the call's context, then the first operand's type),
 // an aligned slice that keeps its own type (`A_ALIGNED`), or a gather / scatter index (`A_INDEX`).
-// `permute` takes its lane indices as a turbofish (`takes_targs`). Not in the table, so `UNK`: `bitcast`, `to_vec`, `rewiden`, `align_to` (their turbofish
-// is a type or a constant).
+// `permute` takes its lane indices as a turbofish (`takes_targs`); `bitcast`, `to_vec`, `rewiden`,
+// and `align_to` take a type or a constant (`shaped_targs`), and their result is the turbofish's
+// (`targs_ret`), `UNK` without one.
 //
 // Entry points: `table` (the `Builtins` of a program); `method` (a method call's built-in on a
 // receiver at one level of auto-deref), `type_head` (the built-in type a path head names),
@@ -48,7 +49,7 @@ const B_END: u32 = 0xffff_fff0;
 
 // The names the table looks up, in the order of their k. The groups are what the guards below
 // test as ranges.
-const NAMES: &str = "len sqrt abs floor ceil round trunc scan_add copysign min_num max_num min_x86 max_x86 fma min max popcount clz scan_add_wrap andnot div_lanes mul_hi lookup abs_wrap reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or reduce_add_ordered split widen_lo widen_hi narrow_wrap narrow_sat compress expand store store_masked scatter ctz mul_wide store_stream to_bits read write write_stream prefetch_read_l1 prefetch_read_l2 prefetch_read_l3 prefetch_read_nta prefetch_write_l1 prefetch_write_l2 prefetch_write_l3 prefetch_write_nta splat load load_masked gather join first_n all none select permute load_aligned store_aligned checked_add checked_sub checked_mul div_const";
+const NAMES: &str = "len sqrt abs floor ceil round trunc scan_add copysign min_num max_num min_x86 max_x86 fma min max popcount clz scan_add_wrap andnot div_lanes mul_hi lookup abs_wrap reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or reduce_add_ordered split widen_lo widen_hi narrow_wrap narrow_sat compress expand store store_masked scatter ctz mul_wide store_stream to_bits read write write_stream prefetch_read_l1 prefetch_read_l2 prefetch_read_l3 prefetch_read_nta prefetch_write_l1 prefetch_write_l2 prefetch_write_l3 prefetch_write_nta splat load load_masked gather join first_n all none select permute load_aligned store_aligned checked_add checked_sub checked_mul div_const bitcast to_vec rewiden align_to";
 
 // `len` of an array, slice, or `str`: no parameters, `usize`.
 const K_LEN: u32 = 0;
@@ -115,6 +116,11 @@ const K_STORE_ALIGNED: u32 = 67;
 const K_CHECKED0: u32 = 68;
 const K_CHECKED1: u32 = 70;
 const K_DIV_CONST: u32 = 71;
+// The built-ins whose turbofish gives the result: `bitcast to_vec rewiden align_to`.
+const K_BITCAST: u32 = 72;
+const K_TO_VEC: u32 = 73;
+const K_REWIDEN: u32 = 74;
+const K_ALIGN_TO: u32 = 75;
 
 // Whether x is a built-in of this table.
 pub fn is_builtin(x: u32) -> bool {
@@ -272,6 +278,12 @@ fn narrow_lane(tab: &mut types.Table, t: u32) -> u32 {
     return tab.int(s, w);
 }
 
+// The bytes of vector c (stage0 `vec_bytes`): 0 for a sizeless one.
+fn vec_bytes(tab: &types.Table, c: u32) -> u32 {
+    let n = tab.b_of(c);
+    return if n == types.LANES_N then 0u32 else lane_bits(tab, tab.a_of(c)) / 8 * n;
+}
+
 // The mask of the lanes of vector c.
 fn mask_of(tab: &mut types.Table, c: u32) -> u32 {
     let w = lane_bits(tab, tab.a_of(c));
@@ -314,7 +326,7 @@ fn vector_ok(tab: &types.Table, k: u32, c: u32) -> bool {
     if k == K_SPLIT { return half_ok(n); }
     if k == K_WIDEN_LO || k == K_WIDEN_HI { return half_ok(n) && widen_ok(tab, lane); }
     if k == K_NARROW_WRAP || k == K_NARROW_SAT { return n != types.LANES_N && n <= 32 && narrow_ok(tab, lane); }
-    return k == K_COMPRESS || k == K_EXPAND || k == K_STORE || k == K_STORE_MASKED || k == K_SCATTER || k == K_STORE_STREAM || k == K_STORE_ALIGNED || k == K_PERMUTE;
+    return k == K_COMPRESS || k == K_EXPAND || k == K_STORE || k == K_STORE_MASKED || k == K_SCATTER || k == K_STORE_STREAM || k == K_STORE_ALIGNED || k == K_PERMUTE || k == K_BITCAST;
 }
 
 // `&[lane align A]` (`&mut` when `mutable`) of vector c, A its bytes (0 for a sizeless one): the
@@ -365,7 +377,7 @@ impl Builtins {
         let mut ok = false;
         let mut at = k;
         if tag == types.TK_SLICE || tag == types.TK_ARRAY || tag == types.TK_STR {
-            ok = k == K_LEN;
+            ok = k == K_LEN || (k == K_ALIGN_TO && tag == types.TK_SLICE);
             if tag == types.TK_SLICE && k >= K_PF0 && k <= K_PF1 {
                 ok = true;
                 at = k + K_SPF;
@@ -382,7 +394,7 @@ impl Builtins {
         } else if tag == types.TK_VECTOR {
             ok = vector_ok(tab, k, c);
         } else if tag == types.TK_MASK {
-            ok = (k == K_TO_BITS || k == K_SELECT) && lanes_ok(tab.b_of(c));
+            ok = (k == K_TO_BITS || k == K_SELECT || k == K_TO_VEC || k == K_REWIDEN) && lanes_ok(tab.b_of(c));
         } else if tag == types.TK_BOOL {
             ok = k == K_SELECT;
         }
@@ -461,10 +473,43 @@ impl Builtins {
         return A_IS;
     }
 
-    // Whether built-in b takes generic arguments (`v.permute::<[..]>()`); on any other built-in
-    // they are an error.
+    // Whether built-in b takes generic arguments (`v.permute::<[..]>()`, `v.bitcast::<T>()`); on
+    // any other built-in they are an error.
     pub fn takes_targs(&self, b: u32) -> bool {
-        return is_builtin(b) && b - B_BASE == K_PERMUTE;
+        return is_builtin(b) && (b - B_BASE == K_PERMUTE || self.shaped_targs(b));
+    }
+
+    // Whether built-in b takes generic arguments lowered by their shape (a type, or a constant
+    // of type `usize`) that give its result (`targs_ret`).
+    pub fn shaped_targs(&self, b: u32) -> bool {
+        return is_builtin(b) && b - B_BASE >= K_BITCAST && b - B_BASE <= K_ALIGN_TO;
+    }
+
+    // The result of built-in b (`shaped_targs`) on c with the generic arguments xs (3 words
+    // each), as stage0's `builtin_method_sig`: `bitcast::<U>` a vector U of c's bytes, `to_vec::<L>`
+    // the vector of int lane L of the mask's lane bits, `rewiden::<W>` the mask of lane bits W
+    // (8, 16, 32, 64), `align_to::<A>` an `Option<&[T align A]>` (A at most 2^20). NONE for any
+    // other argument (stage0 E0208).
+    pub fn targs_ret(&self, tab: &mut types.Table, b: u32, c: u32, xs: &[u32]) -> u32 {
+        let k = b - B_BASE;
+        if xs.len() != 3 { return NONE; }
+        let (gk, gx, gy) = (xs[0], xs[1], xs[2]);
+        if k == K_BITCAST || k == K_TO_VEC {
+            if gk != types.GA_TYPE { return NONE; }
+            if k == K_BITCAST { return if tab.tag_of(gx) == types.TK_VECTOR && vec_bytes(tab, gx) == vec_bytes(tab, c) then gx else NONE; }
+            if tab.tag_of(gx) != types.TK_INT || tab.int_bits(gx) != tab.a_of(c) { return NONE; }
+            return tab.key(types.TK_VECTOR, gx, tab.b_of(c));
+        }
+        if gk != types.GA_VALUE { return NONE; }
+        let v = (gx as u64) << 32 | gy as u64;
+        if k == K_REWIDEN { return if v == 8 || v == 16 || v == 32 || v == 64 then tab.key(types.TK_MASK, gy, tab.b_of(c)) else NONE; }
+        if self.opt == NONE { return NONE; }
+        let al = if v > 1u64 << 20 then 1u32 << 20 else gy;
+        let sl = tab.key(types.TK_SLICE, tab.a_of(c), al);
+        let r = tab.mk_ref(false, sl);
+        tab.begin();
+        tab.push_garg(types.GA_TYPE, r, 0);
+        return tab.intern(types.TK_ADT, self.opt, 0);
     }
 
     // The result of mask c's `select` on operands of types x and y (both decided): their type
@@ -521,6 +566,7 @@ impl Builtins {
         let k = b - B_BASE;
         let tag = tab.tag_of(c);
         if k == K_LEN { return tab.usize_t(); }
+        if self.shaped_targs(b) { return UNK; }
         if (k >= K_PF0 && k <= K_PF1) || (k >= K_PF0 + K_SPF && k <= K_PF1 + K_SPF) { return tab.unit(); }
         if k == K_WRITE || k == K_WRITE_STREAM || k == K_STORE_STREAM { return tab.unit(); }
         if k == K_READ { return tab.b_of(c); }

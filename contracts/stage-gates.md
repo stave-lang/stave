@@ -72,9 +72,8 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
   error decls included), by D. Every T prints as `t<T>`, every D as `d<D>`.
   - Type table: every T a decl line names plus every T their keys reference, transitively, as
     `t<T> key`, key as in `types`. T here is the rank among these types in the canonical type-key
-    order (the order of the `types` table, a total order on keys, so the rank of a subset is
-    defined), dense from `t0`; it differs from the `types` T of the same key. The error type has
-    no line.
+    order (a total order on keys, so the rank of a subset is defined), dense from `t0`; a
+    key both tables hold may have another T in each. The error type has no line.
   - `KIND`: `module fn struct enum trait const static alias impl field variant method
     trait-method error`. `MODULE`: the module decl of the declaring module (a module: itself).
     `PARENT`: the decl of a member's struct, enum, variant (record fields), impl, or trait, else
@@ -183,8 +182,9 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
   no value (a module or type name, e.g. `io` in `io.print(..)`) or has the error type prints `-` as
   T. The type table lists every T a line names plus every T their keys reference, transitively,
   ordered by T, as `T key` with `key` printed exactly as the checked-IR `TypeKey`
-  ([checked-ir.md](checked-ir.md), for example `int s 32`, `ref mut t4`). T prints as `t<T>` in
-  both line kinds.
+  ([checked-ir.md](checked-ir.md), for example `int s 32`, `ref mut t4`). T is the rank among
+  these types in the canonical type-key order, dense from `t0` (as for `sigs`), and prints as
+  `t<T>` in both line kinds.
 - `borrow`: one line per access of the borrow checker in every body that was borrow
   checked (bodies with a type error are skipped).
   - `N` is the node of the access: the place expression for `read`, `write`, `move`; for an

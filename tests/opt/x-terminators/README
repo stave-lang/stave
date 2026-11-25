@@ -1,0 +1,1 @@
+Expansion of a callee whose entry ends in a switch, with a loop (block params and a back edge), a trap block ending in unreachable, ret of a constant and of a loop param; the continuation takes the caller's cbr; params mapped to caller values; nothing for C* or B to do afterwards (no single-edge param, no br-only pair, nothing dead).

@@ -1,0 +1,1 @@
+Edges counted with multiplicity: a switch case and its default into one block are two edges, so C1 keeps that block's param; the two cbr targets with arguments are single-edge blocks, so C1 substitutes and drops the arguments; C5 does not merge a block whose one edge comes from a cbr.

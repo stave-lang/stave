@@ -370,7 +370,7 @@ pub fn is_expr_kind(k: NodeKind) -> bool {
 }
 
 /// The `types` dump (stage-gates): the type table `t<T> key` (every
-/// type a line names, closed over key components, by T), then `I N t<T>` / `I N -` for every
+/// type a line names, closed over key components, T the rank among them), then `I N t<T>` / `I N -` for every
 /// expression node of every item not dropped, by (I, N).
 pub fn dump_types(prog: &Program, tc: &Typeck) -> String {
     let mut lines: Vec<(u32, u32, TypeId)> = Vec::new();
@@ -396,31 +396,17 @@ pub fn dump_types(prog: &Program, tc: &Typeck) -> String {
             lines.push((i as u32, n, t));
         }
     }
-    // the type table: named types, closed over components
-    let mut used = vec![false; tc.types.len()];
-    let mut stack: Vec<TypeId> = lines.iter().map(|l| l.2).filter(|t| !t.is_none()).collect();
-    let mut kids = Vec::new();
-    while let Some(t) = stack.pop() {
-        let Some(u) = used.get_mut(t.idx()) else { continue };
-        if *u {
-            continue;
-        }
-        *u = true;
-        kids.clear();
-        tc.types.kind(t).children(&mut kids);
-        stack.extend_from_slice(&kids);
-    }
+    let roots = lines.iter().map(|l| l.2).filter(|t| !t.is_none()).collect();
+    let table = crate::dump_sigs::TypeRank::from_roots(tc, roots);
     let mut out = String::new();
-    for (i, &u) in used.iter().enumerate() {
-        if u && TypeId(i as u32) != tc.error_type {
-            out.push_str(&format!("t{i} {}\n", tc.type_key(TypeId(i as u32))));
-        }
+    for (k, &t) in table.order.iter().enumerate() {
+        out.push_str(&format!("t{k} {}\n", types::type_key_text_as(&tc.types, t, &|c| table.at(c))));
     }
     for (i, n, t) in lines {
-        if t.is_none() {
+        if t.is_none() || t == tc.error_type {
             out.push_str(&format!("{i} {n} -\n"));
         } else {
-            out.push_str(&format!("{i} {n} t{}\n", t.0));
+            out.push_str(&format!("{i} {n} t{}\n", table.at(t)));
         }
     }
     out

@@ -7,15 +7,14 @@
 //   `tc_traits`, answered in rounds).
 // The call then infers the method's generic arguments as a generic call (`tc_chain.gen_call`):
 // its bindings row holds the impl's (or the bound trait's) arguments, then the method's own
-// generics unbound; `self` is the receiver, not an argument. A method without generics of its
-// own in an impl with a const param has nothing to infer: its call is a plain call (no bindings
-// row) with the impl's arguments.
+// generics unbound (a const param binds as `tc_rows.CB`); `self` is the receiver, not an
+// argument. A method without generics of its own in an impl with a const param has nothing to
+// infer: its call is a plain call (no bindings row) with the impl's arguments.
 //
 // Not decided here (the call is unknown): an impl without a struct or enum head with the name on
 // a struct or enum receiver (it may come first), two trait impls or bound traits with the name
-// (ambiguous), a const generic param of the method, or of its impl or trait when the method has
-// generics, an impl param the self type does not bind, a method without `self`, a question not
-// answered yet.
+// (ambiguous), an impl param the self type does not bind, a method without `self`, a question
+// not answered yet.
 import decls;
 import sigs;
 import tc_rows;
@@ -40,7 +39,6 @@ impl tc_rows.Typeck {
         let off = self.tq.bm.as_slice()[2] as usize;
         let na = self.tq.bm.as_slice()[3] as usize;
         if sg.sflags.as_slice()[m as usize] & sigs.SF_SELF_MASK == 0 { return (NONE, NONE, NONE); }
-        if has_const(sg, tr) || has_const(sg, m) { return (NONE, NONE, NONE); }
         let gl = sg.cx.gens.lo.as_slice();
         let np = (gl[tr as usize + 1] - gl[tr as usize]) as usize;
         let own = (gl[m as usize + 1] - gl[m as usize]) as usize;
@@ -48,13 +46,13 @@ impl tc_rows.Typeck {
         let b = self.binds.len();
         for i in 0..np {
             let w = self.tq.tr.env_words(e);
-            let k = w[off + 3 * i];
-            let x = w[off + 3 * i + 1];
-            if k != types.GA_TYPE || x == ERR {
+            let (k, x, y) = (w[off + 3 * i], w[off + 3 * i + 1], w[off + 3 * i + 2]);
+            if k == types.GA_ERROR || k == types.GA_TYPE && x == ERR {
                 self.binds.truncate(b);
                 return (NONE, NONE, NONE);
             }
-            self.binds.push(x);
+            let v = self.bind_of(k, x, y);
+            self.binds.push(v);
         }
         for _ in 0..own {
             self.binds.push(NONE);
@@ -75,7 +73,6 @@ impl tc_rows.Typeck {
         let m = self.tq.bm.as_slice()[1];
         let off = self.tq.bm.as_slice()[2] as usize;
         let na = self.tq.bm.as_slice()[3] as usize;
-        if has_const(sg, tr) || has_const(sg, m) { return (NONE, NONE, NONE); }
         let gl = sg.cx.gens.lo.as_slice();
         let np = (gl[tr as usize + 1] - gl[tr as usize]) as usize;
         let own = (gl[m as usize + 1] - gl[m as usize]) as usize;
@@ -83,13 +80,13 @@ impl tc_rows.Typeck {
         let b = self.binds.len();
         for i in 0..np {
             let w = self.tq.tr.env_words(e);
-            let k = w[off + 3 * i];
-            let x = w[off + 3 * i + 1];
-            if k != types.GA_TYPE || x == ERR {
+            let (k, x, y) = (w[off + 3 * i], w[off + 3 * i + 1], w[off + 3 * i + 2]);
+            if k == types.GA_ERROR || k == types.GA_TYPE && x == ERR {
                 self.binds.truncate(b);
                 return (NONE, NONE, NONE);
             }
-            self.binds.push(x);
+            let v = self.bind_of(k, x, y);
+            self.binds.push(v);
         }
         for _ in 0..own {
             self.binds.push(NONE);
@@ -118,7 +115,8 @@ impl tc_rows.Typeck {
             if a == tc_traits.A_WAIT { wait = true; }
             if a == tc_traits.A_YES && !wait { return self.impl_method(sg, ds, m, c); }
         }
-        if self.headless_has(s) { return self.waited(wait); }
+        // a method of the name in an impl with no struct or enum head may come first
+        if search.contains(self.headless.as_slice(), s) { return self.waited(wait); }
         let mut found = NONE;
         let mut fargs = vec.Vec::<u32>.new();
         let mut two = false;
@@ -225,16 +223,16 @@ impl tc_rows.Typeck {
             }
             return (m, tab.intern(types.TK_ADT, imp, 0), NONE);
         }
-        if has_const(sg, imp) || has_const(sg, m) { return (NONE, NONE, NONE); }
         let b = self.binds.len();
         for i in 0..np {
-            let k = self.tq.qargs.as_slice()[3 * i];
-            let x = self.tq.qargs.as_slice()[3 * i + 1];
-            if k != types.GA_TYPE || x == ERR || x == NONE {
+            let q = self.tq.qargs.as_slice();
+            let (k, x, y) = (q[3 * i], q[3 * i + 1], q[3 * i + 2]);
+            if k == types.GA_ERROR || k == types.GA_TYPE && (x == ERR || x == NONE) {
                 self.binds.truncate(b);
                 return (NONE, NONE, NONE);
             }
-            self.binds.push(x);
+            let v = self.bind_of(k, x, y);
+            self.binds.push(v);
         }
         for _ in 0..own {
             self.binds.push(NONE);

@@ -1,0 +1,17 @@
+round 1
+fn @0 size 1 closed 1 slots 0 level 0
+fn @1 size 6 closed 4 slots 0 level 1 cyclic
+site @1 b0 0 @0 1 inline
+site @1 b0 1 @2 3 cyclic
+fn @2 size 3 closed 3 slots 0 level 1 cyclic
+site @2 b0 0 @3 6 cyclic
+fn @3 size 6 closed 6 slots 0 level 1 cyclic
+site @3 b2 1 @1 4 cyclic
+fn @4 size 9 closed 7 slots 0 level 1 cyclic
+site @4 b1 0 @0 1 inline
+site @4 b2 1 @4 7 cyclic
+fn @5 size 3 closed 3 slots 0 level 2
+site @5 b0 0 @1 4 cyclic
+fn @6 size 7 closed 7 slots 0 level 3
+site @6 b0 0 @5 3 inline
+site @6 b0 1 @4 7 cyclic

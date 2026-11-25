@@ -1,0 +1,1 @@
+features through the implication closure of the baseline and the caller's needs: sse42 from the baseline, avx from avx2 and from fma, fma and avx2 from avx512f; refused: fma under avx2, avx2 under fma, avx under the baseline alone.

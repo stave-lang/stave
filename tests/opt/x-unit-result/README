@@ -1,0 +1,1 @@
+A unit callee with two rets (continuation without params, two edges into it), an aggregate result, an unused result (its continuation param goes by C1, its make by C6), a slot value as argument; a join that C4 leaves with one edge merges in the same round (C5 after C4).

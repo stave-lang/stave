@@ -1,0 +1,1 @@
+Base passes only. B5 deletes a dead chain whole but no param: every edge argument is live, so a loop-carried value read only by its own update stays (C6 would delete it, see c-dead).

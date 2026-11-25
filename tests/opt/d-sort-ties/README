@@ -1,0 +1,1 @@
+Sort key (S, b, k): a smaller S in a later block sorts first, equal S sort by block before index, and the slot cut (slot_caller=192) falls on the row of block 1; slots of accepted rows go to b0 in (b, k) order, not in sort order; a cut row stays a call; a site in a non-entry block.

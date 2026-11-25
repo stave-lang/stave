@@ -85,6 +85,11 @@ pub struct Typeck {
     // `std.soa.Soa` (NONE without one), its module
     pub soa: u32,
     pub soa_mod: u32,
+    // the name `old` (NONE: not in the program); the contract clause being checked (`CL_*`), the
+    // `old(..)` calls open in it
+    pub old_s: u32,
+    pub clause: u8,
+    pub old_depth: u32,
     pub args: vec.Vec<u32>,
     // the names of the methods of impls with no struct or enum head, sorted
     pub headless: vec.Vec<u32>,
@@ -103,6 +108,8 @@ pub struct Typeck {
     // stacks of type matching
     pub binds: vec.Vec<u32>,
     pub blo: vec.Vec<u32>,
+    // the arguments of the const bindings of the body (`CB`), three words each, each once
+    pub cargs: vec.Vec<u32>,
     pub waits: vec.Vec<bool>,
     pub mt_p: vec.Vec<u32>,
     pub mt_x: vec.Vec<u32>,
@@ -217,12 +224,61 @@ impl Rows {
     }
 }
 
+// The contract clause being checked: none, a `requires`, an `ensures`.
+pub const CL_NONE: u8 = 0;
+pub const CL_REQUIRES: u8 = 1;
+pub const CL_ENSURES: u8 = 2;
+
+// A binding of a const generic param in `binds`: `CB | k`, its argument the three words from
+// `cargs[3 * k]` (a value, a const param of the body, or a value unknown after an error). A type
+// id never has bit 30 set, every other mark has bit 31: the two never meet.
+pub const CB: u32 = 0x4000_0000;
+
+// Whether binding v is a const binding.
+pub fn is_cb(v: u32) -> bool {
+    return v & 0xc000_0000 == CB;
+}
+
 // Whether value v is a literal group's.
 pub fn is_lit(v: u32) -> bool {
     return v != NONE && v != ERR && v != UNK && v & LIT != 0;
 }
 
 impl Typeck {
+    // The const binding of argument (k, x, y), one per distinct argument of the body, so two
+    // bindings are equal exactly when their arguments are.
+    pub fn cbind(&mut self, k: u32, x: u32, y: u32) -> u32 {
+        let n = self.cargs.len() / 3;
+        for i in 0..n {
+            let c = &self.cargs.as_slice()[3 * i..3 * i + 3];
+            if c[0] == k && c[1] == x && c[2] == y { return CB | i as% u32; }
+        }
+        self.cargs.push(k);
+        self.cargs.push(x);
+        self.cargs.push(y);
+        return CB | n as% u32;
+    }
+
+    // Binding v (a type or a const binding) as a generic argument's three words, pushed to `args`.
+    pub fn push_bind(&mut self, v: u32) {
+        if is_cb(v) {
+            let i = 3 * (v & ~CB) as usize;
+            for j in 0..3usize {
+                let w = self.cargs.as_slice()[i + j];
+                self.args.push(w);
+            }
+        } else {
+            self.args.push(types.GA_TYPE);
+            self.args.push(v);
+            self.args.push(0);
+        }
+    }
+
+    // Generic argument (k, x, y) of a type key as a binding: a type, or a const binding.
+    pub fn bind_of(&mut self, k: u32, x: u32, y: u32) -> u32 {
+        return if k == types.GA_TYPE then x else self.cbind(k, x, y);
+    }
+
     pub fn new_lit(&mut self, float: bool) -> u32 {
         let g = self.lg_parent.len() as% u32;
         self.lg_parent.push(g);
@@ -645,12 +701,27 @@ impl Typeck {
     // A built-in method m on c called with generic arguments (`GenericArgs` row ga) and the `()`
     // right after them: its value; NONE when m is no built-in or the call is not that form (then
     // an error if m is one).
-    pub fn bi_targs(&mut self, tab: &mut types.Table, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, tree: &ast.Ast, m: u32, c: u32, ga: u32) -> u32 {
+    pub fn bi_targs(&mut self, tab: &mut types.Table, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, tree: &ast.Ast, m: u32, c: u32, ga: u32, seg: u32, xs: &[u32]) -> u32 {
         if !tc_builtins.is_builtin(m) { return NONE; }
-        let q = tree.tok_end.as_slice()[ga as usize];
-        if !self.bt.takes_targs(m) || consteval.tk(t, q) != terminals.T_L_PAREN || consteval.tk(t, q + 1) != terminals.T_R_PAREN {
+        let lo = tree.tok.as_slice()[ga as usize];
+        let hi = tree.tok_end.as_slice()[ga as usize] - 1;
+        if !self.bt.takes_targs(m) {
+            // E0201 case `type-args` at the turbofish, the operand the built-in's name
+            self.report_span(201, C_TYPE_ARGS, lo, hi, NONE, 0, tree.kids.row(ga as usize).len() as% u32, NONE);
+            let k = self.dg.x.len() - 1;
+            self.dg.x.as_mut_slice()[k] = seg;
             self.bad = true;
             return NONE;
+        }
+        let q = hi + 1;
+        if consteval.tk(t, q) != terminals.T_L_PAREN || consteval.tk(t, q + 1) != terminals.T_R_PAREN {
+            self.bad = true;
+            return NONE;
+        }
+        if self.bt.shaped_targs(m) {
+            let v = self.bt.targs_ret(tab, m, c, xs);
+            if v == NONE { self.bad = true; }
+            return v;
         }
         // `permute::<[i0, ..]>`: one index per lane, each a plain int literal below the lanes
         let n = tab.b_of(c);

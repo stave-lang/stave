@@ -1,0 +1,1 @@
+Base passes only. B4: a repeat whose key is in scope from a dominating block that it cannot reach again stays; operand order is part of the key; a repeat in a loop whose key the same block added earlier is replaced (the search finds the block through its back edge).

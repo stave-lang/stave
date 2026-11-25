@@ -1,4 +1,4 @@
-// lower_bound / upper_bound against a count over the whole column.
+// lower_bound / upper_bound against a count over the whole column; contains against a scan.
 import search;
 import sort;
 import perm;
@@ -16,6 +16,7 @@ fn check<T: word.Word + Copy>(xs: &[T], x: T, what: &str) {
     }
     debug.assert(search.lower_bound(xs, x) == below, what);
     debug.assert(search.upper_bound(xs, x) == not_above, what);
+    debug.assert(search.contains(xs, x) == (not_above > below), what);
 }
 
 test fn empty_and_single() {
@@ -26,6 +27,14 @@ test fn empty_and_single() {
     debug.assert(search.lower_bound(&one, 10) == 0, "equal to the only element");
     debug.assert(search.upper_bound(&one, 10) == 1, "upper bound after the only element");
     debug.assert(search.lower_bound(&one, 11) == 1, "above the only element");
+}
+
+test fn membership() {
+    let e = [0u32; 0];
+    debug.assert(!search.contains(&e, 0), "nothing is in an empty column");
+    let xs = [1u32, 3, 3, 8];
+    debug.assert(search.contains(&xs, 1) && search.contains(&xs, 3) && search.contains(&xs, 8), "first, repeated, last");
+    debug.assert(!search.contains(&xs, 0) && !search.contains(&xs, 4) && !search.contains(&xs, 9), "before, between, after");
 }
 
 test fn duplicates() {

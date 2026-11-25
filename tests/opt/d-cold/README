@@ -1,0 +1,1 @@
+ret(f, b) over several edges and around a loop: sites before a loop and inside a loop that exits are not cold, a site in a loop that never exits is; a call in a loop head split so its continuation carries the back edge to the head; C5 does not merge a block whose one edge comes from a cbr, nor a block with a self edge.
