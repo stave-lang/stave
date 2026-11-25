@@ -1212,7 +1212,7 @@ impl tc_rows.Typeck {
             let mut b = self.acc.as_slice()[r];
             // a chunk loop binds its vector annotation whatever the source's element
             if chunk_vec(&sg.cx.tab, b) == NONE {
-                let e = self.element(&mut sg.cx.tab, src);
+                let e = self.element(sg, ds, nm, src);
                 if b != NONE && b != UNK && e != UNK && e != b { self.bad = true; }
                 if b == NONE { b = e; }
             }
@@ -1258,26 +1258,41 @@ impl tc_rows.Typeck {
         }
     }
 
-    // The element a `for` loop over a source of type src binds: an int range's int, an array's
-    // element, `&T` / `&mut T` over a referenced array or slice; an iterator is not checked yet.
-    fn element(&mut self, tab: &mut types.Table, src: u32) -> u32 {
+    // The element a `for` loop over a source of type src binds (stage0 `element_type`): an int
+    // range's int, an array's element, `&T` / `&mut T` over a referenced array or slice, and over
+    // an iterator (a struct, enum, or generic param, or `&mut` one) X of its `next(&mut self) ->
+    // Option<X>`, the method a call `src.next()` finds.
+    fn element(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, src: u32) -> u32 {
         if src == UNK { return UNK; }
         if src == NONE { return self.err(); }
+        let tab = &mut sg.cx.tab;
         let tag = tab.tag_of(src);
         if tag == types.TK_RANGE {
             if tab.tag_of(tab.a_of(src)) == types.TK_INT { return tab.a_of(src); }
             return self.err();
         }
         if tag == types.TK_ARRAY { return tab.a_of(src); }
+        let mut iter = tag == types.TK_ADT || tag == types.TK_PARAM;
         if tag == types.TK_REF {
             let inner = tab.b_of(src);
             let it = tab.tag_of(inner);
             if it == types.TK_ARRAY || it == types.TK_SLICE { return tab.mk_ref(tab.a_of(src) == 1, tab.a_of(inner)); }
-            if it == types.TK_ADT || it == types.TK_PARAM { return UNK; }
-            return self.err();
+            iter = (it == types.TK_ADT || it == types.TK_PARAM) && tab.a_of(src) == 1;
         }
-        if tag == types.TK_ADT || tag == types.TK_PARAM { return UNK; }
-        return self.err();
+        if !iter { return self.err(); }
+        let next = modules.lookup(&nm.tab, mem.str_bytes("next"));
+        let (m, inst, b) = self.recv_method(sg, ds, src, next);
+        if m == NONE || tc_builtins.is_builtin(m) { return UNK; }
+        let lo = sg.cx.gens.lo.as_slice()[m as usize];
+        let hi = sg.cx.gens.lo.as_slice()[m as usize + 1];
+        if sg.sflags.as_slice()[m as usize] & sigs.SF_SELF_MASK != sigs.SF_SELF_MUT || sg.params.row(m as usize).len() != 1 || lo != hi { return self.err(); }
+        let ret = self.method_ret(sg, ds, m, inst, b);
+        if ret == UNK { return UNK; }
+        let tab2 = &sg.cx.tab;
+        if tab2.tag_of(ret) != types.TK_ADT || tab2.a_of(ret) != self.opt || self.opt == NONE { return self.err(); }
+        let xs = tab2.x(ret);
+        if xs.len() < 3 || xs[0] != types.GA_TYPE { return self.err(); }
+        return self.known(xs[1]);
     }
 }
 

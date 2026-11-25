@@ -1228,6 +1228,20 @@ impl tc_rows.Typeck {
         return if self.waits.as_slice()[r] then UNK else NONE;
     }
 
+    // The type a call of method m found on a receiver (`recv_method`: m, inst, bindings row b)
+    // returns, its bindings all bound; UNK when they are not.
+    pub fn method_ret(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, m: u32, inst: u32, b: u32) -> u32 {
+        let ret = sg.cx.ty.as_slice()[m as usize];
+        if ret == ERR || ret == NONE { return UNK; }
+        if b == NONE { return self.inst_of(sg, ret, inst); }
+        let n = self.call_n(sg, ds, m);
+        for i in 0..n {
+            if self.binds.as_slice()[b as usize + i] == NONE { return UNK; }
+        }
+        let r = self.self_in(sg, ds, m, inst, ret);
+        return self.subst_binds(sg, r, b as usize, n);
+    }
+
     // The value of a generic call of callee with bindings row b, the arguments of `Args` row args
     // (NONE: none), the call's context ch, on a receiver whose `Self` is sf (NONE: a call
     // without one).
@@ -1330,6 +1344,11 @@ impl tc_rows.Typeck {
             return (b, c, NONE);
         }
         let s = nm.tok_str.as_slice()[seg as usize];
+        return self.recv_method(sg, ds, recv, s);
+    }
+
+    // Method s on a receiver value of type recv, as `method_of`.
+    pub fn recv_method(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, recv: u32, s: u32) -> (u32, u32, u32) {
         if s == NONE || recv == UNK || recv == NONE { return (NONE, NONE, NONE); }
         // stage0's `lookup_method`: at each level the impls that apply, then the built-ins, then
         // through a reference
