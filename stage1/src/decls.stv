@@ -815,10 +815,10 @@ fn mark_builtins(nm: &intern.Interned, is_prim: &mut [bool], builtin: &mut [u8])
             mark(nm, is_prim, m.as_bytes());
         }
     }
-    let fns = ["size_of", "align_of", "fence_stream", "soa_row_size", "soa_read", "soa_write"];
+    let fns = ["size_of", "align_of", "needs_drop", "fence_stream", "soa_row_size", "soa_read", "soa_write"];
     for k in 0..fns.len() {
         let s = intern.find_str(&nm.tab, mem.str_bytes(fns[k]));
-        if s != NONE { builtin[s as usize] = if k < 3 then 1u8 else 2u8; }
+        if s != NONE { builtin[s as usize] = if k < 4 then 1u8 else 2u8; }
     }
 }
 

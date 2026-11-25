@@ -1,0 +1,44 @@
+//~ STDOUT const_if_dead_rest.stdout
+// An `if` on a constant condition whose taken arm always returns, with no `else`: the code after
+// it never runs, yet it is lowered as code that can run (its temporaries and locals with drop
+// glue are dropped as scheduled) and then left out of the build.
+import std.io;
+import std.string;
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+fn lit(x: u32) -> u32 {
+    if true {
+        return 8;
+    }
+    let d = D.{ id: x };
+    io.print(f"never {x}\n");
+    return d.id;
+}
+
+fn early<T>(x: u32) -> u32 {
+    if !needs_drop::<T>() {
+        return x;
+    }
+    let mut s = string.String.new();
+    s.push_str("droppable");
+    let d = D.{ id: x };
+    return (s.len() as% u32) + d.id;
+}
+
+fn main() -> i32 {
+    let a = lit(1);
+    let b = early::<u32>(2);
+    let c = early::<D>(3);
+    io.print(f"{a} {b} {c}\n");
+    return 0;
+}

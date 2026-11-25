@@ -1,0 +1,101 @@
+//~ ARGS --release
+//~ STDOUT vec_drop_paths.stdout
+// `vec_drop_paths.stv` in a release build.
+import std.atomic;
+import std.io;
+import std.mem;
+import std.string;
+import std.vec;
+
+static DROPS: atomic.U32 = atomic.U32.new(0);
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let _ = DROPS.fetch_add(1);
+        let id = self.id;
+        io.print(f"{id} ");
+    }
+}
+
+struct Z {}
+
+impl Drop for Z {
+    fn drop(&mut self) {
+        let _ = DROPS.fetch_add(1);
+        io.print("z ");
+    }
+}
+
+fn filled(first: u32, n: u32) -> vec.Vec<D> {
+    let mut v = vec.Vec::<D>.new();
+    for i in 0..n {
+        v.push(D.{ id: first + i });
+    }
+    return v;
+}
+
+fn end(what: &str) {
+    let n = DROPS.swap(0);
+    io.print(f"| {what}: {n}\n");
+}
+
+fn main() -> i32 {
+    let mut v = filled(0, 5);
+    v.truncate(7);
+    end("truncate past len");
+    v.truncate(2);
+    let l2 = v.len();
+    io.print(f"(len {l2}) ");
+    end("truncate 2");
+    v.clear();
+    let l0 = v.len();
+    io.print(f"(len {l0}) ");
+    end("clear");
+    v.push(D.{ id: 9 });
+    mem.drop(v);
+    end("mem.drop");
+    {
+        let w = filled(10, 3);
+    }
+    end("scope end");
+    let mut vv = vec.Vec::<vec.Vec<D>>.new();
+    vv.push(filled(20, 2));
+    vv.push(filled(30, 2));
+    vv.truncate(1);
+    end("nested truncate");
+    mem.drop(vv);
+    end("nested drop");
+    let mut zs = vec.Vec::<Z>.new();
+    zs.push(Z.{});
+    zs.push(Z.{});
+    zs.push(Z.{});
+    zs.truncate(1);
+    end("zero-sized truncate");
+    mem.drop(zs);
+    end("zero-sized drop");
+    let mut xs = vec.Vec::<u32>.new();
+    for i in 0..6u32 {
+        xs.push(i);
+    }
+    xs.truncate(4);
+    let a = xs.len();
+    let last = xs.as_slice()[3];
+    xs.truncate(9);
+    let b = xs.len();
+    xs.clear();
+    let c = xs.len();
+    xs.push(7);
+    let first = xs.as_slice()[0];
+    io.print(f"u32 lens {a} {b} {c}, last {last}, refilled {first}\n");
+    let mut s = string.String.new();
+    s.push_str("abc");
+    s.clear();
+    s.push_str("d");
+    let sl = s.len();
+    io.print(f"string len {sl}\n");
+    return 0;
+}

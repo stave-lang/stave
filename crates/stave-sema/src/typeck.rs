@@ -87,8 +87,8 @@ pub enum Target {
     SoaRow { op: crate::prim::Builtin, ty: TypeId },
     /// A const or `static mut` use.
     Global { decl: DeclId },
-    /// `size_of::<T>()` / `align_of::<T>()`.
-    SizeOf { ty: TypeId, align: bool },
+    /// A type query on `ty`: `size_of::<T>()`, `align_of::<T>()`, `needs_drop::<T>()` (`op`).
+    TypeQuery { ty: TypeId, op: crate::prim::Builtin },
     /// `fence_stream()`.
     FenceStream,
     /// An `extern "stave-intrinsic"` call (checked IR `intrinsic.<name>`).
@@ -176,6 +176,9 @@ pub struct TypedBody {
     /// or a reference to one. Decided once on the definition (a generic `T` or `&T` is never a
     /// vector annotation, whatever an instance gives it); every other `for` is an element loop.
     pub chunk_loops: Vec<u32>,
+    /// The `if`s whose condition is a constant condition ([`crate::constcond`]), by node: the one
+    /// classification the call graph answers per instance and lowering and the effect pass read.
+    pub const_ifs: Vec<crate::constcond::ConstIf>,
     /// The pattern bindings that take a value that is not Copy by value: binding nodes, sorted.
     /// Decided on the types of the definition (a type parameter without a `Copy` bound is not
     /// Copy, whatever an instance gives it), so a pattern moves its value in every instance or in
@@ -942,12 +945,12 @@ fn instance_sizes(
 }
 
 /// The types whose layout lowering reads without holding a value of them: the type of each
-/// `size_of` / `align_of` and the row type of each `std.soa` row built-in (std-only, its row
-/// type a param). One with a param is checked per instance ([`instance_sizes`]), a concrete
-/// `size_of` / `align_of` type at the call.
+/// type query (`size_of` / `align_of` / `needs_drop`) and the row type of each `std.soa` row
+/// built-in (std-only, its row type a param). One with a param is checked per instance
+/// ([`instance_sizes`]), a concrete type query's type at the call.
 fn layout_queries(b: &TypedBody) -> impl Iterator<Item = TypeId> + '_ {
     b.targets.iter().filter_map(|(_, t)| match t {
-        Target::SizeOf { ty, .. } | Target::SoaRow { ty, .. } => Some(*ty),
+        Target::TypeQuery { ty, .. } | Target::SoaRow { ty, .. } => Some(*ty),
         _ => None,
     })
 }
@@ -967,6 +970,7 @@ fn empty_body(j: Job) -> TypedBody {
         implicit: Vec::new(),
         for_kinds: Vec::new(),
         chunk_loops: Vec::new(),
+        const_ifs: Vec::new(),
         moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
@@ -1035,7 +1039,7 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
                 *recv = f(*recv);
                 *ret = f(*ret);
             }
-            Target::SizeOf { ty, .. }
+            Target::TypeQuery { ty, .. }
             | Target::FnValue { ty }
             | Target::SoaRow { ty, .. }
             | Target::Variant { ty, .. }
@@ -1051,6 +1055,11 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
     }
     for (_, t) in &mut b.drops {
         *t = f(*t);
+    }
+    for c in &mut b.const_ifs {
+        if let crate::constcond::ConstCond::NeedsDrop { ty, .. } = &mut c.cond {
+            *ty = f(*ty);
+        }
     }
 }
 
@@ -2288,6 +2297,7 @@ impl<'a> Ck<'a> {
         let has_error =
             self.has_error || self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
         let stmt_ends = crate::temps::StmtEnds::new(&self.icx, j.node, self.lo, self.contracts.as_deref());
+        let const_ifs = crate::constcond::classify(&self.icx, &self.targets, self.lo, j.node);
         let body = TypedBody {
             decl: j.decl,
             item: j.item,
@@ -2314,6 +2324,7 @@ impl<'a> Ck<'a> {
                 k.sort_unstable();
                 k
             },
+            const_ifs,
             moves,
             drops: std::mem::take(&mut self.drops),
             denied: std::mem::take(&mut self.denied),

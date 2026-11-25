@@ -1,0 +1,111 @@
+//~ STDOUT needs_drop.stdout
+// `needs_drop::<T>()`: whether dropping a T runs code, a constant per instance. True for a type
+// with an `impl Drop`, and for one holding such a type by value (field, tuple or array element,
+// enum payload, `vec.Vec` and `String` included; an array whatever its length); false for
+// scalars, plain structs and enums, references, raw pointers, and fn types. In a generic fn it
+// answers for each instance; an `if` on it, or on its negation, runs the taken arm.
+import std.io;
+import std.string;
+import std.vec;
+
+struct Plain {
+    pub a: u32,
+    pub b: u64,
+}
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {}
+}
+
+struct Holder {
+    pub n: u32,
+    pub d: D,
+}
+
+struct HoldsVec {
+    pub v: vec.Vec<u8>,
+}
+
+struct Wrap<T> {
+    pub x: T,
+}
+
+enum E {
+    A,
+    B(u32),
+}
+
+enum F {
+    A,
+    B(D),
+}
+
+fn nd<T>() -> bool {
+    return needs_drop::<T>();
+}
+
+fn arm<T>() -> u32 {
+    if needs_drop::<T>() {
+        return 1;
+    }
+    return 0;
+}
+
+fn not_arm<T>() -> u32 {
+    if !needs_drop::<T>() {
+        return 2;
+    } else {
+        return 3;
+    }
+}
+
+fn value<T>() -> u32 {
+    return if needs_drop::<T>() then 5 else 4;
+}
+
+fn show(name: &str, b: bool) {
+    io.print(f"{name} {b}\n");
+}
+
+fn main() -> i32 {
+    show("u32", needs_drop::<u32>());
+    show("i64", needs_drop::<i64>());
+    show("bool", needs_drop::<bool>());
+    show("f64", needs_drop::<f64>());
+    show("unit", needs_drop::<()>());
+    show("Plain", needs_drop::<Plain>());
+    show("E", needs_drop::<E>());
+    show("D", needs_drop::<D>());
+    show("Holder", needs_drop::<Holder>());
+    show("HoldsVec", needs_drop::<HoldsVec>());
+    show("F", needs_drop::<F>());
+    show("Option<u32>", needs_drop::<Option<u32>>());
+    show("Option<D>", needs_drop::<Option<D>>());
+    show("Wrap<u32>", needs_drop::<Wrap<u32>>());
+    show("Wrap<D>", needs_drop::<Wrap<D>>());
+    show("[u32; 4]", needs_drop::<[u32; 4]>());
+    show("[D; 2]", needs_drop::<[D; 2]>());
+    show("[D; 0]", needs_drop::<[D; 0]>());
+    show("(u32, u8)", needs_drop::<(u32, u8)>());
+    show("(u32, D)", needs_drop::<(u32, D)>());
+    show("&D", needs_drop::<&D>());
+    show("&mut D", needs_drop::<&mut D>());
+    show("*const D", needs_drop::<*const D>());
+    show("&str", needs_drop::<&str>());
+    show("fn(u32) -> u32", needs_drop::<fn(u32) -> u32>());
+    show("Vec<u32>", needs_drop::<vec.Vec<u32>>());
+    show("Vec<Vec<u8>>", needs_drop::<vec.Vec<vec.Vec<u8>>>());
+    show("String", needs_drop::<string.String>());
+    show("nd<u32>", nd::<u32>());
+    show("nd<D>", nd::<D>());
+    show("nd<Wrap<Holder>>", nd::<Wrap<Holder>>());
+    let a = arm::<u32>() + arm::<D>() * 10;
+    let b = not_arm::<u32>() + not_arm::<D>() * 10;
+    let c = value::<u32>() + value::<D>() * 10;
+    io.print(f"arms {a} {b} {c}\n");
+    return 0;
+}

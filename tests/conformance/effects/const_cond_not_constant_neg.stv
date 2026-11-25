@@ -1,0 +1,63 @@
+//~ CHECK-ONLY
+// Only `true`, `false`, `needs_drop::<T>()`, and `!` of one are constant conditions. A `const`
+// item, a local, a comparison, parentheses, or `&&` is computed at run time even where its value
+// is known: both arms are code, and the trap in the other one counts (E1401), inline or behind a
+// call. `vec.Vec<String>` has drop glue: its `clear` runs the element loop, which can trap.
+import std.string;
+import std.vec;
+
+const OFF: bool = false;
+
+fn t(xs: &[u32], i: usize) -> u32 {
+    return xs[i];
+}
+
+fn by_const(xs: &[u32], i: usize) -> u32 without(trap) { //~ ERROR E1401
+    if OFF {
+        return xs[i];
+    }
+    return 0;
+}
+
+fn by_const_call(xs: &[u32], i: usize) -> u32 without(trap) { //~ ERROR E1401
+    if OFF {
+        return t(xs, i);
+    }
+    return 0;
+}
+
+fn by_local(xs: &[u32], i: usize) -> u32 without(trap) { //~ ERROR E1401
+    let c = false;
+    if c {
+        return xs[i];
+    }
+    return 0;
+}
+
+fn by_compare(xs: &[u32], i: usize) -> u32 without(trap) { //~ ERROR E1401
+    if 1u32 == 1u32 {
+        return 0;
+    } else {
+        return xs[i];
+    }
+}
+
+fn by_paren(xs: &[u32], i: usize) -> u32 without(trap) { //~ ERROR E1401
+    if (false) {
+        return xs[i];
+    }
+    return 0;
+}
+
+fn by_and(xs: &[u32], i: usize) -> u32 without(trap) { //~ ERROR E1401
+    if false && true {
+        return t(xs, i);
+    }
+    return 0;
+}
+
+fn clear_strings(v: &mut vec.Vec<string.String>) without(trap) { //~ ERROR E1401
+    v.clear();
+}
+
+fn main() {}

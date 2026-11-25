@@ -1,0 +1,75 @@
+//~ STDOUT const_cond_dead_arms.stdout
+// The dead arm of an `if` on a constant condition is lowered and then deleted, so what it names
+// still exists: a closure literal (a later closure keeps its number), a generic instance only it
+// calls (with a constant condition of its own), a value with drop glue only it makes, and a fn
+// item it makes into a value. Only the taken arms run; the condition of an `if` that is no
+// constant condition is computed at run time.
+import std.io;
+import std.string;
+
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+const OFF: bool = false;
+
+fn only_dead<T>(x: u32) -> u32 {
+    if !needs_drop::<T>() {
+        return x + 1;
+    }
+    return x + 2;
+}
+
+fn twice(x: u32) -> u32 {
+    return x * 2;
+}
+
+fn dead_things(x: u32) -> u32 {
+    if false {
+        let f = fn(y: u32) -> u32 { return y + only_dead::<string.String>(y); };
+        let d = D.{ id: x };
+        let g = twice;
+        return f(x) + g(d.id);
+    }
+    let h = fn(y: u32) -> u32 { return y * 3; };
+    return h(x);
+}
+
+fn by_type<T>(x: u32) -> u32 {
+    let v = if needs_drop::<T>() then x + 100 else x;
+    if !needs_drop::<T>() {
+        return v;
+    } else if true {
+        let d = D.{ id: v };
+        return d.id;
+    } else {
+        return 0;
+    }
+}
+
+fn not_constant(x: u32) -> u32 {
+    let on = !OFF;
+    if OFF {
+        return 0;
+    }
+    if on && x > 1 {
+        return x;
+    }
+    return 1;
+}
+
+fn main() -> i32 {
+    let a = dead_things(5);
+    let b = by_type::<u32>(1);
+    let c = by_type::<D>(2);
+    let e = not_constant(4);
+    io.print(f"{a} {b} {c} {e}\n");
+    return 0;
+}
