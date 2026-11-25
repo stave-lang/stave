@@ -118,6 +118,29 @@ test fn written_generic_arguments() {
     debug.assert(decided(ty.as_slice()), "a variant after its enum's arguments, a fn item with its own");
 }
 
+test fn error_type_operators() {
+    let (d, _, ty) = run("fn f(b: bool, u: u32, x: f32) -> u32 {\n    let a = b + b;\n    let c = a + 1;\n    let e = c < 3;\n    let g = -u;\n    let h = (g, 1u8);\n    let k = x & x;\n    let m = a as u64;\n    let n = 1.5 | 2;\n    let w = u + 1;\n    return w;\n}\nfn main() {}\n");
+    let t = ty.as_slice();
+    debug.assert(d.len() == 4, "E0206 at `b + b`, `-u`, `x & x`; E0201 at `2`");
+    debug.assert(decided(t), "the body is typed around its errors");
+    debug.assert(test_kit.has(t, " -\n"), "an operator on the error type is of it");
+    debug.assert(test_kit.has(t, " bool\n"), "a comparison of the error type is `bool`");
+    debug.assert(test_kit.has(t, " int u 64\n"), "a cast of the error type is the type cast to");
+}
+
+test fn error_type_values() {
+    let (d, _, ty) = run("struct P { x: u32 }\nfn f(v: Nope, p: P) -> u32 {\n    let t: Nope = (1, 2u8);\n    let y = v + 1;\n    let z = v.a.b(1).c;\n    let q = v[0];\n    let (i, j) = v;\n    let s = i + j;\n    let r = if s > 0 then v else 3;\n    let k = match v {\n        w => w,\n    };\n    return p.x;\n}\nfn main() {}\n");
+    let m = messages(&d);
+    debug.assert(test_kit.has(m.as_slice(), "literal `1` has no type context\n"), "a tuple element under the error type has no context");
+    debug.assert(!test_kit.has(m.as_slice(), "literal `0`"), "an index of a value of the error type is still `usize`");
+    debug.assert(decided(ty.as_slice()), "a param, a binding, a field, a call, an index of the error type are of it");
+}
+
+test fn error_type_without_a_rule() {
+    let (_, _, ty) = run("fn f(b: bool) {\n    let a = b + b;\n    let r = [a; 2];\n}\nfn main() {}\n");
+    debug.assert(test_kit.has(ty.as_slice(), " ?\n"), "an array of elements of the error type stays undecided");
+}
+
 test fn nesting_past_the_limit() {
     let mut s = string.String.from_str("fn f(b: bool) -> bool {\n    return ");
     for _ in 0..20005u32 {

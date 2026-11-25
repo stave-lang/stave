@@ -196,10 +196,10 @@ impl tc_rows.Typeck {
         return (x, y, z, true);
     }
 
-    // A lookup that is not decided: when it waits for an answer in the last round, the body is
-    // not modeled.
+    // A lookup that is not decided (waiting for an answer, or one this stage does not take): the
+    // call is unknown.
     fn waited(&mut self, wait: bool) -> (u32, u32, u32) {
-        if wait && self.tq.last { self.bad = true; }
+        let _ = wait;
         return (NONE, NONE, NONE);
     }
 

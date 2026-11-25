@@ -131,7 +131,6 @@ impl tc_rows.Typeck {
                     // gains the clauses
                     let (shape, widened) = tc_rows.fn_conv(tab, v, want, self.proven);
                     if shape && widened != 0 && self.made_fn_value(t, tree, a) { continue; }
-                    self.bad = true;
                     continue;
                 }
                 self.mismatch(a, v, want, why);

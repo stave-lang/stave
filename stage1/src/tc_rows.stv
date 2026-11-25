@@ -3,14 +3,16 @@
 // them the other modules call.
 //
 // Node rows (per global node row): `nty` (the node's value: a type, `NONE` no value, `UNK` not
-// decided, `LIT | g` a pending literal group), `hint` (the context type its parent gave it), `acc`
-// (a parent's running value), `loc` (a binding's type); per `Postfix` row `chain`, `pos`, `pend`
-// (owned by `tc_chain`). Literal groups: union-find by index (`lg_parent`), the type each root is
-// fixed to (`lg_fixed`: `NONE` pending, `UNK` unknown), int or float.
+// decided, `ERR` the error type, `LIT | g` a pending literal group), `hint` (the context type its
+// parent gave it), `acc` (a parent's running value), `loc` (a binding's type); per `Postfix` row
+// `chain`, `pos`, `pend` (owned by `tc_chain`). Literal groups: union-find by index
+// (`lg_parent`), the type each root is fixed to (`lg_fixed`: `NONE` pending, `UNK` unknown, `ERR`
+// the error type), int or float.
 //
 // Entry points: `resolve`, `force`, `poison`, `fix`, `unite` (literal groups); `coerce` (a
 // coercion site), `coercible`, `unify` (stage0's `unify_operands`); `set_hint`; `known` (a type
-// from the signatures); `err` (a type error: the body prints `?`); `report`, `report_span`,
+// from the signatures); `err` (a type error whose value is not modeled: `UNK`); `resolve_e`,
+// `force_e`, `fix_err` (the error type, see `typeck`); `report`, `report_span`,
 // `mismatch` (a type error stage0 reports: a row of `dg`); `cast_ok` (the cast table);
 // `poison_kids`, `unknown` (a
 // form not checked yet); `expr_kid`; `tok_text`, `is_lit`; the calls of the built-ins of
@@ -80,7 +82,6 @@ pub struct Typeck {
     pub module: u32,
     pub sc: consteval.Scope,
     pub self_row: u32,
-    pub bad: bool,
     pub lw: sigs.Lw,
     // `std.soa.Soa` (NONE without one), its module
     pub soa: u32,
@@ -304,12 +305,28 @@ impl Typeck {
         return r;
     }
 
-    // A value with its group's fixed type: a type, `UNK`, or `LIT | root` (pending).
+    // A value with its group's fixed type: a type, `UNK`, or `LIT | root` (pending). The error
+    // type is `UNK` here: a form that has no rule of its own for an operand of the error type
+    // takes it as unknown.
     pub fn resolve(&mut self, v: u32) -> u32 {
+        let x = self.resolve_e(v);
+        return if x == ERR then UNK else x;
+    }
+
+    // `resolve` that keeps the error type (`ERR`: a node or a group stage0 gives the error type),
+    // for the forms with stage0's rule for it.
+    pub fn resolve_e(&mut self, v: u32) -> u32 {
         if !is_lit(v) { return v; }
         let r = self.find(v & (LIT - 1));
         let f = self.lg_fixed.as_slice()[r as usize];
         return if f == NONE then LIT | r else f;
+    }
+
+    // Fixes a pending group of value v to the error type (stage0 `fix(g, ERROR)`).
+    pub fn fix_err(&mut self, v: u32) {
+        if !is_lit(v) { return; }
+        let r = self.find(v & (LIT - 1));
+        if self.lg_fixed.as_slice()[r as usize] == NONE { self.lg_fixed.as_mut_slice()[r as usize] = ERR; }
     }
 
     // Makes a pending group of value v unknown.
@@ -323,12 +340,12 @@ impl Typeck {
     pub fn fix(&mut self, tab: &types.Table, v: u32, ty: u32) -> bool {
         let r = self.find(v & (LIT - 1));
         let f = self.lg_fixed.as_slice()[r as usize];
-        if f != NONE { return f == ty || f == UNK; }
+        if f != NONE { return f == ty || f == UNK || f == ERR; }
         let tag = tab.tag_of(ty);
         let ok = if self.lg_float.as_slice()[r as usize] then tag == types.TK_FLOAT else tag == types.TK_INT;
         if !ok {
             // as stage0: a group fixed to a type of another kind is the error type from then on
-            self.lg_fixed.as_mut_slice()[r as usize] = UNK;
+            self.lg_fixed.as_mut_slice()[r as usize] = ERR;
             return false;
         }
         self.lg_fixed.as_mut_slice()[r as usize] = ty;
@@ -349,21 +366,26 @@ impl Typeck {
 
     // A value that must be a type here (stage0 `force`): a pending group is an error (E0202).
     pub fn force(&mut self, v: u32) -> u32 {
-        let r = self.resolve(v);
+        let x = self.force_e(v);
+        return if x == ERR then UNK else x;
+    }
+
+    // `force` that keeps the error type (a pending group is of it after its E0202).
+    pub fn force_e(&mut self, v: u32) -> u32 {
+        let r = self.resolve_e(v);
         if is_lit(r) {
             self.e0202(r);
-            return UNK;
+            return ERR;
         }
         return r;
     }
 
-    // E0202 for pending group v, once (the group is then unknown); its literal is found when
-    // the body's walk is done (`tc_diag.lit_sites`).
+    // E0202 for pending group v, once (the group is then of the error type); its literal is found
+    // when the body's walk is done (`tc_diag.lit_sites`).
     pub fn e0202(&mut self, v: u32) {
-        self.bad = true;
         let r = self.find(v & (LIT - 1));
         if self.lg_fixed.as_slice()[r as usize] != NONE { return; }
-        self.lg_fixed.as_mut_slice()[r as usize] = UNK;
+        self.lg_fixed.as_mut_slice()[r as usize] = ERR;
         let float = self.lg_float.as_slice()[r as usize];
         self.report(202, if float then C_FLOAT else 0u8, NONE, r, NONE, NONE);
     }
@@ -376,6 +398,16 @@ impl Typeck {
     pub fn force_at(&mut self, r: usize) -> u32 {
         let v = self.nty.as_slice()[r];
         return self.force(v);
+    }
+
+    pub fn resolve_e_at(&mut self, r: usize) -> u32 {
+        let v = self.nty.as_slice()[r];
+        return self.resolve_e(v);
+    }
+
+    pub fn force_e_at(&mut self, r: usize) -> u32 {
+        let v = self.nty.as_slice()[r];
+        return self.force_e(v);
     }
 
     pub fn poison_at(&mut self, r: usize) {
@@ -414,7 +446,6 @@ impl Typeck {
     }
 
     // A type error whose primary span is global tokens lo..=hi (`NONE`: node row n's span).
-    // The caller decides whether the body's types after it are modeled (`bad`).
     pub fn report_span(&mut self, code: u16, case: u8, lo: u32, hi: u32, n: u32, a: u32, b: u32, why: u32) {
         let g = &mut self.dg;
         g.code.push(code);
@@ -449,14 +480,12 @@ impl Typeck {
     // is decided at the body's end.
     pub fn mismatch(&mut self, e: usize, v: u32, want: u32, why: u32) {
         let found = if is_lit(v) then self.lit_kind(v) else v;
-        self.bad = true;
         self.report(201, C_PENDING, e as% u32, want, found, why);
     }
 
     // A type read from the signatures: the error type is not modeled after an error.
     pub fn known(&mut self, ty: u32) -> u32 {
         if ty == ERR || ty == NONE {
-            self.bad = true;
             return UNK;
         }
         return ty;
@@ -499,6 +528,11 @@ impl Typeck {
             self.poison(v);
             return;
         }
+        // the error type wanted: a pending group takes it, any value is no mismatch
+        if want == ERR {
+            self.fix_err(v);
+            return;
+        }
         if v == UNK { return; }
         if is_lit(v) {
             if !self.fix(tab, v, want) { self.mismatch(e, v, want, why); }
@@ -517,10 +551,7 @@ impl Typeck {
             return;
         }
         // a node without a value (a module, type, or fn path) is no mismatch
-        if v == NONE || v == ERR {
-            self.bad = true;
-            return;
-        }
+        if v == NONE { return; }
         self.mismatch(e, v, want, why);
     }
 
@@ -550,16 +581,19 @@ impl Typeck {
         return vt == types.TK_SLICE && tab.b_of(vi) != 0 && tab.a_of(vi) == tab.a_of(wi);
     }
 
-    // stage0's `unify_operands` on resolved values; a mismatch is E0201 at node row rn (the
-    // right operand, the later arm or element).
+    // stage0's `unify_operands` on values resolved by `resolve_e`; a mismatch is E0201 at node
+    // row rn (the right operand, the later arm or element). `ERR` where stage0's value is the
+    // error type: an operand of it (a pending group of the other operand takes it), a mismatch,
+    // vectors with E0602 / E0603, a literal against a vector.
     pub fn unify(&mut self, tab: &types.Table, lt: u32, rt: u32, rn: u32) -> u32 {
+        if lt == ERR || rt == ERR {
+            self.fix_err(lt);
+            self.fix_err(rt);
+            return ERR;
+        }
         if lt == UNK || rt == UNK {
             self.poison(lt);
             self.poison(rt);
-            return UNK;
-        }
-        if lt == NONE || rt == NONE {
-            self.bad = true;
             return UNK;
         }
         let ll = is_lit(lt);
@@ -567,48 +601,39 @@ impl Typeck {
         if !ll && !rl {
             if lt == rt || rt == self.t_never { return lt; }
             if lt == self.t_never { return rt; }
-            // vectors: E0602 / E0603
-            if tab.tag_of(lt) == types.TK_VECTOR || tab.tag_of(rt) == types.TK_VECTOR || lt == ERR || rt == ERR {
-                self.bad = true;
-                return UNK;
-            }
+            if lt == NONE || rt == NONE { return UNK; }
+            if tab.tag_of(lt) == types.TK_VECTOR || tab.tag_of(rt) == types.TK_VECTOR { return ERR; }
             self.mismatch(rn as usize, rt, lt, NONE);
-            return UNK;
+            return ERR;
         }
+        if lt == NONE || rt == NONE { return UNK; }
         if ll && rl {
             if self.unite(lt, rt) { return self.resolve(lt); }
             let a = self.lit_kind(lt);
             let b = self.lit_kind(rt);
-            self.poison(lt);
-            self.poison(rt);
-            self.bad = true;
+            self.fix_err(lt);
+            self.fix_err(rt);
             self.report(201, C_NO_CAST, rn, a, b, NONE);
-            return UNK;
+            return ERR;
         }
         let g = if ll then lt else rt;
         let ty = if ll then rt else lt;
         if ty == self.t_never { return g; }
-        if tab.tag_of(ty) == types.TK_VECTOR || ty == ERR {
-            // E0602 (or an error reported where ty was made): the literal is the error type
-            self.poison(g);
-            self.bad = true;
-            return UNK;
+        if tab.tag_of(ty) == types.TK_VECTOR {
+            // E0602: the literal is the error type
+            self.fix_err(g);
+            return ERR;
         }
         if !self.fix(tab, g, ty) {
             // a pending left operand against a typed right one: the expected type is the error
             // type, no diagnostic
-            if ll {
-                self.bad = true;
-            } else {
-                self.mismatch(rn as usize, rt, lt, NONE);
-            }
-            return UNK;
+            if !ll { self.mismatch(rn as usize, rt, lt, NONE); }
+            return ERR;
         }
         return ty;
     }
 
     pub fn err(&mut self) -> u32 {
-        self.bad = true;
         return UNK;
     }
 }
@@ -654,8 +679,8 @@ impl Typeck {
             }
             let want = self.bt.param(tab, callee, c, j);
             if kd == tc_builtins.A_ALIGNED {
-                let v = self.force_at(a);
-                if v != UNK && !aligned_ok(tab, v, want) { self.bad = true; }
+                // E0606 or a mismatch (later stages'): the call's value is its return type
+                let _ = self.force_at(a);
                 continue;
             }
             if kd == tc_builtins.A_INDEX {
@@ -665,7 +690,6 @@ impl Typeck {
             // a mask of another shape where a mask is wanted: E0605
             let v = self.resolve_at(a);
             if tab.tag_of(want) == types.TK_MASK && v != want && v != UNK && v != NONE && !is_lit(v) && tab.tag_of(v) == types.TK_MASK {
-                self.bad = true;
                 continue;
             }
             self.coerce(tab, a, want, NONE);
@@ -710,17 +734,14 @@ impl Typeck {
             self.report_span(201, C_TYPE_ARGS, lo, hi, NONE, 0, tree.kids.row(ga as usize).len() as% u32, NONE);
             let k = self.dg.x.len() - 1;
             self.dg.x.as_mut_slice()[k] = seg;
-            self.bad = true;
             return NONE;
         }
         let q = hi + 1;
         if consteval.tk(t, q) != terminals.T_L_PAREN || consteval.tk(t, q + 1) != terminals.T_R_PAREN {
-            self.bad = true;
             return NONE;
         }
         if self.bt.shaped_targs(m) {
             let v = self.bt.targs_ret(tab, m, c, xs);
-            if v == NONE { self.bad = true; }
             return v;
         }
         // `permute::<[i0, ..]>`: one index per lane, each a plain int literal below the lanes
@@ -767,15 +788,6 @@ pub fn headless_impls(ds: &decls.Decls) -> (vec.Vec<u32>, vec.Vec<u32>) {
         imps.push(ps.as_slice()[i]);
     }
     return (names, imps);
-}
-
-// Whether v (decided) passes as want, `&[T align A]` (`&mut` when want is): a reference of that
-// mutability or `&mut`, to a slice of T aligned to at least A.
-fn aligned_ok(tab: &types.Table, v: u32, want: u32) -> bool {
-    if v == NONE || tab.tag_of(v) != types.TK_REF || (tab.a_of(want) == 1 && tab.a_of(v) != 1) { return false; }
-    let s = tab.b_of(v);
-    let ws = tab.b_of(want);
-    return tab.tag_of(s) == types.TK_SLICE && tab.a_of(s) == tab.a_of(ws) && tab.b_of(s) >= tab.b_of(ws);
 }
 
 // Whether v (decided) is a gather / scatter index for want as it is: a vector of unsigned lanes
