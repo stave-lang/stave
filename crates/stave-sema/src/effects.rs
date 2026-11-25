@@ -481,12 +481,22 @@ struct BodyOps {
 
 impl BodyOps {
     /// The ops of `owner` in an instance with constant-condition answers `taken`.
-    fn live<'s>(&'s self, b: &TypedBody, taken: &[bool], owner: u32) -> impl Iterator<Item = (Effects, Op)> + 's {
+    fn live<'s>(
+        &'s self,
+        b: &TypedBody,
+        taken: &[bool],
+        owner: u32,
+    ) -> impl Iterator<Item = (Effects, Op)> + 's {
         let dead = if self.ops.is_empty() {
             Vec::new()
         } else {
             crate::constcond::dead_arms(&b.const_ifs, taken, |t| {
-                b.const_ifs.iter().position(|c| c.tok == t).and_then(|k| self.if_owners.get(k)).copied().unwrap_or(0)
+                b.const_ifs
+                    .iter()
+                    .position(|c| c.tok == t)
+                    .and_then(|k| self.if_owners.get(k))
+                    .copied()
+                    .unwrap_or(0)
             })
         };
         self.ops
@@ -636,8 +646,11 @@ pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[
         BOUNDARY.iter().filter_map(|&(f, e, k)| prog.known.decl(f).map(|d| (d, (e, k)))).collect();
     let fd_waits: FxHashSet<DeclId> = FD_WAITS.iter().filter_map(|&f| prog.known.decl(f)).collect();
     // source ops per body, once per decl (instances share them)
-    let body_ops: Vec<BodyOps> =
-        tc.bodies.par_iter().map(|b| if b.has_error { BodyOps::default() } else { body_ops(prog, b) }).collect();
+    let body_ops: Vec<BodyOps> = tc
+        .bodies
+        .par_iter()
+        .map(|b| if b.has_error { BodyOps::default() } else { body_ops(prog, b) })
+        .collect();
     let body_of = |d: DeclId| tc.bodies.binary_search_by_key(&d, |b| b.decl).ok();
     let cyclic: Vec<bool> = (0..g.scc_count() as u32).into_par_iter().map(|s| g.is_cycle(s)).collect();
     // per node: own effects, whether it is a boundary fn, the op of each own effect

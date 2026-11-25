@@ -87,7 +87,13 @@ pub(crate) fn classify(icx: &ItemCx<'_>, targets: &[(u32, Target)], lo: u32, hi:
         let (Some(&c), Some(&t)) = (kids.first(), kids.get(1)) else { continue };
         let Some(cond) = cond_of(icx, targets, c) else { continue };
         let range = |k: u32| (icx.a(k), icx.end_tok(k));
-        out.push(ConstIf { node: n, tok: icx.a(n), cond, then: range(t), els: kids.get(2).map(|&e| range(e)) });
+        out.push(ConstIf {
+            node: n,
+            tok: icx.a(n),
+            cond,
+            then: range(t),
+            els: kids.get(2).map(|&e| range(e)),
+        });
     }
     out
 }
@@ -139,10 +145,7 @@ impl TypedBody {
 /// token ranges; `owner(t)` is the body or closure that holds token `t` (as the caller numbers
 /// them). A token is dead when a dead arm of its own owner holds it.
 pub fn dead_arms(ifs: &[ConstIf], taken: &[bool], owner: impl Fn(u32) -> u32) -> Vec<(u32, u32, u32)> {
-    ifs.iter()
-        .zip(taken)
-        .filter_map(|(c, &t)| c.dead_arm(t).map(|(lo, hi)| (owner(c.tok), lo, hi)))
-        .collect()
+    ifs.iter().zip(taken).filter_map(|(c, &t)| c.dead_arm(t).map(|(lo, hi)| (owner(c.tok), lo, hi))).collect()
 }
 
 /// Whether token `tok` of owner `owner` is in one of the `dead` arms ([`dead_arms`]).
