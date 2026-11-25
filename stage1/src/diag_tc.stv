@@ -136,6 +136,17 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
                 let (wf, ws, wz) = why_span(tree, ds, md, lx, set, t, w);
                 d.role("expected", wf, ws, wz);
             }
+        } else if code == 206 && case == tc_rows.C_DEREF_OP {
+            let get = g.b.as_slice()[k];
+            let get_mut = g.x.as_slice()[k];
+            d.begin(206, if get != NONE && get_mut != NONE then "deref-accessors" else if get != NONE then "deref-read" else if get_mut != NONE then "deref-write" else "deref");
+            d.arg("op", mem.str_bytes("*"));
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("type", buf.as_slice());
+            let (_, s0, z0) = node_span(tree, lx, set, t, n);
+            d.arg("operand", &set.file(f as usize)[s0 as usize..(s0 + z0) as usize]);
+            if get != NONE { d.arg("get", nm.tab.text(ds.name.as_slice()[get as usize] as usize)); }
+            if get_mut != NONE { d.arg("get_mut", nm.tab.text(ds.name.as_slice()[get_mut as usize] as usize)); }
         } else if code == 206 {
             let pat = case == tc_rows.C_PATTERN || case == tc_rows.C_PATTERN_STR;
             d.begin(206, if case == tc_rows.C_REF_OPERAND then "ref-operand" else if case == tc_rows.C_PATTERN then "pattern" else if case == tc_rows.C_PATTERN_STR then "pattern-str" else "");
@@ -151,6 +162,11 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
         } else if code == 202 {
             d.begin(202, if case == tc_rows.C_FLOAT then "float" else if case == tc_rows.C_INFER then "infer" else "");
             d.arg("literal", &set.file(f as usize)[s as usize..(s + z) as usize]);
+        } else if code == 203 && case == tc_rows.C_FLOAT_RANGE {
+            d.begin(203, "float");
+            d.arg("literal", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("type", buf.as_slice());
         } else if code == 203 && case == tc_rows.C_MALFORMED {
             d.begin(203, "malformed");
             d.arg("literal", &set.file(f as usize)[s as usize..(s + z) as usize]);

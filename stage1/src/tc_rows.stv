@@ -187,12 +187,18 @@ pub const C_PATTERN: u8 = 2;
 pub const C_PATTERN_STR: u8 = 3;
 // E0206 base case for indexing (`[]`) a value that is no array or slice.
 pub const C_INDEX: u8 = 4;
+// E0206 cases `deref`, `deref-read`, `deref-write`, `deref-accessors`: unary `*` on operand row n
+// of type a that is no reference or pointer; b the type's read accessor, x its write accessor
+// (NONE: none).
+pub const C_DEREF_OP: u8 = 5;
 // E0202 cases: an int literal (0), a float literal, a generic value whose arguments no context
 // gives (`infer`).
 pub const C_FLOAT: u8 = 1;
 pub const C_INFER: u8 = 2;
-// E0203 case `malformed` (an int literal no int reads).
+// E0203 case `malformed` (an int literal no int reads); case `float` (a float literal its float
+// type a holds no finite value of).
 pub const C_MALFORMED: u8 = 1;
+pub const C_FLOAT_RANGE: u8 = 2;
 // E0201 case `arity`: a = the arguments taken, b = given, x = the call's first token.
 pub const C_ARITY: u8 = 15;
 // E0201 case `type-args`: a = the generic arguments taken, b = given; the span is the list.
