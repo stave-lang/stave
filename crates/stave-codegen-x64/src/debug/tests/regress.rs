@@ -1,10 +1,14 @@
 //! Regressions: `bool` loads, wrapping `addr.elem` offsets, the probed stack-argument area, casts
 //! of fn values, whole-slot loads read in place.
 
+use stave_ir::text::Level;
 use stave_ir::{CastKind, FuncBuilder, Op, Operand};
+use stave_obj::{ImageBuilder, Machine};
 
 use super::harness::*;
-use crate::debug::{Error, Options, bench_ctx, compile_func, compile_func_stack, compile_module};
+use crate::debug::{
+    Error, Options, bench_ctx, compile_func, compile_func_stack, compile_module, emit_module,
+};
 
 /// A `bool` byte read from memory is 1 iff nonzero (interpreter and AArch64 agree).
 #[test]
@@ -110,10 +114,30 @@ fn cast_of_a_fn_value_is_malformed() {
     b.ret(Some(y.into()));
     p.def(f, b);
     p.main(|_, _| {});
-    let e = compile_module(&p.m, &Options { verify: false, ..Options::default() }).unwrap_err();
+    let e = compile_module(&p.m, &Options { verify: None, ..Options::default() }).unwrap_err();
     assert!(matches!(&e, Error::Malformed { func: Some(g), .. } if *g == f), "{e}");
     let e = compile_module(&p.m, &Options::default()).unwrap_err();
     assert!(matches!(&e, Error::Verify(_)), "{e}");
+}
+
+/// The verifier runs by the rules of the level the caller names: a `switch` on an int constant
+/// is legal at level `opt` only, and the default is `checked`.
+#[test]
+fn verify_takes_the_level() {
+    let text = "stave.ir 4 \"x86_64-linux-v2\" release opt\ntype t0 int s 32\nfn @0 a.f() -> t0 {\nb0():\n  \
+                switch 5 5:b1() _:b2()\nb1():\n  ret 1\nb2():\n  ret 2\n}\n";
+    let m = match stave_ir::text::read(text.as_bytes()) {
+        Ok(l) => l.module,
+        Err(es) => panic!("{}", es.iter().map(|e| e.render("t.ir")).collect::<Vec<_>>().join("\n")),
+    };
+    let emit = |verify| {
+        let o = Options { verify, ..Options::default() };
+        emit_module(&m, &o, &mut ImageBuilder::new(Machine::X86_64, o.image.clone())).map(|_| ())
+    };
+    assert!(matches!(emit(Some(Level::Checked)), Err(Error::Verify(_))));
+    assert_eq!(Options::default().verify, Some(Level::Checked));
+    let got = emit(Some(Level::Opt));
+    assert!(got.is_ok(), "{:?}", got.err().map(|e| e.to_string()));
 }
 
 /// A `load` of a whole slot whose one use is the next store, call argument, or `ret` reads the

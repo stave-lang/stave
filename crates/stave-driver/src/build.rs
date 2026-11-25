@@ -540,7 +540,7 @@ fn x64(
         image: image.clone(),
         main: Some(main),
         // The driver verified the module after lowering and after the release passes.
-        verify: false,
+        verify: None,
         threads: threads.unwrap_or(0),
         release,
         features: baseline,

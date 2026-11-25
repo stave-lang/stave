@@ -286,7 +286,7 @@ fn clean_errors() {
         body.operands.truncate(1);
         body.values.truncate(2);
     }
-    let o = Options { verify: false, ..Options::default() };
+    let o = Options { verify: None, ..Options::default() };
     let _ = compile_module(&r.m, &o);
     assert!(compile_module(&r.m, &Options::default()).is_err());
 }
