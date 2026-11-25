@@ -1,5 +1,7 @@
-// The decision's facts and verdicts, and the expansion, on hand-written `release checked` texts;
-// the expected tables and texts follow contracts/opt-passes.md sections 2, 3, 4, and 8.
+// The decision's facts and verdicts, the expansion, and the clean-up, on hand-written
+// `release` texts; the expected tables and texts follow contracts/opt-passes.md sections 2, 3,
+// 4, 5, and 8.
+import clean;
 import decide;
 import expand;
 import facts;
@@ -15,14 +17,19 @@ import std.debug;
 import std.mem;
 import std.vec;
 
+// The lines, each ended by a newline.
+fn joined(lines: &[&str]) -> vec.Vec<u8> {
+    let mut o = vec.Vec::<u8>.new();
+    for i in 0..lines.len() {
+        bytes.push_str(&mut o, lines[i]);
+        o.push(10);
+    }
+    return o;
+}
+
 // The loaded module of the text whose lines are `lines`; it must load.
 fn loaded(lines: &[&str]) -> read.Loaded {
-    let mut src = vec.Vec::<u8>.new();
-    for i in 0..lines.len() {
-        src.extend_from_slice(mem.str_bytes(lines[i]));
-        src.push(10);
-    }
-    let ld = load.load(src.as_slice());
+    let ld = load.load(joined(lines).as_slice());
     debug.assert(ld.ok(), "the test module loads");
     return ld;
 }
@@ -31,12 +38,7 @@ fn loaded(lines: &[&str]) -> read.Loaded {
 fn dumps(lines: &[&str], lim: &decide.Limits, want: &[&str]) -> bool {
     let ld = loaded(lines);
     let got = decide.inline_dump(&ld.m, lim);
-    let mut w = vec.Vec::<u8>.new();
-    for i in 0..want.len() {
-        bytes.push_str(&mut w, want[i]);
-        w.push(10);
-    }
-    return got.as_slice().eq(w.as_slice());
+    return got.as_slice().eq(joined(want).as_slice());
 }
 
 // A leaf, a fn with a `switch`, a loop that never returns, and a trap block; levels 0 to 2.
@@ -258,4 +260,83 @@ test fn x_without_accepted_rows_changes_only_the_level() {
         w.push(10);
     }
     debug.assert(got.as_slice().eq(w.as_slice()), "every row refused on budget: the bodies stay as they are");
+}
+
+// `canon(C*(m))` of the module of `lines` as text, and the most rounds that changed a body. The
+// text loads (the verifier) and is a fixpoint: `C*` changes nothing on it.
+fn cleaned(lines: &[&str]) -> (vec.Vec<u8>, u32) {
+    let mut ld = loaded(lines);
+    let r = clean.run(&mut ld.m);
+    canon.canon(&mut ld.m);
+    let out = print.print(&ld.m);
+    let mut again = load.load(out.as_slice());
+    debug.assert(again.ok(), "the cleaned text loads");
+    debug.assert(clean.run(&mut again.m) == 0, "C* changes nothing on its own output");
+    return (out, r);
+}
+
+// Whether `C*` makes the module of `lines` the text `want` in `rounds` rounds that change it.
+fn cleans_to(lines: &[&str], want: &[&str], rounds: u32) -> bool {
+    let (out, r) = cleaned(lines);
+    return r == rounds && out.as_slice().eq(joined(want).as_slice());
+}
+
+test fn c1_substitutes_single_edge_params_through_chains() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b1(%1) b2()", "b1(%2: t0):", "  ret %2", "b2():", "  ret 0", "}", "fn @1 m.g(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b1(%1) b3()", "b1(%2: t0):", "  cbr %0 b2(%2) b3()", "b2(%3: t0):", "  ret %3", "b3():", "  ret 0", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b1() b2()", "b1():", "  ret %1", "b2():", "  ret 0", "}", "fn @1 m.g(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b1() b3()", "b1():", "  cbr %0 b2() b3()", "b2():", "  ret %1", "b3():", "  ret 0", "}"];
+    debug.assert(cleans_to(&lines, &want, 1), "C1: %2 and %3 become %1, the chain followed to its end");
+}
+
+test fn c2_folds_chains_and_keeps_what_would_trap() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 8", "type t1 int u 64", "type t2 int s 8", "type t3 bool", "fn @0 m.f(t3) -> t1 {", "b0(%0: t3):", "  %1 = add t1 2 3", "  %2 = mul t1 %1 4", "  %3 = add t0 250 9", "  %4 = div t1 1 0", "  %5 = shl t1 1 64", "  %6 = select t1 1 %2 7", "  %7 = select t1 %0 %6 1", "  %8 = shr t2 -128 7", "  %9 = cast.wrap t1 %8", "  %10 = add.wrap t1 %7 %9", "  ret %10", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 8", "type t1 int u 64", "type t2 bool", "fn @0 m.f(t2) -> t1 {", "b0(%0: t2):", "  %1 = add t0 250 9", "  %2 = div t1 1 0", "  %3 = shl t1 1 64", "  %4 = select t1 %0 20 1", "  %5 = add.wrap t1 %4 18446744073709551615", "  ret %5", "}"];
+    debug.assert(cleans_to(&lines, &want, 1), "C2: 5, 20, the select, -1 as u64; the add, div, and shl that would trap stay");
+}
+
+test fn c2_repeats_until_no_instruction_folds() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t1) -> t0 {", "b0(%0: t1):", "  br b2()", "b1():", "  %2 = mul t0 %1 4", "  ret %2", "b2():", "  %1 = add t0 2 3", "  cbr %0 b1() b3()", "b3():", "  ret 0", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t1) -> t0 {", "b0(%0: t1):", "  cbr %0 b1() b2()", "b1():", "  ret 20", "b2():", "  ret 0", "}"];
+    debug.assert(cleans_to(&lines, &want, 1), "C2: the mul printed before the add it reads folds in the same round");
+}
+
+test fn c3_switch_and_cbr_on_constants_become_br() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "fn @0 m.case() -> t0 {", "b0():", "  switch 1 0:b1() 1:b2() _:b3()", "b1():", "  ret 10", "b2():", "  ret 20", "b3():", "  ret 30", "}", "fn @1 m.dflt() -> t0 {", "b0():", "  switch 9 0:b1() 1:b2() _:b3()", "b1():", "  ret 10", "b2():", "  ret 20", "b3():", "  ret 30", "}", "fn @2 m.no() -> t0 {", "b0():", "  cbr 0 b1() b2()", "b1():", "  ret 1", "b2():", "  ret 2", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "fn @0 m.case() -> t0 {", "b0():", "  ret 20", "}", "fn @1 m.dflt() -> t0 {", "b0():", "  ret 30", "}", "fn @2 m.no() -> t0 {", "b0():", "  ret 2", "}"];
+    debug.assert(cleans_to(&lines, &want, 1), "C3: the case of the value, else the default; cbr 0 takes else");
+}
+
+test fn c3_equal_targets_then_a_second_round() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.same(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b1(%1) b1(%1)", "b1(%2: t0):", "  ret %2", "}", "fn @1 m.differ(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b1(%1) b1(5)", "b1(%2: t0):", "  ret %2", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.same(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  ret %1", "}", "fn @1 m.differ(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b1(%1) b1(5)", "b1(%2: t0):", "  ret %2", "}"];
+    debug.assert(cleans_to(&lines, &want, 2), "two edges: C1 waits for C3's br; different operands stay");
+}
+
+test fn c4_dead_blocks_go_with_their_edges() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "fn @0 m.f(t0) -> t0 {", "b0(%0: t0):", "  cbr 1 b1() b2()", "b1():", "  br b3(%0)", "b2():", "  %1 = add t0 %0 1", "  br b3(%1)", "b3(%2: t0):", "  ret %2", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "fn @0 m.f(t0) -> t0 {", "b0(%0: t0):", "  ret %0", "}"];
+    debug.assert(cleans_to(&lines, &want, 2), "C4 takes b2 with its add; round 2 substitutes b3's param and merges");
+}
+
+test fn edges_count_with_multiplicity() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t0) -> t0 {", "b0(%0: t0):", "  switch %0 0:b1(%0) _:b1(5)", "b1(%1: t0):", "  ret %1", "}", "fn @1 m.g(t1) -> t0 {", "b0(%0: t1):", "  cbr %0 b1() b1()", "b1():", "  ret 7", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t0) -> t0 {", "b0(%0: t0):", "  switch %0 0:b1(%0) _:b1(5)", "b1(%1: t0):", "  ret %1", "}", "fn @1 m.g(t1) -> t0 {", "b0(%0: t1):", "  ret 7", "}"];
+    debug.assert(cleans_to(&lines, &want, 1), "a case and the default into one block are two edges; cbr X() X() is a br");
+}
+
+test fn c5_merges_chains_where_the_first_stands() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b2() b1()", "b1():", "  ret %1", "b2():", "  %2 = mul t0 %1 3", "  br b3()", "b3():", "  %3 = add t0 %2 1", "  br b4()", "b4():", "  ret %3", "}", "fn @1 m.g(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b3() b1()", "b1():", "  ret %1", "b2():", "  %3 = add t0 %2 1", "  ret %3", "b3():", "  %2 = mul t0 %1 3", "  br b2()", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b2() b1()", "b1():", "  ret %1", "b2():", "  %2 = mul t0 %1 3", "  %3 = add t0 %2 1", "  ret %3", "}", "fn @1 m.g(t1, t0) -> t0 {", "b0(%0: t1, %1: t0):", "  cbr %0 b2() b1()", "b1():", "  ret %1", "b2():", "  %2 = mul t0 %1 3", "  %3 = add t0 %2 1", "  ret %3", "}"];
+    debug.assert(cleans_to(&lines, &want, 1), "C5: a chain joins its first block, also one stored after the block it joins");
+}
+
+test fn c6_drops_dead_values_and_params() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t0, t0) -> t0 {", "b0(%0: t0, %1: t0):", "  br b1(0, 0)", "b1(%2: t0, %3: t0):", "  %4 = lt t1 %2 %0", "  cbr %4 b2() b3()", "b2():", "  %5 = add.wrap t0 %3 %2", "  %6 = add.wrap t0 %2 1", "  br b1(%6, %5)", "b3():", "  %7 = xor t0 %2 %0", "  %8 = and t0 %7 3", "  ret %2", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t0, t0) -> t0 {", "b0(%0: t0, %1: t0):", "  br b1(0)", "b1(%2: t0):", "  %3 = lt t1 %2 %0", "  cbr %3 b2() b3()", "b2():", "  %4 = add.wrap t0 %2 1", "  br b1(%4)", "b3():", "  ret %2", "}"];
+    debug.assert(cleans_to(&lines, &want, 1), "C6: the loop-carried %3 read only by its own update goes with its arguments; b0's %1 stays");
+}
+
+test fn the_worked_example_needs_two_rounds() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 int s 32", "fn @0 main.main() -> t1 {", "b0():", "  cbr 1 b1() b2()", "b1():", "  %0 = mul t0 5 3", "  br b3(%0)", "b2():", "  %1 = add t0 5 1", "  br b3(%1)", "b3(%2: t0):", "  cbr 0 b4() b5()", "b4():", "  %3 = mul t0 %2 3", "  br b6(%3)", "b5():", "  %4 = add t0 %2 1", "  br b6(%4)", "b6(%5: t0):", "  cbr 0 b7() b8()", "b7():", "  %6 = mul t0 7 3", "  br b9(%6)", "b8():", "  %7 = add t0 7 1", "  br b9(%7)", "b9(%8: t0):", "  %9 = cast.wrap t1 %5", "  ret %9", "}"];
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int s 32", "fn @0 main.main() -> t0 {", "b0():", "  ret 16", "}"];
+    debug.assert(cleans_to(&lines, &want, 2), "opt-passes.md 10.2: round 2 substitutes 15 and %4, folds 16, merges");
 }

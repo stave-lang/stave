@@ -6,3 +6,4 @@
 //            components and levels, the callee tests E and the caller tests L
 //   decide   the decision D1-D7: closed sizes and slots, verdicts, the `inline` dump, the limits
 //   expand   the expansion X1-X7 under the stored decision: counted, then written per fn
+//   clean    the clean-up C*: rounds of C1-C6 per body until a round changes nothing
