@@ -133,8 +133,10 @@ pub fn fmt(l: &LoadedIr) -> Result<String, IrError> {
     print(&l.read, &l.header, l.read_stack.as_ref())
 }
 
-/// `opt`: the release passes on the loaded module, their verifier and audit, printed at level
-/// `opt`. Only a `release` file at level `lowered` or `checked`.
+/// `opt`: the release passes on the loaded module, their verifier and stage0's self-audit,
+/// printed at level `opt` in the file's form: with the stack section of the module the passes
+/// read, which for a `checked` file is the file's own. Only a `release` file at level `lowered`
+/// or `checked`.
 pub fn opt(l: &LoadedIr) -> Result<String, IrError> {
     if l.header.mode != Mode::Release || l.header.level == Level::Opt {
         return Err(IrError::Input(vec![format!(
@@ -143,7 +145,7 @@ pub fn opt(l: &LoadedIr) -> Result<String, IrError> {
         )]));
     }
     let m = build::release_passes(&l.module).map_err(IrError::failure)?;
-    print(&m, &Header { level: Level::Opt, ..l.header }, None)
+    print(&m, &Header { level: Level::Opt, ..l.header }, l.stack.as_ref())
 }
 
 /// `build`: the image for the header's target, as `stave build` makes it: a `release` file at

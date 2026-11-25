@@ -6,7 +6,8 @@
 //!   uses and more (B5);
 //! - a `switch` on an int constant, legal at level `opt` only: every consumer of an `opt` text
 //!   (`stave ir run`, `stave ir build` for x86-64 and AArch64) takes the case whose value is the
-//!   constant, and the base passes never see one (they take `lowered` or `checked` text).
+//!   constant, and the base passes never see one (they take `lowered` or `checked` text);
+//! - `stave ir opt` keeps the stack section of an emit-form file.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -265,4 +266,20 @@ fn a_constant_switch_scrutinee_takes_the_case_of_its_value() {
         let refused = ir_cmd::opt(&load("opt", &switch_on(&optimized, "1")));
         assert!(matches!(refused, Err(IrError::Input(_))), "{target}: `stave ir opt` of an `opt` text");
     }
+}
+
+fn stack_lines(text: &str) -> Vec<&str> {
+    let stack = ["runstack ", "truncated", "node ", "edge ", "nodes "];
+    text.lines().filter(|l| stack.iter().any(|s| l.starts_with(s))).collect()
+}
+
+#[test]
+fn ir_opt_keeps_the_stack_section() {
+    let tmp = TempDir::new("optstack").unwrap();
+    let (checked, optimized) = switch_program(tmp.path(), Triple::parse("x86_64-linux").unwrap());
+    let lines = stack_lines(&checked);
+    assert!(lines.iter().any(|l| l.starts_with("nodes ")), "the emit form has a stack section");
+    assert_eq!(stack_lines(&optimized), lines);
+    let gate: String = checked.lines().filter(|l| !lines.contains(l)).map(|l| format!("{l}\n")).collect();
+    assert!(stack_lines(&opt("gate.ir", &gate)).is_empty(), "the gate form stays without one");
 }
