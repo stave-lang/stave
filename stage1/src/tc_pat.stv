@@ -21,7 +21,7 @@ import intern;
 import lex;
 import sigs;
 import tc_rows;
-import types;
+import ir.types;
 import prims.search;
 
 const NONE: u32 = tc_rows.NONE;
@@ -31,14 +31,6 @@ const UNK: u32 = tc_rows.UNK;
 const K_LITERAL: u8 = node_kinds.KIND_LITERAL;
 const K_PATTERN: u8 = node_kinds.KIND_PATTERN;
 const K_FIELD_PAT: u8 = node_kinds.KIND_FIELD_PAT;
-
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
-const T_UNDERSCORE: u8 = terminals.T_UNDERSCORE as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_COMMA: u8 = terminals.T_COMMA as% u8;
-const T_DOT: u8 = terminals.T_DOT as% u8;
-const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
 
 // How a name binds: the value itself, or a reference to it (shared, mut).
 const M_MOVE: u8 = 0;
@@ -82,13 +74,13 @@ impl tc_rows.Typeck {
     fn pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, n: usize, ty: u32, m: u8) -> bool {
         let a = tree.tok.as_slice()[n];
         let ft = consteval.tk(t, a);
-        if ft == T_UNDERSCORE { return true; }
-        if ft == T_KW_MUT { return self.bind(&mut sg.cx.tab, n, ty, m); }
+        if ft == terminals.T_UNDERSCORE { return true; }
+        if ft == terminals.T_KW_MUT { return self.bind(&mut sg.cx.tab, n, ty, m); }
         let ks = tree.kids.row(n);
         if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL { return true; }
-        if ft == T_L_PAREN {
+        if ft == terminals.T_L_PAREN {
             let close = tree.tok_end.as_slice()[n] - 1;
-            if ks.len() == 1 && consteval.tk(t, close - 1) != T_COMMA {
+            if ks.len() == 1 && consteval.tk(t, close - 1) != terminals.T_COMMA {
                 self.push_pat(self.base + ks[0] as usize, ty, m);
                 return true;
             }
@@ -100,13 +92,13 @@ impl tc_rows.Typeck {
             }
             return true;
         }
-        if ft != T_IDENT { return false; }
+        if ft != terminals.T_IDENT { return false; }
         let mut e = a;
-        while consteval.tk(t, e + 1) == T_DOT && consteval.tk(t, e + 2) == T_IDENT {
+        while consteval.tk(t, e + 1) == terminals.T_DOT && consteval.tk(t, e + 2) == terminals.T_IDENT {
             e = e + 2;
         }
-        let paren = consteval.tk(t, e + 1) == T_L_PAREN;
-        let braces = consteval.tk(t, e + 1) == T_DOT_L_BRACE;
+        let paren = consteval.tk(t, e + 1) == terminals.T_L_PAREN;
+        let braces = consteval.tk(t, e + 1) == terminals.T_DOT_L_BRACE;
         if e == a && !paren && !braces { return self.bind(&mut sg.cx.tab, n, ty, m); }
         let (lo, hi) = sg.cx.uses.range(self.it, (n - self.base) as% u32);
         if lo == hi || sg.cx.uses.tag.as_slice()[hi - 1] != 0 { return false; }

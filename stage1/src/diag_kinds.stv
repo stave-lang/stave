@@ -24,7 +24,7 @@ import modules;
 import source;
 import sigs;
 import traits;
-import types;
+import ir.types;
 import prims.col;
 import prims.search;
 import prims.sort;
@@ -34,12 +34,6 @@ import std.vec;
 
 const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
-
-const T_KW_PUB: u8 = terminals.T_KW_PUB as% u8;
-const T_KW_UNSAFE: u8 = terminals.T_KW_UNSAFE as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
-const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
 
 fn tk(t: &lex.Tokens, tok: u32) -> u8 {
     return t.kind.as_slice()[tok as usize] as% u8;
@@ -367,7 +361,7 @@ fn heads_unify(tab: &mut types.Table, sg: &sigs.Sigs, a: u32, b: u32, args: bool
 fn gparam_span(sg: &sigs.Sigs, tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, it: u32, r: usize) -> (u32, u32, u32) {
     let g = tree.item_node.as_slice()[it as usize] as usize + sg.cx.gens.node.as_slice()[r] as usize;
     let a = tree.tok.as_slice()[g];
-    let nt = if tk(t, a) == terminals.T_KW_CONST as% u8 then a + 1 else a;
+    let nt = if tk(t, a) == terminals.T_KW_CONST then a + 1 else a;
     return modules.tok_span(lx, set, t, nt);
 }
 
@@ -381,8 +375,8 @@ fn pub_token(tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, m: u32) -> u32 {
         if back > a { return NONE; }
         let x = a - back;
         let k = tk(t, x);
-        if k == T_KW_PUB { return x; }
-        if k != T_KW_UNSAFE && k != T_L_PAREN && k != T_R_PAREN && k != T_STR_LIT { return NONE; }
+        if k == terminals.T_KW_PUB { return x; }
+        if k != terminals.T_KW_UNSAFE && k != terminals.T_L_PAREN && k != terminals.T_R_PAREN && k != terminals.T_STR_LIT { return NONE; }
     }
     return NONE;
 }

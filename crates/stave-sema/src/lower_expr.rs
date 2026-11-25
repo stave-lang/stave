@@ -740,9 +740,15 @@ impl<'a> FnCx<'a> {
         let els = self.f.b.create_block();
         let vt = if ty.is_none() || self.is_never(ty) { self.t_unit() } else { ty };
         let j = self.join(n, &[vt]);
-        let bt = self.t_bool();
-        let Some(cv) = self.val(c, Some(bt)) else { return E::Never };
-        self.f.b.cbr(cv, then, &[], els, &[]);
+        // a constant condition branches to its arm only, as in `if_stmt`
+        match self.const_cond(n) {
+            Some(k) => self.f.b.br(if k { then } else { els }, &[]),
+            None => {
+                let bt = self.t_bool();
+                let Some(cv) = self.val(c, Some(bt)) else { return E::Never };
+                self.f.b.cbr(cv, then, &[], els, &[]);
+            }
+        }
         let snap = self.f.env.clone();
         // each branch is a statement of its own: its temporaries end before the join
         self.f.b.switch_to(then);
@@ -1820,11 +1826,16 @@ impl<'a> FnCx<'a> {
                 let row = self.sub(ty);
                 self.soa_row(op, row, args, ctok)
             }
-            Some(Target::SizeOf { ty, align }) => {
+            Some(Target::TypeQuery { ty, op }) => {
                 let t = self.sub(ty);
+                if op == crate::prim::Builtin::NeedsDrop {
+                    let d = self.needs_drop(t);
+                    let bt = self.t_bool();
+                    return E::V(self.int(d as i128), bt);
+                }
                 let Some((s, a)) = self.layout(t) else { return self.fail_at(Some(ctok), "layout") };
                 let us = self.t_usize();
-                E::V(self.int(if align { a } else { s } as i128), us)
+                E::V(self.int(if op == crate::prim::Builtin::AlignOf { a } else { s } as i128), us)
             }
             Some(_) => self.vector_unsupported(Some(ctok), "vector built-in"),
             // A type-relative built-in (`f32x4.splat(x)`) has its target at the name token.

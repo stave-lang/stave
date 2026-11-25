@@ -1,7 +1,7 @@
 //! Built-in names (LANG.md §2, §4; prelude): the type names
 //! (scalars, `str`, `never`, fixed and sizeless vectors and masks, the generic spellings `vec` /
-//! `mask`), the built-in generic fns `size_of` / `align_of`, and `fence_stream`. They are not
-//! declarations and not keywords: a use resolves to [`crate::Res::Prim`] or
+//! `mask`), the built-in generic fns `size_of` / `align_of` / `needs_drop`, and `fence_stream`.
+//! They are not declarations and not keywords: a use resolves to [`crate::Res::Prim`] or
 //! [`crate::Res::Builtin`] and has no `names` dump line. Every module sees them, after its own
 //! scope and the prelude.
 
@@ -112,14 +112,17 @@ pub enum Prim {
     Never,
 }
 
-/// A built-in fn: the generic layout queries (const-evaluable), the stream fence, and the row
-/// operations of `std.soa`.
+/// A built-in fn: the generic type queries (the layout ones const-evaluable), the stream fence,
+/// and the row operations of `std.soa`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Builtin {
     /// `size_of::<T>() -> usize`.
     SizeOf,
     /// `align_of::<T>() -> usize`.
     AlignOf,
+    /// `needs_drop::<T>() -> bool`: whether dropping a T runs code ([`crate::mono::needs_drop`]
+    /// of the instance's type). Not a const-expr.
+    NeedsDrop,
     /// `fence_stream()`: orders earlier streaming stores (an unsafe operation).
     FenceStream,
     /// `old(e)`: `e` evaluated at fn entry. A contextual name inside a contract clause only
@@ -136,9 +139,10 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 6] = [
+    pub const ALL: [Builtin; 7] = [
         Builtin::SizeOf,
         Builtin::AlignOf,
+        Builtin::NeedsDrop,
         Builtin::FenceStream,
         Builtin::SoaRowSize,
         Builtin::SoaRead,
@@ -149,6 +153,7 @@ impl Builtin {
         match self {
             Builtin::SizeOf => "size_of",
             Builtin::AlignOf => "align_of",
+            Builtin::NeedsDrop => "needs_drop",
             Builtin::FenceStream => "fence_stream",
             Builtin::Old => "old",
             Builtin::SoaRowSize => "soa_row_size",
@@ -247,6 +252,7 @@ mod tests {
         assert_eq!(Prim::from_name("vec"), Some(Prim::VecGeneric));
         assert_eq!(Prim::from_name("never"), Some(Prim::Never));
         assert_eq!(Builtin::from_name("align_of"), Some(Builtin::AlignOf));
+        assert_eq!(Builtin::from_name("needs_drop"), Some(Builtin::NeedsDrop));
         assert_eq!(Builtin::from_name("size_of").map(Builtin::name), Some("size_of"));
         for good in ["u8", "i64x8", "f32xn", "mask8x64", "vec", "mask", "never"] {
             assert_eq!(Prim::from_name(good).map(Prim::text).as_deref(), Some(good));

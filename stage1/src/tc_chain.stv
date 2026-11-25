@@ -27,7 +27,7 @@ import tc_builtins;
 import tc_method;
 import tc_rows;
 import tc_traits;
-import types;
+import ir.types;
 import prims.search;
 import prims.sort;
 import std.mem;
@@ -77,17 +77,6 @@ pub const P_TARGS: u8 = 1;
 pub const P_CALL: u8 = 2;
 pub const P_INDEX: u8 = 3;
 pub const P_STRUCT: u8 = 4;
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
-const T_DOT: u8 = terminals.T_DOT as% u8;
-const T_COLON: u8 = terminals.T_COLON as% u8;
-const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
-const T_COLON_COLON: u8 = terminals.T_COLON_COLON as% u8;
-const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
-const T_QUESTION: u8 = terminals.T_QUESTION as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_DOT_DOT_EQ: u8 = terminals.T_DOT_DOT_EQ as% u8;
-const T_KW_SELF_TYPE: u8 = terminals.T_KW_SELF_TYPE as% u8;
 
 impl tc_rows.Typeck {
     // Before body d is checked: when it is checked again (a later round of `tc_traits`), its node
@@ -121,13 +110,13 @@ impl tc_rows.Typeck {
         let ft = tk(t, a);
         let hv = self.nty.as_slice()[head];
         self.set_chain(r, S_VAL, hv);
-        if ft == T_IDENT {
+        if ft == terminals.T_IDENT {
             self.head_state(sg, ds, nm, set, t, cut, tree, r, head);
             if self.chain.as_slice()[r] == S_ERR && self.acc.as_slice()[r] == NONE {
                 let ty = self.bt.type_head(&mut sg.cx.tab, tc_rows.tok_text(t, set, cut, self.it, a, false));
                 if ty != UNK { self.set_chain(r, S_TYPE, ty); }
             }
-        } else if ft == T_KW_SELF_TYPE {
+        } else if ft == terminals.T_KW_SELF_TYPE {
             // `Self` of an impl names its self type; a trait's `Self` is not checked yet
             let st = self.sc.self_ty;
             if st == NONE || st == ERR || sg.cx.tab.tag_of(st) == types.TK_SELF {
@@ -450,10 +439,10 @@ impl tc_rows.Typeck {
         let mut p = self.pos.as_slice()[r];
         while p < end {
             let ty = tk(t, p);
-            if ty == T_DOT && tk(t, p + 1) == T_IDENT {
+            if ty == terminals.T_DOT && tk(t, p + 1) == terminals.T_IDENT {
                 let seg = p + 1;
                 let q = p + 2;
-                if tk(t, q) == T_COLON_COLON {
+                if tk(t, q) == terminals.T_COLON_COLON {
                     // a path step with generic arguments (child c, never entered); a method of a
                     // value with them is not checked yet
                     if c == NONE || kind(tree, c as usize) != node_kinds.KIND_GENERIC_ARGS { return self.chain_lost(r); }
@@ -494,7 +483,7 @@ impl tc_rows.Typeck {
                     continue;
                 }
                 let st = self.chain.as_slice()[r];
-                if tk(t, q) == T_L_PAREN {
+                if tk(t, q) == terminals.T_L_PAREN {
                     let close = close_of(cut, q);
                     let recv0 = if st == S_VAL then self.acc.as_slice()[r] else UNK;
                     let recv = self.force(recv0);
@@ -529,7 +518,7 @@ impl tc_rows.Typeck {
                 p = q;
                 continue;
             }
-            if ty == T_DOT && tk(t, p + 1) == T_INT_LIT {
+            if ty == terminals.T_DOT && tk(t, p + 1) == terminals.T_INT_LIT {
                 let recv0 = self.chain_value(r);
                 let recv = self.force(recv0);
                 let e = self.tuple_field(&sg.cx.tab, set, t, cut, recv, p + 1);
@@ -537,7 +526,7 @@ impl tc_rows.Typeck {
                 p = p + 2;
                 continue;
             }
-            if ty == T_DOT_L_BRACE {
+            if ty == terminals.T_DOT_L_BRACE {
                 if c == NONE || kind(tree, c as usize) != K_STRUCT_LIT { return self.chain_lost(r); }
                 let close = close_of(cut, p);
                 let ch = if close + 1 == end then self.hint.as_slice()[r] else NONE;
@@ -560,7 +549,7 @@ impl tc_rows.Typeck {
                 self.hint.as_mut_slice()[c as usize] = ch;
                 return true;
             }
-            if ty == T_L_PAREN {
+            if ty == terminals.T_L_PAREN {
                 let close = close_of(cut, p);
                 let st = self.chain.as_slice()[r];
                 if st == S_METH || st == S_TCALL {
@@ -628,7 +617,7 @@ impl tc_rows.Typeck {
                 self.hint.as_mut_slice()[c as usize] = ch;
                 return true;
             }
-            if ty == T_L_BRACKET {
+            if ty == terminals.T_L_BRACKET {
                 if c == NONE || !is_expr(kind(tree, c as usize)) { return self.chain_lost(r); }
                 let b0 = self.chain_value(r);
                 let b = self.force(b0);
@@ -641,7 +630,7 @@ impl tc_rows.Typeck {
                 }
                 return true;
             }
-            if ty == T_QUESTION {
+            if ty == terminals.T_QUESTION {
                 let b0 = self.chain_value(r);
                 let base = self.force(b0);
                 let v = self.try_value(&sg.cx.tab, base);
@@ -784,7 +773,7 @@ impl tc_rows.Typeck {
         for j in 0..ks.len() {
             let e = self.base + ks[j] as usize;
             let nt = first_tok(tree, e) - 2;
-            if tk(t, nt) != T_IDENT || tk(t, nt + 1) != T_COLON { return (NONE, UNK, NONE); }
+            if tk(t, nt) != terminals.T_IDENT || tk(t, nt + 1) != terminals.T_COLON { return (NONE, UNK, NONE); }
             let f = member(ds, d, nm.tok_str.as_slice()[nt as usize]);
             if f == NONE { return (NONE, self.err(), NONE); }
             for k in 0..j {
@@ -1486,7 +1475,7 @@ impl tc_rows.Typeck {
         if kind(tree, e) != K_RANGE { return us; }
         let ks = tree.kids.row(e);
         let rr = self.base + ks[1] as usize;
-        let incl = tk(t, first_tok(tree, rr) - 1) == T_DOT_DOT_EQ;
+        let incl = tk(t, first_tok(tree, rr) - 1) == terminals.T_DOT_DOT_EQ;
         return tab.key(types.TK_RANGE, us, if incl then 1u32 else 0u32);
     }
 

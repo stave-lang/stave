@@ -1,0 +1,1946 @@
+// Step 3 of loading (contracts/checked-ir.md "Loading"): the IR verifier on a module read from
+// text, the rules of stave-ir's `verify` for untrusted modules. First the type table is well
+// formed (in range by step 2, acyclic, at most `MAX_DEPTH` deep) and every static's `data`
+// bytes lie inside its type's size; a failure there stops. Then the module rules (address words,
+// vector and mask shapes, layouts, static layouts) and, per fn, the known-item signature, the
+// entry block, dominance of every use by its definition, and the typing of every instruction
+// and terminator; with none of those, every intrinsic is one the header's target builds. A fault
+// is reported at the line it is about: an instruction's, a block's
+// terminator (the entry params: the block header), a fn's header, a `type` or `static` line.
+import bytes;
+import errs;
+import known;
+import model;
+import print;
+import read;
+import types;
+import vtypes;
+import generated.intrinsic_table;
+import generated.ir_text_terminals;
+import generated.known_items;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+const MAX_STATIC_BYTES: u64 = 1073741824;
+
+// Verifier state of one module: its shape rows, layouts, tables, and the message of the last
+// failed check.
+pub struct V {
+    pub sh: vec.Vec<u32>,
+    pub lay: vtypes.Layouts,
+    kt: known.Table,
+    intr_off: vec.Vec<u32>,
+    intr_name: vec.Vec<u8>,
+    intr_ret: vec.Vec<u8>,
+    intr_poff: vec.Vec<u32>,
+    intr_param: vec.Vec<u8>,
+    ptx_off: vec.Vec<u32>,
+    ptx: vec.Vec<u8>,
+    pre_off: vec.Vec<u32>,
+    pre: vec.Vec<u8>,
+    suf_off: vec.Vec<u32>,
+    suf: vec.Vec<u8>,
+    ity_off: vec.Vec<u32>,
+    ity: vec.Vec<u8>,
+    pub msg: vec.Vec<u8>,
+    tmp: vec.Vec<u32>,
+    tmp2: vec.Vec<u32>,
+    // the fn being verified: its value, constant, block, and operand segment starts
+    vlo: usize,
+    clo: usize,
+    blo: usize,
+    f: usize,
+}
+
+fn row(off: &[u32], data: &[u8], i: usize) -> &[u8] from data {
+    return &data[off[i] as usize..off[i + 1] as usize];
+}
+
+// Verifies the module of ld (read without faults); faults go to ld.errs.
+pub fn verify(ld: &mut read.Loaded) {
+    let mut v = V.{
+        sh: vtypes.shape_rows(&ld.m),
+        lay: vtypes.Layouts.{ size: vec.Vec::<u64>.new(), aln: vec.Vec::<u64>.new(), err: vec.Vec::<u8>.new() },
+        kt: known.Table.new(),
+        intr_off: vec.Vec::<u32>.new(),
+        intr_name: vec.Vec::<u8>.new(),
+        intr_ret: vec.Vec::<u8>.new(),
+        intr_poff: vec.Vec::<u32>.new(),
+        intr_param: vec.Vec::<u8>.new(),
+        ptx_off: vec.Vec::<u32>.new(),
+        ptx: vec.Vec::<u8>.new(),
+        pre_off: vec.Vec::<u32>.new(),
+        pre: vec.Vec::<u8>.new(),
+        suf_off: vec.Vec::<u32>.new(),
+        suf: vec.Vec::<u8>.new(),
+        ity_off: vec.Vec::<u32>.new(),
+        ity: vec.Vec::<u8>.new(),
+        msg: vec.Vec::<u8>.new(),
+        tmp: vec.Vec::<u32>.new(),
+        tmp2: vec.Vec::<u32>.new(),
+        vlo: 0,
+        clo: 0,
+        blo: 0,
+        f: 0,
+    };
+    v.intr_off.extend_from_slice(&intrinsic_table.INTR_NAME_OFF);
+    v.intr_name.extend_from_slice(&intrinsic_table.INTR_NAME);
+    v.intr_ret.extend_from_slice(&intrinsic_table.INTR_RET);
+    v.intr_poff.extend_from_slice(&intrinsic_table.INTR_PARAM_OFF);
+    v.intr_param.extend_from_slice(&intrinsic_table.INTR_PARAM);
+    v.ptx_off.extend_from_slice(&intrinsic_table.PTX_NAME_OFF);
+    v.ptx.extend_from_slice(&intrinsic_table.PTX_NAME);
+    v.pre_off.extend_from_slice(&intrinsic_table.PTX_PREFIX_OFF);
+    v.pre.extend_from_slice(&intrinsic_table.PTX_PREFIX);
+    v.suf_off.extend_from_slice(&intrinsic_table.PTX_SUFFIX_OFF);
+    v.suf.extend_from_slice(&intrinsic_table.PTX_SUFFIX);
+    v.ity_off.extend_from_slice(&known_items.ITY_NAME_OFF);
+    v.ity.extend_from_slice(&known_items.ITY_NAME);
+    let m = &ld.m;
+    let er = &mut ld.errs;
+    // the type table: acyclic, bounded depth
+    let (bad, deep) = well_formed(m);
+    if bad != NONE {
+        let mut e = vec.Vec::<u8>.new();
+        e.push(116);
+        bytes.push_u32(&mut e, bad);
+        bytes.push_str(&mut e, if deep then ": nested deeper than 1000" else ": the type is a component of itself");
+        let line = ld.ty_line.as_slice()[bad as usize];
+        er.add(errs.K_VERIFY, line, 0, e.as_slice());
+        return;
+    }
+    v.lay = vtypes.Layouts.compute(m, v.sh.as_slice());
+    // statics: their bytes lie inside their type's size
+    let mut st_size = vec.Vec::<u64>.new();
+    let mut e = vec.Vec::<u8>.new();
+    for i in 0..m.st_ty.len() {
+        let t = m.st_ty.as_slice()[i] as usize;
+        let mut size: u64 = 0;
+        if v.lay.err.as_slice()[t] == vtypes.L_OK {
+            let s = v.lay.size.as_slice()[t];
+            if s > MAX_STATIC_BYTES {
+                e.clear();
+                bytes.push_str(&mut e, "static ");
+                bytes.push_u32(&mut e, i as% u32);
+                bytes.push_str(&mut e, ": ");
+                bytes.push_u64(&mut e, s);
+                bytes.push_str(&mut e, " bytes, more than this reader lays out (1073741824)");
+                er.add(errs.K_VERIFY, ld.st_line.as_slice()[i], 0, e.as_slice());
+            } else {
+                size = s;
+                let dl = m.st_data_lo.as_slice()[i] as usize;
+                for r in dl..dl + m.st_data_n.as_slice()[i] as usize {
+                    let at = m.data_off.as_slice()[r] as u64;
+                    let end = at + m.data_bytes.row_len(r) as u64;
+                    if end > s {
+                        e.clear();
+                        bytes.push_str(&mut e, "static ");
+                        bytes.push_u32(&mut e, i as% u32);
+                        bytes.push_str(&mut e, ": `data` bytes at ");
+                        bytes.push_u64(&mut e, at);
+                        bytes.push_str(&mut e, "..");
+                        bytes.push_u64(&mut e, end);
+                        bytes.push_str(&mut e, " lie past its size ");
+                        bytes.push_u64(&mut e, s);
+                        er.add(errs.K_VERIFY, ld.da_line.as_slice()[r], 0, e.as_slice());
+                    }
+                }
+            }
+        }
+        st_size.push(size);
+    }
+    if er.len() > 0 { return; }
+    // module rules
+    let mut me = errs.Errs.new();
+    static_refs(m, st_size.as_slice(), ld.st_line.as_slice(), &mut me);
+    lanes(m, ld.ty_line.as_slice(), &mut me);
+    for t in 0..m.types.len() {
+        let le = v.lay.err.as_slice()[t];
+        if le == vtypes.L_INFINITE || le == vtypes.L_OVERFLOW || le == vtypes.L_TOO_DEEP {
+            e.clear();
+            e.push(116);
+            bytes.push_u32(&mut e, t as% u32);
+            bytes.push_str(&mut e, ": ");
+            bytes.push_str(&mut e, vtypes.layout_msg(le));
+            me.add(errs.K_VERIFY, ld.ty_line.as_slice()[t], 0, e.as_slice());
+        }
+    }
+    for i in 0..m.st_ty.len() {
+        let t = m.st_ty.as_slice()[i];
+        let le = v.lay.err.as_slice()[t as usize];
+        e.clear();
+        bytes.push_str(&mut e, "static ");
+        bytes.push_u32(&mut e, i as% u32);
+        if le != vtypes.L_OK {
+            bytes.push_str(&mut e, ": type t");
+            bytes.push_u32(&mut e, t);
+            bytes.push_str(&mut e, " has no layout (");
+            bytes.push_str(&mut e, vtypes.layout_msg(le));
+            e.push(41);
+            me.add(errs.K_VERIFY, ld.st_line.as_slice()[i], 0, e.as_slice());
+            continue;
+        }
+        let al = v.lay.aln.as_slice()[t as usize];
+        if m.st_ref_n.as_slice()[i] > 0 && al % 8 != 0 {
+            bytes.push_str(&mut e, ": address words in a type aligned to ");
+            bytes.push_u64(&mut e, al);
+            me.add(errs.K_VERIFY, ld.st_line.as_slice()[i], 0, e.as_slice());
+        }
+    }
+    for k in 0..me.len() {
+        er.add(errs.K_VERIFY, me.line.as_slice()[k], 0, me.msg.row(k));
+    }
+    // every fn
+    for f in 0..m.fns() {
+        if er.full() { break; }
+        v.func(m, f, er, ld.fn_line.as_slice(), ld.blk_line.as_slice(), ld.blk_tline.as_slice(), ld.ins_line.as_slice());
+    }
+    if er.len() == 0 { v.target(m, er, ld.ins_line.as_slice()); }
+}
+
+// The first type that is a component of itself or nests deeper than `MAX_DEPTH` (true), or
+// NONE: an iterative depth-first walk over key components.
+fn well_formed(m: &model.Module) -> (u32, bool) {
+    let n = m.types.len();
+    let mut state = vec.Vec::<u8>.with_capacity(n);
+    let mut height = vec.Vec::<u32>.with_capacity(n);
+    for _ in 0..n {
+        state.push(0);
+        height.push(0);
+    }
+    let mut stk = vec.Vec::<u32>.new();
+    let mut idx = vec.Vec::<u32>.new();
+    let mut kids = vec.Vec::<u32>.new();
+    for root in 0..n {
+        if state.as_slice()[root] != 0 { continue; }
+        stk.push(root as% u32);
+        idx.push(0);
+        state.as_mut_slice()[root] = 1;
+        while stk.len() > 0 {
+            let top = stk.len() - 1;
+            let node = stk.as_slice()[top];
+            m.types.kids(node, &mut kids);
+            let k = idx.as_slice()[top] as usize;
+            if k < kids.len() {
+                idx.as_mut_slice()[top] = (k + 1) as% u32;
+                let c = kids.as_slice()[k];
+                let s = state.as_slice()[c as usize];
+                if s == 0 {
+                    state.as_mut_slice()[c as usize] = 1;
+                    stk.push(c);
+                    idx.push(0);
+                } else if s == 1 {
+                    return (c, false);
+                }
+            } else {
+                let mut h: u32 = 0;
+                for j in 0..kids.len() {
+                    let x = height.as_slice()[kids.as_slice()[j] as usize];
+                    if x > h { h = x; }
+                }
+                h = h + 1;
+                if h > vtypes.MAX_DEPTH { return (node, true); }
+                height.as_mut_slice()[node as usize] = h;
+                state.as_mut_slice()[node as usize] = 2;
+                stk.truncate(top);
+                idx.truncate(top);
+            }
+        }
+    }
+    return (NONE, false);
+}
+
+// The address words of every static: ascending, non-overlapping, 8-aligned words inside zero
+// bytes of its image, each into an existing string or static, at most one past its end.
+fn static_refs(m: &model.Module, st_size: &[u64], st_line: &[u32], me: &mut errs.Errs) {
+    let mut e = vec.Vec::<u8>.new();
+    for i in 0..m.st_ty.len() {
+        let size = st_size[i];
+        let mut next: u64 = 0;
+        let rl = m.st_ref_lo.as_slice()[i] as usize;
+        for r in rl..rl + m.st_ref_n.as_slice()[i] as usize {
+            let at = m.ref_off.as_slice()[r] as u64;
+            let mut misplaced = at < next || at % 8 != 0 || at + 8 > size;
+            if !misplaced {
+                // no nonzero `data` byte inside the word
+                let dl = m.st_data_lo.as_slice()[i] as usize;
+                for d in dl..dl + m.st_data_n.as_slice()[i] as usize {
+                    let off = m.data_off.as_slice()[d] as u64;
+                    let b = m.data_bytes.row(d);
+                    for k in 0..b.len() {
+                        let p = off + k as u64;
+                        if p >= at && p < at + 8 && b[k] != 0 { misplaced = true; }
+                    }
+                }
+            }
+            e.clear();
+            bytes.push_str(&mut e, "static ");
+            bytes.push_u32(&mut e, i as% u32);
+            bytes.push_str(&mut e, ": address word at ");
+            bytes.push_u64(&mut e, at);
+            if misplaced {
+                let n0 = e.len();
+                bytes.push_str(&mut e, " is misplaced");
+                me.add(errs.K_VERIFY, st_line[i], 0, e.as_slice());
+                e.truncate(n0);
+            }
+            next = at + 8;
+            let to = m.ref_to.as_slice()[r];
+            let mut len: u64 = 0;
+            let mut have = true;
+            if m.ref_kind.as_slice()[r] == model.REF_STR {
+                have = (to as usize) < m.strs.rows();
+                if have { len = m.strs.row_len(to as usize) as u64; }
+            } else {
+                have = (to as usize) < m.st_ty.len();
+                if have { len = st_size[to as usize]; }
+            }
+            if !have {
+                bytes.push_str(&mut e, " has no target");
+                me.add(errs.K_VERIFY, st_line[i], 0, e.as_slice());
+            } else if m.ref_add.as_slice()[r] as u64 > len {
+                bytes.push_str(&mut e, " points past its target");
+                me.add(errs.K_VERIFY, st_line[i], 0, e.as_slice());
+            }
+        }
+    }
+}
+
+// Vector types have a lane type and a valid or native lane count; mask types a width of 8, 16,
+// 32, or 64 bits and such a count.
+fn lanes(m: &model.Module, ty_line: &[u32], me: &mut errs.Errs) {
+    let mut e = vec.Vec::<u8>.new();
+    for t in 0..m.types.len() {
+        let id = t as% u32;
+        let tag = m.types.tag_of(id);
+        let n = m.types.b_of(id);
+        let count_ok = n == types.LANES_N || vtypes.valid_lanes(n);
+        let mut ok = true;
+        if tag == types.TK_VECTOR {
+            let (lo, _) = vtypes.lane_cls(m, m.types.a_of(id));
+            ok = lo && count_ok;
+        } else if tag == types.TK_MASK {
+            let w = m.types.a_of(id);
+            ok = (w == 8 || w == 16 || w == 32 || w == 64) && count_ok;
+        }
+        if !ok {
+            e.clear();
+            e.push(116);
+            bytes.push_u32(&mut e, id);
+            bytes.push_str(&mut e, ": not a vector or mask shape (");
+            print.key_text(m, id, &mut e);
+            e.push(41);
+            me.add(errs.K_VERIFY, ty_line[t], 0, e.as_slice());
+        }
+    }
+}
+
+impl V {
+    // The part that needs the header's target: every `intrinsic.<name>` is built for its arch (an
+    // intrinsic of both arches for every target, an x86-64 or AArch64 one for that arch only).
+    fn target(&mut self, m: &model.Module, er: &mut errs.Errs, ln_i: &[u32]) {
+        let arch = if m.target <= 2 then intrinsic_table.ARCH_X86 else if m.target <= 5 then intrinsic_table.ARCH_A64 else 255u8;
+        let name = if arch == intrinsic_table.ARCH_X86 then "x86-64" else if arch == intrinsic_table.ARCH_A64 then "AArch64" else "gpu-sm86";
+        let mut arches = vec.Vec::<u8>.new();
+        arches.extend_from_slice(&intrinsic_table.INTR_ARCH);
+        for i in 0..m.ins_op.len() {
+            if m.ins_op.as_slice()[i] != ir_text_terminals.IR_T_INTR { continue; }
+            let x = m.intr.row(m.ins_intr.as_slice()[i] as usize);
+            let r = self.intr_row(x);
+            if r == NONE { continue; }
+            let a = arches.as_slice()[r as usize];
+            if a == intrinsic_table.ARCH_BOTH || a == arch { continue; }
+            let mut e = vec.Vec::<u8>.new();
+            bytes.push_str(&mut e, "`intrinsic.");
+            e.extend_from_slice(x);
+            bytes.push_str(&mut e, "` is not built for the target arch ");
+            bytes.push_str(&mut e, name);
+            er.add(errs.K_VERIFY, ln_i[i], 0, e.as_slice());
+        }
+    }
+
+    fn fail(&mut self, s: &str) -> bool {
+        self.msg.clear();
+        bytes.push_str(&mut self.msg, s);
+        return false;
+    }
+
+    // `tN (key)` for a message.
+    fn tname(&self, m: &model.Module, t: u32, out: &mut vec.Vec<u8>) {
+        out.push(116);
+        bytes.push_u32(out, t);
+        if vtypes.in_range(m, t) {
+            bytes.push_str(out, " (");
+            print.key_text(m, t, out);
+            out.push(41);
+        }
+    }
+
+    fn fail_t(&mut self, m: &model.Module, s: &str, t: u32) -> bool {
+        let mut e = vec.Vec::<u8>.new();
+        bytes.push_str(&mut e, s);
+        self.tname(m, t, &mut e);
+        self.msg = e;
+        return false;
+    }
+
+    // The type of a value operand, or NONE.
+    fn opnd_ty(&self, m: &model.Module, o: usize) -> u32 {
+        if m.opnd_kind.as_slice()[o] != model.O_VALUE { return NONE; }
+        return m.val_ty.as_slice()[self.vlo + m.opnd_id.as_slice()[o] as usize];
+    }
+
+    // An int constant operand: (true, hi, lo).
+    fn int_const(&self, m: &model.Module, o: usize) -> (bool, u64, u64) {
+        if m.opnd_kind.as_slice()[o] != model.O_CONST { return (false, 0, 0); }
+        let c = self.clo + m.opnd_id.as_slice()[o] as usize;
+        if m.const_kind.as_slice()[c] != model.C_INT { return (false, 0, 0); }
+        let w = m.const_bits.as_slice()[c] as usize;
+        return (true, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
+    }
+
+    // The class of an operand: a value's type's, a float constant's format, `K_CONST` for an int
+    // constant.
+    fn opnd_cls(&self, m: &model.Module, o: usize) -> vtypes.Cls {
+        let k = m.opnd_kind.as_slice()[o];
+        if k == model.O_VALUE { return vtypes.classify(m, self.opnd_ty(m, o)); }
+        if k == model.O_CONST {
+            let ck = m.const_kind.as_slice()[self.clo + m.opnd_id.as_slice()[o] as usize];
+            if ck == model.C_INT { return vtypes.cls_of(vtypes.K_CONST); }
+            let f = if ck == model.C_F16 then vtypes.F16 else if ck == model.C_BF16 then vtypes.BF16 else if ck == model.C_F32 then vtypes.F32 else vtypes.F64;
+            return vtypes.Cls.{ k: vtypes.K_FLOAT, bits: 0, signed: false, fmt: f };
+        }
+        if k == model.O_STR { return vtypes.cls_of(vtypes.K_FAT); }
+        if k == model.O_FUNC { return vtypes.cls_of(vtypes.K_FN); }
+        return vtypes.cls_of(vtypes.K_OTHER);
+    }
+
+    fn ret_matches(&self, m: &model.Module, r: u32, t: u32) -> bool {
+        if r != NONE { return r == t; }
+        return vtypes.is_unit(m, t);
+    }
+
+    // Whether fn type t has the params and return of fn type w.
+    fn same_fn_shape(&self, m: &model.Module, t: u32, w: u32) -> bool {
+        if m.types.tag_of(t) != types.TK_FN || m.types.tag_of(w) != types.TK_FN { return false; }
+        let np = m.types.a_of(t);
+        if np != m.types.a_of(w) { return false; }
+        let a = m.types.x(t);
+        let b = m.types.x(w);
+        return a[0..np as usize + 1].eq(&b[0..np as usize + 1]);
+    }
+
+    // Whether operand o can stand where a value of type `want` is expected.
+    fn check_operand(&mut self, m: &model.Module, o: usize, want: u32) -> bool {
+        if !vtypes.in_range(m, want) { return self.fail("expected type out of range"); }
+        let k = m.opnd_kind.as_slice()[o];
+        let id = m.opnd_id.as_slice()[o];
+        if k == model.O_VALUE {
+            let t = self.opnd_ty(m, o);
+            if t == want || self.same_fn_shape(m, t, want) { return true; }
+            let mut e = vec.Vec::<u8>.new();
+            e.push(37);
+            bytes.push_u32(&mut e, id);
+            bytes.push_str(&mut e, " has type ");
+            self.tname(m, t, &mut e);
+            bytes.push_str(&mut e, ", expected ");
+            self.tname(m, want, &mut e);
+            self.msg = e;
+            return false;
+        }
+        if k == model.O_CONST {
+            let c = self.clo + id as usize;
+            let ck = m.const_kind.as_slice()[c];
+            let tag = m.types.tag_of(want);
+            if ck == model.C_INT {
+                let w = m.const_bits.as_slice()[c] as usize;
+                let hi = m.wide.hi.as_slice()[w];
+                let lo = m.wide.lo.as_slice()[w];
+                if tag == types.TK_INT {
+                    let cl = vtypes.classify(m, want);
+                    if vtypes.fits(cl.signed, cl.bits, hi, lo) { return true; }
+                    return self.fail_t(m, "constant out of range of ", want);
+                }
+                if tag == types.TK_BOOL && hi == 0 && lo <= 1 { return true; }
+                if tag == types.TK_CHAR && vtypes.is_char(hi, lo) { return true; }
+                return self.fail_t(m, "constant cannot have type ", want);
+            }
+            if tag == types.TK_FLOAT {
+                let f = m.types.a_of(want);
+                if (ck == model.C_F16 && f == vtypes.F16) || (ck == model.C_BF16 && f == vtypes.BF16) || (ck == model.C_F32 && f == vtypes.F32) || (ck == model.C_F64 && f == vtypes.F64) { return true; }
+            }
+            return self.fail_t(m, "constant cannot have type ", want);
+        }
+        if k == model.O_STR {
+            let tag = m.types.tag_of(want);
+            if (tag == types.TK_REF || tag == types.TK_PTR) && m.types.tag_of(m.types.b_of(want)) == types.TK_STR { return true; }
+            return self.fail_t(m, "string operand cannot have type ", want);
+        }
+        if k == model.O_FUNC {
+            let g = id as usize;
+            if m.types.tag_of(want) == types.TK_FN {
+                let np = m.types.a_of(want) as usize;
+                let x = m.types.x(want);
+                if m.fn_params.row(g).eq(&x[0..np]) && self.ret_matches(m, m.fn_ret.as_slice()[g], x[np]) { return true; }
+            }
+            let mut e = vec.Vec::<u8>.new();
+            bytes.push_str(&mut e, "fn @");
+            print.push_inst(&mut e, m.fn_inst.row(g));
+            bytes.push_str(&mut e, " does not have type ");
+            self.tname(m, want, &mut e);
+            self.msg = e;
+            return false;
+        }
+        return self.fail("a type operand is not a value");
+    }
+
+    // An operand where the rules name a scalar type by key (`bool`, `int u size`): checked as
+    // that type when the table holds it, else only a constant of its range stands there.
+    fn check_scalar(&mut self, m: &model.Module, o: usize, tag: u8, a: u32, b: u32) -> bool {
+        let t = m.types.find(tag, a, b, &self.tmp.as_slice()[0..0]);
+        if t != NONE { return self.check_operand(m, o, t); }
+        let (c, hi, lo) = self.int_const(m, o);
+        if c {
+            if tag == types.TK_BOOL && hi == 0 && lo <= 1 { return true; }
+            if tag == types.TK_INT && vtypes.fits(a == 1, 64, hi, lo) { return true; }
+        }
+        return self.fail(if tag == types.TK_BOOL then "operand cannot have type bool" else "operand cannot have type int u size");
+    }
+
+    fn check_usize(&mut self, m: &model.Module, o: usize) -> bool {
+        return self.check_scalar(m, o, types.TK_INT, 0, types.W_SIZE);
+    }
+
+    // Operands lo..lo + n against types tys.
+    fn check_args(&mut self, m: &model.Module, lo: usize, n: usize, tys: &[u32]) -> bool {
+        if n != tys.len() {
+            let mut e = vec.Vec::<u8>.new();
+            bytes.push_u64(&mut e, n as u64);
+            bytes.push_str(&mut e, " arguments, expected ");
+            bytes.push_u64(&mut e, tys.len() as u64);
+            self.msg = e;
+            return false;
+        }
+        for k in 0..n {
+            if !self.check_operand(m, lo + k, tys[k]) {
+                let mut e = vec.Vec::<u8>.new();
+                bytes.push_str(&mut e, "argument ");
+                bytes.push_u64(&mut e, k as u64);
+                bytes.push_str(&mut e, ": ");
+                e.extend_from_slice(self.msg.as_slice());
+                self.msg = e;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The type id of ABI type code x in the module, or NONE (`unit`, or a type the table lacks).
+    fn ity_type(&self, m: &model.Module, x: u8) -> u32 {
+        let e = &self.tmp.as_slice()[0..0];
+        let usize_t = m.types.find(types.TK_INT, 0, types.W_SIZE, e);
+        if x == known_items.ITY_USIZE { return usize_t; }
+        if x == known_items.ITY_ISIZE { return m.types.find(types.TK_INT, 1, types.W_SIZE, e); }
+        let u32_t = m.types.find(types.TK_INT, 0, types.W_32, e);
+        if x == known_items.ITY_U32 { return u32_t; }
+        if x == known_items.ITY_U64 { return m.types.find(types.TK_INT, 0, types.W_64, e); }
+        if x == known_items.ITY_U32X4 {
+            if u32_t == NONE { return NONE; }
+            let four = [u32_t, u32_t, u32_t, u32_t];
+            return m.types.find(types.TK_TUPLE, 0, 0, &four);
+        }
+        let u8_t = m.types.find(types.TK_INT, 0, types.W_8, e);
+        if x == known_items.ITY_MUT_PTR_U8 { return if u8_t == NONE then NONE else m.types.find(types.TK_PTR, 1, u8_t, e); }
+        if x == known_items.ITY_CONST_PTR_U8 { return if u8_t == NONE then NONE else m.types.find(types.TK_PTR, 0, u8_t, e); }
+        if x == known_items.ITY_CONST_PTR_USIZE { return if usize_t == NONE then NONE else m.types.find(types.TK_PTR, 0, usize_t, e); }
+        return NONE;
+    }
+
+    fn push_ity(&self, out: &mut vec.Vec<u8>, x: u8) {
+        out.extend_from_slice(row(self.ity_off.as_slice(), self.ity.as_slice(), x as usize));
+    }
+
+    fn func(&mut self, m: &model.Module, f: usize, er: &mut errs.Errs, ln_f: &[u32], ln_b: &[u32], ln_t: &[u32], ln_i: &[u32]) {
+        self.f = f;
+        // known items: the ABI signature the stages assume; only a report entry on the alt stack
+        let flags = m.fn_flags.as_slice()[f];
+        let kn = m.fn_known.as_slice()[f];
+        if flags & model.F_ALTSTACK != 0 && !(kn != NONE && self.kt.report.as_slice()[kn as usize]) {
+            let mut e = vec.Vec::<u8>.new();
+            bytes.push_str(&mut e, "alt_stack is true for ");
+            if kn == NONE {
+                bytes.push_str(&mut e, "no known item");
+            } else {
+                e.push(96);
+                e.extend_from_slice(self.kt.path(kn as usize));
+                e.push(96);
+            }
+            self.msg = e;
+            er.add(errs.K_VERIFY, ln_f[f], 0, self.msg.as_slice());
+        }
+        if kn != NONE && self.kt.abi_ret.as_slice()[kn as usize] != known_items.ITY_NONE {
+            let k = kn as usize;
+            let ps = m.fn_params.row(f);
+            let want_n = self.kt.abi_params(k).len();
+            let mut ok = ps.len() == want_n;
+            if ok {
+                for j in 0..want_n {
+                    let x = self.kt.abi_params(k)[j];
+                    if self.ity_type(m, x) != ps[j] { ok = false; }
+                }
+            }
+            let r = self.kt.abi_ret.as_slice()[k];
+            let fr = m.fn_ret.as_slice()[f];
+            if r == known_items.ITY_UNIT {
+                if fr != NONE { ok = false; }
+            } else if fr == NONE || self.ity_type(m, r) != fr {
+                ok = false;
+            }
+            if flags & model.F_VARIADIC != 0 { ok = false; }
+            if !ok {
+                let mut e = vec.Vec::<u8>.new();
+                e.push(96);
+                e.extend_from_slice(self.kt.path(k));
+                bytes.push_str(&mut e, "` must have the signature [");
+                for j in 0..want_n {
+                    if j > 0 { bytes.push_str(&mut e, ", "); }
+                    self.push_ity(&mut e, self.kt.abi_params(k)[j]);
+                }
+                bytes.push_str(&mut e, "] -> ");
+                self.push_ity(&mut e, r);
+                self.msg = e;
+                er.add(errs.K_VERIFY, ln_f[f], 0, self.msg.as_slice());
+            }
+        }
+        if flags & model.F_BODY == 0 { return; }
+        self.vlo = m.fn_val_lo.as_slice()[f] as usize;
+        self.clo = m.fn_const_lo.as_slice()[f] as usize;
+        self.blo = m.fn_blk_lo.as_slice()[f] as usize;
+        let nb = m.fn_blk_n.as_slice()[f] as usize;
+        let n0 = er.len();
+        // structure: b0 is no branch target; its params are the fn's params
+        for b in self.blo..self.blo + nb {
+            let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+            for g in tl..tl + m.blk_tgt_n.as_slice()[b] as usize {
+                if m.tgt_blk.as_slice()[g] == 0 { er.add_str(errs.K_VERIFY, ln_t[b], 0, "b0 (entry) cannot be a branch target"); }
+            }
+        }
+        let ps = m.fn_params.row(f);
+        let pn = m.blk_param_n.as_slice()[self.blo] as usize;
+        let mut same = pn == ps.len();
+        if same {
+            for j in 0..pn {
+                if m.val_ty.as_slice()[self.vlo + j] != ps[j] { same = false; }
+            }
+        }
+        if !same { er.add_str(errs.K_VERIFY, ln_b[self.blo], 0, "b0 params do not match the fn params"); }
+        if er.len() != n0 { return; }
+        self.dominance(m, nb, er, ln_t, ln_i);
+        // typing
+        for b in self.blo..self.blo + nb {
+            let il = m.blk_ins_lo.as_slice()[b] as usize;
+            for i in il..il + m.blk_ins_n.as_slice()[b] as usize {
+                if !self.check_inst(m, b - self.blo, i) { er.add(errs.K_VERIFY, ln_i[i], 0, self.msg.as_slice()); }
+            }
+            if !self.check_term(m, b) { er.add(errs.K_VERIFY, ln_t[b], 0, self.msg.as_slice()); }
+        }
+    }
+
+    // Every use of a value is dominated by its definition: in its block, after it; else in a
+    // block its definition's block dominates (Cooper, Harvey, Kennedy over the blocks reachable
+    // from b0).
+    fn dominance(&mut self, m: &model.Module, nb: usize, er: &mut errs.Errs, ln_t: &[u32], ln_i: &[u32]) {
+        let blo = self.blo;
+        // postorder from b0
+        let mut post = vec.Vec::<u32>.new();
+        let mut seen = vec.Vec::<bool>.with_capacity(nb);
+        for _ in 0..nb {
+            seen.push(false);
+        }
+        let mut stk = vec.Vec::<u32>.new();
+        let mut idx = vec.Vec::<u32>.new();
+        if nb > 0 {
+            seen.as_mut_slice()[0] = true;
+            stk.push(0);
+            idx.push(0);
+        }
+        while stk.len() > 0 {
+            let top = stk.len() - 1;
+            let x = stk.as_slice()[top] as usize;
+            let k = idx.as_slice()[top] as usize;
+            let tl = m.blk_tgt_lo.as_slice()[blo + x] as usize;
+            if k < m.blk_tgt_n.as_slice()[blo + x] as usize {
+                idx.as_mut_slice()[top] = (k + 1) as% u32;
+                let s = m.tgt_blk.as_slice()[tl + k] as usize;
+                if s < nb && !seen.as_slice()[s] {
+                    seen.as_mut_slice()[s] = true;
+                    stk.push(s as% u32);
+                    idx.push(0);
+                }
+            } else {
+                post.push(x as% u32);
+                stk.truncate(top);
+                idx.truncate(top);
+            }
+        }
+        let mut po = vec.Vec::<u32>.with_capacity(nb);
+        for _ in 0..nb {
+            po.push(NONE);
+        }
+        for i in 0..post.len() {
+            po.as_mut_slice()[post.as_slice()[i] as usize] = i as% u32;
+        }
+        // predecessors (reachable ones), as a CSR
+        let mut pcount = vec.Vec::<u32>.with_capacity(nb + 1);
+        for _ in 0..nb + 1 {
+            pcount.push(0);
+        }
+        for x in 0..nb {
+            if !seen.as_slice()[x] { continue; }
+            let tl = m.blk_tgt_lo.as_slice()[blo + x] as usize;
+            for g in tl..tl + m.blk_tgt_n.as_slice()[blo + x] as usize {
+                let s = m.tgt_blk.as_slice()[g] as usize;
+                if s < nb {
+                    let c = pcount.as_slice()[s + 1] + 1;
+                    pcount.as_mut_slice()[s + 1] = c;
+                }
+            }
+        }
+        for x in 0..nb {
+            let c = pcount.as_slice()[x + 1] + pcount.as_slice()[x];
+            pcount.as_mut_slice()[x + 1] = c;
+        }
+        let mut fill = vec.Vec::<u32>.new();
+        fill.extend_from_slice(pcount.as_slice());
+        let mut preds = vec.Vec::<u32>.with_capacity(pcount.as_slice()[nb] as usize);
+        for _ in 0..pcount.as_slice()[nb] {
+            preds.push(0);
+        }
+        for x in 0..nb {
+            if !seen.as_slice()[x] { continue; }
+            let tl = m.blk_tgt_lo.as_slice()[blo + x] as usize;
+            for g in tl..tl + m.blk_tgt_n.as_slice()[blo + x] as usize {
+                let s = m.tgt_blk.as_slice()[g] as usize;
+                if s < nb {
+                    let at = fill.as_slice()[s];
+                    preds.as_mut_slice()[at as usize] = x as% u32;
+                    fill.as_mut_slice()[s] = at + 1;
+                }
+            }
+        }
+        let mut idom = vec.Vec::<u32>.with_capacity(nb);
+        for _ in 0..nb {
+            idom.push(NONE);
+        }
+        if nb > 0 { idom.as_mut_slice()[0] = 0; }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut r = post.len();
+            while r > 0 {
+                r = r - 1;
+                let bk = post.as_slice()[r] as usize;
+                if bk == 0 { continue; }
+                let mut new = NONE;
+                for q in pcount.as_slice()[bk] as usize..pcount.as_slice()[bk + 1] as usize {
+                    let p = preds.as_slice()[q];
+                    if idom.as_slice()[p as usize] == NONE { continue; }
+                    if new == NONE {
+                        new = p;
+                    } else {
+                        let mut a = p;
+                        let mut b = new;
+                        while a != b {
+                            while po.as_slice()[a as usize] < po.as_slice()[b as usize] {
+                                a = idom.as_slice()[a as usize];
+                            }
+                            while po.as_slice()[b as usize] < po.as_slice()[a as usize] {
+                                b = idom.as_slice()[b as usize];
+                            }
+                        }
+                        new = a;
+                    }
+                }
+                if new != NONE && idom.as_slice()[bk] != new {
+                    idom.as_mut_slice()[bk] = new;
+                    changed = true;
+                }
+            }
+        }
+        // definition position of each value: (block, 0 for params, k + 1 for instruction k)
+        let nv = m.fn_val_n.as_slice()[self.f] as usize;
+        let mut dblk = vec.Vec::<u32>.with_capacity(nv);
+        let mut dpos = vec.Vec::<u32>.with_capacity(nv);
+        for _ in 0..nv {
+            dblk.push(0);
+            dpos.push(0);
+        }
+        for x in 0..nb {
+            let b = blo + x;
+            let pv = m.blk_val_lo.as_slice()[b] as usize;
+            for j in 0..m.blk_param_n.as_slice()[b] as usize {
+                dblk.as_mut_slice()[pv + j] = x as% u32;
+            }
+            let il = m.blk_ins_lo.as_slice()[b] as usize;
+            for i in il..il + m.blk_ins_n.as_slice()[b] as usize {
+                let r = m.ins_res.as_slice()[i];
+                if r != NONE {
+                    dblk.as_mut_slice()[r as usize] = x as% u32;
+                    dpos.as_mut_slice()[r as usize] = (i - il + 1) as% u32;
+                }
+            }
+        }
+        for x in 0..nb {
+            if idom.as_slice()[x] == NONE { continue; }
+            let b = blo + x;
+            let il = m.blk_ins_lo.as_slice()[b] as usize;
+            let ni = m.blk_ins_n.as_slice()[b] as usize;
+            for i in il..il + ni {
+                let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+                for o in ol..ol + m.ins_opnd_n.as_slice()[i] as usize {
+                    if !self.dominated(m, o, x, (i - il + 1) as% u32, dblk.as_slice(), dpos.as_slice(), idom.as_slice()) {
+                        er.add(errs.K_VERIFY, ln_i[i], 0, self.msg.as_slice());
+                    }
+                }
+            }
+            let end = (ni + 1) as% u32;
+            let top = m.blk_topnd.as_slice()[b];
+            if top != NONE && !self.dominated(m, top as usize, x, end, dblk.as_slice(), dpos.as_slice(), idom.as_slice()) {
+                er.add(errs.K_VERIFY, ln_t[b], 0, self.msg.as_slice());
+            }
+            let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+            for g in tl..tl + m.blk_tgt_n.as_slice()[b] as usize {
+                let ol = m.tgt_opnd_lo.as_slice()[g] as usize;
+                for o in ol..ol + m.tgt_opnd_n.as_slice()[g] as usize {
+                    if !self.dominated(m, o, x, end, dblk.as_slice(), dpos.as_slice(), idom.as_slice()) {
+                        er.add(errs.K_VERIFY, ln_t[b], 0, self.msg.as_slice());
+                    }
+                }
+            }
+        }
+    }
+
+    // Whether operand o, used in block x at position `at`, is dominated by its definition.
+    fn dominated(&mut self, m: &model.Module, o: usize, x: usize, at: u32, dblk: &[u32], dpos: &[u32], idom: &[u32]) -> bool {
+        if m.opnd_kind.as_slice()[o] != model.O_VALUE { return true; }
+        let v = m.opnd_id.as_slice()[o] as usize;
+        let db = dblk[v] as usize;
+        let mut ok = false;
+        if db == x {
+            ok = dpos[v] < at;
+        } else {
+            // walk up the dominator tree from x
+            let mut y = x;
+            let mut steps: usize = 0;
+            while y != 0 && steps <= idom.len() {
+                y = idom[y] as usize;
+                if y == db {
+                    ok = true;
+                    break;
+                }
+                steps = steps + 1;
+            }
+            if db == 0 { ok = true; }
+        }
+        if ok { return true; }
+        let mut e = vec.Vec::<u8>.new();
+        bytes.push_str(&mut e, "use of %");
+        bytes.push_u64(&mut e, v as u64);
+        bytes.push_str(&mut e, " not dominated by its definition");
+        self.msg = e;
+        return false;
+    }
+}
+
+// Op typing (stave-ir `verify` `check_inst`, `check_term`, `check_intrinsic`, `verify/simd`).
+impl V {
+    fn arity(&mut self, n: usize, k: usize) -> bool {
+        if n == k { return true; }
+        let mut e = vec.Vec::<u8>.new();
+        bytes.push_u64(&mut e, n as u64);
+        bytes.push_str(&mut e, " operands, expected ");
+        bytes.push_u64(&mut e, k as u64);
+        self.msg = e;
+        return false;
+    }
+
+    fn res(&mut self, ty: u32) -> bool {
+        if ty != NONE { return true; }
+        return self.fail("missing result type");
+    }
+
+    fn no_res(&mut self, ty: u32) -> bool {
+        if ty == NONE { return true; }
+        return self.fail("must have no result");
+    }
+
+    fn args2(&mut self, m: &model.Module, ol: usize, t: u32) -> bool {
+        let ts = [t, t];
+        return self.check_args(m, ol, 2, &ts);
+    }
+
+    fn args1(&mut self, m: &model.Module, ol: usize, t: u32) -> bool {
+        let ts = [t];
+        return self.check_args(m, ol, 1, &ts);
+    }
+
+    // Block x's terminator: its targets' arguments, its condition, scrutinee, or returned value.
+    fn check_term(&mut self, m: &model.Module, b: usize) -> bool {
+        let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+        let tn = m.blk_tgt_n.as_slice()[b] as usize;
+        for g in tl..tl + tn {
+            let tb = self.blo + m.tgt_blk.as_slice()[g] as usize;
+            let pv = m.blk_val_lo.as_slice()[tb] as usize;
+            let pn = m.blk_param_n.as_slice()[tb] as usize;
+            let mut tys = vec.Vec::<u32>.new();
+            for j in 0..pn {
+                tys.push(m.val_ty.as_slice()[self.vlo + pv + j]);
+            }
+            if !self.check_args(m, m.tgt_opnd_lo.as_slice()[g] as usize, m.tgt_opnd_n.as_slice()[g] as usize, tys.as_slice()) {
+                let mut e = vec.Vec::<u8>.new();
+                bytes.push_str(&mut e, "branch to b");
+                bytes.push_u32(&mut e, m.tgt_blk.as_slice()[g]);
+                bytes.push_str(&mut e, ": ");
+                e.extend_from_slice(self.msg.as_slice());
+                self.msg = e;
+                return false;
+            }
+        }
+        let kind = m.blk_tkind.as_slice()[b];
+        let o = m.blk_topnd.as_slice()[b];
+        if kind == model.TM_CBR {
+            if !self.check_scalar(m, o as usize, types.TK_BOOL, 0, 0) {
+                let mut e = vec.Vec::<u8>.new();
+                bytes.push_str(&mut e, "cbr condition: ");
+                e.extend_from_slice(self.msg.as_slice());
+                self.msg = e;
+                return false;
+            }
+            return true;
+        }
+        if kind == model.TM_SWITCH {
+            let t = self.opnd_ty(m, o as usize);
+            if t == NONE { return self.fail("switch scrutinee must be a value"); }
+            let c = vtypes.classify(m, t);
+            if c.k != vtypes.K_INT && c.k != vtypes.K_BOOL && c.k != vtypes.K_CHAR { return self.fail_t(m, "switch on ", t); }
+            for g in tl..tl + tn - 1 {
+                let w = m.tgt_case.as_slice()[g];
+                let hi = m.wide.hi.as_slice()[w as usize];
+                let lo = m.wide.lo.as_slice()[w as usize];
+                let ok = if c.k == vtypes.K_INT then vtypes.fits(c.signed, c.bits, hi, lo) else if c.k == vtypes.K_BOOL then hi == 0 && lo <= 1 else hi == 0 && lo <= 1114111;
+                if !ok { return self.fail_t(m, "switch case out of range of ", t); }
+                for h in tl..g {
+                    if m.tgt_case.as_slice()[h] == w { return self.fail("duplicate switch case"); }
+                }
+            }
+            return true;
+        }
+        if kind == model.TM_RET {
+            let r = m.fn_ret.as_slice()[self.f];
+            if o == NONE && r == NONE { return true; }
+            if o != NONE && r != NONE {
+                if self.check_operand(m, o as usize, r) { return true; }
+                let mut e = vec.Vec::<u8>.new();
+                bytes.push_str(&mut e, "ret: ");
+                e.extend_from_slice(self.msg.as_slice());
+                self.msg = e;
+                return false;
+            }
+            return self.fail(if o == NONE then "ret without a value in a fn with a return type" else "ret with a value in a unit fn");
+        }
+        return true;
+    }
+
+    fn enum_field(&mut self, m: &model.Module, et: u32, vo: usize, fo: usize) -> u32 {
+        let (ok, vars) = vtypes.enum_variants(m, self.sh.as_slice(), et);
+        if !ok {
+            let _ = self.fail_t(m, "variant field of ", et);
+            return NONE;
+        }
+        let (cv, vh, vl) = self.int_const(m, vo);
+        if !cv {
+            let _ = self.fail("variant index must be a constant");
+            return NONE;
+        }
+        let (cf, fh, fl) = self.int_const(m, fo);
+        if !cf {
+            let _ = self.fail("field index must be a constant");
+            return NONE;
+        }
+        if vh != 0 || vl >= vars.len() as u64 {
+            let _ = self.fail("variant index out of range");
+            return NONE;
+        }
+        let fs = m.var_fields.row(vars[vl as usize] as usize);
+        if fh != 0 || fl >= fs.len() as u64 {
+            let _ = self.fail("field index out of range");
+            return NONE;
+        }
+        return fs[fl as usize];
+    }
+
+    // An int-class index operand: a constant one word holds, or a value of an int type.
+    fn word_index(&mut self, m: &model.Module, o: usize, msg: &str) -> bool {
+        let (c, hi, lo) = self.int_const(m, o);
+        if c && vtypes.fits_word(hi, lo) { return true; }
+        if !c && self.opnd_cls(m, o).k == vtypes.K_INT { return true; }
+        return self.fail(msg);
+    }
+
+    fn check_inst(&mut self, m: &model.Module, blk: usize, i: usize) -> bool {
+        let op = m.ins_op.as_slice()[i];
+        let ty = m.ins_ty.as_slice()[i];
+        let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+        let n = m.ins_opnd_n.as_slice()[i] as usize;
+        if op == ir_text_terminals.IR_T_KW_ADD || op == ir_text_terminals.IR_T_KW_SUB || op == ir_text_terminals.IR_T_KW_MUL || op == ir_text_terminals.IR_T_KW_DIV || op == ir_text_terminals.IR_T_KW_REM {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let c = vtypes.classify(m, ty);
+            if !(c.k == vtypes.K_INT || (c.k == vtypes.K_FLOAT && (c.fmt == vtypes.F32 || c.fmt == vtypes.F64))) { return self.fail_t(m, "arithmetic on ", ty); }
+            return self.args2(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_ADD_DOT_WRAP || op == ir_text_terminals.IR_T_SUB_DOT_WRAP || op == ir_text_terminals.IR_T_MUL_DOT_WRAP || op == ir_text_terminals.IR_T_ADD_DOT_SAT || op == ir_text_terminals.IR_T_SUB_DOT_SAT || op == ir_text_terminals.IR_T_MUL_DOT_SAT {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            if vtypes.classify(m, ty).k != vtypes.K_INT { return self.fail_t(m, "int op on ", ty); }
+            return self.args2(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_KW_NEG {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let c = vtypes.classify(m, ty);
+            if !((c.k == vtypes.K_INT && c.signed) || (c.k == vtypes.K_FLOAT && (c.fmt == vtypes.F32 || c.fmt == vtypes.F64))) { return self.fail_t(m, "neg on ", ty); }
+            return self.args1(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_KW_SHL || op == ir_text_terminals.IR_T_KW_SHR || op == ir_text_terminals.IR_T_SHL_DOT_WRAP {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            if vtypes.classify(m, ty).k != vtypes.K_INT { return self.fail_t(m, "shift of ", ty); }
+            if !self.check_operand(m, ol, ty) { return false; }
+            let k = self.opnd_cls(m, ol + 1).k;
+            if k == vtypes.K_INT || k == vtypes.K_CONST { return true; }
+            return self.fail("shift amount must be an int");
+        }
+        if op == ir_text_terminals.IR_T_KW_AND || op == ir_text_terminals.IR_T_KW_OR || op == ir_text_terminals.IR_T_KW_XOR || op == ir_text_terminals.IR_T_KW_NOT {
+            let two = op != ir_text_terminals.IR_T_KW_NOT;
+            if !self.arity(n, if two then 2usize else 1usize) || !self.res(ty) { return false; }
+            let k = vtypes.classify(m, ty).k;
+            if k != vtypes.K_INT && k != vtypes.K_BOOL { return self.fail_t(m, if two then "bitwise op on " else "not on ", ty); }
+            return if two then self.args2(m, ol, ty) else self.args1(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_KW_POPCOUNT || op == ir_text_terminals.IR_T_KW_CLZ || op == ir_text_terminals.IR_T_KW_CTZ {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            if vtypes.classify(m, ty).k != vtypes.K_INT { return self.fail_t(m, "bit count of ", ty); }
+            return self.args1(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_MUL_DOT_WIDE {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let xs = m.types.x(ty);
+            if m.types.tag_of(ty) != types.TK_TUPLE || xs.len() != 2 || xs[0] != xs[1] { return self.fail("mul.wide result must be a pair tuple"); }
+            let e = xs[0];
+            let c = vtypes.classify(m, e);
+            if c.k != vtypes.K_INT || (c.bits != 32 && c.bits != 64) { return self.fail("mul.wide needs a 32- or 64-bit int"); }
+            return self.args2(m, ol, e);
+        }
+        if op == ir_text_terminals.IR_T_KW_EQ || op == ir_text_terminals.IR_T_KW_NE || op == ir_text_terminals.IR_T_KW_LT || op == ir_text_terminals.IR_T_KW_LE || op == ir_text_terminals.IR_T_KW_GT || op == ir_text_terminals.IR_T_KW_GE {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            if !vtypes.is_bool(m, ty) { return self.fail("compare result must be bool"); }
+            let eqne = op == ir_text_terminals.IR_T_KW_EQ || op == ir_text_terminals.IR_T_KW_NE;
+            let mut ot = self.opnd_ty(m, ol);
+            if ot == NONE { ot = self.opnd_ty(m, ol + 1); }
+            if ot != NONE {
+                let k = vtypes.classify(m, ot).k;
+                let ok = k == vtypes.K_INT || k == vtypes.K_BOOL || k == vtypes.K_CHAR || k == vtypes.K_FLOAT || ((k == vtypes.K_PTR || k == vtypes.K_FN) && eqne);
+                if !ok { return self.fail_t(m, "compare of ", ot); }
+                return self.args2(m, ol, ot);
+            }
+            let x = self.opnd_cls(m, ol);
+            let y = self.opnd_cls(m, ol + 1);
+            if x.k == vtypes.K_CONST && y.k == vtypes.K_CONST { return true; }
+            if x.k == vtypes.K_FLOAT && y.k == vtypes.K_FLOAT && x.fmt == y.fmt { return true; }
+            if x.k == vtypes.K_FN && y.k == vtypes.K_FN && eqne { return true; }
+            return self.fail("compare of mismatched constants");
+        }
+        if op == ir_text_terminals.IR_T_KW_SELECT {
+            if !self.arity(n, 3) || !self.res(ty) { return false; }
+            if !self.check_scalar(m, ol, types.TK_BOOL, 0, 0) { return self.prefix("argument 0: "); }
+            if !self.check_operand(m, ol + 1, ty) { return self.prefix("argument 1: "); }
+            if !self.check_operand(m, ol + 2, ty) { return self.prefix("argument 2: "); }
+            return true;
+        }
+        let ck = cast_kind(op);
+        if ck != 255 {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let mut to_t = ty;
+            if ck == vtypes.C_TRY {
+                to_t = vtypes.option_payload(m, self.sh.as_slice(), ty);
+                if to_t == NONE { return self.fail("cast.try result must be an Option-shaped enum"); }
+            }
+            let to = vtypes.classify(m, to_t);
+            if !vtypes.castable(to) { return self.fail_t(m, "cast to ", to_t); }
+            let fc = self.opnd_cls(m, ol);
+            if fc.k == vtypes.K_CONST {
+                let (_, hi, lo) = self.int_const(m, ol);
+                if !vtypes.fits_word(hi, lo) { return self.fail("cast constant out of range"); }
+                let neg = vtypes.is_neg(hi);
+                let src = vtypes.Cls.{ k: vtypes.K_INT, bits: 64, signed: neg, fmt: 0 };
+                let ok = if ck == vtypes.C_EXACT then vtypes.const_converts(hi, lo, to) else vtypes.cast_allowed(ck, src, to);
+                if ok { return true; }
+                return self.fail_t(m, "constant cannot be cast to ", to_t);
+            }
+            let mut src = fc;
+            if m.opnd_kind.as_slice()[ol] == model.O_FUNC {
+                src = vtypes.cls_of(vtypes.K_PTR);
+            } else if fc.k == vtypes.K_FN {
+                return self.fail("cast of a fn value");
+            } else if !vtypes.castable(fc) {
+                return self.fail("cast of a non-scalar");
+            }
+            if vtypes.cast_allowed(ck, src, to) { return true; }
+            return self.fail_t(m, "cast not allowed to ", to_t);
+        }
+        if op == ir_text_terminals.IR_T_KW_MAKE {
+            if !self.res(ty) { return false; }
+            if m.types.tag_of(ty) == types.TK_ARRAY {
+                let xs = m.types.x(ty);
+                let len = ((xs[1] as u64) << 32) | (xs[2] as u64);
+                if len != n as u64 { return self.fail_t(m, "make with another element count of ", ty); }
+                let el = m.types.a_of(ty);
+                for k in 0..n {
+                    if !self.check_operand(m, ol + k, el) { return self.prefix("argument: "); }
+                }
+                return true;
+            }
+            let mut fs = vec.Vec::<u32>.new();
+            if !vtypes.record_fields(m, self.sh.as_slice(), ty, &mut fs) { return self.fail_t(m, "make of ", ty); }
+            return self.check_args(m, ol, n, fs.as_slice());
+        }
+        if op == ir_text_terminals.IR_T_KW_GET || op == ir_text_terminals.IR_T_KW_SET {
+            let get = op == ir_text_terminals.IR_T_KW_GET;
+            if !self.arity(n, if get then 2usize else 3usize) || !self.res(ty) { return false; }
+            let at = if get then self.opnd_ty(m, ol) else ty;
+            if at == NONE { return self.fail("get of a non-value"); }
+            if !self.check_operand(m, ol, at) { return false; }
+            let mut ft = NONE;
+            if m.types.tag_of(at) == types.TK_ARRAY {
+                let xs = m.types.x(at);
+                let len = ((xs[1] as u64) << 32) | (xs[2] as u64);
+                let (c, hi, lo) = self.int_const(m, ol + 1);
+                if c {
+                    if hi != 0 || lo >= len { return self.fail("array index constant out of range"); }
+                } else {
+                    let ic = self.opnd_cls(m, ol + 1);
+                    if ic.k != vtypes.K_INT || ic.signed { return self.fail("array index must be an unsigned int"); }
+                }
+                ft = m.types.a_of(at);
+            } else {
+                let mut fs = vec.Vec::<u32>.new();
+                if !vtypes.record_fields(m, self.sh.as_slice(), at, &mut fs) { return self.fail_t(m, "field of ", at); }
+                let (c, hi, lo) = self.int_const(m, ol + 1);
+                if !c { return self.fail("field index must be a constant"); }
+                if hi != 0 || lo >= fs.len() as u64 { return self.fail("field index out of range"); }
+                ft = fs.as_slice()[lo as usize];
+            }
+            if get {
+                if ft != ty { return self.fail_t(m, "get result is not the field type ", ft); }
+                return true;
+            }
+            return self.check_operand(m, ol + 2, ft);
+        }
+        if op == ir_text_terminals.IR_T_ENUM_DOT_MAKE {
+            if !self.res(ty) { return false; }
+            let (ok, vars) = vtypes.enum_variants(m, self.sh.as_slice(), ty);
+            if !ok { return self.fail_t(m, "enum.make of ", ty); }
+            if n == 0 { return self.fail("enum.make needs a variant index"); }
+            let (c, hi, lo) = self.int_const(m, ol);
+            if !c { return self.fail("variant index must be a constant"); }
+            if hi != 0 || lo >= vars.len() as u64 { return self.fail("variant index out of range"); }
+            let mut fs = vec.Vec::<u32>.new();
+            fs.extend_from_slice(m.var_fields.row(vars[lo as usize] as usize));
+            return self.check_args(m, ol + 1, n - 1, fs.as_slice());
+        }
+        if op == ir_text_terminals.IR_T_ENUM_DOT_TAG {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let c = vtypes.classify(m, ty);
+            if c.k != vtypes.K_INT { return self.fail("enum.tag result must be an int"); }
+            let et = self.opnd_ty(m, ol);
+            if et == NONE { return self.fail("enum.tag of a non-value"); }
+            let (ok, vars) = vtypes.enum_variants(m, self.sh.as_slice(), et);
+            if !ok { return self.fail_t(m, "enum.tag of ", et); }
+            let top: u64 = if vars.len() == 0 then 0 else (vars.len() - 1) as u64;
+            if !vtypes.fits(c.signed, c.bits, 0, top) { return self.fail("enum.tag result type too narrow"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_ENUM_DOT_GET {
+            if !self.arity(n, 3) || !self.res(ty) { return false; }
+            let et = self.opnd_ty(m, ol);
+            if et == NONE { return self.fail("enum.get of a non-value"); }
+            let ft = self.enum_field(m, et, ol + 1, ol + 2);
+            if ft == NONE { return false; }
+            if ft != ty { return self.fail_t(m, "enum.get result is not the field type ", ft); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_KW_SLOT {
+            if !self.arity(n, 0) || !self.res(ty) { return false; }
+            if blk != 0 { return self.fail("slot outside b0"); }
+            let p = vtypes.pointee(m, ty);
+            if p == NONE { return self.fail("slot result must be a pointer type"); }
+            if vtypes.is_unsized_pointee(m, p) { return self.fail("slot of an unsized type"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_KW_LOAD {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let pt = self.opnd_ty(m, ol);
+            if pt == NONE { return self.fail("load from a non-value"); }
+            if vtypes.pointee(m, pt) != ty { return self.fail_t(m, "load through ", pt); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_KW_STORE {
+            if !self.arity(n, 2) || !self.no_res(ty) { return false; }
+            let pt = self.opnd_ty(m, ol);
+            if pt == NONE { return self.fail("store to a non-value"); }
+            let p = vtypes.pointee(m, pt);
+            if p == NONE { return self.fail("store through a non-pointer"); }
+            return self.check_operand(m, ol + 1, p);
+        }
+        if op == ir_text_terminals.IR_T_ADDR_DOT_FIELD {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let pt = self.opnd_ty(m, ol);
+            if pt == NONE { return self.fail("addr.field of a non-value"); }
+            let rt = vtypes.pointee(m, pt);
+            if rt == NONE { return self.fail("addr.field through a non-pointer"); }
+            let mut fs = vec.Vec::<u32>.new();
+            if !vtypes.record_fields(m, self.sh.as_slice(), rt, &mut fs) { return self.fail_t(m, "addr.field of ", rt); }
+            let (c, hi, lo) = self.int_const(m, ol + 1);
+            if !c { return self.fail("field index must be a constant"); }
+            if hi != 0 || lo >= fs.len() as u64 { return self.fail("field index out of range"); }
+            if vtypes.pointee(m, ty) != fs.as_slice()[lo as usize] { return self.fail("addr.field result must point to the field type"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_ADDR_DOT_ENUM_FIELD {
+            if !self.arity(n, 3) || !self.res(ty) { return false; }
+            let pt = self.opnd_ty(m, ol);
+            if pt == NONE { return self.fail("addr.enum_field of a non-value"); }
+            let et = vtypes.pointee(m, pt);
+            if et == NONE { return self.fail("addr.enum_field through a non-pointer"); }
+            let ft = self.enum_field(m, et, ol + 1, ol + 2);
+            if ft == NONE { return false; }
+            if vtypes.pointee(m, ty) != ft { return self.fail("addr.enum_field result must point to the field type"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_ADDR_DOT_ELEM {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let pt = self.opnd_ty(m, ol);
+            if pt == NONE { return self.fail("addr.elem of a non-value"); }
+            let inner = vtypes.pointee(m, pt);
+            if inner == NONE { return self.fail("addr.elem through a non-pointer"); }
+            let it = m.types.tag_of(inner);
+            let mut et = NONE;
+            if it == types.TK_ARRAY || it == types.TK_SLICE {
+                et = m.types.a_of(inner);
+            } else if m.types.tag_of(pt) == types.TK_PTR {
+                et = inner;
+            } else {
+                return self.fail_t(m, "addr.elem of ", pt);
+            }
+            if !self.word_index(m, ol + 1, "element index must be an int (a constant in 64 bits)") { return false; }
+            if vtypes.pointee(m, ty) != et { return self.fail("addr.elem result must point to the element type"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_SLICE_DOT_MAKE {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let inner = vtypes.pointee(m, ty);
+            if inner == NONE { return self.fail("slice.make result must be a pointer"); }
+            let pt = self.opnd_ty(m, ol);
+            if pt == NONE { return self.fail("slice.make pointer must be a value"); }
+            let it = m.types.tag_of(inner);
+            let p = vtypes.pointee(m, pt);
+            let mut elem_ok = false;
+            if it == types.TK_SLICE {
+                elem_ok = p != NONE && p == m.types.a_of(inner);
+            } else if it == types.TK_STR {
+                elem_ok = p != NONE && vtypes.is_key(m, p, types.TK_INT, 0, types.W_8);
+            } else {
+                return self.fail("slice.make result must point to a slice or str");
+            }
+            if !elem_ok || vtypes.classify(m, pt).k != vtypes.K_PTR { return self.fail("slice.make pointer must point to the element type"); }
+            return self.check_usize(m, ol + 1);
+        }
+        if op == ir_text_terminals.IR_T_SLICE_DOT_LEN || op == ir_text_terminals.IR_T_SLICE_DOT_PTR {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            if self.opnd_cls(m, ol).k != vtypes.K_FAT { return self.fail("slice.len / slice.ptr of a thin value"); }
+            if op == ir_text_terminals.IR_T_SLICE_DOT_LEN {
+                if !vtypes.is_usize(m, ty) { return self.fail("slice.len result must be usize"); }
+            } else if vtypes.classify(m, ty).k != vtypes.K_PTR {
+                return self.fail("slice.ptr result must be a thin pointer");
+            }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_FN_DOT_MAKE {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            if m.types.tag_of(ty) != types.TK_FN { return self.fail("fn.make result must be a fn type"); }
+            if m.opnd_kind.as_slice()[ol] != model.O_FUNC { return self.fail("fn.make code must be @fn"); }
+            let g = m.opnd_id.as_slice()[ol] as usize;
+            let gp = m.fn_params.row(g);
+            if gp.len() == 0 { return self.fail("fn.make code has no environment param"); }
+            let et = gp[gp.len() - 1];
+            let np = m.types.a_of(ty) as usize;
+            let x = m.types.x(ty);
+            if !gp[0..gp.len() - 1].eq(&x[0..np]) || !self.ret_matches(m, m.fn_ret.as_slice()[g], x[np]) { return self.fail_t(m, "fn.make: the code does not match ", ty); }
+            let c = vtypes.classify(m, et);
+            if !(c.k == vtypes.K_PTR || (c.k == vtypes.K_INT && !c.signed && c.bits == 64)) { return self.fail("fn.make environment param must be a thin pointer or usize"); }
+            return self.check_operand(m, ol + 1, et);
+        }
+        if op == ir_text_terminals.IR_T_CHECK_DOT_BOUNDS {
+            if !self.arity(n, 2) || !self.no_res(ty) { return false; }
+            for k in 0..2usize {
+                let (c, hi, _) = self.int_const(m, ol + k);
+                if c {
+                    if hi != 0 { return self.fail("check.bounds operands must be unsigned ints (constants below 2^64)"); }
+                } else {
+                    let ic = self.opnd_cls(m, ol + k);
+                    if ic.k != vtypes.K_INT || ic.signed { return self.fail("check.bounds operands must be unsigned ints (constants below 2^64)"); }
+                }
+            }
+            return true;
+        }
+        if op >= ir_text_terminals.IR_T_MEM_DOT_PREFETCH_READ_L1 && op <= ir_text_terminals.IR_T_MEM_DOT_PREFETCH_WRITE_NTA {
+            if !self.arity(n, 2) || !self.no_res(ty) { return false; }
+            let pt = self.opnd_ty(m, ol);
+            if pt == NONE { return self.fail("prefetch of a non-value"); }
+            if vtypes.pointee(m, pt) == NONE || vtypes.classify(m, pt).k != vtypes.K_PTR { return self.fail("prefetch address must be a thin pointer"); }
+            return self.word_index(m, ol + 1, "prefetch index must be an int (a constant in 64 bits)");
+        }
+        if op == ir_text_terminals.IR_T_MEM_DOT_STORE_STREAM {
+            if !self.arity(n, 2) || !self.no_res(ty) { return false; }
+            let pt = self.opnd_ty(m, ol);
+            if pt == NONE { return self.fail("mem.store_stream to a non-value"); }
+            let p = vtypes.pointee(m, pt);
+            if p == NONE { return self.fail("mem.store_stream through a non-pointer"); }
+            let pt2 = m.types.tag_of(p);
+            let ok = (pt2 == types.TK_INT && m.types.b_of(p) != types.W_SIZE) || pt2 == types.TK_FLOAT || pt2 == types.TK_VECTOR;
+            if !ok { return self.fail_t(m, "mem.store_stream of ", p); }
+            return self.check_operand(m, ol + 1, p);
+        }
+        if op == ir_text_terminals.IR_T_MEM_DOT_FENCE_STREAM || (op >= ir_text_terminals.IR_T_PANIC_DOT_ASSERT && op <= ir_text_terminals.IR_T_PANIC_DOT_UNWRAP) {
+            return self.arity(n, 0) && self.no_res(ty);
+        }
+        if op == ir_text_terminals.IR_T_KW_CALL {
+            if n == 0 { return self.fail("call needs a callee"); }
+            if m.opnd_kind.as_slice()[ol] != model.O_FUNC { return self.fail("call callee must be @fn (use call.ind)"); }
+            let g = m.opnd_id.as_slice()[ol] as usize;
+            if ty != m.fn_ret.as_slice()[g] { return self.fail("call result type differs from the callee's return type"); }
+            let gp = m.fn_params.row(g);
+            if m.fn_flags.as_slice()[g] & model.F_VARIADIC != 0 && n > gp.len() + 1 {
+                if !self.check_args(m, ol + 1, gp.len(), gp) { return false; }
+                for k in ol + 1 + gp.len()..ol + n {
+                    let c = self.opnd_cls(m, k);
+                    let ok = if c.k == vtypes.K_CONST then true else if c.k == vtypes.K_INT then c.bits == 32 || c.bits == 64 else (c.k == vtypes.K_FLOAT && c.fmt == vtypes.F64) || c.k == vtypes.K_PTR;
+                    if !ok { return self.fail("variadic argument: not a C variadic type"); }
+                }
+                return true;
+            }
+            return self.check_args(m, ol + 1, n - 1, gp);
+        }
+        if op == ir_text_terminals.IR_T_CALL_DOT_IND {
+            if n == 0 { return self.fail("call.ind needs a callee"); }
+            if m.opnd_kind.as_slice()[ol] == model.O_FUNC {
+                let g = m.opnd_id.as_slice()[ol] as usize;
+                if ty != m.fn_ret.as_slice()[g] { return self.fail("call.ind result type differs from the callee's return type"); }
+                return self.check_args(m, ol + 1, n - 1, m.fn_params.row(g));
+            }
+            let ft = self.opnd_ty(m, ol);
+            if ft == NONE { return self.fail("call.ind callee must be a value"); }
+            if m.types.tag_of(ft) != types.TK_FN { return self.fail_t(m, "call.ind of ", ft); }
+            let np = m.types.a_of(ft) as usize;
+            let x = m.types.x(ft);
+            let ret = x[np];
+            let ok = if ty != NONE then ty == ret else vtypes.is_unit(m, ret);
+            if !ok { return self.fail("call.ind result type differs from the fn type's return"); }
+            let mut ps = vec.Vec::<u32>.new();
+            ps.extend_from_slice(&x[0..np]);
+            return self.check_args(m, ol + 1, n - 1, ps.as_slice());
+        }
+        if op == ir_text_terminals.IR_T_INTR { return self.check_intrinsic(m, i, ol, n, ty); }
+        return self.check_vec(m, op, ty, ol, n);
+    }
+
+    fn prefix(&mut self, p: &str) -> bool {
+        let mut e = vec.Vec::<u8>.new();
+        bytes.push_str(&mut e, p);
+        e.extend_from_slice(self.msg.as_slice());
+        self.msg = e;
+        return false;
+    }
+
+    // The table row of intrinsic name x, or NONE.
+    fn intr_row(&self, x: &[u8]) -> u32 {
+        let off = self.intr_off.as_slice();
+        let mut lo: usize = 0;
+        let mut hi: usize = off.len() - 1;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let c = cmp(row(off, self.intr_name.as_slice(), mid), x);
+            if c == 0 { return mid as% u32; }
+            if c < 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return NONE;
+    }
+
+    fn is_ptx(&self, x: &[u8]) -> bool {
+        for k in 0..self.ptx_off.len() - 1 {
+            if row(self.ptx_off.as_slice(), self.ptx.as_slice(), k).eq(x) { return true; }
+        }
+        let mut pre = false;
+        for k in 0..self.pre_off.len() - 1 {
+            let p = row(self.pre_off.as_slice(), self.pre.as_slice(), k);
+            if p.len() <= x.len() && x[0..p.len()].eq(p) { pre = true; }
+        }
+        if !pre { return false; }
+        for k in 0..self.suf_off.len() - 1 {
+            let p = row(self.suf_off.as_slice(), self.suf.as_slice(), k);
+            if p.len() <= x.len() && x[x.len() - p.len()..x.len()].eq(p) { return true; }
+        }
+        return false;
+    }
+
+    fn intr_fail(&mut self, name: &[u8], s: &str) -> bool {
+        let mut e = vec.Vec::<u8>.new();
+        bytes.push_str(&mut e, "intrinsic.");
+        e.extend_from_slice(name);
+        bytes.push_str(&mut e, ": ");
+        bytes.push_str(&mut e, s);
+        self.msg = e;
+        return false;
+    }
+
+    // `intrinsic.<name>` against its row of the generated table, or `static_addr` against the
+    // module's statics.
+    fn check_intrinsic(&mut self, m: &model.Module, i: usize, ol: usize, n: usize, ty: u32) -> bool {
+        let mut name = vec.Vec::<u8>.new();
+        name.extend_from_slice(m.intr.row(m.ins_intr.as_slice()[i] as usize));
+        let r = self.intr_row(name.as_slice());
+        if r == NONE {
+            if self.is_ptx(name.as_slice()) { return self.intr_fail(name.as_slice(), "no checked signature (the Ptx set)"); }
+            let mut e = vec.Vec::<u8>.new();
+            bytes.push_str(&mut e, "unknown intrinsic `");
+            e.extend_from_slice(name.as_slice());
+            e.push(96);
+            self.msg = e;
+            return false;
+        }
+        if r == intrinsic_table.INTR_STATIC_ADDR {
+            if n != 1 { return self.intr_fail(name.as_slice(), "the wrong number of operands, expected 1"); }
+            let (c, hi, lo) = self.int_const(m, ol);
+            if !c { return self.intr_fail(name.as_slice(), "the index must be an int constant"); }
+            if hi != 0 || lo >= m.st_ty.len() as u64 { return self.intr_fail(name.as_slice(), "static out of range"); }
+            let st = m.st_ty.as_slice()[lo as usize];
+            if ty != NONE && m.types.tag_of(ty) == types.TK_PTR && m.types.b_of(ty) == st { return true; }
+            return self.intr_fail(name.as_slice(), "the result must be a raw pointer to the static's type");
+        }
+        if r == intrinsic_table.INTR_CPU_BASELINE { return self.intr_fail(name.as_slice(), "lowering replaces it by a constant"); }
+        let ret = self.intr_ret.as_slice()[r as usize];
+        if ret == known_items.ITY_NONE { return self.intr_fail(name.as_slice(), "no checked signature"); }
+        if ret == known_items.ITY_UNIT {
+            if ty != NONE { return self.intr_fail(name.as_slice(), "must have no result"); }
+        } else if ty != NONE {
+            let rt = self.ity_type(m, ret);
+            if rt == NONE { return self.intr_fail(name.as_slice(), "the result type is not in the module"); }
+            if rt != ty { return self.intr_fail(name.as_slice(), "wrong result type"); }
+        } else {
+            return self.intr_fail(name.as_slice(), "wrong result type");
+        }
+        let po = self.intr_poff.as_slice()[r as usize] as usize;
+        let pe = self.intr_poff.as_slice()[r as usize + 1] as usize;
+        let mut ps = vec.Vec::<u32>.new();
+        for k in po..pe {
+            let t = self.ity_type(m, self.intr_param.as_slice()[k]);
+            if t == NONE { return self.intr_fail(name.as_slice(), "a param type is not in the module"); }
+            ps.push(t);
+        }
+        if !self.check_args(m, ol, n, ps.as_slice()) {
+            let mut e = vec.Vec::<u8>.new();
+            bytes.push_str(&mut e, "intrinsic.");
+            e.extend_from_slice(name.as_slice());
+            bytes.push_str(&mut e, ": ");
+            e.extend_from_slice(self.msg.as_slice());
+            self.msg = e;
+            return false;
+        }
+        return true;
+    }
+}
+
+// The cast kind of a scalar cast op, or 255.
+fn cast_kind(op: u16) -> u8 {
+    if op == ir_text_terminals.IR_T_KW_CAST { return vtypes.C_EXACT; }
+    if op == ir_text_terminals.IR_T_CAST_DOT_WRAP { return vtypes.C_WRAP; }
+    if op == ir_text_terminals.IR_T_CAST_DOT_SAT { return vtypes.C_SAT; }
+    if op == ir_text_terminals.IR_T_CAST_DOT_ROUND { return vtypes.C_ROUND; }
+    if op == ir_text_terminals.IR_T_CAST_DOT_TRY { return vtypes.C_TRY; }
+    return 255;
+}
+
+fn cmp(a: &[u8], b: &[u8]) -> i32 {
+    let n = if a.len() < b.len() then a.len() else b.len();
+    for i in 0..n {
+        if a[i] != b[i] { return if a[i] < b[i] then -1 else 1; }
+    }
+    if a.len() == b.len() { return 0; }
+    return if a.len() < b.len() then -1 else 1;
+}
+
+// Typing of the vector and mask ops (stave-ir `verify/simd`).
+impl V {
+    fn vshape(&mut self, m: &model.Module, t: u32) -> (bool, u32, vtypes.Cls, u32) {
+        let (ok, lane, c, k) = vtypes.vec_shape(m, t);
+        if !ok { let _ = self.fail_t(m, "not a fixed-size vector: ", t); }
+        return (ok, lane, c, k);
+    }
+
+    fn mshape(&mut self, m: &model.Module, t: u32) -> (bool, u32, u32) {
+        let (ok, w, k) = vtypes.mask_shape(m, t);
+        if !ok { let _ = self.fail_t(m, "not a fixed-size mask: ", t); }
+        return (ok, w, k);
+    }
+
+    fn value_ty(&mut self, m: &model.Module, o: usize) -> u32 {
+        let t = self.opnd_ty(m, o);
+        if t == NONE { let _ = self.fail("operand must be a value"); }
+        return t;
+    }
+
+    // Mask type mt is `mask <lane bits> <n>`.
+    fn mask_for(&mut self, m: &model.Module, mt: u32, lane: vtypes.Cls, n: u32) -> bool {
+        let (ok, w, k) = self.mshape(m, mt);
+        if !ok { return false; }
+        if w != vtypes.lane_bits(lane) || k != n { return self.fail_t(m, "mask does not match the vector: ", mt); }
+        return true;
+    }
+
+    fn int_lanes(&mut self, m: &model.Module, t: u32) -> (bool, vtypes.Cls, u32) {
+        let (ok, _, c, k) = self.vshape(m, t);
+        if !ok { return (false, c, 0); }
+        if c.k != vtypes.K_INT {
+            let _ = self.fail_t(m, "int vector op on ", t);
+            return (false, c, 0);
+        }
+        return (true, c, k);
+    }
+
+    fn float_lanes(&mut self, m: &model.Module, t: u32) -> bool {
+        let (ok, _, c, _) = self.vshape(m, t);
+        if !ok { return false; }
+        if c.k != vtypes.K_FLOAT { return self.fail_t(m, "float vector op on ", t); }
+        return true;
+    }
+
+    // A gather / scatter index: n unsigned int lanes of any width.
+    fn index_lanes(&mut self, m: &model.Module, t: u32, n: u32) -> bool {
+        let (ok, c, k) = self.int_lanes(m, t);
+        if !ok { return false; }
+        if c.signed { return self.fail_t(m, "signed gather / scatter index ", t); }
+        if k != n { return self.fail("gather / scatter index lane count differs"); }
+        return true;
+    }
+
+    // A slice or array memory operand of element type `lane`: (ok, has alignment, alignment).
+    fn mem(&mut self, m: &model.Module, o: usize, lane: u32, store: bool) -> (bool, bool, u32) {
+        let st = self.value_ty(m, o);
+        if st == NONE { return (false, false, 0); }
+        let (ok, elem, mutable, has, al) = vtypes.mem_operand(m, st);
+        if !ok {
+            let _ = self.fail_t(m, "vector memory operand is not a slice or array reference: ", st);
+            return (false, false, 0);
+        }
+        if elem != lane {
+            let _ = self.fail_t(m, "vector memory operand has another element type: ", st);
+            return (false, false, 0);
+        }
+        if store && !mutable {
+            let _ = self.fail("vector store through a shared reference");
+            return (false, false, 0);
+        }
+        return (true, has, al);
+    }
+
+    // Whether operand o is an element pointer of element type `lane` (0 no, 1 yes, 2 an error).
+    fn elem_ptr(&mut self, m: &model.Module, o: usize, lane: u32, store: bool) -> u8 {
+        let st = self.value_ty(m, o);
+        if st == NONE { return 2; }
+        let (ok, elem, mutable) = vtypes.elem_ptr_operand(m, st);
+        if !ok { return 0; }
+        if elem != lane {
+            let _ = self.fail_t(m, "vector memory operand has another element type: ", st);
+            return 2;
+        }
+        if store && !mutable {
+            let _ = self.fail("vector store through a shared pointer");
+            return 2;
+        }
+        return 1;
+    }
+
+    fn aligned(&mut self, has: bool, al: u32, lane: vtypes.Cls, n: u32) -> bool {
+        let need = vtypes.lane_bits(lane) / 8 * n;
+        if has && al >= need { return true; }
+        return self.fail("aligned vector access needs a slice aligned to the vector's size");
+    }
+
+    fn check_vec(&mut self, m: &model.Module, op: u16, ty: u32, ol: usize, n: usize) -> bool {
+        let t_ = ir_text_terminals.IR_T_VEC_DOT_STORE;
+        let is_store = op == t_ || op == ir_text_terminals.IR_T_VEC_DOT_STORE_ALIGNED || op == ir_text_terminals.IR_T_VEC_DOT_STORE_STREAM || op == ir_text_terminals.IR_T_VEC_DOT_STORE_MASKED || op == ir_text_terminals.IR_T_VEC_DOT_SCATTER;
+        if is_store && ty != NONE { return self.fail("must have no result"); }
+        if op == ir_text_terminals.IR_T_VEC_DOT_SPLAT {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let (ok, lane, _, _) = self.vshape(m, ty);
+            if !ok { return false; }
+            return self.args1(m, ol, lane);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_ADD || op == ir_text_terminals.IR_T_VEC_DOT_SUB || op == ir_text_terminals.IR_T_VEC_DOT_MUL || op == ir_text_terminals.IR_T_VEC_DOT_DIV || op == ir_text_terminals.IR_T_VEC_DOT_COPYSIGN || op == ir_text_terminals.IR_T_VEC_DOT_MIN_NUM || op == ir_text_terminals.IR_T_VEC_DOT_MAX_NUM || op == ir_text_terminals.IR_T_VEC_DOT_MIN_X86 || op == ir_text_terminals.IR_T_VEC_DOT_MAX_X86 {
+            if !self.arity(n, 2) || !self.res(ty) || !self.float_lanes(m, ty) { return false; }
+            return self.args2(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_NEG || op == ir_text_terminals.IR_T_VEC_DOT_ABS || op == ir_text_terminals.IR_T_VEC_DOT_SQRT || op == ir_text_terminals.IR_T_VEC_DOT_FLOOR || op == ir_text_terminals.IR_T_VEC_DOT_CEIL || op == ir_text_terminals.IR_T_VEC_DOT_ROUND || op == ir_text_terminals.IR_T_VEC_DOT_TRUNC || op == ir_text_terminals.IR_T_VEC_DOT_SCAN_ADD {
+            if !self.arity(n, 1) || !self.res(ty) || !self.float_lanes(m, ty) { return false; }
+            return self.args1(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_FMA {
+            if !self.arity(n, 3) || !self.res(ty) || !self.float_lanes(m, ty) { return false; }
+            let ts = [ty, ty, ty];
+            return self.check_args(m, ol, 3, &ts);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_MIN || op == ir_text_terminals.IR_T_VEC_DOT_MAX {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let (ok, _, _, _) = self.vshape(m, ty);
+            if !ok { return false; }
+            return self.args2(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_ADD_DOT_WRAP || op == ir_text_terminals.IR_T_VEC_DOT_SUB_DOT_WRAP || op == ir_text_terminals.IR_T_VEC_DOT_MUL_DOT_WRAP || op == ir_text_terminals.IR_T_VEC_DOT_ADD_DOT_SAT || op == ir_text_terminals.IR_T_VEC_DOT_SUB_DOT_SAT || op == ir_text_terminals.IR_T_VEC_DOT_MUL_DOT_SAT || op == ir_text_terminals.IR_T_VEC_DOT_MUL_HI || op == ir_text_terminals.IR_T_VEC_DOT_DIV_LANES || op == ir_text_terminals.IR_T_VEC_DOT_AND || op == ir_text_terminals.IR_T_VEC_DOT_OR || op == ir_text_terminals.IR_T_VEC_DOT_XOR || op == ir_text_terminals.IR_T_VEC_DOT_ANDNOT {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let (ok, _, _) = self.int_lanes(m, ty);
+            if !ok { return false; }
+            return self.args2(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_CHECKED_ADD || op == ir_text_terminals.IR_T_VEC_DOT_CHECKED_SUB || op == ir_text_terminals.IR_T_VEC_DOT_CHECKED_MUL {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let p = vtypes.option_payload(m, self.sh.as_slice(), ty);
+            if p == NONE { return self.fail("checked op result must be an Option"); }
+            let (ok, _, _) = self.int_lanes(m, p);
+            if !ok { return false; }
+            return self.args2(m, ol, p);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_DIV_CONST {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let (ok, c, _) = self.int_lanes(m, ty);
+            if !ok || !self.check_operand(m, ol, ty) { return false; }
+            let (k, hi, lo) = self.int_const(m, ol + 1);
+            if k && vtypes.fits(c.signed, c.bits, hi, lo) { return true; }
+            return self.fail("div_const divisor must be a lane-typed constant");
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_ABS_WRAP {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let (ok, c, _) = self.int_lanes(m, ty);
+            if !ok { return false; }
+            if !c.signed { return self.fail_t(m, "abs_wrap on unsigned lanes ", ty); }
+            return self.args1(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_POPCOUNT || op == ir_text_terminals.IR_T_VEC_DOT_CLZ || op == ir_text_terminals.IR_T_VEC_DOT_NOT || op == ir_text_terminals.IR_T_VEC_DOT_SCAN_ADD_WRAP {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let (ok, _, _) = self.int_lanes(m, ty);
+            if !ok { return false; }
+            return self.args1(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_SHL || op == ir_text_terminals.IR_T_VEC_DOT_SHR || op == ir_text_terminals.IR_T_VEC_DOT_SHL_DOT_WRAP {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let (ok, _, _) = self.int_lanes(m, ty);
+            if !ok || !self.check_operand(m, ol, ty) { return false; }
+            if self.opnd_ty(m, ol + 1) == ty { return true; }
+            let k = self.opnd_cls(m, ol + 1).k;
+            if k == vtypes.K_INT || k == vtypes.K_CONST { return true; }
+            return self.fail("vector shift amount must be the vector type or an int");
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_EQ || op == ir_text_terminals.IR_T_VEC_DOT_NE || op == ir_text_terminals.IR_T_VEC_DOT_LT || op == ir_text_terminals.IR_T_VEC_DOT_LE || op == ir_text_terminals.IR_T_VEC_DOT_GT || op == ir_text_terminals.IR_T_VEC_DOT_GE {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let vt = self.value_ty(m, ol);
+            if vt == NONE { return false; }
+            let (ok, _, lane, k) = self.vshape(m, vt);
+            if !ok || !self.mask_for(m, ty, lane, k) { return false; }
+            return self.args2(m, ol, vt);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_ADD || op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_ADD_WRAP || op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_MIN || op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_MAX || op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_AND || op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_OR {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let vt = self.value_ty(m, ol);
+            if vt == NONE { return false; }
+            let (ok, lane, lc, _) = self.vshape(m, vt);
+            if !ok { return false; }
+            if ty != lane { return self.fail_t(m, "reduction result is not the lane type: ", ty); }
+            if (op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_AND || op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_OR) && lc.k != vtypes.K_INT { return self.fail("bitwise reduction of float lanes"); }
+            if op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_ADD && lc.k != vtypes.K_FLOAT { return self.fail("`vec.reduce_add` of int lanes (use `vec.reduce_add_wrap`)"); }
+            if op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_ADD_WRAP && lc.k != vtypes.K_INT { return self.fail("wrapping reduction of float lanes"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_REDUCE_ADD_ORDERED {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let vt = self.value_ty(m, ol);
+            if vt == NONE || !self.float_lanes(m, vt) { return false; }
+            let (_, lane, _, _) = self.vshape(m, vt);
+            if ty != lane { return self.fail_t(m, "reduction result is not the lane type: ", ty); }
+            let ts = [vt, lane];
+            return self.check_args(m, ol, 2, &ts);
+        }
+        let vck = vec_cast_kind(op);
+        if vck != 255 {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let mut to_t = ty;
+            if vck == vtypes.C_TRY {
+                to_t = vtypes.option_payload(m, self.sh.as_slice(), ty);
+                if to_t == NONE { return self.fail("vec.cast.try result must be an Option"); }
+            }
+            let (ok, _, to, k) = self.vshape(m, to_t);
+            if !ok { return false; }
+            let at = self.value_ty(m, ol);
+            if at == NONE { return false; }
+            let (ok2, _, src, k0) = self.vshape(m, at);
+            if !ok2 { return false; }
+            if k != k0 { return self.fail("vector cast changes the lane count"); }
+            if !vtypes.cast_allowed(vck, src, to) { return self.fail("lane cast not allowed"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_BITCAST {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let (ok, _, to, k) = self.vshape(m, ty);
+            if !ok { return false; }
+            let at = self.value_ty(m, ol);
+            if at == NONE { return false; }
+            let (ok2, _, src, k0) = self.vshape(m, at);
+            if !ok2 { return false; }
+            if vtypes.lane_bits(to) * k != vtypes.lane_bits(src) * k0 { return self.fail("bitcast between vectors of different widths"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_SPLIT || op == ir_text_terminals.IR_T_VEC_DOT_JOIN {
+            let split = op == ir_text_terminals.IR_T_VEC_DOT_SPLIT;
+            if !self.arity(n, if split then 1usize else 2usize) || !self.res(ty) { return false; }
+            let vt = if split then self.value_ty(m, ol) else ty;
+            if vt == NONE { return false; }
+            let (ok, lane, _, k) = self.vshape(m, vt);
+            if !ok { return false; }
+            let h = m.types.find(types.TK_VECTOR, lane, k / 2, &self.tmp.as_slice()[0..0]);
+            if h == NONE { return self.fail("the half vector type is not in the module"); }
+            if split {
+                let xs = m.types.x(ty);
+                if k < 4 || m.types.tag_of(ty) != types.TK_TUPLE || xs.len() != 2 || xs[0] != h || xs[1] != h { return self.fail("split result must be the pair of half vectors"); }
+                return true;
+            }
+            if k < 4 { return self.fail("join of 1-lane halves"); }
+            return self.args2(m, ol, h);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_WIDEN_LO || op == ir_text_terminals.IR_T_VEC_DOT_WIDEN_HI {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let (ok, _, wide, k) = self.vshape(m, ty);
+            if !ok { return false; }
+            let at = self.value_ty(m, ol);
+            if at == NONE { return false; }
+            let (ok2, _, lane, k0) = self.vshape(m, at);
+            if !ok2 { return false; }
+            let (wok, w) = vtypes.wide_lane(lane);
+            if !wok || !vtypes.same_cls(w, wide) || k * 2 != k0 { return self.fail("widen result must be half as many lanes of the double-width lane"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_NARROW_WRAP || op == ir_text_terminals.IR_T_VEC_DOT_NARROW_SAT {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let (ok, _, lane, k) = self.vshape(m, ty);
+            if !ok { return false; }
+            let at = self.value_ty(m, ol);
+            if at == NONE { return false; }
+            let (ok2, _, wide, k0) = self.vshape(m, at);
+            if !ok2 { return false; }
+            let (wok, w) = vtypes.wide_lane(lane);
+            if lane.k != vtypes.K_INT || !wok || !vtypes.same_cls(w, wide) || k0 * 2 != k { return self.fail("narrow operands must be two vectors of the double-width int lane"); }
+            return self.args2(m, ol, at);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_PERMUTE {
+            if !self.res(ty) { return false; }
+            let (ok, lane, _, k) = self.vshape(m, ty);
+            if !ok { return false; }
+            if n != k as usize + 1 { return self.fail("permute needs one lane index per result lane"); }
+            let vt = self.value_ty(m, ol);
+            if vt == NONE { return false; }
+            let (ok2, l0, _, k0) = self.vshape(m, vt);
+            if !ok2 { return false; }
+            if l0 != lane { return self.fail("permute changes the lane type"); }
+            for j in ol + 1..ol + n {
+                let (c, hi, lo) = self.int_const(m, j);
+                if !c || hi != 0 || lo >= k0 as u64 { return self.fail("permute index must be a constant below the lane count"); }
+            }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_LOOKUP {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let (ok, _, _, k) = self.vshape(m, ty);
+            if !ok || !self.check_operand(m, ol, ty) { return false; }
+            let it = self.value_ty(m, ol + 1);
+            if it == NONE { return false; }
+            let (ok2, _, k1) = self.int_lanes(m, it);
+            if !ok2 { return false; }
+            if k1 != k { return self.fail("lookup index lane count differs"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_COMPRESS || op == ir_text_terminals.IR_T_VEC_DOT_EXPAND {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let (ok, _, lane, k) = self.vshape(m, ty);
+            if !ok || !self.check_operand(m, ol, ty) { return false; }
+            let mt = self.value_ty(m, ol + 1);
+            if mt == NONE { return false; }
+            return self.mask_for(m, mt, lane, k);
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_LOAD || op == ir_text_terminals.IR_T_VEC_DOT_LOAD_ALIGNED || op == ir_text_terminals.IR_T_VEC_DOT_LOAD_MASKED {
+            let msk = op == ir_text_terminals.IR_T_VEC_DOT_LOAD_MASKED;
+            if !self.arity(n, if msk then 3usize else 2usize) || !self.res(ty) { return false; }
+            let (ok, lane, lc, k) = self.vshape(m, ty);
+            if !ok { return false; }
+            if op == ir_text_terminals.IR_T_VEC_DOT_LOAD {
+                let ep = self.elem_ptr(m, ol, lane, false);
+                if ep == 2 { return false; }
+                if ep == 1 { return self.check_usize(m, ol + 1); }
+            }
+            let (mo, has, al) = self.mem(m, ol, lane, false);
+            if !mo { return false; }
+            if op == ir_text_terminals.IR_T_VEC_DOT_LOAD_ALIGNED && !self.aligned(has, al, lc, k) { return false; }
+            if !self.check_usize(m, ol + 1) { return false; }
+            if msk {
+                let mt = self.value_ty(m, ol + 2);
+                if mt == NONE { return false; }
+                return self.mask_for(m, mt, lc, k);
+            }
+            return true;
+        }
+        if is_store {
+            if op == ir_text_terminals.IR_T_VEC_DOT_SCATTER {
+                if !self.arity(n, 3) { return false; }
+                let vt = self.value_ty(m, ol + 2);
+                if vt == NONE { return false; }
+                let (ok, lane, _, k) = self.vshape(m, vt);
+                if !ok { return false; }
+                let (mo, _, _) = self.mem(m, ol, lane, true);
+                if !mo { return false; }
+                let it = self.value_ty(m, ol + 1);
+                if it == NONE { return false; }
+                return self.index_lanes(m, it, k);
+            }
+            let msk = op == ir_text_terminals.IR_T_VEC_DOT_STORE_MASKED;
+            if !self.arity(n, if msk then 4usize else 3usize) { return false; }
+            let vt = self.value_ty(m, ol + 2);
+            if vt == NONE { return false; }
+            let (ok, lane, lc, k) = self.vshape(m, vt);
+            if !ok { return false; }
+            if op == ir_text_terminals.IR_T_VEC_DOT_STORE {
+                let ep = self.elem_ptr(m, ol, lane, true);
+                if ep == 2 { return false; }
+                if ep == 1 { return self.check_usize(m, ol + 1); }
+            }
+            let (mo, has, al) = self.mem(m, ol, lane, true);
+            if !mo { return false; }
+            if (op == ir_text_terminals.IR_T_VEC_DOT_STORE_ALIGNED || op == ir_text_terminals.IR_T_VEC_DOT_STORE_STREAM) && !self.aligned(has, al, lc, k) { return false; }
+            if !self.check_usize(m, ol + 1) { return false; }
+            if msk {
+                let mt = self.value_ty(m, ol + 3);
+                if mt == NONE { return false; }
+                return self.mask_for(m, mt, lc, k);
+            }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_VEC_DOT_GATHER {
+            if !self.arity(n, 2) || !self.res(ty) { return false; }
+            let (ok, lane, _, k) = self.vshape(m, ty);
+            if !ok { return false; }
+            let (mo, _, _) = self.mem(m, ol, lane, false);
+            if !mo { return false; }
+            let it = self.value_ty(m, ol + 1);
+            if it == NONE { return false; }
+            return self.index_lanes(m, it, k);
+        }
+        if op == ir_text_terminals.IR_T_MASK_DOT_AND || op == ir_text_terminals.IR_T_MASK_DOT_OR || op == ir_text_terminals.IR_T_MASK_DOT_XOR || op == ir_text_terminals.IR_T_MASK_DOT_NOT {
+            let two = op != ir_text_terminals.IR_T_MASK_DOT_NOT;
+            if !self.arity(n, if two then 2usize else 1usize) || !self.res(ty) { return false; }
+            let (ok, _, _) = self.mshape(m, ty);
+            if !ok { return false; }
+            return if two then self.args2(m, ol, ty) else self.args1(m, ol, ty);
+        }
+        if op == ir_text_terminals.IR_T_MASK_DOT_SELECT {
+            if !self.arity(n, 3) || !self.res(ty) { return false; }
+            let mt = self.value_ty(m, ol);
+            if mt == NONE { return false; }
+            let (ok, w, k) = self.mshape(m, mt);
+            if !ok { return false; }
+            let (vok, _, lane, k1v) = vtypes.vec_shape(m, ty);
+            let mut w1: u32 = 0;
+            let mut k1: u32 = 0;
+            if vok {
+                w1 = vtypes.lane_bits(lane);
+                k1 = k1v;
+            } else {
+                let (mok, mw, mk) = self.mshape(m, ty);
+                if !mok { return false; }
+                w1 = mw;
+                k1 = mk;
+            }
+            if w != w1 || k != k1 { return self.fail_t(m, "select mask does not match ", ty); }
+            return self.args2(m, ol + 1, ty);
+        }
+        if op == ir_text_terminals.IR_T_MASK_DOT_TO_BITS {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let mt = self.value_ty(m, ol);
+            if mt == NONE { return false; }
+            let (ok, _, k) = self.mshape(m, mt);
+            if !ok { return false; }
+            let c = vtypes.classify(m, ty);
+            if c.k == vtypes.K_INT && !c.signed && c.bits == vtypes.to_bits_width(k) && !vtypes.is_usize(m, ty) { return true; }
+            return self.fail_t(m, "to_bits result is not the smallest uint holding the lanes: ", ty);
+        }
+        if op == ir_text_terminals.IR_T_MASK_DOT_TO_VEC {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let (ok, _, k) = self.int_lanes(m, ty);
+            if !ok { return false; }
+            let (_, _, lane, _) = self.vshape(m, ty);
+            let mt = self.value_ty(m, ol);
+            if mt == NONE { return false; }
+            return self.mask_for(m, mt, lane, k);
+        }
+        if op == ir_text_terminals.IR_T_MASK_DOT_FIRST_N {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let (ok, _, _) = self.mshape(m, ty);
+            if !ok { return false; }
+            return self.check_usize(m, ol);
+        }
+        if op == ir_text_terminals.IR_T_MASK_DOT_REWIDEN {
+            if !self.arity(n, 1) || !self.res(ty) { return false; }
+            let (ok, _, k) = self.mshape(m, ty);
+            if !ok { return false; }
+            let mt = self.value_ty(m, ol);
+            if mt == NONE { return false; }
+            let (ok2, _, k0) = self.mshape(m, mt);
+            if !ok2 { return false; }
+            if k != k0 { return self.fail("rewiden changes the lane count"); }
+            return true;
+        }
+        if op == ir_text_terminals.IR_T_MASK_DOT_ALL || op == ir_text_terminals.IR_T_MASK_DOT_NONE {
+            if !self.arity(n, 0) || !self.res(ty) { return false; }
+            let (ok, _, _) = self.mshape(m, ty);
+            return ok;
+        }
+        return self.fail("an op the verifier does not know");
+    }
+}
+
+// The cast kind of a vector cast op, or 255.
+fn vec_cast_kind(op: u16) -> u8 {
+    if op == ir_text_terminals.IR_T_VEC_DOT_CAST { return vtypes.C_EXACT; }
+    if op == ir_text_terminals.IR_T_VEC_DOT_CAST_DOT_WRAP { return vtypes.C_WRAP; }
+    if op == ir_text_terminals.IR_T_VEC_DOT_CAST_DOT_SAT { return vtypes.C_SAT; }
+    if op == ir_text_terminals.IR_T_VEC_DOT_CAST_DOT_ROUND { return vtypes.C_ROUND; }
+    if op == ir_text_terminals.IR_T_VEC_DOT_CAST_DOT_TRY { return vtypes.C_TRY; }
+    return 255;
+}

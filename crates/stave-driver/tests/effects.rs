@@ -38,6 +38,8 @@ fn every_node_maps_to_its_ir() {
         "tests/conformance/run/fnval_coerce.stv",
         "tests/conformance/run/once_init.stv",
         "tests/conformance/run/select_words.stv",
+        "tests/conformance/run/const_cond_dead_arms.stv",
+        "tests/conformance/effects/const_cond_dead_ok.stv",
         "tests/conformance/effects/block_neg.stv",
         "tests/conformance/effects/generic_instance.stv",
     ] {

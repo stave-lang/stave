@@ -44,9 +44,6 @@ import std.vec;
 
 pub const NONE: u32 = idx.NONE;
 
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_DOT: u8 = terminals.T_DOT as% u8;
-const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
 const B_DOT: u8 = 46;
 
 pub struct Modules {
@@ -164,10 +161,10 @@ pub fn tok_span(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, g: u32) 
 // The identifier chain `Ident ("." Ident)*` at global token g (empty unless g is an Ident).
 pub fn ident_chain(kind: &[u8], g: usize, out: &mut vec.Vec<u32>) {
     out.clear();
-    if g >= kind.len() || kind[g] != T_IDENT { return; }
+    if g >= kind.len() || kind[g] != terminals.T_IDENT { return; }
     out.push(g as% u32);
     let mut p = g + 1;
-    while p + 1 < kind.len() && kind[p] == T_DOT && kind[p + 1] == T_IDENT {
+    while p + 1 < kind.len() && kind[p] == terminals.T_DOT && kind[p + 1] == terminals.T_IDENT {
         out.push((p + 1) as% u32);
         p = p + 2;
     }
@@ -468,7 +465,7 @@ fn paths(md: &mut Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.So
             ident_chain(kind, tree.tok.as_slice()[root] as usize + 1, &mut chain);
             if chain.len() == 0 { continue; }
             let after = chain.as_slice()[chain.len() - 1] as usize + 1;
-            let bound = if after + 1 < kind.len() && kind[after] == T_KW_AS && kind[after + 1] == T_IDENT then (after + 1) as% u32 else chain.as_slice()[chain.len() - 1];
+            let bound = if after + 1 < kind.len() && kind[after] == terminals.T_KW_AS && kind[after + 1] == terminals.T_IDENT then (after + 1) as% u32 else chain.as_slice()[chain.len() - 1];
             syms.clear();
             for k in 0..chain.len() {
                 syms.push(ts[chain.as_slice()[k] as usize]);

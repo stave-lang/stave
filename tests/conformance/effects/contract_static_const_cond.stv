@@ -1,0 +1,31 @@
+//~ CHECK-ONLY
+// A `static` named only in the dead arm of an `if` on a constant condition is not used by the
+// instance, so a fn that names it there may be called in a clause; in the taken arm it is E0211
+// case `static`, as anywhere else.
+import std.atomic;
+
+static COUNTER: atomic.U64 = atomic.U64.new(0);
+
+fn dead(x: u32) -> bool {
+    if false {
+        let v = COUNTER.load();
+    }
+    return x > 0;
+}
+
+fn taken(x: u32) -> bool {
+    if true {
+        let v = COUNTER.load();
+    }
+    return x > 0;
+}
+
+fn f(x: u32) -> u32 requires(dead(x)) {
+    return x;
+}
+
+fn g(x: u32) -> u32 requires(taken(x)) { //~ ERROR E0211
+    return x;
+}
+
+fn main() {}

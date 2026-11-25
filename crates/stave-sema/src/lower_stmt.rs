@@ -635,7 +635,7 @@ impl<'a> FnCx<'a> {
                     | Target::Index { .. }
                     | Target::Slice { .. }
                     | Target::Global { .. }
-                    | Target::SizeOf { .. }
+                    | Target::TypeQuery { .. }
                     | Target::Old
                     | Target::Builtin { .. }
             )
@@ -1329,6 +1329,19 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    /// The instance's answer to the condition of `if` node `n` when it is a constant condition
+    /// ([`crate::constcond`]): the call graph's, read here, never decided again.
+    pub fn const_cond(&mut self, n: u32) -> Option<bool> {
+        let i = self.tb().const_if(n)?;
+        match self.taken.and_then(|t| t.get(i)) {
+            Some(&b) => Some(b),
+            None => {
+                self.fail(n, "a constant condition without the call graph's answer for this instance");
+                None
+            }
+        }
+    }
+
     fn if_stmt(&mut self, n: u32) {
         let kids = self.kids(n);
         let (Some(&c), Some(&tb)) = (kids.first(), kids.get(1)) else { return };
@@ -1337,19 +1350,44 @@ impl<'a> FnCx<'a> {
         let eb = els.map(|_| self.f.b.create_block());
         let j = self.join(n, &[]);
         let bt = self.t_bool();
-        // the condition's temporaries end before the branch
-        self.begin_temps(c);
-        let cv = self.val(c, Some(bt));
-        self.end_temps();
-        let Some(cv) = cv else { return };
-        let snap = self.f.env.clone();
-        match eb {
-            Some(eb) => self.f.b.cbr(cv, then, &[], eb, &[]),
+        // A constant condition has no value to compute: it is `true`, `false`, `needs_drop`, or
+        // `!` of one, and the instance's answer is known.
+        let taken = self.const_cond(n);
+        let cv = match taken {
+            Some(_) => None,
             None => {
+                // the condition's temporaries end before the branch
+                self.begin_temps(c);
+                let cv = self.val(c, Some(bt));
+                self.end_temps();
+                let Some(cv) = cv else { return };
+                Some(cv)
+            }
+        };
+        let snap = self.f.env.clone();
+        // A constant condition branches to its arm only: the other is lowered as usual but
+        // nothing reaches it, so the post-pass deletes it and no build, debug included, emits
+        // it.
+        match (taken, cv, eb) {
+            (Some(true), _, None) => {
+                self.f.b.br(then, &[]);
+                // The false edge still enters the join, from a block nothing reaches: the code
+                // after the `if` is lowered as code that can run (its drops decided as the
+                // schedule has them), as after a known trap, even when the arm never ends.
+                let dead = self.f.b.create_block();
+                self.f.b.switch_to(dead);
+                self.br_join(j, &[]);
+            }
+            (Some(true), _, Some(_)) => self.f.b.br(then, &[]),
+            (Some(false), _, Some(eb)) => self.f.b.br(eb, &[]),
+            (Some(false), _, None) => self.br_join(j, &[]),
+            (None, Some(cv), Some(eb)) => self.f.b.cbr(cv, then, &[], eb, &[]),
+            (None, Some(cv), None) => {
                 let args = self.edge(j, &[]);
                 let jb = self.f.joins[j].block;
                 self.f.b.cbr(cv, then, &[], jb, &args);
             }
+            (None, None, _) => return,
         }
         self.f.b.switch_to(then);
         self.block(tb);

@@ -94,6 +94,8 @@ it: `let s = f"..";` (a `String`), then pass `&s`.
 
 - `size_of::<T>()` / `align_of::<T>()` are built-in generic fns, used through
   `mem.type_size` / `mem.type_align`.
+- `needs_drop::<T>()` (built-in, a constant per instance): `Vec.truncate` / `clear` / drop
+  loop over the elements only when it is true; an `if` on it compiles the taken arm only.
 - Raw pointers: `*p = v` drops the old pointee (a place assignment); `p.write(v)`
   stores without dropping (Vec fills uninitialized slots with it); `p.read()` moves the pointee
   out bitwise (Vec `pop`, `clear`). Both are unsafe.

@@ -1,0 +1,32 @@
+u32 false
+i64 false
+bool false
+f64 false
+unit false
+Plain false
+E false
+D true
+Holder true
+HoldsVec true
+F true
+Option<u32> false
+Option<D> true
+Wrap<u32> false
+Wrap<D> true
+[u32; 4] false
+[D; 2] true
+[D; 0] true
+(u32, u8) false
+(u32, D) true
+&D false
+&mut D false
+*const D false
+&str false
+fn(u32) -> u32 false
+Vec<u32> true
+Vec<Vec<u8>> true
+String true
+nd<u32> false
+nd<D> true
+nd<Wrap<Holder>> true
+arms 10 32 54

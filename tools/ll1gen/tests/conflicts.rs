@@ -189,6 +189,23 @@ fn pass_through_rules_must_exist_and_not_derive_epsilon() {
 }
 
 #[test]
+fn too_many_terminals_for_the_u8_kind_column_are_refused() {
+    let mut t = contract();
+    let mut i = 0;
+    while t.terms.len() <= LANGUAGE.terminal_ids.max_terminals() {
+        t.terms.push(format!("synthetic{i}"));
+        i += 1;
+    }
+    let err = ll1gen::render(&t, LANGUAGE.grammar, &LANGUAGE).err().expect("too many terminals").to_string();
+    assert!(err.contains("255 terminals, at most 254"), "{err}");
+    // At the limit the count check passes (the synthetic terminals then fail naming instead).
+    t.terms.pop();
+    let err =
+        ll1gen::render(&t, LANGUAGE.grammar, &LANGUAGE).err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(!err.contains("at most 254"), "{err}");
+}
+
+#[test]
 fn output_is_byte_identical_across_runs() {
     let src = contract_src();
     let (_, a) = generate(&src, "contracts/grammar.ebnf", &LANGUAGE).expect("generate");

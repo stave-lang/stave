@@ -1,0 +1,365 @@
+// The checked-IR module (contracts/checked-ir.md) as flat columns. Every id is a rank or a
+// position the text fixes: `t<T>` the type row, `s<S>` the string row, site rows, static
+// indices, decl ids as written; fns by instance id (FuncId = rank); per fn, blocks and values
+// numbered in print order, its constant pool by first use in print order.
+//
+// Per-fn data is a segment of a module-wide column, found by the fn's `*_lo` and `*_n` columns
+// (fns are ranked after their segments are written, so the segments are not in FuncId order).
+// Local ids inside a segment (a block, a value, a pool entry) count from the segment's start.
+//
+// - Ops are the terminal ids of the IR text grammar (`generated.ir_text_terminals`): the grammar
+//   is the one list of op spellings. `intrinsic.<name>` is `IR_T_INTR` with the name's row in the
+//   module's intrinsic table (names the bodies use, each once, sorted by bytes).
+// - Operands are (kind, id): a value (local), a constant (local pool entry), a string, a fn
+//   (FuncId), or a type.
+// - Int constants are i128, as two's-complement (hi, lo) rows of the module's wide-int pool, one
+//   row per distinct value: an int constant, a switch case, a const generic argument, a claim
+//   weight, an `adt` const argument outside u64.
+// - Terminators: a kind, the operand they test or return (or NONE), and their targets, each a
+//   block, an operand run, and for `switch` the case value (the default target last, without).
+import types;
+import prims.col;
+import prims.ragged;
+import std.idx;
+import std.vec;
+
+pub const NONE: u32 = idx.NONE;
+
+pub const MODE_DEBUG: u8 = 0;
+pub const MODE_RELEASE: u8 = 1;
+pub const LEVEL_LOWERED: u8 = 0;
+pub const LEVEL_CHECKED: u8 = 1;
+pub const LEVEL_OPT: u8 = 2;
+
+pub const KIND_STRUCT: u8 = 0;
+pub const KIND_ENUM: u8 = 1;
+
+// Operand kinds.
+pub const O_VALUE: u8 = 0;
+pub const O_CONST: u8 = 1;
+pub const O_STR: u8 = 2;
+pub const O_FUNC: u8 = 3;
+pub const O_TYPE: u8 = 4;
+
+// Constant kinds: an int's bits are its wide-int row.
+pub const C_INT: u8 = 0;
+pub const C_F16: u8 = 1;
+pub const C_BF16: u8 = 2;
+pub const C_F32: u8 = 3;
+pub const C_F64: u8 = 4;
+
+// Terminator kinds.
+pub const TM_BR: u8 = 0;
+pub const TM_CBR: u8 = 1;
+pub const TM_SWITCH: u8 = 2;
+pub const TM_RET: u8 = 3;
+pub const TM_UNREACHABLE: u8 = 4;
+
+// Fn flags.
+pub const F_BODY: u8 = 1;
+pub const F_SYMBOL: u8 = 2;
+pub const F_VARIADIC: u8 = 4;
+pub const F_KNOWN: u8 = 8;
+pub const F_ALTSTACK: u8 = 16;
+pub const F_UNBUILT: u8 = 32;
+
+// Generic argument kinds of a fn header.
+pub const GARG_TYPE: u32 = 0;
+pub const GARG_CONST: u32 = 1;
+
+// Address-word targets.
+pub const REF_STR: u8 = 0;
+pub const REF_STATIC: u8 = 1;
+
+// Edge kinds of the stack section.
+pub const EDGE_CALL: u8 = 0;
+pub const EDGE_INDIRECT: u8 = 1;
+pub const EDGE_SPAWN: u8 = 2;
+
+// Claim kinds and row terms.
+pub const CL_PRE: u8 = 0;
+pub const CL_PRE_CHECKED: u8 = 1;
+pub const CL_POST: u8 = 2;
+pub const RT_ZERO: u8 = 0;
+pub const RT_PARAM: u8 = 1;
+pub const RT_LENPARAM: u8 = 2;
+pub const RT_RESULT: u8 = 3;
+pub const RT_LENRESULT: u8 = 4;
+
+// The last part of an unchecked entry's instance id (printed `u`).
+pub const UNCHECKED_ENTRY: u32 = 0xffff_ffff;
+
+// i128 values, one row per distinct value.
+pub struct Wide {
+    pub hi: vec.Vec<u64>,
+    pub lo: vec.Vec<u64>,
+    slots: vec.Vec<u32>,
+}
+
+fn mix(k: u64) -> u64 {
+    let mut x = k;
+    x = x ^ (x >> 33);
+    x = x *% 0xff51afd7ed558ccd;
+    x = x ^ (x >> 33);
+    x = x *% 0xc4ceb9fe1a85ec53;
+    return x ^ (x >> 33);
+}
+
+impl Wide {
+    pub fn new() -> Wide {
+        return Wide.{ hi: vec.Vec::<u64>.new(), lo: vec.Vec::<u64>.new(), slots: col.filled(64, NONE) };
+    }
+
+    // The row of value (hi, lo).
+    pub fn intern(&mut self, hi: u64, lo: u64) -> u32 {
+        let mask = self.slots.len() - 1;
+        let mut at = (mix(hi ^ mix(lo)) as usize) & mask;
+        loop {
+            let s = self.slots.as_slice()[at];
+            if s == NONE { break; }
+            if self.hi.as_slice()[s as usize] == hi && self.lo.as_slice()[s as usize] == lo { return s; }
+            at = (at + 1) & mask;
+        }
+        let id = self.hi.len() as% u32;
+        self.hi.push(hi);
+        self.lo.push(lo);
+        self.slots.as_mut_slice()[at] = id;
+        if self.hi.len() * 2 > self.slots.len() {
+            let cap = self.slots.len() * 2;
+            let m = cap - 1;
+            let mut slots = col.filled(cap, NONE);
+            for k in 0..self.hi.len() {
+                let mut p = (mix(self.hi.as_slice()[k] ^ mix(self.lo.as_slice()[k])) as usize) & m;
+                while slots.as_slice()[p] != NONE {
+                    p = (p + 1) & m;
+                }
+                slots.as_mut_slice()[p] = k as% u32;
+            }
+            self.slots = slots;
+        }
+        return id;
+    }
+
+    // Row w as a u64 when it is one (its value is in 0..=u64::MAX).
+    pub fn as_u64(&self, w: u32) -> (bool, u64) {
+        let i = w as usize;
+        return (self.hi.as_slice()[i] == 0, self.lo.as_slice()[i]);
+    }
+
+    pub fn is_negative(&self, w: u32) -> bool {
+        return (self.hi.as_slice()[w as usize] >> 63) == 1;
+    }
+}
+
+pub struct Module {
+    // header: the target's row in `names.TARGETS`
+    pub target: u32,
+    pub mode: u8,
+    pub level: u8,
+    pub wide: Wide,
+    // decls, ascending by id
+    pub decl_id: vec.Vec<u32>,
+    pub decl_kind: vec.Vec<u8>,
+    pub decl_path: ragged.Ragged<u8>,
+    // types by id; shapes ascending by type, each a list of variant rows of `var_fields`
+    pub types: types.Table,
+    pub shape_ty: vec.Vec<u32>,
+    pub shape_kind: vec.Vec<u8>,
+    pub shape_vars: ragged.Ragged<u32>,
+    pub var_fields: ragged.Ragged<u32>,
+    // strings and sites by row
+    pub strs: ragged.Ragged<u8>,
+    pub site_file: ragged.Ragged<u8>,
+    pub site_line: vec.Vec<u32>,
+    pub site_col: vec.Vec<u32>,
+    pub site_fn: ragged.Ragged<u8>,
+    // statics by index; their `data` and `ref` rows by (static, offset)
+    pub st_ty: vec.Vec<u32>,
+    pub st_path: ragged.Ragged<u8>,
+    pub st_data_lo: vec.Vec<u32>,
+    pub st_data_n: vec.Vec<u32>,
+    pub st_ref_lo: vec.Vec<u32>,
+    pub st_ref_n: vec.Vec<u32>,
+    pub data_off: vec.Vec<u32>,
+    pub data_bytes: ragged.Ragged<u8>,
+    pub ref_off: vec.Vec<u32>,
+    pub ref_kind: vec.Vec<u8>,
+    pub ref_to: vec.Vec<u32>,
+    pub ref_add: vec.Vec<u32>,
+    // `main` (a FuncId) and `cell` (a decl id), NONE when absent
+    pub main: u32,
+    pub cell: u32,
+    // the stack section (emit form)
+    pub has_stack: bool,
+    pub has_runstack: bool,
+    pub runstack: u64,
+    pub truncated: bool,
+    pub node_rec: vec.Vec<bool>,
+    pub edge_from: vec.Vec<u32>,
+    pub edge_to: vec.Vec<u32>,
+    pub edge_kind: vec.Vec<u8>,
+    pub fn_nodes: ragged.Ragged<u32>,
+    // the intrinsic table: names, sorted by bytes
+    pub intr: ragged.Ragged<u8>,
+    // fns by FuncId
+    pub fn_inst: ragged.Ragged<u32>,
+    pub fn_path: ragged.Ragged<u8>,
+    pub fn_targ: ragged.Ragged<u32>,
+    pub fn_params: ragged.Ragged<u32>,
+    pub fn_ret: vec.Vec<u32>,
+    pub fn_feat: vec.Vec<u64>,
+    pub fn_sym: ragged.Ragged<u8>,
+    pub fn_flags: vec.Vec<u8>,
+    pub fn_known: vec.Vec<u32>,
+    pub fn_site: vec.Vec<u32>,
+    pub fn_blk_lo: vec.Vec<u32>,
+    pub fn_blk_n: vec.Vec<u32>,
+    pub fn_val_lo: vec.Vec<u32>,
+    pub fn_val_n: vec.Vec<u32>,
+    pub fn_const_lo: vec.Vec<u32>,
+    pub fn_const_n: vec.Vec<u32>,
+    pub fn_claim_lo: vec.Vec<u32>,
+    pub fn_claim_n: vec.Vec<u32>,
+    // blocks: params are the values `val_lo .. val_lo + param_n` of their fn; instructions;
+    // the terminator
+    pub blk_val_lo: vec.Vec<u32>,
+    pub blk_param_n: vec.Vec<u32>,
+    pub blk_ins_lo: vec.Vec<u32>,
+    pub blk_ins_n: vec.Vec<u32>,
+    pub blk_tkind: vec.Vec<u8>,
+    pub blk_topnd: vec.Vec<u32>,
+    pub blk_tgt_lo: vec.Vec<u32>,
+    pub blk_tgt_n: vec.Vec<u32>,
+    // values: their types
+    pub val_ty: vec.Vec<u32>,
+    // instructions: op, result type (NONE: no result), result value (local), operands, site
+    pub ins_op: vec.Vec<u16>,
+    pub ins_intr: vec.Vec<u32>,
+    pub ins_ty: vec.Vec<u32>,
+    pub ins_res: vec.Vec<u32>,
+    pub ins_opnd_lo: vec.Vec<u32>,
+    pub ins_opnd_n: vec.Vec<u32>,
+    pub ins_site: vec.Vec<u32>,
+    // operands
+    pub opnd_kind: vec.Vec<u8>,
+    pub opnd_id: vec.Vec<u32>,
+    // branch targets: block (local), operands, the switch case's wide-int row (NONE otherwise)
+    pub tgt_blk: vec.Vec<u32>,
+    pub tgt_opnd_lo: vec.Vec<u32>,
+    pub tgt_opnd_n: vec.Vec<u32>,
+    pub tgt_case: vec.Vec<u32>,
+    // constant pools
+    pub const_kind: vec.Vec<u8>,
+    pub const_bits: vec.Vec<u64>,
+    // claims: kind, the two terms (kind, index), the weight's wide-int row
+    pub claim_kind: vec.Vec<u8>,
+    pub claim_a: vec.Vec<u8>,
+    pub claim_ai: vec.Vec<u32>,
+    pub claim_b: vec.Vec<u8>,
+    pub claim_bi: vec.Vec<u32>,
+    pub claim_w: vec.Vec<u32>,
+}
+
+impl Module {
+    pub fn new() -> Module {
+        return Module.{
+            target: 0,
+            mode: MODE_DEBUG,
+            level: LEVEL_CHECKED,
+            wide: Wide.new(),
+            decl_id: vec.Vec::<u32>.new(),
+            decl_kind: vec.Vec::<u8>.new(),
+            decl_path: ragged.Ragged::<u8>.new(),
+            types: types.Table.new(),
+            shape_ty: vec.Vec::<u32>.new(),
+            shape_kind: vec.Vec::<u8>.new(),
+            shape_vars: ragged.Ragged::<u32>.new(),
+            var_fields: ragged.Ragged::<u32>.new(),
+            strs: ragged.Ragged::<u8>.new(),
+            site_file: ragged.Ragged::<u8>.new(),
+            site_line: vec.Vec::<u32>.new(),
+            site_col: vec.Vec::<u32>.new(),
+            site_fn: ragged.Ragged::<u8>.new(),
+            st_ty: vec.Vec::<u32>.new(),
+            st_path: ragged.Ragged::<u8>.new(),
+            st_data_lo: vec.Vec::<u32>.new(),
+            st_data_n: vec.Vec::<u32>.new(),
+            st_ref_lo: vec.Vec::<u32>.new(),
+            st_ref_n: vec.Vec::<u32>.new(),
+            data_off: vec.Vec::<u32>.new(),
+            data_bytes: ragged.Ragged::<u8>.new(),
+            ref_off: vec.Vec::<u32>.new(),
+            ref_kind: vec.Vec::<u8>.new(),
+            ref_to: vec.Vec::<u32>.new(),
+            ref_add: vec.Vec::<u32>.new(),
+            main: NONE,
+            cell: NONE,
+            has_stack: false,
+            has_runstack: false,
+            runstack: 0,
+            truncated: false,
+            node_rec: vec.Vec::<bool>.new(),
+            edge_from: vec.Vec::<u32>.new(),
+            edge_to: vec.Vec::<u32>.new(),
+            edge_kind: vec.Vec::<u8>.new(),
+            fn_nodes: ragged.Ragged::<u32>.new(),
+            intr: ragged.Ragged::<u8>.new(),
+            fn_inst: ragged.Ragged::<u32>.new(),
+            fn_path: ragged.Ragged::<u8>.new(),
+            fn_targ: ragged.Ragged::<u32>.new(),
+            fn_params: ragged.Ragged::<u32>.new(),
+            fn_ret: vec.Vec::<u32>.new(),
+            fn_feat: vec.Vec::<u64>.new(),
+            fn_sym: ragged.Ragged::<u8>.new(),
+            fn_flags: vec.Vec::<u8>.new(),
+            fn_known: vec.Vec::<u32>.new(),
+            fn_site: vec.Vec::<u32>.new(),
+            fn_blk_lo: vec.Vec::<u32>.new(),
+            fn_blk_n: vec.Vec::<u32>.new(),
+            fn_val_lo: vec.Vec::<u32>.new(),
+            fn_val_n: vec.Vec::<u32>.new(),
+            fn_const_lo: vec.Vec::<u32>.new(),
+            fn_const_n: vec.Vec::<u32>.new(),
+            fn_claim_lo: vec.Vec::<u32>.new(),
+            fn_claim_n: vec.Vec::<u32>.new(),
+            blk_val_lo: vec.Vec::<u32>.new(),
+            blk_param_n: vec.Vec::<u32>.new(),
+            blk_ins_lo: vec.Vec::<u32>.new(),
+            blk_ins_n: vec.Vec::<u32>.new(),
+            blk_tkind: vec.Vec::<u8>.new(),
+            blk_topnd: vec.Vec::<u32>.new(),
+            blk_tgt_lo: vec.Vec::<u32>.new(),
+            blk_tgt_n: vec.Vec::<u32>.new(),
+            val_ty: vec.Vec::<u32>.new(),
+            ins_op: vec.Vec::<u16>.new(),
+            ins_intr: vec.Vec::<u32>.new(),
+            ins_ty: vec.Vec::<u32>.new(),
+            ins_res: vec.Vec::<u32>.new(),
+            ins_opnd_lo: vec.Vec::<u32>.new(),
+            ins_opnd_n: vec.Vec::<u32>.new(),
+            ins_site: vec.Vec::<u32>.new(),
+            opnd_kind: vec.Vec::<u8>.new(),
+            opnd_id: vec.Vec::<u32>.new(),
+            tgt_blk: vec.Vec::<u32>.new(),
+            tgt_opnd_lo: vec.Vec::<u32>.new(),
+            tgt_opnd_n: vec.Vec::<u32>.new(),
+            tgt_case: vec.Vec::<u32>.new(),
+            const_kind: vec.Vec::<u8>.new(),
+            const_bits: vec.Vec::<u64>.new(),
+            claim_kind: vec.Vec::<u8>.new(),
+            claim_a: vec.Vec::<u8>.new(),
+            claim_ai: vec.Vec::<u32>.new(),
+            claim_b: vec.Vec::<u8>.new(),
+            claim_bi: vec.Vec::<u32>.new(),
+            claim_w: vec.Vec::<u32>.new(),
+        };
+    }
+
+    pub fn fns(&self) -> usize {
+        return self.fn_flags.len();
+    }
+
+    pub fn has_body(&self, f: usize) -> bool {
+        return self.fn_flags.as_slice()[f] & F_BODY != 0;
+    }
+}

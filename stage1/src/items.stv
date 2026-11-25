@@ -36,10 +36,6 @@ pub const FILE_TOO_DEEP: u8 = 3;
 pub const MAX_DEPTH: i32 = 10000;
 pub const NONE: u32 = idx.NONE;
 
-const T_SEMI: u8 = terminals.T_SEMI as% u8;
-const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
-const T_KW_IMPORT: u8 = terminals.T_KW_IMPORT as% u8;
-
 // The items of every file, and the bracket structure they came from. `depth` and `mate` are
 // per token (`mate`: the paired bracket, `NONE` for another token; `depth` and `mate` are
 // meaningful only in files with items). File F's items are `file_item[F]..file_item[F + 1]`;
@@ -77,7 +73,7 @@ fn classes() -> Classes {
     let shut = [terminals.T_R_PAREN, terminals.T_R_BRACKET, terminals.T_R_BRACE, terminals.T_R_BRACE];
     for k in 0usize..4 {
         c.step[open[k] as usize] = 1;
-        c.closer[open[k] as usize] = shut[k] as% u8;
+        c.closer[open[k] as usize] = shut[k];
         c.step[shut[k] as usize] = -1;
     }
     let kws = [
@@ -194,7 +190,7 @@ pub fn build(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens) -> Items {
         {
             let depth = out.depth.as_slice();
             for i in lo..eof {
-                let prev_ends = i == lo || kind[i - 1] == T_SEMI || kind[i - 1] == T_R_BRACE;
+                let prev_ends = i == lo || kind[i - 1] == terminals.T_SEMI || kind[i - 1] == terminals.T_R_BRACE;
                 keep.push(depth[i] == 0 && cls.item_kw[kind[i] as usize] && prev_ends);
             }
         }
@@ -206,7 +202,7 @@ pub fn build(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens) -> Items {
         // the first start that is no `import`: a later `import` is late
         let mut first_other = eof;
         for k in 0..ns {
-            if kind[lo + (sl[k] as usize)] != T_KW_IMPORT {
+            if kind[lo + (sl[k] as usize)] != terminals.T_KW_IMPORT {
                 first_other = lo + (sl[k] as usize);
                 break;
             }
@@ -216,7 +212,7 @@ pub fn build(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens) -> Items {
         for k in 0..ns {
             let s = lo + (sl[k] as usize);
             let e = if k + 1 < ns then lo + (sl[k + 1] as usize) else eof;
-            let kd = if kind[s] != T_KW_IMPORT then ITEM_ITEM else if s > first_other then ITEM_LATE_IMPORT else ITEM_IMPORT;
+            let kd = if kind[s] != terminals.T_KW_IMPORT then ITEM_ITEM else if s > first_other then ITEM_LATE_IMPORT else ITEM_IMPORT;
             push_item(&mut out, f, s, e, kd);
         }
         // byte offsets of the new items

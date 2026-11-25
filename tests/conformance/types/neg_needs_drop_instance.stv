@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// `needs_drop::<T>()` of a type with a param is checked per instance, as `size_of`: an instance
+// that makes the type unsized is rejected at the generic fn, naming it (E0911
+// `instance-layout`); a sized instance passes.
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {}
+}
+
+fn any<T>() -> bool { //~ ERROR E0911
+    return needs_drop::<T>();
+}
+
+fn main() -> i32 {
+    let f = any::<str>();
+    let g = any::<D>();
+    let h = any::<u32>();
+    return 0;
+}

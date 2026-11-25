@@ -73,6 +73,9 @@ pub(crate) struct G<'a> {
     pub borrows: bool,
     /// The features generic instances inherit from their type arguments, beyond their `needs`.
     pub inherited: &'a FxHashMap<InstKey, u64>,
+    /// Per fn instance with constant conditions: the call graph's answers
+    /// ([`crate::callgraph::CallGraph::taken`]), keyed in this table.
+    pub taken: &'a FxHashMap<InstKey, Box<[bool]>>,
     /// The drop schedules of the checked bodies ([`crate::drops`]); `None`: the program was
     /// lowered without a borrow check.
     pub drops: Option<&'a crate::drops::Schedules>,
@@ -403,6 +406,8 @@ pub(crate) struct FnCx<'a> {
     pub tb: Option<&'a TypedBody>,
     pub tys: Overlay<'a>,
     pub args: Vec<GArg>,
+    /// The instance's answer to each constant condition of the body ([`G::taken`]).
+    pub taken: Option<&'a [bool]>,
     pub self_ty: Option<Ty>,
     /// The caller is not in a built-in package (user sites, runtime/README.md).
     pub user: bool,
@@ -476,6 +481,7 @@ impl<'a> FnCx<'a> {
             tb: None,
             tys: Overlay::new(g.table),
             args: Vec::new(),
+            taken: None,
             self_ty: None,
             user: false,
             path,
@@ -2212,6 +2218,7 @@ fn empty_body() -> &'static TypedBody {
         implicit: Vec::new(),
         for_kinds: Vec::new(),
         chunk_loops: Vec::new(),
+        const_ifs: Vec::new(),
         moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),

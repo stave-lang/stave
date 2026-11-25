@@ -7,6 +7,9 @@
 //! most [`NATIVE_MAX`], M more), and no (op, form, type) covered twice. The generator expands
 //! type groups to concrete keys, expands placeholders per key, and counts the cost.
 //!
+//! [`known`] and [`intrinsics`]: the compiler-known items and the intrinsic table of stave-ir and
+//! stage1, from `crates/stave-ir/tables/known.toml` and `intrinsics.toml`.
+//!
 //! [`opt`]: the release optimizer's table (`crates/stave-ir/tables/opt.toml`).
 
 use std::collections::BTreeMap;
@@ -15,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+pub mod intrinsics;
+pub mod known;
 pub mod opt;
 
 /// One target architecture: its table, its generated file, its tiers in order.
@@ -417,12 +422,20 @@ pub fn generate(root: &Path) -> Result<Vec<(&'static str, String)>, String> {
             Err(e) => errors.push(e),
         }
     }
-    match std::fs::read_to_string(root.join(opt::TABLE)) {
-        Ok(t) => match opt::generate(&t) {
-            Ok(files) => out.extend(files),
-            Err(e) => errors.push(e),
-        },
-        Err(e) => errors.push(format!("{}: {e}", opt::TABLE)),
+    type Gen = fn(&str) -> Result<Vec<(&'static str, String)>, String>;
+    let tables: [(&str, Gen); 3] = [
+        (known::TABLE, known::generate),
+        (intrinsics::TABLE, intrinsics::generate),
+        (opt::TABLE, opt::generate),
+    ];
+    for (table, generate) in tables {
+        match std::fs::read_to_string(root.join(table)) {
+            Ok(t) => match generate(&t) {
+                Ok(files) => out.extend(files),
+                Err(e) => errors.push(e),
+            },
+            Err(e) => errors.push(format!("{table}: {e}")),
+        }
     }
     if errors.is_empty() { Ok(out) } else { Err(errors.join("\n")) }
 }

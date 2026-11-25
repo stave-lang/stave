@@ -1,0 +1,352 @@
+# The intrinsic table (contracts/intrinsics.md): every name an `extern "stave-intrinsic"` block may
+# declare, the arch it is built for, and its signature. `tools/gen-tables` writes stave-ir's table
+# (`crates/stave-ir/src/generated/intrinsic_table.rs`, read by `intrinsics.rs`: the front end's
+# E0805 / E0704 checks and the IR verifier) and stage1's (`stage1/ir/src/generated/intrinsic_table.stv`).
+#
+# One `[[intrinsic]]` per name: `name`, `kind` (the stave-ir `Kind` it parses to), `arch` (`x86`,
+# `a64`, or `both`), and `params` and `ret` (types as in known.toml); a name without them has no
+# checked signature (`static_addr`, which lowering alone emits: its result type is the module's).
+# `[ptx]`: the PTX set, which has no checked signature: the `names`, and every name that starts
+# with one of `prefixes` and ends with one of `suffixes`.
+
+[[intrinsic]]
+name = "syscall0"
+kind = "Syscall(0)"
+arch = "both"
+params = ["usize"]
+ret = "isize"
+
+[[intrinsic]]
+name = "syscall1"
+kind = "Syscall(1)"
+arch = "both"
+params = ["usize", "usize"]
+ret = "isize"
+
+[[intrinsic]]
+name = "syscall2"
+kind = "Syscall(2)"
+arch = "both"
+params = ["usize", "usize", "usize"]
+ret = "isize"
+
+[[intrinsic]]
+name = "syscall3"
+kind = "Syscall(3)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize"]
+ret = "isize"
+
+[[intrinsic]]
+name = "syscall4"
+kind = "Syscall(4)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize"]
+ret = "isize"
+
+[[intrinsic]]
+name = "syscall5"
+kind = "Syscall(5)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "isize"
+
+[[intrinsic]]
+name = "syscall6"
+kind = "Syscall(6)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "isize"
+
+[[intrinsic]]
+name = "ccall0"
+kind = "Ccall(0)"
+arch = "both"
+params = ["usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall1"
+kind = "Ccall(1)"
+arch = "both"
+params = ["usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall2"
+kind = "Ccall(2)"
+arch = "both"
+params = ["usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall3"
+kind = "Ccall(3)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall4"
+kind = "Ccall(4)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall5"
+kind = "Ccall(5)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall6"
+kind = "Ccall(6)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall7"
+kind = "Ccall(7)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall8"
+kind = "Ccall(8)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall9"
+kind = "Ccall(9)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall10"
+kind = "Ccall(10)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall11"
+kind = "Ccall(11)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "ccall12"
+kind = "Ccall(12)"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "cpuid"
+kind = "Cpuid"
+arch = "x86"
+params = ["u32", "u32"]
+ret = "u32x4"
+
+[[intrinsic]]
+name = "xgetbv"
+kind = "Xgetbv"
+arch = "x86"
+params = ["u32"]
+ret = "u64"
+
+[[intrinsic]]
+name = "thread_start_addr"
+kind = "ThreadStartAddr"
+arch = "both"
+params = []
+ret = "usize"
+
+[[intrinsic]]
+name = "main_addr"
+kind = "MainAddr"
+arch = "both"
+params = []
+ret = "usize"
+
+[[intrinsic]]
+name = "signal_handler_addr"
+kind = "SignalHandlerAddr"
+arch = "both"
+params = []
+ret = "usize"
+
+[[intrinsic]]
+name = "site_table"
+kind = "SiteTable"
+arch = "both"
+params = []
+ret = "usize"
+
+[[intrinsic]]
+name = "pc_table"
+kind = "PcTable"
+arch = "both"
+params = []
+ret = "usize"
+
+[[intrinsic]]
+name = "stack_table"
+kind = "StackTable"
+arch = "both"
+params = []
+ret = "usize"
+
+[[intrinsic]]
+name = "thread_block"
+kind = "ThreadBlock"
+arch = "both"
+params = []
+ret = "usize"
+
+[[intrinsic]]
+name = "set_thread_block"
+kind = "SetThreadBlock"
+arch = "a64"
+params = ["usize"]
+ret = "unit"
+
+[[intrinsic]]
+name = "call_on_stack"
+kind = "CallOnStack"
+arch = "both"
+params = ["usize", "usize", "usize"]
+ret = "usize"
+
+[[intrinsic]]
+name = "cpu_init"
+kind = "CpuInit"
+arch = "both"
+params = []
+ret = "unit"
+
+[[intrinsic]]
+name = "cpu_baseline"
+kind = "CpuBaseline"
+arch = "both"
+params = []
+ret = "u64"
+
+[[intrinsic]]
+name = "thread_clone"
+kind = "ThreadClone"
+arch = "both"
+params = ["usize", "usize", "usize", "usize", "usize", "usize", "usize"]
+ret = "isize"
+
+[[intrinsic]]
+name = "atomic_load_u32"
+kind = "Atomic { op: AtomicOp::Load, wide: false }"
+arch = "both"
+params = ["usize"]
+ret = "u32"
+
+[[intrinsic]]
+name = "atomic_load_u64"
+kind = "Atomic { op: AtomicOp::Load, wide: true }"
+arch = "both"
+params = ["usize"]
+ret = "u64"
+
+[[intrinsic]]
+name = "atomic_xchg_u32"
+kind = "Atomic { op: AtomicOp::Xchg, wide: false }"
+arch = "both"
+params = ["usize", "u32"]
+ret = "u32"
+
+[[intrinsic]]
+name = "atomic_xchg_u64"
+kind = "Atomic { op: AtomicOp::Xchg, wide: true }"
+arch = "both"
+params = ["usize", "u64"]
+ret = "u64"
+
+[[intrinsic]]
+name = "atomic_add_u32"
+kind = "Atomic { op: AtomicOp::Add, wide: false }"
+arch = "both"
+params = ["usize", "u32"]
+ret = "u32"
+
+[[intrinsic]]
+name = "atomic_add_u64"
+kind = "Atomic { op: AtomicOp::Add, wide: true }"
+arch = "both"
+params = ["usize", "u64"]
+ret = "u64"
+
+[[intrinsic]]
+name = "atomic_cas_u32"
+kind = "Atomic { op: AtomicOp::Cas, wide: false }"
+arch = "both"
+params = ["usize", "u32", "u32"]
+ret = "u32"
+
+[[intrinsic]]
+name = "atomic_cas_u64"
+kind = "Atomic { op: AtomicOp::Cas, wide: true }"
+arch = "both"
+params = ["usize", "u64", "u64"]
+ret = "u64"
+
+[[intrinsic]]
+name = "copy_bytes"
+kind = "CopyBytes"
+arch = "both"
+params = ["mut_ptr_u8", "const_ptr_u8", "usize"]
+ret = "unit"
+
+[[intrinsic]]
+name = "static_addr"
+kind = "StaticAddr"
+arch = "both"
+
+[ptx]
+names = [
+    "fence_sc_gpu",
+    "fence_sc_sys",
+    "fence_acqrel_gpu",
+    "nanosleep",
+    "globaltimer",
+    "clock64",
+    "tid_x",
+    "tid_y",
+    "tid_z",
+    "ntid_x",
+    "ntid_y",
+    "ntid_z",
+    "ctaid_x",
+    "ctaid_y",
+    "ctaid_z",
+    "nctaid_x",
+    "nctaid_y",
+    "nctaid_z",
+    "laneid",
+    "smid",
+    "activemask",
+    "match_any_u32",
+    "shfl_idx_u32",
+    "vote_ballot",
+    "bar_sync",
+    "bar_warp_sync",
+    "ld_shared_u32",
+    "st_shared_u32",
+    "stacksave",
+    "thread_exit",
+]
+prefixes = ["ld_acquire_", "st_release_", "ld_relaxed_", "st_relaxed_", "atom_"]
+suffixes = ["u32", "u64", "_acqrel"]

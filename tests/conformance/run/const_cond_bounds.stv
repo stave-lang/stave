@@ -1,0 +1,24 @@
+//~ STDOUT const_cond_bounds.stdout
+// Per instance, the taken arm of `if !needs_drop::<T>()` guards the index: the `u32` instance
+// returns 0 for an index past the end, the `String` instance runs no test (its arm is dead) and
+// reads in-bounds indices only here.
+import std.io;
+import std.string;
+
+fn g<T>(xs: &[u32], i: usize) -> u32 {
+    if !needs_drop::<T>() {
+        if i >= xs.len() {
+            return 0;
+        }
+    }
+    return xs[i];
+}
+
+fn main() -> i32 {
+    let xs: [u32; 2] = [1, 2];
+    let a = g::<u32>(&xs, 100);
+    let b = g::<u32>(&xs, 1);
+    let c = g::<string.String>(&xs, 0);
+    io.print(f"{a} {b} {c}\n");
+    return 0;
+}

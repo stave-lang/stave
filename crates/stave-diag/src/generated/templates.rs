@@ -5367,7 +5367,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, expression value (all but a place read in place: contracts/lang-details.md, Size limits), or return value of a fn whose type takes more than 2^28 bytes, once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, two slots for a value `if` / `match` (its result and the live arm, whatever the arm count), plus each call's result, by-value receiver, and arguments, whatever the callee) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it, and so does `overflow` for a type with a param whose layout lowering reads (a `size_of` / `align_of` type, the row type of a `std.soa` row built-in); case `instance-layout`: such a type that the instance makes unsized; once per instance, at the generic fn",
+        rule: "`size_of::<T>()` / `align_of::<T>()` / `needs_drop::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, expression value (all but a place read in place: contracts/lang-details.md, Size limits), or return value of a fn whose type takes more than 2^28 bytes, once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, two slots for a value `if` / `match` (its result and the live arm, whatever the arm count), plus each call's result, by-value receiver, and arguments, whatever the callee) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it, and so does `overflow` for a type with a param whose layout lowering reads (a `size_of` / `align_of` / `needs_drop` type, the row type of a `std.soa` row built-in); case `instance-layout`: such a type that the instance makes unsized; once per instance, at the generic fn",
         retired: false,
         located: true,
         holes: &[
@@ -5379,7 +5379,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         shapes: &[
             Shape {
                 case: "",
-                message: "`{type}` has no layout for `size_of` / `align_of`",
+                message: "`{type}` has no layout for `size_of` / `align_of` / `needs_drop`",
                 labels: &[
                     LabelTemplate { at: "primary", text: "no size or alignment for this type" },
                 ],
@@ -5415,7 +5415,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             },
             Shape {
                 case: "instance-layout",
-                message: "in `{fn}`, `{type}` has no layout for `size_of` / `align_of`",
+                message: "in `{fn}`, `{type}` has no layout for `size_of` / `align_of` / `needs_drop`",
                 labels: &[
                     LabelTemplate { at: "primary", text: "no size or alignment for this type in this instance" },
                 ],

@@ -1,0 +1,8 @@
+# The checked IR of stage1 (contracts/checked-ir.md): the type table, the module model, the text
+# reader and printer, and the verifier. The front end, the back end, and the prover import it;
+# it imports none of them.
+name = "ir"
+kind = "lib"
+
+[dependencies]
+prims = { path = "../prims/seq" }

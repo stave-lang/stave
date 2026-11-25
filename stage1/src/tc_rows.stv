@@ -24,7 +24,7 @@ import sigs;
 import source;
 import tc_builtins;
 import tc_traits;
-import types;
+import ir.types;
 import prims.sort;
 import std.idx;
 import std.vec;
@@ -391,12 +391,6 @@ pub fn fn_conv(tab: &types.Table, v: u32, want: u32, proven: u64) -> (bool, u32)
     return (vf & ~(wf | proven) == 0, wx[n + 3] & ~vx[n + 3]);
 }
 
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
-const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
-const T_COMMA: u8 = terminals.T_COMMA as% u8;
-const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
-
 impl Typeck {
     // A call of built-in callee on c (the receiver, or the type of a type-relative call) with the
     // arguments of `Args` row args (NONE: none), each checked by its kind; its value.
@@ -464,7 +458,7 @@ impl Typeck {
     pub fn bi_targs(&mut self, tab: &mut types.Table, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, tree: &ast.Ast, m: u32, c: u32, ga: u32) -> u32 {
         if !tc_builtins.is_builtin(m) { return NONE; }
         let q = tree.tok_end.as_slice()[ga as usize];
-        if !self.bt.takes_targs(m) || consteval.tk(t, q) != T_L_PAREN || consteval.tk(t, q + 1) != T_R_PAREN {
+        if !self.bt.takes_targs(m) || consteval.tk(t, q) != terminals.T_L_PAREN || consteval.tk(t, q + 1) != terminals.T_R_PAREN {
             self.bad = true;
             return NONE;
         }
@@ -474,14 +468,14 @@ impl Typeck {
         let ks = tree.kids.row(ga as usize);
         if ks.len() != 1 { return self.err(); }
         let a = tree.tok.as_slice()[self.base + ks[0] as usize];
-        if consteval.tk(t, a) != T_L_BRACKET { return self.err(); }
+        if consteval.tk(t, a) != terminals.T_L_BRACKET { return self.err(); }
         let close = cut.mate.as_slice()[a as usize];
         if close == NONE { return self.err(); }
         let mut count: u32 = 0;
         for tok in a + 1..close {
             let k = consteval.tk(t, tok);
-            if k == T_COMMA { continue; }
-            if k != T_INT_LIT { return self.err(); }
+            if k == terminals.T_COMMA { continue; }
+            if k != terminals.T_INT_LIT { return self.err(); }
             let (v, big, suf) = consteval.parse_int(tok_text(t, set, cut, self.it, tok, false));
             if big || suf != 0 || v >= n as u64 { return self.err(); }
             count = count + 1;

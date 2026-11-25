@@ -22,7 +22,7 @@ import lex;
 import sigs;
 import source;
 import tc_rows;
-import types;
+import ir.types;
 import std.vec;
 
 const NONE: u32 = tc_rows.NONE;
@@ -38,10 +38,6 @@ const K_MATCH: u8 = node_kinds.KIND_MATCH_EXPR;
 const K_PRIMARY: u8 = node_kinds.KIND_PRIMARY;
 const K_POSTFIX: u8 = node_kinds.KIND_POSTFIX;
 const K_UNARY: u8 = node_kinds.KIND_UNARY;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_COMMA: u8 = terminals.T_COMMA as% u8;
-const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
-const T_FMT_LIT: u8 = terminals.T_FMT_LIT as% u8;
 
 impl tc_rows.Typeck {
     // Before child c of closure Primary r: the params' bindings take their types, the return
@@ -141,7 +137,7 @@ impl tc_rows.Typeck {
         let mut c = n;
         while c != NONE as usize {
             let k = tree.kind.as_slice()[c];
-            if k == K_PRIMARY && t.kind.as_slice()[tree.tok.as_slice()[c] as usize] == T_KW_FN { return true; }
+            if k == K_PRIMARY && t.kind.as_slice()[tree.tok.as_slice()[c] as usize] == terminals.T_KW_FN { return true; }
             if self.fn_item.as_slice()[c] { return true; }
             c = wrapped(tree, self.base, c);
         }
@@ -181,7 +177,7 @@ fn value_arms(t: &lex.Tokens, tree: &ast.Ast, base: usize, n: usize, out: &mut v
         let cs = tree.kids.row(core);
         let a = tree.tok.as_slice()[core] as usize;
         let end = tree.tok_end.as_slice()[core] as usize;
-        if tree.kind.as_slice()[core] == K_PRIMARY && t.kind.as_slice()[a] == T_L_PAREN && cs.len() == 1 && end >= 2 && t.kind.as_slice()[end - 2] != T_COMMA {
+        if tree.kind.as_slice()[core] == K_PRIMARY && t.kind.as_slice()[a] == terminals.T_L_PAREN && cs.len() == 1 && end >= 2 && t.kind.as_slice()[end - 2] != terminals.T_COMMA {
             todo.push((base + cs[0] as usize) as% u32);
             continue;
         }
@@ -195,10 +191,10 @@ fn fstring_node(t: &lex.Tokens, tree: &ast.Ast, base: usize, n: usize) -> bool {
     while tree.kind.as_slice()[c] == K_PRIMARY {
         let a = tree.tok.as_slice()[c] as usize;
         let k = t.kind.as_slice()[a];
-        if k == T_FMT_LIT { return true; }
+        if k == terminals.T_FMT_LIT { return true; }
         let cs = tree.kids.row(c);
         let end = tree.tok_end.as_slice()[c] as usize;
-        if k != T_L_PAREN || cs.len() != 1 || end < 2 || t.kind.as_slice()[end - 2] == T_COMMA { return false; }
+        if k != terminals.T_L_PAREN || cs.len() != 1 || end < 2 || t.kind.as_slice()[end - 2] == terminals.T_COMMA { return false; }
         c = base + cs[0] as usize;
     }
     return false;

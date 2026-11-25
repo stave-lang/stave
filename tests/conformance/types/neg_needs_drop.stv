@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// `needs_drop::<T>()` takes one type argument and no value argument and is a `bool`. Its value is
+// known per instance only: it is no const-expr (E0904), not even of a concrete type. A type
+// without a layout has no answer (E0911) at the call (an instance making it unsized:
+// `neg_needs_drop_instance.stv`).
+struct D {
+    pub id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {}
+}
+
+const C: bool = needs_drop::<u32>(); //~ ERROR E0904
+
+const N: usize = if needs_drop::<D>() then 1 else 2; //~ ERROR E0904
+
+fn main() -> i32 {
+    let a = needs_drop::<str>(); //~ ERROR E0911
+    let b = needs_drop::<[D]>(); //~ ERROR E0911
+    let c = needs_drop(); //~ ERROR E0202
+    let d = needs_drop::<u32>(1u32); //~ ERROR E0201
+    let e: u32 = needs_drop::<D>(); //~ ERROR E0201
+    return 0;
+}

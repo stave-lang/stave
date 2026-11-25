@@ -31,7 +31,7 @@ import intern;
 import layout;
 import modules;
 import sigs;
-import types;
+import ir.types;
 import prims.col;
 import prims.ragged;
 import prims.search;
