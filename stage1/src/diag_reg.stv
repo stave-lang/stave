@@ -103,9 +103,7 @@ impl Registry {
 
     // Whether `number` is a code of the registry.
     pub fn has_code(&self, number: u16) -> bool {
-        let n = self.number.as_slice();
-        let r = search.lower_bound(n, number);
-        return r < n.len() && n[r] == number;
+        return search.contains(self.number.as_slice(), number);
     }
 
     // Whether the code at `row` has a shape named `case`.

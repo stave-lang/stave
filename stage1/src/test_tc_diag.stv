@@ -2,7 +2,8 @@
 // `tc_diag`, `diag_tc`) at the mismatch sites (annotation, operator, return, argument), the fix
 // each E0201 names, the arity of a call, `break` outside of a loop; E0413 for a `const` or
 // `static` of a reference or view type (`sigs` rows) and for a `const` with drop glue
-// (`diag_kinds.const_drops`).
+// (`diag_kinds.const_drops`). And the forms the body checker types (its `types` dump): const
+// generic arguments, `Soa` columns, built-in turbofish, contract clauses, nesting past the limit.
 import diag;
 import diag_kinds;
 import diag_sigs;
@@ -16,9 +17,13 @@ import test_kit;
 import typeck;
 import std.debug;
 import std.mem;
+import std.string;
 import std.vec;
 
 const CORE: &str = "pub enum Option<T> { Some(T), None }\npub enum Result<T, E> { Ok(T), Err(E) }\npub trait Copy {}\npub trait Drop {\n    fn drop(&mut self);\n}\n";
+
+// A stand-in `std.soa`: its `Soa<P>` has a column per field of P outside this module.
+const SOA: &str = "pub struct Soa<P> { n: usize }\nimpl<P> Soa<P> {\n    pub fn len(&self) -> usize {\n        return self.n;\n    }\n}\n";
 
 const MAIN: &str = "fn one(x: u16) -> u16 { return x; }\nfn f(a: u32, b: u64) -> u32 {\n    let c: u16 = a;\n    let d = a + b;\n    let e = one(1u16, 2u16);\n    return;\n}\nfn g() {\n    break;\n}\nfn h(o: Option<u32>) -> u32 {\n    return o;\n}\nfn k(x: u32) -> Option<u32> {\n    return x;\n}\nfn ok(n: u32) -> u32 {\n    let m: u32 = n + 1;\n    return m;\n}\nfn main() {}\n";
 
@@ -35,15 +40,22 @@ fn messages(d: &diag.Diags) -> vec.Vec<u8> {
     return out;
 }
 
-// The program `main` (module `main`) over the stand-in std core, through every stage that
-// raises type errors; their diagnostics, and the body checker's state.
+// The program `main` (module `main`) over the stand-in std core and soa, through every stage
+// that raises type errors; their diagnostics, and the body checker's state.
 fn check(main_src: &str) -> (diag.Diags, tc_rows.Typeck) {
+    let (d, tc, _) = run(main_src);
+    return (d, tc);
+}
+
+// As `check`, with the `types` dump of the program.
+fn run(main_src: &str) -> (diag.Diags, tc_rows.Typeck, vec.Vec<u8>) {
     let mut k = test_kit.kit();
     let m = k.package("main", false, true, false);
     let s = k.package("std", true, false, false);
     k.dep(m, "std", s);
     k.file(m, "main", main_src);
     k.file(s, "core", CORE);
+    k.file(s, "soa", SOA);
     let o = k.run();
     let mut fl = files.FileList.empty();
     fl.pkg_builtin.push(false);
@@ -58,7 +70,64 @@ fn check(main_src: &str) -> (diag.Diags, tc_rows.Typeck) {
     diag_kinds.const_drops(&mut d, &kd, order.as_slice(), &sg, &o.ds, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
     let tc = typeck.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, true, sigs.baseline(mem.str_bytes("x86_64-linux")));
     diag_tc.typeck_diags(&mut d, &tc, &sg, &o.ds, &o.md, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
-    return (d, tc);
+    let ty = dump.types_txt(&tc, &sg.cx.tab, &o.tree);
+    return (d, tc, ty);
+}
+
+// Whether the `types` dump ty decides every expression (no `?` line).
+fn decided(ty: &[u8]) -> bool {
+    return !test_kit.has(ty, " ?\n");
+}
+
+test fn const_generic_arguments() {
+    let (d, _, ty) = run("struct M<T, const L: u32> { v: T }\nimpl<T, const L: u32> M<T, L> {\n    pub fn get(&self) -> &T {\n        return &self.v;\n    }\n}\nfn mk<T, const L: u32>(v: T) -> M<T, L> {\n    return M::<T, L>.{ v: v };\n}\nfn fill<const N: usize>(x: u8) -> [u8; N] {\n    return [x; N];\n}\nfn first<const N: usize>(xs: &[u32; N]) -> u32 {\n    return xs[0];\n}\nfn main() {\n    let m = mk::<u32, 1>(5u32);\n    let r = m.get();\n    let a = fill::<4>(1u8);\n    let b = first::<2>(&[1u32, 2u32]);\n    let c = first(&[1u32, 2u32, 3u32]);\n}\n");
+    let t = ty.as_slice();
+    debug.assert(d.len() == 0, "no error");
+    debug.assert(decided(t), "every expression typed");
+    debug.assert(test_kit.has(t, " array t") && test_kit.has(t, " 4\n"), "`fill::<4>` instantiates the array length");
+    debug.assert(test_kit.has(t, " 1\n"), "`M<u32, 1>` keeps its const argument");
+}
+
+test fn soa_columns() {
+    let (d, _, ty) = run("import std.soa;\nstruct P { x: f32, y: u32 }\nfn f(ps: &soa.Soa<P>) -> u32 {\n    let xs = &ps.x;\n    let n = ps.y.len();\n    return ps.y[0];\n}\nfn main() {}\n");
+    let t = ty.as_slice();
+    debug.assert(d.len() == 0, "no error");
+    debug.assert(decided(t), "every expression typed");
+    debug.assert(test_kit.has(t, " slice t"), "a column is a slice of its field");
+}
+
+test fn builtin_turbofish() {
+    let (d, _, ty) = run("fn f(a: i32x4, m: mask32x4, xs: &[f32]) {\n    let b = a.bitcast::<u32x4>();\n    let w = m.rewiden::<16>();\n    let v = m.to_vec::<i32>();\n    let o = xs.align_to::<16>();\n}\nfn g(a: i32x4) {\n    let q = a.div_const::<7>(3);\n}\nfn main() {}\n");
+    let m = messages(&d);
+    debug.assert(d.len() == 1, "the turbofish on `div_const` only");
+    debug.assert(test_kit.has(m.as_slice(), "`div_const` takes 0 generic arguments, found 1\n"), "a built-in that takes no turbofish");
+    let t = ty.as_slice();
+    debug.assert(test_kit.has(t, " vec t") && test_kit.has(t, " 4\n"), "`bitcast::<u32x4>`");
+    debug.assert(test_kit.has(t, " mask 16 4\n"), "`rewiden::<16>`");
+}
+
+test fn contract_clauses() {
+    let (d, _, ty) = run("fn f(x: u32) -> u32 requires(x < 10) ensures(result > x) ensures(result == old(x) + 1) {\n    return x + 1;\n}\nfn main() {}\n");
+    debug.assert(d.len() == 0, "no error");
+    debug.assert(decided(ty.as_slice()), "the clauses are typed: `result`, `old(x)`");
+}
+
+test fn written_generic_arguments() {
+    let (d, _, ty) = run("enum E<T> { A(T), B }\nfn id<T>(x: T) -> T {\n    return x;\n}\nfn main() {\n    let a = E::<u32>.A(1);\n    let b = E::<u32>.B;\n    let h: fn(u32) -> u32 = id::<u32>;\n}\n");
+    debug.assert(d.len() == 0, "no error");
+    debug.assert(decided(ty.as_slice()), "a variant after its enum's arguments, a fn item with its own");
+}
+
+test fn nesting_past_the_limit() {
+    let mut s = string.String.from_str("fn f(b: bool) -> bool {\n    return ");
+    for _ in 0..20005u32 {
+        s.push_str("!");
+    }
+    s.push_str("b;\n}\nfn main() {}\n");
+    let (_, _, ty) = run(s.as_str());
+    let t = ty.as_slice();
+    debug.assert(decided(t), "the levels within the limit are typed");
+    debug.assert(test_kit.has(t, " -\n"), "the levels past it are of the error type");
 }
 
 test fn mismatches_and_their_fixes() {

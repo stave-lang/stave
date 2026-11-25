@@ -97,8 +97,11 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
             d.begin(201, "not-in-loop");
             d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
         } else if code == 201 && case == tc_rows.C_TYPE_ARGS {
+            // the operand: a built-in method's name (its token in x), else the span's text
             d.begin(201, "type-args");
-            d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            let x = g.x.as_slice()[k];
+            let (_, s0, z0) = if x == NONE then (f, s, z) else tok_range(lx, set, t, x, x);
+            d.arg("operand", &set.file(f as usize)[s0 as usize..(s0 + z0) as usize]);
             num_arg(d, &mut buf, "count", g.a.as_slice()[k]);
             num_arg(d, &mut buf, "given", g.b.as_slice()[k]);
         } else if code == 201 && case == tc_rows.C_ARITY {

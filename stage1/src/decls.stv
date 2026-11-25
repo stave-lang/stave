@@ -236,11 +236,6 @@ impl Decls {
         if t + 1 < self.tr_key.len() && self.tr_key.as_slice()[t + 1] == key { return (NONE, true); }
         return (self.tr_decl.as_slice()[t], false);
     }
-
-    pub fn is_poisoned(&self, s: u32) -> bool {
-        let k = search.lower_bound(self.poisoned.as_slice(), s);
-        return k < self.poisoned.len() && self.poisoned.as_slice()[k] == s;
-    }
 }
 
 // The position of key in the sorted keys, or keys.len().

@@ -132,6 +132,9 @@ impl tc_rows.Typeck {
         self.lg_fixed.clear();
         self.lg_float.clear();
         self.binds.clear();
+        self.cargs.clear();
+        self.clause = tc_rows.CL_NONE;
+        self.old_depth = 0;
         self.rets.clear();
         self.ret_why.clear();
         let k = ds.kind.as_slice()[d as usize];
@@ -244,13 +247,12 @@ impl tc_rows.Typeck {
                 let c = self.base + ks[k] as usize;
                 let ent = self.enter(sg, ds, nm, set, t, cut, tree, r, k, c);
                 if self.fc_node.len() > 0 { self.node_coercions(&sg.cx.tab, t, tree); }
-                if ent {
+                if ent && is_level(kind(tree, c)) && self.depth == tc_rows.MAX_DEPTH {
+                    self.too_deep(t, tree, r, c);
+                } else if ent {
                     self.st_row.push(c as% u32);
                     self.st_kid.push(0);
-                    if is_level(kind(tree, c)) {
-                        self.depth = self.depth + 1;
-                        if self.depth > tc_rows.MAX_DEPTH { self.bad = true; }
-                    }
+                    if is_level(kind(tree, c)) { self.depth = self.depth + 1; }
                 }
                 continue;
             }
@@ -262,13 +264,15 @@ impl tc_rows.Typeck {
         }
     }
 
-    // Marks the expression nodes of row c's subtree unknown (a part stage0 checks that this
-    // stage does not enter).
-    fn unknown_subtree(&mut self, tree: &ast.Ast, c: usize) {
+    // Child c of row r one level past `MAX_DEPTH` (E0005 case `expr`): c and its subtree are not
+    // checked and are of the error type. Only `!` takes an operand of the error type (its value
+    // is `bool` whatever the operand); under any other parent the body is not decided here.
+    fn too_deep(&mut self, t: &lex.Tokens, tree: &ast.Ast, r: usize, c: usize) {
         let lo = c - tree.size.as_slice()[c] as usize;
-        for r in lo..c + 1 {
-            if is_expr(kind(tree, r)) { self.nty.as_mut_slice()[r] = UNK; }
+        for x in lo..c + 1 {
+            if is_expr(kind(tree, x)) { self.nty.as_mut_slice()[x] = ERR; }
         }
+        if kind(tree, r) != K_UNARY || tk(t, first_tok(tree, r)) != terminals.T_BANG { self.bad = true; }
     }
 
     // Before child c (the k-th) of row r: whether the walk enters it, and its context type.
@@ -278,8 +282,20 @@ impl tc_rows.Typeck {
         let h = self.hint.as_slice()[r];
         if pk == K_FN_DECL {
             if ck == K_BLOCK { return true; }
-            if ck == K_REQUIRES || ck == K_ENSURES { self.unknown_subtree(tree, c); }
-            return false;
+            if ck != K_REQUIRES && ck != K_ENSURES { return false; }
+            // a contract clause, checked before the body: `result` (bound at the first `ensures`
+            // row) is the returned value
+            if ck == K_ENSURES && first_of(tree, self.base, r, k, K_ENSURES) {
+                let ret = self.rets.as_slice()[self.rets.len() - 1];
+                self.loc.as_mut_slice()[c] = ret;
+            }
+            self.clause = if ck == K_ENSURES then tc_rows.CL_ENSURES else tc_rows.CL_REQUIRES;
+            return true;
+        }
+        if pk == K_REQUIRES || pk == K_ENSURES {
+            if !is_expr(ck) { return false; }
+            self.set_hint_bool(c);
+            return true;
         }
         if pk == K_CONST_DECL || pk == K_STATIC_DECL {
             if !is_expr(ck) { return false; }
@@ -610,9 +626,10 @@ impl tc_rows.Typeck {
             self.finish_arm(sg, tree, r);
             return;
         }
-        if k == K_IF_STMT {
+        if k == K_IF_STMT || k == K_REQUIRES || k == K_ENSURES {
             let ks = tree.kids.row(r);
             self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
+            if k != K_IF_STMT { self.clause = tc_rows.CL_NONE; }
             return;
         }
         if k == K_CONST_DECL || k == K_STATIC_DECL {
@@ -767,7 +784,7 @@ impl tc_rows.Typeck {
             return self.loc.as_slice()[self.self_row as usize];
         }
         if ft == terminals.T_KW_SELF_TYPE { return NONE; }
-        if ft == terminals.T_IDENT { return self.path_head(sg, ds, t, tree, r); }
+        if ft == terminals.T_IDENT { return self.path_head(sg, ds, nm, set, t, cut, tree, r); }
         if ft == terminals.T_L_PAREN { return self.paren(sg, t, tree, r); }
         if ft == terminals.T_L_BRACKET { return self.array_lit(sg, ds, nm, set, t, cut, tree, r, h); }
         if ft == terminals.T_KW_FN { return self.closure_value(sg, tree, r); }
@@ -776,9 +793,9 @@ impl tc_rows.Typeck {
     }
 
     // An identifier Primary: a bare name, or the head of a postfix chain. A local, a const, or a
-    // static is a value, and a bare fn name is its fn item's value; any other head names no
-    // value (`-`).
-    fn path_head(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
+    // static is a value, and a bare fn name (with or without generic arguments) is its fn item's
+    // value; any other head names no value (`-`).
+    fn path_head(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) -> u32 {
         let p = sg.cx.parent.as_slice()[r];
         let head = p != NONE && kind(tree, p as usize) == K_POSTFIX && self.base + tree.kids.row(p as usize)[0] as usize == r;
         let n = (r - self.base) as% u32;
@@ -803,10 +820,14 @@ impl tc_rows.Typeck {
             let ty = sg.cx.ty.as_slice()[target as usize];
             return if ty == ERR || ty == NONE then UNK else ty;
         }
-        // with written generic arguments: not checked yet
-        if dk == decls.DK_FN && !head && tree.kids.row(r).len() == 0 {
+        if dk == decls.DK_FN && !head {
+            let ks = tree.kids.row(r);
+            let ga = if ks.len() == 1 && kind(tree, self.base + ks[0] as usize) == node_kinds.KIND_GENERIC_ARGS then (self.base + ks[0] as usize) as% u32 else NONE;
+            if ks.len() != 0 && ga == NONE { return UNK; }
+            let b = if ga == NONE then NONE else self.targs_row(sg, ds, nm, set, t, cut, tree, target, ga, NONE);
+            if b == UNK { return UNK; }
             let h = self.hint.as_slice()[r];
-            return self.fn_item_value(sg, r, target, NONE, h);
+            return self.fn_item_value(sg, r, target, b, h);
         }
         return if head then NONE else UNK;
     }
@@ -908,7 +929,7 @@ impl tc_rows.Typeck {
         }
         let tab = &mut sg.cx.tab;
         if op == terminals.T_BANG {
-            self.coerce_bool(tab, c);
+            if self.nty.as_slice()[c] != ERR { self.coerce_bool(tab, c); }
             return self.t_bool;
         }
         if op == terminals.T_STAR {
@@ -1412,6 +1433,15 @@ fn compound_op(op: u8) -> u8 {
     return terminals.T_LT_LT_PERCENT;
 }
 
+// Whether child k of row r is the first of its children of kind want.
+fn first_of(tree: &ast.Ast, base: usize, r: usize, k: usize, want: u8) -> bool {
+    let ks = tree.kids.row(r);
+    for j in 0..k {
+        if kind(tree, base + ks[j] as usize) == want { return false; }
+    }
+    return true;
+}
+
 // A node that is one level of `tc_rows.MAX_DEPTH` when the walk enters it.
 fn is_level(k: u8) -> bool {
     return is_expr(k) || k == K_BLOCK;
@@ -1634,6 +1664,9 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         lw: sigs.Lw.new(),
         soa: soa,
         soa_mod: md.soa_mod,
+        old_s: modules.lookup(&nm.tab, mem.str_bytes("old")),
+        clause: tc_rows.CL_NONE,
+        old_depth: 0,
         args: vec.Vec::<u32>.new(),
         headless: tc_chain.headless_names(ds),
         hl_name: hl_name,
@@ -1644,6 +1677,7 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         arm: col.filled(n, NONE),
         binds: vec.Vec::<u32>.new(),
         blo: col.filled(n, NONE),
+        cargs: vec.Vec::<u32>.new(),
         waits: col.filled(n, false),
         mt_p: vec.Vec::<u32>.new(),
         mt_x: vec.Vec::<u32>.new(),
