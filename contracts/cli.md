@@ -14,6 +14,7 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 | `stave test [PKG_DIR] [--release] [--target T] [--filter S [--exact]] [--runner CMD] [--input N]` | Build and run `test fn`s and the conformance files. `--filter S` selects those whose name contains `S`; with `--exact`, the one named `S` (`main.sums`; `--exact` without `--filter`: exit 2). `--input N` runs only input N of the selected `test fn`: a selection of no `test fn`, of several, or of one without parameters is exit 2, and so is a PKG_DIR without `stave.toml`. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
 | `stave unsafe-report [PKG_DIR] [--json]` | List the unsafe inventory |
 | `stave effects [PKG_DIR] [--json]` | List the effect set of each fn of the program's own packages |
+| `stave dup [PKG_DIR] [--target T] [--all] [--min-size N] [--json \| --baseline FILE \| --write-baseline FILE]` | List the classes of fns with the same code and the re-declared consts; with `--baseline`, fail on a new class |
 | `stave caps-report [PKG_DIR] [--json]` | Planned: per package, the OS capability classes its code can reach |
 | `stave bounds-report [PKG_DIR] [--target T] [--json]` | Planned: every bounds check kept in release code, with the reason |
 | `stave branch-report [PKG_DIR] [--target T] [--json]` | Planned: branches in loops whose condition depends on loaded data, with a suggested fix |
@@ -148,6 +149,57 @@ Outputs and statuses of the code-generating commands:
   `col` as in `unsafe-report`, at the fn's name (a closure: its `fn` token); `fn` is the
   checked-IR path, with the type args of an instance (`main.id<u32>`), a closure `<fn>.<k>`.
   Deny-clause violations (E1401, E1403) are printed on stderr after the report, exit 1.
+
+- `stave dup [PKG_DIR] [--target T] [--all] [--min-size N] [--json]`: checks the program as
+  `stave check` does (always stage0; `--target` selects the arch packages and the fns built,
+  default the host baseline); with error diagnostics they go to stderr (`--json`: as JSON lines),
+  nothing to stdout, exit 1. Otherwise it lowers every fn instance of the call graph with a
+  checked body at level `lowered` (before the removal of proven checks and any optimization) and
+  compares their duplicate forms (`stave_ir::form`): the canonical IR text of the fn with its
+  closures, without its own name, instance id, type args, link symbol, and site rows (`!row`, and a
+  site row passed as an argument is `site`); the fn itself is `@self`, its closure `k` `@self.k`;
+  every other fn is spelled by the first fn of its class of equal code (the least fixpoint: calls
+  of fns with the same code are the same code), every type by its module type id. A **class** is
+  a set of instances with equal forms from at least two source fns; a generic fn takes part per
+  instance, and two generic fns whose instances differ at a type args tuple both are built with
+  are never in one class. `self` classes compare methods up to `Self`: the `Self` type of each
+  (the receiver, else a return type that is the impl's self type) and each type containing it are
+  spelled by their structure with `Self`, a call of a method of the same `Self` type by
+  `@Self.<trait path or ->.<name>` and its own type args; such a class needs two `Self` types.
+  Not compared: fns whose size (instructions plus blocks, closures included) is below `N` (default
+  5), `test fn`s, drop glue, fns the target does not build. A class is listed when a member is
+  outside the built-in packages, or with `--all`. Human: per class, by saving (size times members
+  minus one) descending, then form (`exact` first), then members: `class <i>: exact|up to Self,
+  size <s>, <n> fns, saves <v>`, then one line per source fn sorted by path,
+  `  <file>:<line>: <path>` (a generic fn: its instances `<path><args>`, comma-separated), then
+  ` (<marks>)` from `pub`, `trait-impl`, `export`, `known` (the last three must exist where they
+  are). Then each `const` name, type, and value declared in more than one module (most modules
+  first, then name): `const <name>: <type> = <value>: <n> modules` and a line per const; then each
+  const that other consts are declared as (`const X: T = m.Y;`, an `as`-family cast allowed),
+  most aliases first: `alias of <path>: <n>` and a line per alias; then the summary line
+  `dup: <c> classes (<e> exact, <s> up to Self) over <f> fns of size >= <N>; <g> const groups,
+  <a> aliases`. `file` and `line` as in `unsafe-report`, at the name. `--json`: one object per
+  class (`{"kind":"class","form":"exact","size":13,"saving":13,"members":[{"fn":"util.sum_mix",
+  "instances":[],"file":"src/util.stv","line":7,"marks":["pub"]}]}`), const group
+  (`{"kind":"const","name":..,"type":..,"value":..,"members":[{"const":..,"file":..,"line":..}]}`),
+  and alias group (`{"kind":"alias","of":..,"members":[..]}`), in the human order, no summary.
+  The output is the same for every `STAVE_THREADS`.
+  - `--write-baseline FILE`: writes the classes to FILE instead, a `#` header line, then one line
+    per class, `<form> <path> <path>...` (`exact` or `self`, the source fns' paths sorted), the
+    lines sorted: no lines, sizes, or instances, so an edit elsewhere does not change it.
+  - `--baseline FILE` (**the `dup-gate` check**): a class passes when one baseline line of its
+    form holds all its paths. Each fn of a class that does not pass and is not on that line gets
+    one stdout line, `<file>:<line>: new duplicate (<form>, size <s>): `<fn>` is the same code
+    [up to `Self`] as `<existing>` (<file>:<line>): call it instead` (a `self` class: `write it
+    once, generic over a trait the types implement`), `<existing>` being a member the baseline
+    had, a callable one first (`pub`, no other mark); then `dup: <n> new duplicates not in the
+    baseline`, exit 1. Baseline lines that share no two fns with a class are allowed (one
+    stderr line counts them): removing a class is always allowed, adding one takes
+    `--write-baseline` and review. An unreadable or malformed FILE is exit 2.
+
+  The CI step `tools/ci-step/run.sh dup-gate` (part of `check`) runs `stave dup stage1 --all
+  --target x86_64-linux --baseline tools/ci-step/dup-baseline.txt` (stage1 with `ir`, `prims`, `std`,
+  `runtime`); `STAVE_BLESS=1` writes the baseline instead.
 
 - `stave fix [PKG_DIR] [--dry-run]`: runs `stave check` (always stage0), applies every fix whose
   `applicability` is `exact` to the source files of the root package (never `std`, `runtime`, or

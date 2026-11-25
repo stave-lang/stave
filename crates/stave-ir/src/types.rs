@@ -634,6 +634,13 @@ pub fn feature_generators(fs: FeatureSet) -> Vec<Feature> {
 
 /// TypeKey text of one key.
 pub fn key_text(k: &TypeKey) -> String {
+    key_text_with(k, &mut |s, t| {
+        let _ = write!(s, "t{}", t.0);
+    })
+}
+
+/// [`key_text`] with each component type spelled by `spell` (`key_text` spells `t<N>`).
+pub fn key_text_with(k: &TypeKey, spell: &mut dyn FnMut(&mut String, TypeId)) -> String {
     let mut s = String::new();
     let lanes = |n: &Lanes| match n {
         Lanes::Fixed(k) => k.to_string(),
@@ -650,16 +657,21 @@ pub fn key_text(k: &TypeKey) -> String {
         TypeKey::Char => s.push_str("char"),
         TypeKey::Str => s.push_str("str"),
         TypeKey::Ref { mutable, inner } => {
-            let _ = write!(s, "ref {}t{}", if *mutable { "mut " } else { "" }, inner.0);
+            s.push_str(if *mutable { "ref mut " } else { "ref " });
+            spell(&mut s, *inner);
         }
         TypeKey::RawPtr { mutable, inner } => {
-            let _ = write!(s, "ptr {} t{}", if *mutable { "mut" } else { "const" }, inner.0);
+            s.push_str(if *mutable { "ptr mut " } else { "ptr const " });
+            spell(&mut s, *inner);
         }
         TypeKey::Array { elem, len } => {
-            let _ = write!(s, "array t{} {}", elem.0, len);
+            s.push_str("array ");
+            spell(&mut s, *elem);
+            let _ = write!(s, " {len}");
         }
         TypeKey::Slice { elem, align } => {
-            let _ = write!(s, "slice t{}", elem.0);
+            s.push_str("slice ");
+            spell(&mut s, *elem);
             if let Some(a) = align {
                 let _ = write!(s, " align {a}");
             }
@@ -667,7 +679,8 @@ pub fn key_text(k: &TypeKey) -> String {
         TypeKey::Tuple(ts) => {
             s.push_str("tuple");
             for t in ts {
-                let _ = write!(s, " t{}", t.0);
+                s.push(' ');
+                spell(&mut s, *t);
             }
         }
         TypeKey::Adt { def, args } => {
@@ -675,7 +688,8 @@ pub fn key_text(k: &TypeKey) -> String {
             for a in args {
                 match a {
                     GenericArg::Type(t) => {
-                        let _ = write!(s, " t{}", t.0);
+                        s.push(' ');
+                        spell(&mut s, *t);
                     }
                     GenericArg::Const(c) => {
                         let _ = write!(s, " {c}");
@@ -686,15 +700,19 @@ pub fn key_text(k: &TypeKey) -> String {
         TypeKey::FnType { params, ret, features } => {
             s.push_str("fntype");
             for p in params {
-                let _ = write!(s, " t{}", p.0);
+                s.push(' ');
+                spell(&mut s, *p);
             }
-            let _ = write!(s, " -> t{}", ret.0);
+            s.push_str(" -> ");
+            spell(&mut s, *ret);
             for f in feature_generators(*features) {
                 let _ = write!(s, " {}", f.name());
             }
         }
         TypeKey::Vec { lane, n } => {
-            let _ = write!(s, "vec t{} {}", lane.0, lanes(n));
+            s.push_str("vec ");
+            spell(&mut s, *lane);
+            let _ = write!(s, " {}", lanes(n));
         }
         TypeKey::Mask { width, n } => {
             let _ = write!(s, "mask {} {}", width, lanes(n));

@@ -101,6 +101,16 @@ pub fn abi_signature(k: Known) -> Option<(&'static [ITy], ITy)> {
     abi_table(k)
 }
 
+/// The param of a known item that lowering passes a site row in, as an int constant
+/// (contracts/intrinsics.md "Paths fixed by the compiler"): the user-site store, the error-trace
+/// hooks, and the failed `ensures` report. `None` for the others.
+pub fn site_param(k: Known) -> Option<usize> {
+    match k {
+        Known::SetUserSite | Known::ErrtracePush | Known::ErrtraceRestart | Known::EnsuresFailed => Some(0),
+        _ => None,
+    }
+}
+
 /// Whether `f` is the fn a failed `requires` check calls.
 pub fn is_requires_failed(f: &crate::Func) -> bool {
     f.known == Some(Known::RequiresFailed)

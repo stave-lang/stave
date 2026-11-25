@@ -179,3 +179,13 @@ pub fn single(src: &str) -> Out {
     k.file(s, "core", "pub enum Option<T> { Some(T), None }\npub trait Copy {}\n");
     return k.run();
 }
+
+// Whether the bytes of `needle` occur in `hay`.
+pub fn has(hay: &[u8], needle: &str) -> bool {
+    let n = mem.str_bytes(needle);
+    if n.len() > hay.len() { return false; }
+    for i in 0..hay.len() - n.len() + 1 {
+        if hay[i..i + n.len()].eq(n) { return true; }
+    }
+    return false;
+}

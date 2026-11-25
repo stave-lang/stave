@@ -24,15 +24,6 @@ const MAIN: &str = "fn one(x: u16) -> u16 { return x; }\nfn f(a: u32, b: u64) ->
 
 const GLOBALS: &str = "struct R { fd: i32 }\nimpl Drop for R {\n    fn drop(&mut self) {}\n}\nconst S: &str = \"x\";\nconst T: &str = S;\nstatic U: &str = \"y\";\nconst V: Option<&u8> = Option.None;\nstatic W: Option<&u8> = Option.None;\nconst K: R = R.{ fd: 1i32 };\nconst N: u32 = 1;\nfn main() {}\n";
 
-fn has(hay: &[u8], needle: &str) -> bool {
-    let n = mem.str_bytes(needle);
-    if n.len() > hay.len() { return false; }
-    for i in 0..hay.len() - n.len() + 1 {
-        if hay[i..i + n.len()].eq(n) { return true; }
-    }
-    return false;
-}
-
 // Every message of d, one per line.
 fn messages(d: &diag.Diags) -> vec.Vec<u8> {
     debug.assert(!d.bad.get(), "every row builds from its template");
@@ -75,13 +66,13 @@ test fn mismatches_and_their_fixes() {
     let m = messages(&d);
     let ms = m.as_slice();
     debug.assert(d.len() == 7, "one diagnostic per error, none in `ok`");
-    debug.assert(has(ms, "mismatched types: expected `u16`, found `u32`\n"), "an annotation");
-    debug.assert(has(ms, "mismatched types: expected `u32`, found `u64`\n"), "the right operand");
-    debug.assert(has(ms, "`one` takes 1 arguments, found 2\n"), "arity");
-    debug.assert(has(ms, "mismatched types: expected `u32`, found `()`\n"), "`return;` in a fn with a value");
-    debug.assert(has(ms, "`break` outside of a loop\n"), "`break` outside of a loop");
-    debug.assert(has(ms, "mismatched types: expected `u32`, found `Option<u32>`\n"), "a return value");
-    debug.assert(has(ms, "mismatched types: expected `Option<u32>`, found `u32`\n"), "a return value to wrap");
+    debug.assert(test_kit.has(ms, "mismatched types: expected `u16`, found `u32`\n"), "an annotation");
+    debug.assert(test_kit.has(ms, "mismatched types: expected `u32`, found `u64`\n"), "the right operand");
+    debug.assert(test_kit.has(ms, "`one` takes 1 arguments, found 2\n"), "arity");
+    debug.assert(test_kit.has(ms, "mismatched types: expected `u32`, found `()`\n"), "`return;` in a fn with a value");
+    debug.assert(test_kit.has(ms, "`break` outside of a loop\n"), "`break` outside of a loop");
+    debug.assert(test_kit.has(ms, "mismatched types: expected `u32`, found `Option<u32>`\n"), "a return value");
+    debug.assert(test_kit.has(ms, "mismatched types: expected `Option<u32>`, found `u32`\n"), "a return value to wrap");
     let mut fixes: u32 = 0;
     for r in 0..tc.dg.len() {
         let c = tc.dg.case.as_slice()[r];
@@ -96,11 +87,11 @@ test fn casts_operators_and_patterns() {
     let m = messages(&d);
     let ms = m.as_slice();
     debug.assert(d.len() == 5, "one diagnostic per error");
-    debug.assert(has(ms, "`as` from `u64` to `u32` can lose information\n"), "a lossy plain cast");
-    debug.assert(has(ms, "operator `+%` is not defined for `f32`\n"), "a wrapping float operator");
-    debug.assert(has(ms, "operator `==` is not defined for `P`\n"), "`==` on a struct");
-    debug.assert(has(ms, "operator `[]` is not defined for `u64`\n"), "indexing a scalar");
-    debug.assert(has(ms, "this pattern tests `==`, which is not defined for `&str`\n"), "a string pattern");
+    debug.assert(test_kit.has(ms, "`as` from `u64` to `u32` can lose information\n"), "a lossy plain cast");
+    debug.assert(test_kit.has(ms, "operator `+%` is not defined for `f32`\n"), "a wrapping float operator");
+    debug.assert(test_kit.has(ms, "operator `==` is not defined for `P`\n"), "`==` on a struct");
+    debug.assert(test_kit.has(ms, "operator `[]` is not defined for `u64`\n"), "indexing a scalar");
+    debug.assert(test_kit.has(ms, "this pattern tests `==`, which is not defined for `&str`\n"), "a string pattern");
 }
 
 test fn literals() {
@@ -108,11 +99,11 @@ test fn literals() {
     let m = messages(&d);
     let ms = m.as_slice();
     debug.assert(d.len() == 5, "one diagnostic per error; `-128i8` and the u64 maximum fit");
-    debug.assert(has(ms, "literal `7` has no type context\n"), "no context");
-    debug.assert(has(ms, "literal `300` is out of range for `u8`\n"), "too big");
-    debug.assert(has(ms, "literal `-129` is out of range for `i8`\n"), "a folded minus");
-    debug.assert(has(ms, "the generic arguments of `Option.None` cannot be inferred\n"), "a generic unit variant without a context");
-    debug.assert(has(ms, "literal `12abc` is malformed\n"), "a bad suffix");
+    debug.assert(test_kit.has(ms, "literal `7` has no type context\n"), "no context");
+    debug.assert(test_kit.has(ms, "literal `300` is out of range for `u8`\n"), "too big");
+    debug.assert(test_kit.has(ms, "literal `-129` is out of range for `i8`\n"), "a folded minus");
+    debug.assert(test_kit.has(ms, "the generic arguments of `Option.None` cannot be inferred\n"), "a generic unit variant without a context");
+    debug.assert(test_kit.has(ms, "literal `12abc` is malformed\n"), "a bad suffix");
 }
 
 test fn globals_with_views_or_drop_glue() {
@@ -120,7 +111,7 @@ test fn globals_with_views_or_drop_glue() {
     let m = messages(&d);
     let ms = m.as_slice();
     debug.assert(d.len() == 3, "static strings and an int const are fine");
-    debug.assert(has(ms, "const `V` has reference or view type `Option<&u8>`\n"), "a view in a const");
-    debug.assert(has(ms, "static `W` has reference or view type `Option<&u8>`\n"), "a view in a static");
-    debug.assert(has(ms, "const `K` has type `R`, which has drop glue\n"), "drop glue in a const");
+    debug.assert(test_kit.has(ms, "const `V` has reference or view type `Option<&u8>`\n"), "a view in a const");
+    debug.assert(test_kit.has(ms, "static `W` has reference or view type `Option<&u8>`\n"), "a view in a static");
+    debug.assert(test_kit.has(ms, "const `K` has type `R`, which has drop glue\n"), "drop glue in a const");
 }
