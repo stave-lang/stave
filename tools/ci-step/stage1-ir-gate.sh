@@ -16,11 +16,12 @@
 # only by the bounds audit, a step stage1 does not have), refused in lines or structure (an
 # `error:` line), or refused by the verifier (a `verify:` line).
 #
-# Optimizer goldens: `stage1 ir opt --dump=inline` on every tests/opt case with an `inline.txt`,
-# and `--dump-phase=inline --verify-phases` on every case with an `inline.ir`, each on its input
-# and on the input's `stage1 ir fmt` text; stage0's `stave ir check` loads every such module at
-# level `opt`. A case whose `limits` asks for more than one round is skipped (the clean-up between
-# rounds is not built) and counted.
+# Optimizer goldens, each run under the case's `limits` (one `--limit` per line), on `input.ir`
+# and on its `stage1 ir fmt` text, both byte-equal to the expected file: `--dump=inline` against
+# `inline.txt`; `--dump-phase=inline --verify-phases` against `inline.ir`; and on every case without
+# a `passes` file `--dump-phase=clean --verify-phases` against `clean.ir`, else `output.ir` (a
+# decision-only case has neither: its module is verified, and the two runs must agree). stage0's
+# `stave ir check` loads every module after a phase. No case is skipped.
 #
 # Corpus: the roots of the stage1 gate (every package and other `.stv` file below
 # tests/conformance), the bench programs, and the stage1 package itself (the largest text: its
@@ -74,22 +75,15 @@ if [ "$PROFILE" = release ]; then cargo build -q --locked --release -p stave-cli
 mkdir -p "$OUT"
 "$S0" build "$ROOT/stage1" -o "$S1" >"$OUT/build.log" 2>&1 || { cat "$OUT/build.log"; exit 1; }
 
-# Optimizer goldens (opt-passes.md "Gates"): per case of tests/opt with an `inline.txt`, the
-# `inline` dump of `input.ir` under the case's `limits`, and the dump of its `stage1 ir fmt` text,
-# equal that file byte for byte.
+# Optimizer goldens (opt-passes.md "Gates").
 fail=0
+lims_of() { if [ -f "$1/limits" ]; then sed 's/^/--limit /' "$1/limits" | tr '\n' ' '; fi; }
 ocases=0
 osame=0
-oskip=0
 for c in "$ROOT"/tests/opt/*/; do
   [ -f "$c/inline.txt" ] || continue
-  if [ -f "$c/limits" ] && awk -F= '$1 == "rounds" && $2 > 1 { r = 1 } END { exit !r }' "$c/limits"; then
-    oskip=$((oskip + 1))
-    continue
-  fi
   ocases=$((ocases + 1))
-  lims=""
-  if [ -f "$c/limits" ]; then lims=$(sed 's/^/--limit /' "$c/limits" | tr '\n' ' '); fi
+  lims=$(lims_of "$c")
   o="$OUT/opt-$(basename "$c")"
   # shellcheck disable=SC2086
   if "$S1" ir opt --dump=inline $lims "$c/input.ir" > "$o.inline" 2> "$o.err" &&
@@ -102,36 +96,47 @@ for c in "$ROOT"/tests/opt/*/; do
     fail=1
   fi
 done
-echo "stage1-ir-gate: opt inline dumps $osame / $ocases equal ($oskip cases of more than one round skipped)"
+echo "stage1-ir-gate: opt inline dumps $osame / $ocases equal"
 
-# The module after the expansion (`--dump-phase=inline`, verified by stage1) of every case with an
-# `inline.ir`, on its input and on its `stage1 ir fmt` text, equals that file; stage0 loads it.
+# phase_ok CASE PHASE WANT: the module after PHASE of the last round, verified by stage1, on the
+# input and on its fmt text, equals WANT (empty: the run on the input); stage0 loads it.
+phase_ok() {
+  lims=$(lims_of "$1")
+  o="$OUT/opt-$(basename "$1").$2"
+  exp="${3:-$o.ir}"
+  # shellcheck disable=SC2086
+  "$S1" ir opt --dump-phase="$2" --verify-phases $lims "$1/input.ir" > "$o.ir" 2> "$o.err" &&
+    "$S1" ir fmt "$1/input.ir" > "$o.fmt" &&
+    "$S1" ir opt --dump-phase="$2" --verify-phases $lims "$o.fmt" > "$o.fmt.ir" 2>> "$o.err" &&
+    cmp -s "$exp" "$o.ir" && cmp -s "$exp" "$o.fmt.ir" &&
+    "$S0" ir check "$o.ir" 2>> "$o.err"
+}
+phase_fail() {
+  echo "OPT $2 DIFF $(basename "$1") ($(diff "$3" "$OUT/opt-$(basename "$1").$2.ir" 2>&1 | head -3 | tr '\n' ' ')$(head -c 200 "$OUT/opt-$(basename "$1").$2.err"))"
+}
 xcases=0
 xsame=0
-xskip=0
+ccases=0
+csame=0
+cver=0
 for c in "$ROOT"/tests/opt/*/; do
-  [ -f "$c/inline.ir" ] || continue
-  if [ -f "$c/limits" ] && awk -F= '$1 == "rounds" && $2 > 1 { r = 1 } END { exit !r }' "$c/limits"; then
-    xskip=$((xskip + 1))
-    continue
+  if [ -f "$c/inline.ir" ]; then
+    xcases=$((xcases + 1))
+    if phase_ok "$c" inline "$c/inline.ir"; then xsame=$((xsame + 1)); else phase_fail "$c" inline "$c/inline.ir"; fail=1; fi
   fi
-  xcases=$((xcases + 1))
-  lims=""
-  if [ -f "$c/limits" ]; then lims=$(sed 's/^/--limit /' "$c/limits" | tr '\n' ' '); fi
-  o="$OUT/opt-$(basename "$c")"
-  # shellcheck disable=SC2086
-  if "$S1" ir opt --dump-phase=inline --verify-phases $lims "$c/input.ir" > "$o.x.ir" 2> "$o.x.err" &&
-     "$S1" ir fmt "$c/input.ir" > "$o.x.fmt" &&
-     "$S1" ir opt --dump-phase=inline --verify-phases $lims "$o.x.fmt" > "$o.x.fmt.ir" 2>> "$o.x.err" &&
-     cmp -s "$c/inline.ir" "$o.x.ir" && cmp -s "$c/inline.ir" "$o.x.fmt.ir" &&
-     "$S0" ir check "$o.x.ir" 2>> "$o.x.err"; then
-    xsame=$((xsame + 1))
+  [ -f "$c/passes" ] && continue
+  ccases=$((ccases + 1))
+  want=""
+  if [ -f "$c/clean.ir" ]; then want="$c/clean.ir"; elif [ -f "$c/output.ir" ]; then want="$c/output.ir"; fi
+  if phase_ok "$c" clean "$want"; then
+    if [ -n "$want" ]; then csame=$((csame + 1)); else cver=$((cver + 1)); fi
   else
-    echo "OPT X DIFF $(basename "$c") ($(diff "$c/inline.ir" "$o.x.ir" 2>&1 | head -3 | tr '\n' ' ')$(head -c 200 "$o.x.err"))"
+    phase_fail "$c" clean "${want:-/dev/null}"
     fail=1
   fi
 done
-echo "stage1-ir-gate: opt modules after X $xsame / $xcases equal and loaded by stage0 ($xskip cases of more than one round skipped)"
+echo "stage1-ir-gate: opt modules after X $xsame / $xcases equal, verified, loaded by stage0"
+echo "stage1-ir-gate: opt modules after C* $csame / $((ccases - cver)) equal, $cver of $ccases without an expected text verified, all loaded by stage0"
 
 LIST="$OUT/roots.txt"
 CONF="$ROOT/tests/conformance"
