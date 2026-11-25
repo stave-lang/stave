@@ -1,6 +1,7 @@
 //~ EXIT 101
-//~ STDERR-CONTAINS "panic: Bounds at bounds_array_set.stv:6:22 in main.fill (thread 0)"
-// A write into an array value (SSA `set`) with a dynamic index ≥ N traps.
+//~ STDERR-CONTAINS "panic: Bounds at bounds_array_set.stv:7:22 in main.fill (thread 0)"
+// A write into an element of a local array (in its slot, written in place) with a dynamic
+// index ≥ N traps.
 fn fill(n: usize) -> u8 {
     let mut a: [u8; 3] = [0, 0, 0];
     for i in 0..n { a[i] = 1; }

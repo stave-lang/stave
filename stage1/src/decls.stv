@@ -231,9 +231,16 @@ impl Decls {
             if p != NONE && !imp && self.flags.as_slice()[p as usize] & F_PUB != 0 { return (G_DECL, p); }
         }
         if self.is_prim.as_slice()[s as usize] { return (G_PRIM, s); }
-        let b = self.builtin.as_slice()[s as usize];
-        if b == 1 || (b == 2 && m == md.soa_mod) { return (G_BUILTIN, s); }
+        if self.builtin_fn(s, m == md.soa_mod) { return (G_BUILTIN, s); }
         return (G_NONE, NONE);
+    }
+
+    // Whether name s, when no decl takes it, is a built-in fn of a module (`in_soa`: the module
+    // is `std.soa`, which alone sees the row built-ins).
+    pub fn builtin_fn(&self, s: u32, in_soa: bool) -> bool {
+        if s == NONE || self.is_prim.as_slice()[s as usize] { return false; }
+        let b = self.builtin.as_slice()[s as usize];
+        return b == 1 || (b == 2 && in_soa);
     }
 
     // The member named S of decl d that a path step reaches: a variant or a trait method.

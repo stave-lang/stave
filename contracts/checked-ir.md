@@ -92,7 +92,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `make` | elems.. | tuple, struct, or array value (SSA aggregate) |
 | `get` † / `set` † | `agg idx` / `agg idx v` | field (constant index) or array element; `set` yields the updated aggregate; a dynamic array index traps `Bounds` |
 | `enum.make` / `enum.tag` / `enum.get` | `v fields..` / `e` / `e v f` | enum value of variant `v` (constant) with its fields; its variant index (result `u32`; the verifier accepts any int type holding the variant count); field `f` of variant `v` |
-| `slot` | — | `%k = slot t<ref mut T>`: a stack slot for an address-taken local of type T, result `&mut T` |
+| `slot` | — | `%k = slot t<ref mut T>`: a stack slot for a local of type T that lives in memory (SSA rule), result `&mut T` |
 | `load` / `store` | `p` / `p v` | memory read / write (`store` has no result); a `bool` byte read from memory is `1` iff nonzero |
 | `addr.field` / `addr.enum_field` / `addr.elem` | `p i` / `p v f` / `p i` | address arithmetic, unchecked (wrapping: `p + i * size` mod 2^64) |
 | `slice.make` / `slice.len` / `slice.ptr` | `p n` / `s` / `s` | fat pointer (`&[T]`, `&str`) parts |
@@ -218,9 +218,12 @@ b2():
 
 ## SSA rule (pruned SSA)
 
-- Every `let` binding is its own local. A local whose address is taken (`&`, `&mut`, autoref) lives
-  in a `slot` created in `b0`, in declaration order, and is read and written with `load`/`store`.
-  Every other local is an SSA value: `let` and assignment rebind it and emit no instruction.
+- Every `let` binding is its own local. A local lives in a `slot` created in `b0`, in declaration
+  order, and is read and written with `load`/`store`, when its address is taken (`&`, `&mut`,
+  autoref, a sub-slice), a closure captures it, its type has drop glue, or an assignment stores
+  into a part of it (`a[i] = v`, `s.f += v`, `t.0[j].k = v`): such a store writes the part in
+  place. Every other local is an SSA value: `let` and assignment rebind it and emit no
+  instruction.
 - A join (if/match join, loop head, loop exit, `for` head and exit, `&&`/`||` join) has exactly one
   block param per SSA local that is assigned inside the construct (a branch, arm, or loop body) and
   is live at the join's entry. Liveness is computed by path exploration. Params are ordered by local index (fn params, then `let`s in source order). An expression
@@ -233,11 +236,11 @@ b2():
   guard and the body are lowered once; a false guard continues with the next arm.
 - No other block params. No folding, copy propagation, or dead-code removal beyond unreachable
   blocks, except: a literal `-` is folded; `size_of` / `align_of` / `needs_drop::<T>()` are the
-  instance's constant; `!` of a constant `bool` is the constant; an `if` (statement or
-  expression) whose condition is a constant ends in `br` to the taken arm (or the join), and the
-  other arm, unreachable, is deleted (lang-details.md, "§1 Type queries").
-- **Slots**: every `slot` is in `b0`, before any other instruction of `b0`, one per address-taken
-  local in declaration order (fn params first, then `let`s in source order).
+  instance's constant; an `if` (statement or expression) whose condition is a constant condition
+  (lang-details.md, "§1 Type queries") ends in `br` to the taken arm (or the join), and the other
+  arm, unreachable, is deleted.
+- **Slots**: every `slot` is in `b0`, before any other instruction of `b0`, one per local in a
+  slot in declaration order (fn params first, then `let`s in source order).
 - **Panics**: an unconditional trap (`unwrap` on `None`, a failed `std.debug.assert`, ...) is
   `panic.<kind> ()` followed by the terminator `unreachable`; code after it in source is
   unreachable and deleted with its blocks. A call of a `-> never` fn is followed by `unreachable`
@@ -276,8 +279,8 @@ b2():
   Only the witness checker makes an unchecked entry or a call of one.
 - **Bounds checks** (stave-ir `bounds`): `xs[i]` on a place in memory (a
   slice, or an array behind a reference or in a `slot`) is `check.bounds i n` immediately before
-  `addr.elem p i` (`n` = `slice.len p`, or the array length as a constant); `a[i]` on an array SSA
-  value is `get`/`set`, which check a dynamic index themselves. A constant index ≥ a constant array
+  `addr.elem p i` (`n` = `slice.len p`, or the array length as a constant); `a[i]` read from an
+  array SSA value is `get`, which checks a dynamic index itself. A constant index ≥ a constant array
   length is `panic.bounds ()` + `unreachable` (the trap is kept; sub-slices fold the same way;
   the code after it is lowered into a block nothing reaches, which the post-pass deletes).
   One pass after lowering removes the checks that have a proof (constant index < length, a

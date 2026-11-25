@@ -1,0 +1,565 @@
+// Built-in methods and type-relative built-ins of the body checker (types/check, see `typeck`),
+// as a table: stage0's `builtins.rs` (`builtin_method`, `builtin_method_sig`) and the
+// type-relative built-ins of `expr.rs` (`f32x8.splat`, `mask32x8.first_n`).
+//
+// Owns: which built-in a method call or a type-relative call names, and its signature. A built-in
+// is a callee id (`is_builtin`) the chain module (`tc_chain`) calls through `params`, `param`, and
+// `ret`, with the receiver type, or the type a type-relative call names, as `c`. Every entry is
+// (receiver kind or type head, name) -> (parameter count, parameter types, result type); `UNK`
+// is the answer until the entry is in the table, so an entry not written yet prints `?`, never a
+// guess.
+//
+// A callee is `B_BASE + k`, k the index of the name in `NAMES`; the receiver's type tells the
+// vector, int, pointer, and slice forms of one name apart. The parameter count depends on k
+// alone, so a slice's prefetch hints (they take an index) are `K_SPF` above the pointer's. Each
+// argument has a kind (`arg_kind`): checked against its `param` type (`A_IS`), typed without a
+// context (`A_FREE`: mask `select`'s operands, whose common type `select_ret` makes the result),
+// the operands of `bool.select` (`A_SEL`: the call's context, then the first operand's type),
+// an aligned slice that keeps its own type (`A_ALIGNED`), or a gather / scatter index (`A_INDEX`).
+// `permute` takes its lane indices as a turbofish (`takes_targs`). Not in the table, so `UNK`: `bitcast`, `to_vec`, `rewiden`, `align_to` (their turbofish
+// is a type or a constant).
+//
+// Entry points: `table` (the `Builtins` of a program); `method` (a method call's built-in on a
+// receiver at one level of auto-deref), `type_head` (the built-in type a path head names),
+// `type_rel` (a type-relative built-in of such a type), `params`, `arg_kind`, `param`, `ret`,
+// `select_ret`, `takes_targs`; `is_builtin`.
+import intern;
+import modules;
+import sigs;
+import types;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+// A type or callee the checker does not decide (printed `?`); `tc_rows.UNK` is this value.
+pub const UNK: u32 = 4294967293;
+
+// The kinds of a built-in's argument (see the top).
+pub const A_IS: u8 = 0;
+pub const A_FREE: u8 = 1;
+pub const A_SEL: u8 = 2;
+pub const A_ALIGNED: u8 = 3;
+pub const A_INDEX: u8 = 4;
+
+// Callee ids of the built-ins: `B_BASE + k` for built-in k.
+const B_BASE: u32 = 4294967040;
+const B_END: u32 = 4294967280;
+
+// The names the table looks up, in the order of their k. The groups are what the guards below
+// test as ranges.
+const NAMES: &str = "len sqrt abs floor ceil round trunc scan_add copysign min_num max_num min_x86 max_x86 fma min max popcount clz scan_add_wrap andnot div_lanes mul_hi lookup abs_wrap reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or reduce_add_ordered split widen_lo widen_hi narrow_wrap narrow_sat compress expand store store_masked scatter ctz mul_wide store_stream to_bits read write write_stream prefetch_read_l1 prefetch_read_l2 prefetch_read_l3 prefetch_read_nta prefetch_write_l1 prefetch_write_l2 prefetch_write_l3 prefetch_write_nta splat load load_masked gather join first_n all none select permute load_aligned store_aligned checked_add checked_sub checked_mul div_const";
+
+// `len` of an array, slice, or `str`: no parameters, `usize`.
+const K_LEN: u32 = 0;
+// Vector, float lanes only, no parameter, the vector: `sqrt abs floor ceil round trunc scan_add`.
+const K_FLOAT0: u32 = 1;
+const K_FLOAT1: u32 = 7;
+// Float lanes only, one vector parameter, the vector: `copysign min_num max_num min_x86 max_x86`.
+const K_FLOAT2: u32 = 8;
+const K_FLOAT3: u32 = 12;
+const K_FMA: u32 = 13;
+const K_MIN: u32 = 14;
+const K_MAX: u32 = 15;
+// Integer lanes (a scalar int too): `popcount clz` and the vector's `scan_add_wrap`.
+const K_POPCOUNT: u32 = 16;
+const K_CLZ: u32 = 17;
+const K_SCAN_ADD_WRAP: u32 = 18;
+// Integer lanes, one vector parameter, the vector: `andnot div_lanes mul_hi lookup`.
+const K_ANDNOT: u32 = 19;
+const K_MUL_HI: u32 = 21;
+const K_LOOKUP: u32 = 22;
+const K_ABS_WRAP: u32 = 23;
+// Reductions: the lane type.
+const K_REDUCE_ADD: u32 = 24;
+const K_REDUCE_ADD_WRAP: u32 = 25;
+const K_REDUCE_MIN: u32 = 26;
+const K_REDUCE_MAX: u32 = 27;
+const K_REDUCE_AND: u32 = 28;
+const K_REDUCE_OR: u32 = 29;
+const K_REDUCE_ADD_ORDERED: u32 = 30;
+const K_SPLIT: u32 = 31;
+const K_WIDEN_LO: u32 = 32;
+const K_WIDEN_HI: u32 = 33;
+const K_NARROW_WRAP: u32 = 34;
+const K_NARROW_SAT: u32 = 35;
+const K_COMPRESS: u32 = 36;
+const K_EXPAND: u32 = 37;
+const K_STORE: u32 = 38;
+const K_STORE_MASKED: u32 = 39;
+const K_SCATTER: u32 = 40;
+const K_CTZ: u32 = 41;
+const K_MUL_WIDE: u32 = 42;
+const K_STORE_STREAM: u32 = 43;
+const K_TO_BITS: u32 = 44;
+const K_READ: u32 = 45;
+const K_WRITE: u32 = 46;
+const K_WRITE_STREAM: u32 = 47;
+// The eight prefetch hints of a pointer, then the same of a slice at `K_SPF` above.
+const K_PF0: u32 = 48;
+const K_PF1: u32 = 55;
+const K_SPF: u32 = 100;
+// The type-relative built-ins.
+const K_SPLAT: u32 = 56;
+const K_LOAD: u32 = 57;
+const K_LOAD_MASKED: u32 = 58;
+const K_GATHER: u32 = 59;
+const K_JOIN: u32 = 60;
+const K_FIRST_N: u32 = 61;
+const K_ALL: u32 = 62;
+const K_NONE: u32 = 63;
+const K_SELECT: u32 = 64;
+const K_PERMUTE: u32 = 65;
+const K_LOAD_ALIGNED: u32 = 66;
+const K_STORE_ALIGNED: u32 = 67;
+const K_CHECKED0: u32 = 68;
+const K_CHECKED1: u32 = 70;
+const K_DIV_CONST: u32 = 71;
+
+// Whether x is a built-in of this table.
+pub fn is_builtin(x: u32) -> bool {
+    return x >= B_BASE && x < B_END;
+}
+
+// The built-in fns, in this order (stage0's `prim.Builtin`); which of them a name is, the
+// resolver decides (`decls.builtin_fn`).
+const FNS: &str = "size_of align_of fence_stream soa_row_size soa_read soa_write";
+const F_SIZE_OF: usize = 0;
+const F_ALIGN_OF: usize = 1;
+const F_FENCE: usize = 2;
+const F_ROW_SIZE: usize = 3;
+const F_READ: usize = 4;
+const F_WRITE: usize = 5;
+
+// The names the table looks up, as interned strings (NONE: not in this program).
+pub struct Builtins {
+    ids: vec.Vec<u32>,
+    fns: vec.Vec<u32>,
+    // `std.core.Option` (NONE: none in this program)
+    opt: u32,
+}
+
+// The table of a program whose strings are tab and whose `Option` is decl opt (NONE: none).
+pub fn table(tab: &intern.Table, opt: u32) -> Builtins {
+    return Builtins.{ ids: lookups(tab, mem.str_bytes(NAMES)), fns: lookups(tab, mem.str_bytes(FNS)), opt: opt };
+}
+
+// The interned ids of the space-separated names w.
+fn lookups(tab: &intern.Table, w: &[u8]) -> vec.Vec<u32> {
+    let mut ids = vec.Vec::<u32>.new();
+    let mut at: usize = 0;
+    for i in 0..w.len() + 1 {
+        if i == w.len() || w[i] == 32 {
+            ids.push(modules.lookup(tab, &w[at..i]));
+            at = i + 1;
+        }
+    }
+    return ids;
+}
+
+impl Builtins {
+    // The call of built-in fn s with the type written in its turbofish (NONE: none written) as a
+    // fn type (its parameters and result), as stage0's `call` on `St::Builtin`; ERR for a call
+    // stage0 rejects (a turbofish missing or given to `fence_stream`), UNK for `size_of` /
+    // `align_of` of a type that holds no generic param and is not a scalar, a reference, or a
+    // pointer (stage0 asks its layout, E0911 when there is none).
+    pub fn fn_type(&self, tab: &mut types.Table, s: u32, ty: u32) -> u32 {
+        let mut k: usize = 0;
+        while k < self.fns.len() && self.fns.as_slice()[k] != s {
+            k = k + 1;
+        }
+        if s == NONE || k == self.fns.len() { return UNK; }
+        if (k == F_FENCE) != (ty == NONE) { return types.ERR; }
+        if (k == F_SIZE_OF || k == F_ALIGN_OF) && !has_params(tab, ty) {
+            let tag = tab.tag_of(ty);
+            let laid = tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_REF || tag == types.TK_PTR;
+            if !laid { return UNK; }
+        }
+        let us = tab.usize_t();
+        let u8t = tab.int(false, types.W_8);
+        let ret = if k == F_FENCE || k == F_WRITE then tab.unit() else if k == F_READ then ty else us;
+        let p = tab.mk_ptr(k == F_WRITE, u8t);
+        tab.begin();
+        if k == F_READ || k == F_WRITE {
+            tab.push(p);
+            tab.push(us);
+            tab.push(us);
+        }
+        if k == F_WRITE { tab.push(ty); }
+        tab.push(ret);
+        tab.push(0);
+        tab.push(0);
+        tab.push(0);
+        let np: u32 = if k == F_READ then 3 else if k == F_WRITE then 4 else 0;
+        return tab.intern(types.TK_FN, np, 0);
+    }
+}
+
+// Whether type t holds a generic param or `Self` (stage0's `has_params`; a const param shows
+// as a component only where the table keeps it as one).
+fn has_params(tab: &types.Table, t: u32) -> bool {
+    let mut st = vec.Vec::<u32>.new();
+    let mut ks = vec.Vec::<u32>.new();
+    st.push(t);
+    while st.len() > 0 {
+        let x = st.as_slice()[st.len() - 1];
+        st.truncate(st.len() - 1);
+        let tag = tab.tag_of(x);
+        if tag == types.TK_PARAM || tag == types.TK_CONSTPARAM || tag == types.TK_SELF { return true; }
+        tab.kids(x, &mut ks);
+        st.extend_from_slice(ks.as_slice());
+    }
+    return false;
+}
+
+// Whether t is a lane type of a vector: a fixed-width int or a float.
+fn lane_ok(tab: &types.Table, t: u32) -> bool {
+    let tag = tab.tag_of(t);
+    return (tag == types.TK_INT && tab.b_of(t) != types.W_SIZE) || tag == types.TK_FLOAT;
+}
+
+// Whether n is the lane count of a vector or mask: a literal count or the sizeless one.
+fn lanes_ok(n: u32) -> bool {
+    return n == types.LANES_N || n == 2 || n == 4 || n == 8 || n == 16 || n == 32 || n == 64;
+}
+
+// The bits of lane type t.
+fn lane_bits(tab: &types.Table, t: u32) -> u32 {
+    if tab.tag_of(t) == types.TK_INT { return tab.int_bits(t); }
+    let f = tab.a_of(t);
+    return if f == 1 then 32u32 else if f == 2 then 64u32 else 16u32;
+}
+
+// The width code of an int of `bits` bits.
+fn width_code(bits: u32) -> u32 {
+    return if bits == 8 then types.W_8 else if bits == 16 then types.W_16 else if bits == 32 then types.W_32 else types.W_64;
+}
+
+// The vector `lane x n` has a half (`split`, `widen_*`): fixed and at least 4 lanes.
+fn half_ok(n: u32) -> bool {
+    return n != types.LANES_N && n >= 4;
+}
+
+// Whether lane type t has a lane type of twice its bits (`widen_lo`).
+fn widen_ok(tab: &types.Table, t: u32) -> bool {
+    if tab.tag_of(t) == types.TK_INT { return tab.b_of(t) <= types.W_32; }
+    return tab.a_of(t) != 2;
+}
+
+// The lane type of twice the bits of lane type t, for which `widen_ok` holds.
+fn wide_lane(tab: &mut types.Table, t: u32) -> u32 {
+    if tab.tag_of(t) == types.TK_INT {
+        let s = tab.is_signed(t);
+        let w = tab.b_of(t) + 1;
+        return tab.int(s, w);
+    }
+    let f = if tab.a_of(t) == 1 then 2u32 else 1u32;
+    return tab.key(types.TK_FLOAT, f, 0);
+}
+
+// Whether lane type t has an int lane type of half its bits (`narrow_wrap`).
+fn narrow_ok(tab: &types.Table, t: u32) -> bool {
+    return tab.tag_of(t) == types.TK_INT && tab.b_of(t) != types.W_8 && tab.b_of(t) != types.W_SIZE;
+}
+
+// The int lane type of half the bits of lane type t, for which `narrow_ok` holds.
+fn narrow_lane(tab: &mut types.Table, t: u32) -> u32 {
+    let s = tab.is_signed(t);
+    let w = tab.b_of(t) - 1;
+    return tab.int(s, w);
+}
+
+// The mask of the lanes of vector c.
+fn mask_of(tab: &mut types.Table, c: u32) -> u32 {
+    let w = lane_bits(tab, tab.a_of(c));
+    let n = tab.b_of(c);
+    return tab.key(types.TK_MASK, w, n);
+}
+
+// The unsigned vector of the lane width and count of vector c (the index of a gather).
+fn index_of(tab: &mut types.Table, c: u32) -> u32 {
+    let w = lane_bits(tab, tab.a_of(c));
+    let n = tab.b_of(c);
+    let u = tab.int(false, width_code(w));
+    return tab.key(types.TK_VECTOR, u, n);
+}
+
+// `&[T]` (`&mut` when `mutable`) of the lane type of vector c.
+fn lane_slice(tab: &mut types.Table, c: u32, mutable: bool) -> u32 {
+    let l = tab.a_of(c);
+    let s = tab.key(types.TK_SLICE, l, 0);
+    return tab.mk_ref(mutable, s);
+}
+
+// The vector of lane type lane and half the lanes of n.
+fn half_of(tab: &mut types.Table, lane: u32, n: u32) -> u32 {
+    return tab.key(types.TK_VECTOR, lane, n / 2);
+}
+
+// Whether the vector method k exists on vector type c.
+fn vector_ok(tab: &types.Table, k: u32, c: u32) -> bool {
+    let lane = tab.a_of(c);
+    let n = tab.b_of(c);
+    if !lane_ok(tab, lane) || !lanes_ok(n) { return false; }
+    let float = tab.tag_of(lane) == types.TK_FLOAT;
+    if (k >= K_FLOAT0 && k <= K_FLOAT1) || (k >= K_FLOAT2 && k <= K_FMA) { return float; }
+    if k == K_MIN || k == K_MAX || k == K_REDUCE_MIN || k == K_REDUCE_MAX { return true; }
+    if k == K_REDUCE_ADD || k == K_REDUCE_ADD_ORDERED { return float; }
+    if k == K_POPCOUNT || k == K_CLZ || k == K_SCAN_ADD_WRAP || (k >= K_ANDNOT && k <= K_LOOKUP) { return !float; }
+    if k == K_REDUCE_ADD_WRAP || k == K_REDUCE_AND || k == K_REDUCE_OR || (k >= K_CHECKED0 && k <= K_DIV_CONST) { return !float; }
+    if k == K_ABS_WRAP { return tab.is_signed(lane); }
+    if k == K_SPLIT { return half_ok(n); }
+    if k == K_WIDEN_LO || k == K_WIDEN_HI { return half_ok(n) && widen_ok(tab, lane); }
+    if k == K_NARROW_WRAP || k == K_NARROW_SAT { return n != types.LANES_N && n <= 32 && narrow_ok(tab, lane); }
+    return k == K_COMPRESS || k == K_EXPAND || k == K_STORE || k == K_STORE_MASKED || k == K_SCATTER || k == K_STORE_STREAM || k == K_STORE_ALIGNED || k == K_PERMUTE;
+}
+
+// `&[lane align A]` (`&mut` when `mutable`) of vector c, A its bytes (0 for a sizeless one): the
+// least aligned slice an aligned load or store of c takes.
+fn aligned_slice(tab: &mut types.Table, c: u32, mutable: bool) -> u32 {
+    let l = tab.a_of(c);
+    let n = tab.b_of(c);
+    let bytes = if n == types.LANES_N then 0u32 else lane_bits(tab, l) / 8 * n;
+    let s = tab.key(types.TK_SLICE, l, bytes);
+    return tab.mk_ref(mutable, s);
+}
+
+// The shape of a `select` operand: (lane bits, lanes) of a vector or mask, NONE for any other
+// type.
+fn shape(tab: &types.Table, t: u32) -> (u32, u32) {
+    let tag = tab.tag_of(t);
+    if tag == types.TK_VECTOR { return (lane_bits(tab, tab.a_of(t)), tab.b_of(t)); }
+    if tag == types.TK_MASK { return (tab.a_of(t), tab.b_of(t)); }
+    return (NONE, NONE);
+}
+
+// Whether the int method k exists on int type c.
+fn int_ok(tab: &types.Table, k: u32, c: u32) -> bool {
+    let w = tab.b_of(c);
+    if k == K_MUL_WIDE { return w == types.W_32 || w == types.W_64; }
+    if k == K_MUL_HI || k == K_STORE_STREAM { return w != types.W_SIZE; }
+    return k == K_POPCOUNT || k == K_CLZ || k == K_CTZ;
+}
+
+impl Builtins {
+    // The index of the name s in `NAMES`, or NONE.
+    fn find(&self, s: u32) -> u32 {
+        let xs = self.ids.as_slice();
+        for k in 0..xs.len() {
+            if xs[k] == s { return k as% u32; }
+        }
+        return NONE;
+    }
+
+    // The built-in method named s of a receiver of type c at one level of auto-deref (c is no
+    // reference, struct, enum, or generic param; no impl has a method of that name for it): a
+    // callee, or `UNK`.
+    pub fn method(&self, tab: &types.Table, c: u32, s: u32) -> u32 {
+        if s == NONE { return UNK; }
+        let k = self.find(s);
+        if k == NONE { return UNK; }
+        let tag = tab.tag_of(c);
+        let mut ok = false;
+        let mut at = k;
+        if tag == types.TK_SLICE || tag == types.TK_ARRAY || tag == types.TK_STR {
+            ok = k == K_LEN;
+            if tag == types.TK_SLICE && k >= K_PF0 && k <= K_PF1 {
+                ok = true;
+                at = k + K_SPF;
+            }
+        } else if tag == types.TK_INT {
+            ok = int_ok(tab, k, c);
+        } else if tag == types.TK_FLOAT {
+            ok = k == K_STORE_STREAM;
+        } else if tag == types.TK_PTR {
+            let inner = tab.b_of(c);
+            let mutable = tab.a_of(c) == 1;
+            let streamable = lane_ok(tab, inner) || tab.tag_of(inner) == types.TK_VECTOR;
+            ok = k == K_READ || (k == K_WRITE && mutable) || (k == K_WRITE_STREAM && mutable && streamable) || (k >= K_PF0 && k <= K_PF1);
+        } else if tag == types.TK_VECTOR {
+            ok = vector_ok(tab, k, c);
+        } else if tag == types.TK_MASK {
+            ok = (k == K_TO_BITS || k == K_SELECT) && lanes_ok(tab.b_of(c));
+        } else if tag == types.TK_BOOL {
+            ok = k == K_SELECT;
+        }
+        return if ok then B_BASE + at else UNK;
+    }
+
+    // The built-in scalar, vector, or mask type a path head spelled `name` names (a head no
+    // use resolves), or `UNK`. Only vector and mask types have type-relative built-ins.
+    pub fn type_head(&self, tab: &mut types.Table, name: &[u8]) -> u32 {
+        let (pk, px, py) = sigs.prim_of(name);
+        if pk == 2 {
+            let l = sigs.scalar_ty(tab, px);
+            return tab.key(types.TK_VECTOR, l, py);
+        }
+        if pk == 3 { return tab.key(types.TK_MASK, px, py); }
+        return UNK;
+    }
+
+    // The type-relative built-in named s of built-in type ty (`f32x8.splat`): a callee, or `UNK`.
+    pub fn type_rel(&self, tab: &types.Table, ty: u32, s: u32) -> u32 {
+        if s == NONE { return UNK; }
+        let k = self.find(s);
+        if k == NONE { return UNK; }
+        let tag = tab.tag_of(ty);
+        if tag == types.TK_VECTOR {
+            let lane = tab.a_of(ty);
+            if !lane_ok(tab, lane) || !lanes_ok(tab.b_of(ty)) { return UNK; }
+            if k == K_SPLAT || k == K_LOAD || k == K_LOAD_MASKED || k == K_GATHER || k == K_LOAD_ALIGNED { return B_BASE + k; }
+            if k == K_JOIN && half_ok(tab.b_of(ty)) { return B_BASE + k; }
+        } else if tag == types.TK_MASK {
+            if k >= K_FIRST_N && k <= K_NONE && lanes_ok(tab.b_of(ty)) { return B_BASE + k; }
+        }
+        return UNK;
+    }
+
+    // The number of arguments built-in b takes on c, or `UNK`.
+    pub fn params(&self, b: u32, c: u32) -> u32 {
+        let _ = c;
+        if !is_builtin(b) { return UNK; }
+        let k = b - B_BASE;
+        if k >= K_PF0 + K_SPF && k <= K_PF1 + K_SPF { return 1; }
+        if k == K_LEN { return 0; }
+        if k >= K_FLOAT0 && k <= K_FLOAT1 { return 0; }
+        if k >= K_FLOAT2 && k <= K_FLOAT3 { return 1; }
+        if k == K_FMA { return 2; }
+        if k == K_MIN || k == K_MAX { return 1; }
+        if k >= K_POPCOUNT && k <= K_SCAN_ADD_WRAP { return 0; }
+        if k >= K_ANDNOT && k <= K_LOOKUP { return 1; }
+        if k >= K_ABS_WRAP && k <= K_REDUCE_OR { return 0; }
+        if k == K_REDUCE_ADD_ORDERED { return 1; }
+        if k >= K_SPLIT && k <= K_WIDEN_HI { return 0; }
+        if k == K_NARROW_WRAP || k == K_NARROW_SAT || k == K_COMPRESS || k == K_EXPAND { return 1; }
+        if k == K_STORE || k == K_SCATTER { return 2; }
+        if k == K_STORE_MASKED { return 3; }
+        if k == K_CTZ || k == K_TO_BITS || k == K_READ { return 0; }
+        if k == K_MUL_WIDE || k == K_WRITE || k == K_WRITE_STREAM { return 1; }
+        if k == K_STORE_STREAM { return 2; }
+        if k >= K_PF0 && k <= K_PF1 { return 0; }
+        if k == K_SPLAT || k == K_FIRST_N { return 1; }
+        if k == K_LOAD || k == K_GATHER || k == K_JOIN { return 2; }
+        if k == K_LOAD_MASKED { return 3; }
+        if k == K_ALL || k == K_NONE || k == K_PERMUTE { return 0; }
+        if k == K_SELECT || k == K_LOAD_ALIGNED || k == K_STORE_ALIGNED { return 2; }
+        if (k >= K_CHECKED0 && k <= K_CHECKED1) || k == K_DIV_CONST { return 1; }
+        return UNK;
+    }
+
+    // The kind of argument j of built-in b on c (`A_*`).
+    pub fn arg_kind(&self, tab: &types.Table, b: u32, c: u32, j: usize) -> u8 {
+        if !is_builtin(b) { return A_IS; }
+        let k = b - B_BASE;
+        if k == K_SELECT { return if tab.tag_of(c) == types.TK_BOOL then A_SEL else A_FREE; }
+        let vector = tab.tag_of(c) == types.TK_VECTOR;
+        if j == 0 && (k == K_LOAD_ALIGNED || k == K_STORE_ALIGNED || (k == K_STORE_STREAM && vector)) { return A_ALIGNED; }
+        if j == 1 && (k == K_GATHER || k == K_SCATTER) { return A_INDEX; }
+        return A_IS;
+    }
+
+    // Whether built-in b takes generic arguments (`v.permute::<[..]>()`); on any other built-in
+    // they are an error.
+    pub fn takes_targs(&self, b: u32) -> bool {
+        return is_builtin(b) && b - B_BASE == K_PERMUTE;
+    }
+
+    // The result of mask c's `select` on operands of types x and y (both decided): their type
+    // when they are one vector or mask type of c's lane bits and lanes; NONE (an error) else.
+    pub fn select_ret(&self, tab: &types.Table, c: u32, x: u32, y: u32) -> u32 {
+        let (w, n) = shape(tab, x);
+        if w == NONE || x != y { return NONE; }
+        if w != tab.a_of(c) || n != tab.b_of(c) { return NONE; }
+        return x;
+    }
+
+    // The type of argument j of built-in b on c (its context and coercion target), or `UNK`.
+    pub fn param(&self, tab: &mut types.Table, b: u32, c: u32, j: usize) -> u32 {
+        if !is_builtin(b) { return UNK; }
+        let k = b - B_BASE;
+        let tag = tab.tag_of(c);
+        if k >= K_PF0 + K_SPF && k <= K_PF1 + K_SPF { return tab.usize_t(); }
+        if k == K_STORE_STREAM && tag != types.TK_VECTOR {
+            if j == 1 { return tab.usize_t(); }
+            let s = tab.key(types.TK_SLICE, c, 0);
+            return tab.mk_ref(true, s);
+        }
+        if k == K_WRITE || k == K_WRITE_STREAM { return tab.b_of(c); }
+        if k == K_MUL_WIDE || (k == K_MUL_HI && tag == types.TK_INT) { return c; }
+        if k == K_FIRST_N { return tab.usize_t(); }
+        if tag != types.TK_VECTOR { return UNK; }
+        let lane = tab.a_of(c);
+        if k == K_SPLAT || k == K_REDUCE_ADD_ORDERED || k == K_DIV_CONST { return lane; }
+        if k == K_LOAD_ALIGNED || k == K_STORE_ALIGNED || k == K_STORE_STREAM {
+            if j == 0 { return aligned_slice(tab, c, k != K_LOAD_ALIGNED); }
+            return tab.usize_t();
+        }
+        if k == K_COMPRESS || k == K_EXPAND { return mask_of(tab, c); }
+        if k == K_JOIN {
+            let n = tab.b_of(c);
+            return half_of(tab, lane, n);
+        }
+        if k == K_STORE || k == K_STORE_MASKED || k == K_SCATTER {
+            if j == 0 { return lane_slice(tab, c, true); }
+            if k == K_SCATTER { return index_of(tab, c); }
+        } else if k == K_LOAD || k == K_LOAD_MASKED || k == K_GATHER {
+            if j == 0 { return lane_slice(tab, c, false); }
+            if k == K_GATHER { return index_of(tab, c); }
+        } else {
+            return c;
+        }
+        if j == 1 { return tab.usize_t(); }
+        return mask_of(tab, c);
+    }
+
+    // The result type of built-in b on c, or `UNK`.
+    pub fn ret(&self, tab: &mut types.Table, b: u32, c: u32) -> u32 {
+        if !is_builtin(b) { return UNK; }
+        let k = b - B_BASE;
+        let tag = tab.tag_of(c);
+        if k == K_LEN { return tab.usize_t(); }
+        if (k >= K_PF0 && k <= K_PF1) || (k >= K_PF0 + K_SPF && k <= K_PF1 + K_SPF) { return tab.unit(); }
+        if k == K_WRITE || k == K_WRITE_STREAM || k == K_STORE_STREAM { return tab.unit(); }
+        if k == K_READ { return tab.b_of(c); }
+        if k == K_TO_BITS {
+            let n = tab.b_of(c);
+            return if n <= 8 then tab.int(false, types.W_8) else if n <= 16 then tab.int(false, types.W_16) else if n <= 32 then tab.int(false, types.W_32) else tab.int(false, types.W_64);
+        }
+        if k == K_MUL_WIDE {
+            tab.begin();
+            tab.push(c);
+            tab.push(c);
+            return tab.intern(types.TK_TUPLE, 0, 0);
+        }
+        if tag == types.TK_INT || tag == types.TK_FLOAT { return c; }
+        if tag != types.TK_VECTOR && tag != types.TK_MASK { return UNK; }
+        if k == K_SELECT { return UNK; }
+        if k >= K_CHECKED0 && k <= K_CHECKED1 {
+            if self.opt == NONE { return UNK; }
+            tab.begin();
+            tab.push_garg(types.GA_TYPE, c, 0);
+            return tab.intern(types.TK_ADT, self.opt, 0);
+        }
+        if k == K_STORE_ALIGNED { return tab.unit(); }
+        if (k >= K_FIRST_N && k <= K_NONE) || k == K_SPLAT || k == K_LOAD || k == K_LOAD_MASKED || k == K_GATHER || k == K_JOIN { return c; }
+        let lane = tab.a_of(c);
+        let n = tab.b_of(c);
+        if k >= K_REDUCE_ADD && k <= K_REDUCE_ADD_ORDERED { return lane; }
+        if k == K_STORE || k == K_STORE_MASKED || k == K_SCATTER { return tab.unit(); }
+        if k == K_SPLIT {
+            let h = half_of(tab, lane, n);
+            tab.begin();
+            tab.push(h);
+            tab.push(h);
+            return tab.intern(types.TK_TUPLE, 0, 0);
+        }
+        if k == K_WIDEN_LO || k == K_WIDEN_HI {
+            let w = wide_lane(tab, lane);
+            return tab.key(types.TK_VECTOR, w, n / 2);
+        }
+        if k == K_NARROW_WRAP || k == K_NARROW_SAT {
+            let l = narrow_lane(tab, lane);
+            return tab.key(types.TK_VECTOR, l, n * 2);
+        }
+        return c;
+    }
+}

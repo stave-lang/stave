@@ -1,6 +1,8 @@
 // Traits (types/traits): the impl table, impl matching, and trait answers over the type table,
-// from the signatures alone. Every answer is taken in the empty environment: a generic param has
-// no bound and is not `view`.
+// from the signatures alone. An answer is taken in an environment: the empty one (a generic param
+// has no bound and is not `view`), or the facts of a body's generic params (their bounds and
+// `view` flags, `env_of`), given with the question. A goal on a type without generic params
+// ignores the environment, so it is one goal for every body.
 //
 // Data:
 // - `Lang`: the compiler-known traits and types (fixed paths of the built-in packages).
@@ -14,12 +16,15 @@
 //
 // Passes:
 // 1. the impl table: one row per impl decl, sorted into line order (merge sort on the key);
-// 2. queries: the goals and impl-applies clauses the callers ask for (`goal`, `applies_q`);
+// 2. queries: the goals and impl-applies clauses the callers ask for (`goal`, `applies_q`,
+//    `applies_env`);
 // 3. expansion, in goal order: a goal's clauses from the rules (structural parts, the impls whose
 //    self type matches and whose params take no view), creating the goals they name;
 // 4. solving: strongly connected components of the goal graph (Tarjan, explicit stack), each
 //    decided after the components it depends on: a component's coinductive goals start true,
 //    its inductive ones false, and its members are re-evaluated until none changes.
+// Passes 2-4 may run again with more queries: a goal's clauses name only goals expanded with it,
+// so the goals decided before keep their answers (`decided`).
 import decls;
 import files;
 import intern;
@@ -29,6 +34,7 @@ import sigs;
 import types;
 import prims.col;
 import prims.ragged;
+import prims.search;
 import prims.sort;
 import std.mem;
 import std.vec;
@@ -445,6 +451,13 @@ pub struct Traits {
     // queries: whether an impl's self type matched with no view refused, and its bound goals
     pub q_ok: vec.Vec<bool>,
     pub q_mem: ragged.Ragged<u32>,
+    // the environments (id e is row e - 1; 0 is the empty one): per generic param in flat order
+    // its `view` flag, its bound count, then per bound the trait, the argument word count, and
+    // the arguments; the environment of the goal being made or expanded
+    envs: Keys,
+    cur_env: u32,
+    // the goals decided by the last `solve`: `0..solved`
+    solved: usize,
     // scratch: a goal key; the lists of `each`, `impl_clauses`, and `applies`, kept between
     // calls (taken out while in use)
     w: vec.Vec<u32>,
@@ -476,6 +489,9 @@ pub fn new(sg: &sigs.Sigs, tab: &types.Table, ds: &decls.Decls, fl: &files.FileL
         done: 0,
         q_ok: vec.Vec::<bool>.new(),
         q_mem: ragged.Ragged::<u32>.new(),
+        envs: Keys.new(),
+        cur_env: 0,
+        solved: 0,
         w: vec.Vec::<u32>.new(),
         s_each: vec.Vec::<u32>.new(),
         s_cands: vec.Vec::<u32>.new(),
@@ -637,14 +653,17 @@ impl Traits {
         return tr != NONE && (tr == l.send || tr == l.sync || tr == l.flat || tr == l.frozen);
     }
 
-    // The goal "t implements tr with args" (Copy takes none); NONE when it holds for every type
-    // (t is the error type).
+    // The goal "t implements tr with args" (Copy takes none) in the current environment; NONE
+    // when it holds for every type (t is the error type). Key: t, tr, the args (3 words each),
+    // then the environment when it is not the empty one and t may hold a generic param.
     pub fn goal(&mut self, t: u32, tr: u32, args: &[u32]) -> u32 {
         if !real(t) { return NONE; }
         self.w.clear();
         self.w.push(t);
         self.w.push(tr);
         if tr != self.lang.copy_tr { self.w.extend_from_slice(args); }
+        let e = self.cur_env;
+        if e != 0 && (t as usize >= self.comp.hasp.len() || self.comp.hasp.as_slice()[t as usize]) { self.w.push(e); }
         let (g, fresh) = self.keys.id(self.w.as_slice());
         if fresh {
             self.co.push(self.is_co(tr));
@@ -690,7 +709,7 @@ impl Traits {
         for k in 0..hi - lo {
             if args.as_slice()[3 * k] != types.GA_TYPE { continue; }
             let a = args.as_slice()[3 * k + 1];
-            if real(a) && !sg.cx.gens.is_view.as_slice()[lo + k] && self.comp.is_view.as_slice()[a as usize] { return false; }
+            if real(a) && !sg.cx.gens.is_view.as_slice()[lo + k] && self.view_in(tab, a) { return false; }
         }
         for k in 0..hi - lo {
             if args.as_slice()[3 * k] != types.GA_TYPE { continue; }
@@ -875,20 +894,28 @@ impl Traits {
             key.extend_from_slice(self.keys.rows.row(g));
             let t = key.as_slice()[0];
             let tr = key.as_slice()[1];
+            // a key with an environment has one word more than 2 + 3 per argument
+            let with_env = key.len() % 3 == 0;
+            let n = if with_env then key.len() - 1 else key.len();
             targs.clear();
-            targs.extend_from_slice(&key.as_slice()[2..key.len()]);
+            targs.extend_from_slice(&key.as_slice()[2..n]);
+            self.cur_env = if with_env then key.as_slice()[n] else 0;
             self.cl_lo.as_mut_slice()[g] = self.cl.rows() as% u32;
             self.expand_one(tab, sg, sh, pa, t, tr, targs.as_slice());
             self.cl_hi.as_mut_slice()[g] = self.cl.rows() as% u32;
         }
+        self.cur_env = 0;
     }
 
     fn expand_one(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, sh: &layout.Shapes, pa: &mut layout.Parts, t: u32, tr: u32, targs: &[u32]) {
         let tag = tab.tag_of(t);
         let a = tab.a_of(t);
         let mut ts = vec.Vec::<u32>.new();
-        // a generic param has no bounds in the empty environment
-        if tag == types.TK_PARAM { return; }
+        // a generic param implements what its bounds in the environment name
+        if tag == types.TK_PARAM {
+            if self.env_holds(a, tr, targs) { self.clause(ts.as_slice()); }
+            return;
+        }
         let l_copy = self.lang.copy_tr;
         if tr == l_copy {
             if tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_PTR || tag == types.TK_FN || tag == types.TK_NEVER || tag == types.TK_VECTOR || tag == types.TK_MASK || (tag == types.TK_REF && a == 0) {
@@ -1007,6 +1034,7 @@ impl Traits {
                 self.decide(comp.as_slice(), edge.as_slice(), e_lo.as_slice());
             }
         }
+        self.solved = n;
     }
 
     // Decides one component (the components it reaches are decided): a goal without a cycle
@@ -1044,4 +1072,173 @@ impl Traits {
             if !changed { break; }
         }
     }
+
+    // The environment of a body's generic params: rows `pa..pb` then `oa..ob` of `sg.cx.gens`
+    // (flat order). 0 when no param has a bound or `view` (it answers as the empty one).
+    pub fn env_of(&mut self, sg: &sigs.Sigs, pa: u32, pb: u32, oa: u32, ob: u32) -> u32 {
+        let mut w = vec.Vec::<u32>.new();
+        let mut any = false;
+        let np = (pb - pa) as usize;
+        let n = np + (ob - oa) as usize;
+        for k in 0..n {
+            let r = if k < np then pa as usize + k else oa as usize + k - np;
+            let v = sg.cx.gens.is_view.as_slice()[r];
+            let bs = sg.gp_bounds.row(r);
+            w.push(if v then 1u32 else 0u32);
+            w.push(bs.len() as% u32);
+            for j in 0..bs.len() {
+                let x = bs[j] as usize;
+                let args = sg.b_args.row(x);
+                w.push(sg.b_trait.as_slice()[x]);
+                w.push(args.len() as% u32);
+                w.extend_from_slice(args);
+            }
+            any = any || v || bs.len() > 0;
+        }
+        if !any { return 0; }
+        let (e, _) = self.envs.id(w.as_slice());
+        return e + 1;
+    }
+
+    // The words of environment e (not the empty one).
+    pub fn env_words(&self, e: u32) -> &[u32] from self {
+        return self.envs.rows.row((e - 1) as usize);
+    }
+
+    // The facts of param p in environment e: its bounds are the words `lo..hi` of `env_words`,
+    // and its `view` flag.
+    fn env_param(&self, e: u32, p: u32) -> (usize, usize, bool) {
+        if e == 0 { return (0, 0, false); }
+        let w = self.envs.rows.row((e - 1) as usize);
+        let mut at: usize = 0;
+        let mut k: u32 = 0;
+        while at + 1 < w.len() {
+            let nb = w[at + 1] as usize;
+            let mut end = at + 2;
+            for _ in 0..nb {
+                end = end + 2 + w[end + 1] as usize;
+            }
+            if k == p { return (at + 2, end, w[at] == 1); }
+            at = end;
+            k = k + 1;
+        }
+        return (0, 0, false);
+    }
+
+    // Whether param p implements tr with targs in the current environment: a bound names them
+    // (Copy: the trait alone), or tr is Frozen and a bound is Flat.
+    fn env_holds(&self, p: u32, tr: u32, targs: &[u32]) -> bool {
+        let e = self.cur_env;
+        if e == 0 || tr == NONE { return false; }
+        let (lo, hi, _) = self.env_param(e, p);
+        let w = self.envs.rows.row((e - 1) as usize);
+        let l = &self.lang;
+        let mut at = lo;
+        while at < hi {
+            let bt = w[at];
+            let na = w[at + 1] as usize;
+            let ba = &w[at + 2..at + 2 + na];
+            if bt == tr && (tr == l.copy_tr || ba.eq(targs)) { return true; }
+            if tr == l.frozen && l.flat != NONE && bt == l.flat { return true; }
+            at = at + 2 + na;
+        }
+        return false;
+    }
+
+    // Whether type t is or holds a reference or view in the current environment: a param with
+    // `view` counts, outside a raw pointer.
+    fn view_in(&self, tab: &types.Table, t: u32) -> bool {
+        if self.comp.is_view.as_slice()[t as usize] { return true; }
+        let e = self.cur_env;
+        if e == 0 || !self.comp.hasp.as_slice()[t as usize] { return false; }
+        let mut stack = vec.Vec::<u32>.new();
+        let mut kids = vec.Vec::<u32>.new();
+        stack.push(t);
+        while stack.len() > 0 {
+            let x = stack.as_slice()[stack.len() - 1];
+            stack.truncate(stack.len() - 1);
+            let tag = tab.tag_of(x);
+            if tag == types.TK_PARAM {
+                let (_, _, v) = self.env_param(e, tab.a_of(x));
+                if v { return true; }
+                continue;
+            }
+            if tag == types.TK_PTR { continue; }
+            tab.kids(x, &mut kids);
+            stack.extend_from_slice(kids.as_slice());
+        }
+        return false;
+    }
+
+    // A query in environment e: whether impl i applies to t, as `applies`; its bound goals into
+    // ms (answered by `decided` and `is` after the next `expand` and `solve`), its generic
+    // arguments into args.
+    pub fn applies_env(&mut self, tab: &mut types.Table, sg: &sigs.Sigs, e: u32, i: u32, t: u32, ms: &mut vec.Vec<u32>, args: &mut vec.Vec<u32>) -> bool {
+        self.cur_env = e;
+        let ok = self.applies(tab, sg, i, t, ms, args);
+        self.cur_env = 0;
+        return ok;
+    }
+
+    // A query in environment e: the goal "t implements tr with args" (answered by `decided` and
+    // `is` after the next `expand` and `solve`).
+    pub fn goal_env(&mut self, tab: &types.Table, e: u32, t: u32, tr: u32, args: &[u32]) -> u32 {
+        self.comp.ensure(tab, self.adt_view.as_slice());
+        self.cur_env = e;
+        let g = self.goal(t, tr, args);
+        self.cur_env = 0;
+        return g;
+    }
+
+    // Whether goal g has its answer (NONE: it holds).
+    pub fn decided(&self, g: u32) -> bool {
+        return g == NONE || (g as usize) < self.solved;
+    }
+
+    // The trait methods named s that the bounds of param p in environment e give, one per trait
+    // and arguments (two bounds of one trait with other arguments are two): the trait, the
+    // method, and the offset and word count of the bound's arguments in `env_words(e)`, 4 words
+    // each, into out.
+    pub fn bound_methods(&self, ds: &decls.Decls, e: u32, p: u32, s: u32, out: &mut vec.Vec<u32>) {
+        out.clear();
+        if e == 0 || s == NONE { return; }
+        let (lo, hi, _) = self.env_param(e, p);
+        let w = self.envs.rows.row((e - 1) as usize);
+        let mut at = lo;
+        while at < hi {
+            let bt = w[at];
+            let na = w[at + 1] as usize;
+            let m = trait_member(ds, bt, s);
+            if m != NONE {
+                let mut dup = false;
+                let mut k: usize = 0;
+                while k + 3 < out.len() {
+                    let o = out.as_slice()[k + 2] as usize;
+                    let c = out.as_slice()[k + 3] as usize;
+                    let xa = &w[o..o + c];
+                    let ya = &w[at + 2..at + 2 + na];
+                    if out.as_slice()[k] == bt && xa.eq(ya) { dup = true; }
+                    k = k + 4;
+                }
+                if !dup {
+                    out.push(bt);
+                    out.push(m);
+                    out.push((at + 2) as% u32);
+                    out.push(na as% u32);
+                }
+            }
+            at = at + 2 + na;
+        }
+    }
+}
+
+// The method named s of trait tr, or NONE.
+fn trait_member(ds: &decls.Decls, tr: u32, s: u32) -> u32 {
+    if tr == NONE { return NONE; }
+    let key = search.pair(tr, s);
+    let k = search.lower_bound(ds.mem_key.as_slice(), key);
+    if k == ds.mem_key.len() || ds.mem_key.as_slice()[k] != key { return NONE; }
+    let m = ds.mem_decl.as_slice()[k];
+    if ds.kind.as_slice()[m as usize] != decls.DK_TRAIT_METHOD { return NONE; }
+    return m;
 }

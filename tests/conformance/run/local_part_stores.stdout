@@ -1,0 +1,20 @@
+loop 12592406221 45299155 5
+copies 45299155 99 99 98 32120651 97 1
+borrow 111 44 155
+value 222 111 99 777 70 1
+nested 101 40 21 14
+tuple 8 49 41 0
+vectors 24 4
+drop 2
+replaced 2
+drop 1
+replaced 1
+drop 10
+drop 21
+drop 3
+drop 30
+moved
+drop 31
+stored 5
+drop 45
+end

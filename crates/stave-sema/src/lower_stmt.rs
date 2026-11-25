@@ -117,6 +117,20 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    /// Whether place expression `n`, rooted at a local ([`Self::place_root`]), is a part of that
+    /// local (a field or element path) rather than the whole local.
+    fn is_part(&self, n: u32) -> bool {
+        let icx = self.icx;
+        match icx.kind(n) {
+            Some(NodeKind::Postfix) => true,
+            Some(NodeKind::Unary) => icx.last_child(n).is_some_and(|c| self.is_part(c)),
+            Some(NodeKind::Primary) if icx.is(icx.a(n), Term::LParen) => {
+                icx.first_child(n).is_some_and(|c| self.is_part(c))
+            }
+            _ => false,
+        }
+    }
+
     /// Walks a postfix chain's steps: the root local of the place it denotes; method calls whose
     /// receiver is auto-referenced at a local root, and sub-slices of a local root, are reported
     /// to `autoref`.
@@ -252,9 +266,9 @@ impl<'a> FnCx<'a> {
             }
         }
         let lo = icx.ast.descendants(root).start;
-        let mut autoref: Vec<usize> = Vec::new();
+        let mut in_mem: Vec<usize> = Vec::new();
         let mut assigns: Vec<(u32, usize)> = Vec::new();
-        // a postfix chain adds to `autoref` only at a method call with an auto-referenced
+        // a postfix chain adds to `in_mem` only at a method call with an auto-referenced
         // receiver or at a sub-slice of the root: without one in the body the chains (most nodes
         // of a body) are not walked
         let autoref_calls = tb.targets.iter().any(|(_, t)| {
@@ -278,11 +292,11 @@ impl<'a> FnCx<'a> {
                         && let Some(c) = icx.last_child(m)
                         && let Some(l) = self.place_root(c)
                     {
-                        autoref.push(l);
+                        in_mem.push(l);
                     }
                 }
                 Some(NodeKind::Postfix) if autoref_calls => {
-                    let _ = self.chain_root(m, Some(&mut autoref));
+                    let _ = self.chain_root(m, Some(&mut in_mem));
                 }
                 Some(NodeKind::ExprStmt) => {
                     let kids = icx.kids_vec(m);
@@ -290,12 +304,17 @@ impl<'a> FnCx<'a> {
                         && let Some(l) = self.place_root(kids[0])
                     {
                         assigns.push((m, l));
+                        // a store into a part writes the local's bytes in place: as an SSA
+                        // aggregate every such store would rebuild (copy) the whole value
+                        if self.is_part(kids[0]) {
+                            in_mem.push(l);
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        for l in autoref {
+        for l in in_mem {
             if let Some(li) = self.locals.get_mut(l) {
                 li.mem = true;
             }
@@ -1211,7 +1230,15 @@ impl<'a> FnCx<'a> {
         let Some(&pat) = kids.first() else { return };
         let Some(init) = kids.iter().copied().find(|&c| icx.is_expr(c)) else { return };
         let want = self.binding_ty(pat);
+        // a name bound to a local in a slot: an array repeat initializer fills that slot
+        self.f.fill_into = self
+            .by_node
+            .get(&pat)
+            .copied()
+            .filter(|&l| !self.locals[l].drop && self.f.slot.get(l).is_some_and(|s| s.is_some()))
+            .map(|l| (init, l));
         let e = self.expr(init, want);
+        self.f.fill_into = None;
         if matches!(e, E::Never) {
             return;
         }
@@ -2821,6 +2848,20 @@ impl<'a> FnCx<'a> {
             return false;
         };
         let lt = self.locals[l].ty;
+        if matches!(mode, Mode::Move)
+            && place.proj.is_empty()
+            && place.root.is_none()
+            && !self.locals[l].drop
+            && matches!(place.base, Base::Mem(p, _) if self.f.slot.get(l).copied().flatten() == Some(p))
+        {
+            // the initializer filled the local's slot and began it (`repeat_fill`)
+            if self.g.borrows
+                && let Some(s) = self.f.scopes.last_mut()
+            {
+                s.push(l);
+            }
+            return true;
+        }
         let v = match mode {
             // the owner is moved where the pattern is committed
             Mode::Move => self.take(&place),
