@@ -1549,6 +1549,287 @@ b0(%0: t7, %1: t0):
     load(&access("  check.bounds () %1 4\n", "%1"));
 }
 
+/// The line number (from 1) of the first line of `src` containing `needle`.
+fn line_of(src: &str, needle: &str) -> usize {
+    src.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("no {needle:?} in:\n{src}")) + 1
+}
+
+/// `body` loads at every level.
+fn loads_everywhere(body: &str) {
+    for level in LEVELS {
+        load(&elem_ptr_module(level, body));
+    }
+}
+
+/// `body` is refused at every level by the audit at the first line containing `at`, with `msg`.
+fn refused_everywhere(body: &str, at: &str, msg: &str) {
+    for level in LEVELS {
+        let src = elem_ptr_module(level, body);
+        let es = rejects(&src, &format!("t.ir:{}: verify: {msg}", line_of(&src, at)));
+        assert_eq!(es[0].kind, ErrorKind::Audit, "{level}");
+    }
+}
+
+const ELEM_UNGUARDED: &str = "Elem access without a bounds check or proof";
+
+/// A slice of arrays `s: &[[u64; 4]]`: an index through its element pointer would count the
+/// `u64`s of `s[0]`, which need not exist, so every access through it is refused, whatever the
+/// index or check; `s[i][3]` (an access of `s`, then one of the array it yields) loads.
+#[test]
+fn an_access_through_the_element_pointer_of_a_slice_of_arrays_is_refused() {
+    let types = "type t6 array t1 4
+type t7 slice t6
+type t8 ref t7
+type t9 ptr mut t6
+type t10 ref t6
+type t11 vec t1 4
+";
+    refused_everywhere(
+        &format!(
+            "{types}fn @0 main.get(t8) -> t1 {{
+b0(%0: t8):
+  %1 = slice.ptr t9 %0
+  %2 = addr.elem t5 %1 3
+  %3 = load t1 %2
+  ret %3
+}}
+"
+        ),
+        "addr.elem",
+        ELEM_UNGUARDED,
+    );
+    refused_everywhere(
+        &format!(
+            "{types}fn @0 main.get(t8, t0) -> t1 {{
+b0(%0: t8, %1: t0):
+  check.bounds () %1 4
+  %2 = slice.ptr t9 %0
+  %3 = addr.elem t5 %2 %1
+  %4 = load t1 %3
+  ret %4
+}}
+"
+        ),
+        "addr.elem",
+        ELEM_UNGUARDED,
+    );
+    refused_everywhere(
+        &format!(
+            "{types}fn @0 main.get(t8) -> t11 {{
+b0(%0: t8):
+  %1 = slice.ptr t9 %0
+  %2 = vec.load t11 %1 0
+  ret %2
+}}
+"
+        ),
+        "vec.load",
+        "Vector access without a bounds check or proof",
+    );
+    loads_everywhere(&format!(
+        "{types}fn @0 main.get(t8, t0) -> t1 {{
+b0(%0: t8, %1: t0):
+  %2 = slice.len t0 %0
+  check.bounds () %1 %2
+  %3 = addr.elem t10 %0 %1
+  %4 = addr.elem t5 %3 3
+  %5 = load t1 %4
+  ret %5
+}}
+"
+    ));
+}
+
+/// The result of an element access points to one element: an `addr.elem` on it, as on any
+/// pointer to one element the function derived itself or was passed, is an access with nothing
+/// to check against. Only a raw pointer read from memory or returned by a call (through
+/// pointer-to-pointer casts) is unsafe pointer arithmetic, no access.
+#[test]
+fn pointer_arithmetic_on_a_pointer_to_one_element_is_refused_unless_it_comes_from_memory_or_a_call() {
+    let refused = [
+        // a checked access through the element pointer, moved on by a second `addr.elem`
+        "fn @0 main.get(t3, t0) -> t1 {
+b0(%0: t3, %1: t0):
+  %2 = slice.len t0 %0
+  check.bounds () %1 %2
+  %3 = slice.ptr t4 %0
+  %4 = addr.elem t4 %3 %1
+  %5 = addr.elem t5 %4 1000
+  %6 = load t1 %5
+  ret %6
+}
+",
+        // the same straight on the slice
+        "fn @0 main.get(t3, t0) -> t1 {
+b0(%0: t3, %1: t0):
+  %2 = slice.len t0 %0
+  check.bounds () %1 %2
+  %3 = addr.elem t4 %0 %1
+  %4 = addr.elem t5 %3 3
+  %5 = load t1 %4
+  ret %5
+}
+",
+        // a raw parameter
+        "fn @0 main.get(t4, t0) -> t1 {
+b0(%0: t4, %1: t0):
+  %2 = addr.elem t5 %0 %1
+  %3 = load t1 %2
+  ret %3
+}
+",
+        // a reference cast to a raw pointer
+        "type t6 array t1 4
+type t7 ref t6
+fn @0 main.get(t7) -> t1 {
+b0(%0: t7):
+  %1 = cast t4 %0
+  %2 = addr.elem t5 %1 1000
+  %3 = load t1 %2
+  ret %3
+}
+",
+        // a pointer read from memory, passed through a block parameter
+        "type t6 ref t4
+fn @0 main.get(t6, t0) -> t1 {
+b0(%0: t6, %1: t0):
+  %2 = load t4 %0
+  br b1(%2)
+b1(%3: t4):
+  %4 = addr.elem t5 %3 %1
+  %5 = load t1 %4
+  ret %5
+}
+",
+    ];
+    for body in refused {
+        let at = body.lines().find(|l| l.contains("addr.elem t5")).unwrap().trim();
+        refused_everywhere(body, at, ELEM_UNGUARDED);
+    }
+    let unsafe_arith = [
+        // read from memory
+        "type t6 ref t4
+fn @0 main.get(t6, t0) -> t1 {
+b0(%0: t6, %1: t0):
+  %2 = load t4 %0
+  %3 = addr.elem t5 %2 %1
+  %4 = load t1 %3
+  ret %4
+}
+",
+        // read from memory, then cast
+        "type t6 int u 8
+type t7 ptr mut t6
+type t8 ref t7
+fn @0 main.get(t8, t0) -> t1 {
+b0(%0: t8, %1: t0):
+  %2 = load t7 %0
+  %3 = cast t4 %2
+  %4 = addr.elem t5 %3 %1
+  %5 = load t1 %4
+  ret %5
+}
+",
+        // returned by a call
+        "fn @0 main.get(t0) -> t1 {
+b0(%0: t0):
+  %1 = call t4 @1
+  %2 = addr.elem t5 %1 %0
+  %3 = load t1 %2
+  ret %3
+}
+fn @1 main.base() -> t4 symbol \"base\"
+",
+    ];
+    for body in unsafe_arith {
+        loads_everywhere(body);
+    }
+}
+
+/// `slice.make` of a slice's element pointer and length keeps the slice's type up to dropped
+/// mutability or alignment; a raised alignment only as the `Some` of `align_to`'s `select` on
+/// the address.
+#[test]
+fn a_slice_rebuilt_from_its_parts_keeps_its_type() {
+    let module = |level: &str, body: &str| {
+        format!(
+            "stave.ir 4 \"x86_64-linux-v2\" release {level}
+decl d0 enum std.core.Option
+type t0 int u size
+type t1 float 32
+type t2 slice t1
+type t3 slice t1 align 16
+type t4 ref t2
+type t5 ref t3
+type t6 ref t1
+type t7 bool
+type t8 adt d0 t5
+type t9 ref mut t2
+type t10 ref mut t1
+type t11 ref mut t3
+shape t8 enum | | t5
+{body}"
+        )
+    };
+    let rebuild = |from: &str, to: &str| {
+        format!(
+            "fn @0 main.re({from}) -> {to} {{
+b0(%0: {from}):
+  %1 = slice.ptr t6 %0
+  %2 = slice.len t0 %0
+  %3 = slice.make {to} %1 %2
+  ret %3
+}}
+"
+        )
+    };
+    let align_to = |cond: &str, yes: &str, no: &str| {
+        format!(
+            "fn @0 main.aligned(t4) -> t8 {{
+b0(%0: t4):
+  %1 = slice.ptr t6 %0
+  %2 = cast t0 %1
+  %3 = rem t0 %2 {cond}
+  %4 = eq t7 %3 0
+  %5 = slice.ptr t6 %0
+  %6 = slice.len t0 %0
+  %7 = slice.make t5 %5 %6
+  %8 = enum.make t8 1 %7
+  %9 = enum.make t8 0
+  %10 = select t8 %4 {yes} {no}
+  ret %10
+}}
+"
+        )
+    };
+    let refused = [
+        rebuild("t4", "t5"),
+        rebuild("t4", "t11"),
+        rebuild("t4", "t9"),
+        align_to("8", "%8", "%9"),
+        align_to("16", "%9", "%8"),
+    ];
+    for body in &refused {
+        for level in LEVELS {
+            let src = module(level, body);
+            // the `slice.ptr` the `slice.make` reads
+            let line = line_of(
+                &src,
+                if body.contains("%5 = slice.ptr") { "%5 = slice.ptr" } else { "%1 = slice.ptr" },
+            );
+            let es = rejects(&src, &format!("t.ir:{line}: verify: {ELEM_PTR_MISUSE}"));
+            assert_eq!(es[0].kind, ErrorKind::Audit, "{level}");
+        }
+    }
+    let accepted =
+        [rebuild("t4", "t4"), rebuild("t5", "t4"), rebuild("t9", "t4"), align_to("16", "%8", "%9")];
+    for body in &accepted {
+        for level in LEVELS {
+            load(&module(level, body));
+        }
+    }
+}
+
 #[test]
 fn one_error_per_bad_line_at_most_one_hundred() {
     let mut src = String::from(HEAD);
