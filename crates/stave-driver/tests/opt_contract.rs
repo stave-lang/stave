@@ -3,9 +3,27 @@
 //!
 //! - cases of the base passes beside the examples: the parts of params placed after the slots
 //!   and a part whose anchor is deleted in the same step (B1, B3), dead code whose value has 255
-//!   uses and more (B5).
+//!   uses and more (B5);
+//! - a `switch` on an int constant, legal at level `opt` only: every consumer of an `opt` text
+//!   (`stave ir run`, `stave ir build` for x86-64 and AArch64) takes the case whose value is the
+//!   constant, and the base passes never see one (they take `lowered` or `checked` text).
 
-use stave_driver::ir_cmd;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[path = "../../../tests/support/legs.rs"]
+mod legs;
+
+use stave_driver::dump::emit_text;
+use stave_driver::exec::{self, RunSpec, TempDir};
+use stave_driver::ir_cmd::{self, IrError};
+use stave_driver::pipeline::{self, Goal, Options};
+use stave_driver::shipped::Library;
+use stave_target::Triple;
+
+fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
 
 fn load(name: &str, text: &str) -> ir_cmd::LoadedIr {
     ir_cmd::load(name, text.as_bytes()).unwrap_or_else(|e| panic!("{name}: {:?}", e.lines()))
@@ -149,5 +167,102 @@ b0(%0: t0):
 }
 ";
         assert_eq!(opt(&format!("uses{n}.ir"), &text), want, "{n} uses");
+    }
+}
+
+/// `pick` lowers to `switch %0 0:.. 1:.. 7:.. _:..`; `main` exits with `pick(0)`.
+const SWITCH_PROGRAM: &str = "fn pick(x: i32) -> i32 {
+    return match x { 0 => 10, 1 => 20, 7 => 40, _ => 30 };
+}
+
+/// The `opt` text of [`SWITCH_PROGRAM`] for `target` in the emit form (`stave ir emit --release`,
+/// then `stave ir opt`), with the `checked` text it came from.
+fn switch_program(dir: &Path, target: Triple) -> (String, String) {
+    let src = dir.join("main.stv");
+    std::fs::write(&src, SWITCH_PROGRAM).unwrap();
+    let mut o = Options::new(Goal::Check).threads(Some(2));
+    o.lower = true;
+    o.emit_ir = true;
+    o.release = true;
+    o.target = Some(target);
+    let out = pipeline::run(&src, &Library::in_dir(&repo()), &o).unwrap();
+    assert!(!out.has_errors() && out.failure.is_none(), "{target}: {:?} {:?}", out.diagnostics, out.failure);
+    let checked = emit_text(&out).unwrap();
+    let optimized = opt("main.ir", &checked);
+    (checked, optimized)
+}
+
+/// `text` with the scrutinee of `pick`'s `switch` replaced by `k`.
+fn switch_on(text: &str, k: &str) -> String {
+    let start = text.find(" main.pick(").expect("fn main.pick");
+    let at = start + text[start..].find("\n  switch %0 ").expect("pick switches on its param") + 1;
+    format!("{}  switch {k} {}", &text[..at], &text[at + "  switch %0 ".len()..])
+}
+
+fn have(tool: &str) -> bool {
+    Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success())
+}
+
+/// How binaries for `target` run here: `Some(None)` natively, `Some(Some(cmd))` through `cmd`.
+fn runner(target: Triple) -> Option<Option<&'static str>> {
+    let how = if exec::can_run(target) {
+        Some(None)
+    } else if target.name() == "aarch64-linux" && cfg!(target_os = "linux") && have("qemu-aarch64") {
+        Some(Some("qemu-aarch64"))
+    } else {
+        None
+    };
+    legs::gate(target.name(), how.is_some());
+    how
+}
+
+/// The scrutinee constants and the exit status `pick` gives with them: a case value, no case
+/// value, and constants whose low 64 (or 32) bits equal a case value but whose value does not.
+const SCRUTINEES: [(&str, i32); 7] = [
+    ("0", 10),
+    ("1", 20),
+    ("7", 40),
+    ("2", 30),
+    ("4294967297", 30),
+    ("18446744073709551617", 30),
+    ("-18446744073709551615", 30),
+];
+
+#[test]
+fn a_constant_switch_scrutinee_takes_the_case_of_its_value() {
+    let tmp = TempDir::new("optsw").unwrap();
+    for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
+        let (checked, optimized) = switch_program(tmp.path(), target);
+        let how = runner(target);
+        for (k, want) in SCRUTINEES {
+            let name = format!("{target} switch {k}");
+            let text = switch_on(&optimized, k);
+            let l = load(&name, &text);
+            assert_eq!(ir_cmd::fmt(&l).unwrap(), text, "{name}: not canonical");
+            let ran = ir_cmd::run(&l, &[]).unwrap_or_else(|e| panic!("{name}: ir run: {:?}", e.lines()));
+            assert_eq!(ran.ran.exit, want, "{name}: `stave ir run`");
+            let built =
+                ir_cmd::build(&l, Some(2)).unwrap_or_else(|e| panic!("{name}: ir build: {:?}", e.lines()));
+            if let Some(runner) = how {
+                let bin = tmp.path().join(format!("sw-{target}-{}", k.replace('-', "m")));
+                built.image.write_file(&bin).unwrap();
+                let spec = RunSpec { args: &[], runner, cwd: None, inherit: false };
+                let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
+                assert_eq!(got.exit, want, "{name}: the `stave ir build` binary");
+            }
+            // Below level `opt` the scrutinee must be a value: the base passes never see a constant.
+            let low = switch_on(&checked, k);
+            match ir_cmd::load(&name, low.as_bytes()) {
+                Err(IrError::Input(es)) => {
+                    assert!(
+                        es.iter().any(|e| e.contains("switch scrutinee must be a value")),
+                        "{name}: {es:?}"
+                    )
+                }
+                r => panic!("{name}: a `checked` text with a constant scrutinee: {:?}", r.map(|_| ())),
+            }
+        }
+        let refused = ir_cmd::opt(&load("opt", &switch_on(&optimized, "1")));
+        assert!(matches!(refused, Err(IrError::Input(_))), "{target}: `stave ir opt` of an `opt` text");
     }
 }

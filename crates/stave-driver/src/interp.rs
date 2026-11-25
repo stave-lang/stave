@@ -22,6 +22,7 @@
 
 use stave_ir::interp::{Config, Interp, Outcome, Val};
 use stave_ir::memcheck::MemReport;
+use stave_ir::text::Level;
 use stave_ir::{BufferHost, Known, Module, PanicKind, Site, SyscallAbi};
 use stave_target::{Arch, Triple};
 
@@ -39,6 +40,8 @@ pub struct Limits {
     /// borrow side table ([`crate::pipeline::Output::for_interp`]); on any other module it sees
     /// the ends of allocations only.
     pub borrow: bool,
+    /// The IR level of the module, whose verifier rules the run checks it by.
+    pub level: Level,
 }
 
 /// Whether `STAVE_INTERP_CHECK` is `1` or `borrow`: the default of [`Limits::check`].
@@ -59,6 +62,7 @@ impl Default for Limits {
             max_depth: 20_000,
             check: check_from_env(),
             borrow: borrow_from_env(),
+            level: Level::Checked,
         }
     }
 }
@@ -106,6 +110,7 @@ pub fn run(
         max_depth: limits.max_depth,
         check: limits.check || limits.borrow,
         borrow: limits.borrow,
+        level: limits.level,
         ..Config::default()
     };
     let mut it = Interp::new(&m, host, cfg).map_err(|e| format!("interp: {e:?}"))?;

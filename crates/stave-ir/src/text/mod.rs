@@ -320,7 +320,7 @@ fn verify(l: &Loaded) -> Result<(), Vec<ReadError>> {
         Err(es) => return Err(es.iter().map(|e| locate(l, e)).take(MAX_ERRORS).collect()),
     };
     for f in 0..m.funcs.len() {
-        errs.extend(verify_func_body(m, FuncId(f as u32)));
+        errs.extend(verify_func_body(m, FuncId(f as u32), l.header.level));
         if errs.len() >= MAX_ERRORS {
             break;
         }

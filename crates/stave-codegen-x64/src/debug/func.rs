@@ -3241,7 +3241,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         let b = self.b;
         let cs = b.switch_cases(cases);
         if let Some(x) = self.int_const(scrut) {
-            let tg = cs.iter().find(|c| c.value == x).map_or(default, |c| c.target);
+            let tg = b.switch_target(cases, default, x);
             self.edge(&tg)?;
             return self.jump_block(tg.block, next);
         }

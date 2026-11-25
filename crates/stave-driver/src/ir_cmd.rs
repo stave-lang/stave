@@ -88,7 +88,7 @@ pub fn load(file: &str, src: &[u8]) -> Result<LoadedIr, IrError> {
     let read = module.clone();
     let read_stack = stack.clone();
     if header.level != Level::Lowered {
-        build::verified_final(&module).map_err(IrError::failure)?;
+        build::verified_final(&module, header.level).map_err(IrError::failure)?;
         return Ok(LoadedIr { file: file.to_string(), header, read, module, read_stack, stack });
     }
     let mut m = module;
@@ -173,7 +173,7 @@ pub fn run(l: &LoadedIr, args: &[&[u8]]) -> Result<Interpreted, IrError> {
             l.file
         )]));
     };
-    let limits = Limits { borrow: false, ..Limits::default() };
+    let limits = Limits { borrow: false, level: l.header.level, ..Limits::default() };
     interp::run(&l.module, &main.path.clone(), l.header.target, args, &[], limits).map_err(IrError::Run)
 }
 

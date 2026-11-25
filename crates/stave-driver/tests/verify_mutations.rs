@@ -12,6 +12,7 @@ use stave_driver::interp::{self, Limits};
 use stave_driver::pipeline::{self, Goal, Options};
 use stave_driver::shipped::Library;
 use stave_ir::ir::{ConstId, Target, ValueDef};
+use stave_ir::text::Level;
 use stave_ir::{
     Block, CastKind, Const, FuncId, IntrinsicId, Known, Module, Op, Operand, PanicKind, Site, StrId, Term,
     TypeId, Value, VecOp,
@@ -504,9 +505,8 @@ fn mutate(m: &mut Module, r: &mut Rng) -> String {
 
 fn verifies(m: &Module) -> bool {
     match stave_ir::verify::verify_types(m) {
-        Ok(e) if e.is_empty() => {
-            (0..m.funcs.len()).all(|f| stave_ir::verify::verify_func_body(m, FuncId(f as u32)).is_empty())
-        }
+        Ok(e) if e.is_empty() => (0..m.funcs.len())
+            .all(|f| stave_ir::verify::verify_func_body(m, FuncId(f as u32), Level::Checked).is_empty()),
         _ => false,
     }
 }
@@ -517,7 +517,8 @@ fn downstream(m: &Module, main: FuncId, target: &str, release: bool) {
     let triple = Triple::parse(target).unwrap();
     let _ = codegen_link(m, triple, release, Some(1), None);
     if let Some(f) = m.func(main) {
-        let limits = Limits { max_steps: 200_000, max_depth: 200, check: false, borrow: false };
+        let limits =
+            Limits { max_steps: 200_000, max_depth: 200, check: false, borrow: false, level: Level::Checked };
         let _ = interp::run(m, &f.path.clone(), triple, &[], &[], limits);
     }
 }

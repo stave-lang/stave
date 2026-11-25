@@ -62,4 +62,4 @@ pub use known::Known;
 pub use simd::VecOp;
 pub use text::{print_checked, print_module};
 pub use types::{AdtShape, DeclId, FloatBits, GenericArg, IntBits, Lanes, TypeId, TypeKey, TypeTable};
-pub use verify::{VerifyError, verify_func, verify_module};
+pub use verify::{VerifyError, verify_func, verify_module, verify_module_at};

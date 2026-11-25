@@ -635,6 +635,38 @@ fn panic_ops_and_switch() {
     assert!(b.insts.op.iter().all(|o| matches!(o, Op::Panic(_))));
 }
 
+/// A `switch` whose scrutinee is `scrut`, with cases `cases`, at `level`.
+fn switch_module(level: &str, scrut: &str, cases: &str) -> String {
+    format!(
+        "stave.ir 4 \"x86_64-linux-v2\" release {level}
+type t0 int s 32
+fn @0 app.s() -> t0 {{
+b0():
+  switch {scrut} {cases} _:b1()
+b1():
+  ret 0
+}}
+"
+    )
+}
+
+/// At level `opt` the scrutinee may be an int constant, any integer, whose cases are checked for
+/// duplicates only; below it, and for any other constant, it must be a value.
+#[test]
+fn a_constant_switch_scrutinee_only_at_level_opt() {
+    for k in ["1", "-1", "18446744073709551617"] {
+        load(&switch_module("opt", k, "1:b1() -5:b1() 170141183460469231731687303715884105727:b1()"));
+        for level in ["checked", "lowered"] {
+            rejects(&switch_module(level, k, "1:b1()"), "t.ir:5: verify: switch scrutinee must be a value");
+        }
+    }
+    rejects(&switch_module("opt", "1", "1:b1() 1:b1()"), "t.ir:5: verify: duplicate switch case 1");
+    rejects(
+        &switch_module("opt", "0x3f800000", "1:b1()"),
+        "t.ir:5: verify: switch scrutinee must be a value",
+    );
+}
+
 /// Branch targets with arguments, constants of every kind as operands.
 const TERMS: &str = "stave.ir 4 \"x86_64-linux-v2\" debug checked
 type t0 int s 32
