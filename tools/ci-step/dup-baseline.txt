@@ -1,0 +1,33 @@
+# stave dup baseline: one class per line, `<form> <fn path>...` (contracts/cli.md `dup-gate`)
+exact consteval.child decls.child
+exact consteval.is_chain typeck.is_chain
+exact consteval.kind sigs.kind tc_chain.kind tc_rows.kind typeck.kind
+exact diag_out.push_str dump.push_str ir.bytes.push_str test_manifest.push_str traits.push_str
+exact diag_reg.column parse.copy_bools
+exact diag_sigs.push_lanes dump.push_lanes
+exact intern.find_str modules.lookup
+exact ir.bytes.is_digit lex.is_digit manifest.is_dec std.num.is_digit
+exact ir.bytes.push_u64 text.push_u64
+exact ir.grammar.cmp_bytes ir.verify.cmp text.cmp
+exact ir.model.mix ir.types.mix ir.umap.mix prims.hindex.mix traits.mix
+exact ir.print.push_inst ir.read.push_inst
+exact ir.types.memo_get sigs.memo_get tc_traits.memo
+exact ir.vtypes.digits tc_rows.sig_bits
+exact ir.vtypes.mul_ok layout.mul_ok
+exact kinds.real layout.real traits.real
+exact kinds.run_of layout.run_of
+exact resolve.is_idcont tc_chain.is_idcont
+exact runtime.alloc.panic_str runtime.cpu.str_bytes runtime.panic.str_bytes std.mem.str_bytes
+exact runtime.panic.round_up runtime.start.round_up runtime.thread.round_up
+exact sigs.close_of tc_chain.close_of
+exact tc_builtins.lane_bits typeck.lane_bits
+exact tc_chain.first_tok typeck.first_tok
+exact tc_chain.has_const_param tc_method.has_const
+exact tc_chain.member tc_pat.field
+self diag_reg.Strs.get intern.Cands.text
+self diag_reg.Strs.len intern.Cands.len
+self diag_reg.Strs.new intern.Cands.new
+self ir.lexer.Lexed.push lex.Errs.push
+self prims.test_util.Rng.next test_intern.Rng.next
+self std.soa.Soa.reserve std.vec.Vec.reserve
+self std.soa.Soa.try_reserve std.vec.Vec.try_reserve

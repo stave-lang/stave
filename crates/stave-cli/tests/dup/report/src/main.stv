@@ -1,0 +1,62 @@
+// The `stave dup` golden (expected.txt, baseline.txt; crates/stave-cli/tests/dup.rs), built against
+// the pinned stand-in library so it does not move with the shipped std.
+import geo;
+import util;
+
+const NONE: u32 = util.NONE;
+const LIMIT: u32 = 1000;
+
+// A copy of `util.sum_mix` with other local names.
+fn checksum(xs: &[u32]) -> u32 {
+    let mut h: u32 = 0;
+    for i in 0..xs.len() {
+        h = h *% 31u32 +% xs[i];
+    }
+    return h;
+}
+
+pub fn last_or<U: Copy>(ys: &[U], fallback: U) -> U {
+    if ys.len() == 0 {
+        return fallback;
+    }
+    return ys[ys.len() - 1];
+}
+
+// Closures are part of their fn: equal closures, equal fns.
+fn apply_a(x: u32) -> u32 {
+    let f = fn(y: u32) -> u32 { return y *% 3u32 +% 1u32; };
+    return f(f(x)) +% f(x);
+}
+
+fn apply_b(x: u32) -> u32 {
+    let g = fn(z: u32) -> u32 { return z *% 3u32 +% 1u32; };
+    return g(g(x)) +% g(x);
+}
+
+fn apply_c(x: u32) -> u32 {
+    let g = fn(z: u32) -> u32 { return z *% 3u32 +% 2u32; };
+    return g(g(x)) +% g(x);
+}
+
+// A call of itself is the same code in both.
+rec fn fact_a(n: u64) -> u64 {
+    return if n == 0u64 then 1u64 else n *% fact_a(n -% 1u64);
+}
+
+rec fn fact_b(k: u64) -> u64 {
+    return if k == 0u64 then 1u64 else k *% fact_b(k -% 1u64);
+}
+
+fn main() {
+    let xs: [u32; 3] = [1u32, 2u32, 3u32];
+    let a = checksum(&xs);
+    let b = last_or(&xs, 0u32);
+    let c = util.first_or(&xs, 0u32);
+    let bs: [u8; 2] = [1u8, 2u8];
+    let d = last_or(&bs, 0u8);
+    let e = util.size_plus::<u32>() + util.align_plus::<u32>();
+    let f = util.size_plus::<[u8; 3]>() + util.align_plus::<[u8; 3]>();
+    let mut m = geo.Meters.{ v: 1u32 };
+    let mut ft = geo.Feet.{ v: 2u32 };
+    let g = m.bumped() +% ft.bumped() +% m.get() +% ft.get();
+}

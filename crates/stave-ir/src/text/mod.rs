@@ -3,8 +3,9 @@
 //!
 //! - [`print`]: [`print_module`] prints a module as the gate form of the text, or as the emit
 //!   form when it is given the stack section; [`print_checked`] prints a bare module, for callers
-//!   that have no target, mode, or stack section (tests, debugging). [`spell`]: what the printer
-//!   refuses, a module whose text would not load.
+//!   that have no target, mode, or stack section (tests, debugging); `body_text` prints one
+//!   body with the names a caller chooses (the duplicate form, [`crate::form`]). [`spell`]: what
+//!   the printer refuses, a module whose text would not load.
 //! - [`lex`]: one line to tokens (bytes, any input).
 //! - [`line`]: one line parsed on the generated LL(1) table and typed; no line looks at another,
 //!   so lines can be parsed in parallel.
@@ -21,6 +22,7 @@ mod spell;
 
 use std::fmt;
 
+pub(crate) use print::{BodyNames, body_text};
 pub use print::{print_checked, print_module};
 use stave_target::Triple;
 

@@ -47,17 +47,29 @@ pub fn binop_trait(op: u8) -> usize {
 }
 
 impl tc_rows.Typeck {
-    // An operator of trait k (a position in `traits.OPS`, NONE: none) on operands of type t.
-    pub fn user_op(&mut self, sg: &mut sigs.Sigs, k: usize, t: u32) -> u32 {
-        if k == NONE as usize { return self.err(); }
+    // An operator (token tok) of trait k (a position in `traits.OPS`, NONE: none) on operands of
+    // type t.
+    pub fn user_op(&mut self, sg: &mut sigs.Sigs, k: usize, t: u32, tok: u32) -> u32 {
+        let tab = &sg.cx.tab;
+        let param = tab.tag_of(t) == types.TK_PARAM;
+        if k == NONE as usize || self.tq.tr.lang.ops.as_slice()[k] == NONE {
+            // no operator trait: E0206
+            let r = tab.tag_of(t) == types.TK_REF;
+            self.report_span(206, if r then tc_rows.C_REF_OPERAND else 0u8, tok, tok, NONE, t, NONE, NONE);
+            return self.err();
+        }
         let tr = self.tq.tr.lang.ops.as_slice()[k];
         let cp = self.tq.tr.lang.copy_tr;
-        if tr == NONE || cp == NONE { return self.err(); }
+        if cp == NONE { return self.err(); }
         let e = self.tq.env_of(sg, self.sc);
         let a = self.tq.holds(sg, e, t, tr);
         let c = self.tq.holds(sg, e, t, cp);
-        // stage0's E0206 / E0422: the operator's value is the error type, the rest of the body is
-        // typed as without it
+        // stage0's E0206 (E0901 for a generic param) / E0422: the operator's value is the error
+        // type, the rest of the body is typed as without it
+        if a == tc_traits.A_NO && !param {
+            let r = sg.cx.tab.tag_of(t) == types.TK_REF;
+            self.report_span(206, if r then tc_rows.C_REF_OPERAND else 0u8, tok, tok, NONE, t, NONE, NONE);
+        }
         if a == tc_traits.A_NO || c == tc_traits.A_NO { return UNK; }
         if a == tc_traits.A_WAIT || c == tc_traits.A_WAIT {
             if self.tq.last { self.bad = true; }

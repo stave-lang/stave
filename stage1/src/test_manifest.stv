@@ -7,6 +7,7 @@ import files;
 import manifest;
 import manifest_check;
 import source;
+import test_kit;
 import text;
 import std.debug;
 import std.mem;
@@ -245,15 +246,6 @@ test fn the_dependencies_carry_their_spans() {
     debug.assert(m.name_lo == 7 && m.name_hi == 10 && m.kind_lo == manifest.NO_SPAN, "name and kind spans");
 }
 
-fn has(hay: &[u8], needle: &str) -> bool {
-    let n = mem.str_bytes(needle);
-    if n.len() > hay.len() { return false; }
-    for i in 0..hay.len() - n.len() + 1 {
-        if hay[i..i + n.len()].eq(n) { return true; }
-    }
-    return false;
-}
-
 // The human text of one row `case` of manifest `p`/stave.toml (ten bytes of text, no newline).
 fn render_row(case: u8, key: &str, extra: &str) -> (bool, vec.Vec<u8>) {
     let mut fl = files.FileList.empty();
@@ -278,14 +270,14 @@ test fn every_case_builds_from_its_template() {
         let want_root = c == manifest_check.C_MISSING_ROOT;
         let (ok, out) = render_row(c, "k", if want_root then "src/main.stv" else "string");
         debug.assert(ok && out.len() > 0, "the row is built from the registry");
-        debug.assert(has(out.as_slice(), "stave.toml:1:3: error[E"), "located at offset 2 of the manifest");
+        debug.assert(test_kit.has(out.as_slice(), "stave.toml:1:3: error[E"), "located at offset 2 of the manifest");
     }
     let (ok, out) = render_row(manifest_check.C_WRONG_TYPE, "k", "string");
-    debug.assert(has(out.as_slice(), "`k` in `stave.toml` must be a string\n"), "wrong-type message");
+    debug.assert(test_kit.has(out.as_slice(), "`k` in `stave.toml` must be a string\n"), "wrong-type message");
     let (ok, out) = render_row(manifest_check.C_NON_PATH, "k", "");
-    debug.assert(has(out.as_slice(), "write `k = { path = \"<dir>\" }`"), "braces in a fix");
+    debug.assert(test_kit.has(out.as_slice(), "write `k = { path = \"<dir>\" }`"), "braces in a fix");
     let (ok, out) = render_row(manifest_check.C_MISSING_ROOT, "", "src/lib.stv");
-    debug.assert(has(out.as_slice(), "the package has no root module `src/lib.stv`\n"), "missing-root message");
+    debug.assert(test_kit.has(out.as_slice(), "the package has no root module `src/lib.stv`\n"), "missing-root message");
     let (ok, out) = render_row(99, "k", "");
     debug.assert(!ok, "a number that is no case is an internal error");
 }

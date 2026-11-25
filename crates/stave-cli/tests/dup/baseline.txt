@@ -1,0 +1,9 @@
+# stave dup baseline: one class per line, `<form> <fn path>...` (contracts/cli.md `dup-gate`)
+exact main.apply_a main.apply_b
+exact main.checksum util.sum_mix
+exact main.fact_a main.fact_b
+exact main.last_or util.first_or
+exact util.ex_a util.ex_b
+exact util.twice_a util.twice_b
+self geo.Feet.grow geo.Meters.grow
+self geo.Feet.score geo.Meters.score

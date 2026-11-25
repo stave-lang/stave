@@ -12,13 +12,16 @@
 // Not raised here yet (stage0 raises them in the same pass): E0905 (a method signature that
 // differs from the trait's), E0415 and E0422 (Copy under the impl's own bounds).
 import ast;
+import consteval;
 import decls;
 import diag;
 import diag_sigs;
 import files;
+import generated.node_kinds;
 import generated.terminals;
 import intern;
 import items;
+import kinds;
 import lex;
 import modules;
 import source;
@@ -646,5 +649,47 @@ fn drop_views(d: &mut diag.Diags, tab: &types.Table, sg: &sigs.Sigs, ds: &decls.
         let (pf, ps, pz) = gparam_span(sg, tree, lx, set, t, it, ilo + p);
         d.role("param", pf, ps, pz);
         d.end(f, s, z);
+    }
+}
+
+// E0413 case `drop`: a `const` whose type has drop glue (the kinds' `drop` flag) and holds no
+// reference or view, of a checked item (a const is a new copy at each use, so a destructor
+// would run at each use). `order` is the printed types the kinds are of.
+pub fn const_drops(d: &mut diag.Diags, kd: &kinds.Kinds, order: &[u32], sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast) {
+    let mut keys = vec.Vec::<u64>.new();
+    for k in 0..order.len() {
+        keys.push(search.pair(order[k], k as% u32));
+    }
+    let perm = sort.sort_perm(keys.as_slice());
+    let mut sk = vec.Vec::<u64>.new();
+    for j in 0..perm.len() {
+        sk.push(keys.as_slice()[perm.as_slice()[j] as usize]);
+    }
+    let mut buf = vec.Vec::<u8>.new();
+    for c in 0..ds.decls() {
+        if ds.kind.as_slice()[c] != decls.DK_CONST { continue; }
+        let it = ds.item.as_slice()[c];
+        let n = ds.node.as_slice()[c];
+        if it == NONE || n == NONE || !tree.ok(it as usize) { continue; }
+        let ty = sg.cx.ty.as_slice()[c];
+        if ty == ERR || sigs.is_view_in(&sg.cx, ds, ty, consteval.no_scope()) { continue; }
+        let x = search.lower_bound(sk.as_slice(), search.pair(ty, 0));
+        if x == sk.len() || (sk.as_slice()[x] >> 32) as% u32 != ty { continue; }
+        let k = (sk.as_slice()[x] & 0xffff_ffff) as usize;
+        if kd.bits.as_slice()[k] & kinds.K_DROP == 0 { continue; }
+        let base = tree.item_node.as_slice()[it as usize] as usize;
+        let tn = consteval.child(tree, base, base + n as usize, node_kinds.KIND_TYPE);
+        if tn == NONE { continue; }
+        d.begin(413, "drop");
+        d.arg("name", nm.tab.text(ds.name.as_slice()[c] as usize));
+        buf.clear();
+        let ns = consteval.no_scope();
+        diag_sigs.display(&mut buf, sg, ds, nm, &[ns.par_lo, ns.par_hi, ns.own_lo, ns.own_hi], ty);
+        d.arg("type", buf.as_slice());
+        let a = tree.tok.as_slice()[tn as usize];
+        let e = tree.tok_end.as_slice()[tn as usize];
+        let (f, s, _) = modules.tok_span(lx, set, t, a);
+        let (_, s2, z2) = modules.tok_span(lx, set, t, if e > a then e - 1 else a);
+        d.end(f, s, s2 + z2 - s);
     }
 }

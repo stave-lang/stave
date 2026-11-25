@@ -19,6 +19,7 @@ pub enum Cmd {
     Fix,
     UnsafeReport,
     Effects,
+    Dup,
     Fmt,
     Lowering,
     Explain,
@@ -36,6 +37,7 @@ impl Cmd {
             Cmd::Fix => "fix",
             Cmd::UnsafeReport => "unsafe-report",
             Cmd::Effects => "effects",
+            Cmd::Dup => "dup",
             Cmd::Fmt => "fmt",
             Cmd::Lowering => "lowering",
             Cmd::Explain => "explain",
@@ -53,6 +55,7 @@ impl Cmd {
             Cmd::Fix,
             Cmd::UnsafeReport,
             Cmd::Effects,
+            Cmd::Dup,
             Cmd::Fmt,
             Cmd::Lowering,
             Cmd::Explain,
@@ -156,8 +159,16 @@ pub struct Args {
     pub input: Option<usize>,
     pub watch: bool,
     pub alloc_check: bool,
-    /// `unsafe-report --json`, `effects --json`.
+    /// `unsafe-report --json`, `effects --json`, `dup --json`.
     pub json: bool,
+    /// `dup --all`: also the classes inside the built-in packages.
+    pub all: bool,
+    /// `dup --min-size N`.
+    pub min_size: Option<u32>,
+    /// `dup --baseline FILE`: the gate.
+    pub baseline: Option<PathBuf>,
+    /// `dup --write-baseline FILE`.
+    pub write_baseline: Option<PathBuf>,
     /// `fix --dry-run`.
     pub dry_run: bool,
     /// `fmt` paths: files, and directories standing for every `.stv` file below them.
@@ -211,6 +222,10 @@ commands:
   unsafe-report [PKG_DIR] [--json]
   effects [PKG_DIR] [--json]
                         (the effects of each fn of the program's own packages)
+  dup [PKG_DIR] [--target T] [--all] [--min-size N] [--json]
+      [--baseline FILE | --write-baseline FILE]
+                        (classes of fns with the same code, and re-declared consts;
+                        --baseline: exit 1 on a class the baseline does not hold)
   fmt [PKG_DIR | FILE...] [--check]
                         rewrite sources in the canonical layout (a directory: every
                         .stv file below it; --check: list the files that would change)
@@ -263,6 +278,10 @@ fn allowed(cmd: Cmd, flag: &str) -> bool {
         Cmd::Fix => matches!(flag, "--dry-run" | "--target" | "--diagnostics"),
         // These always run in stage0 whatever --compiler says (cli-stage1.md).
         Cmd::UnsafeReport | Cmd::Effects => matches!(flag, "--json" | "--compiler"),
+        Cmd::Dup => matches!(
+            flag,
+            "--json" | "--compiler" | "--target" | "--all" | "--min-size" | "--baseline" | "--write-baseline"
+        ),
         Cmd::Fmt => flag == "--check",
         Cmd::Lowering => matches!(flag, "--target" | "--op" | "--compiler"),
         Cmd::Explain => flag == "--compiler",
@@ -286,10 +305,13 @@ fn takes_value(flag: &str) -> bool {
             | "--filter"
             | "--input"
             | "--op"
+            | "--min-size"
+            | "--baseline"
+            | "--write-baseline"
     )
 }
 
-const KNOWN_FLAGS: [&str; 21] = [
+const KNOWN_FLAGS: [&str; 25] = [
     "--release",
     "--target",
     "--features",
@@ -311,6 +333,10 @@ const KNOWN_FLAGS: [&str; 21] = [
     "--check",
     "--op",
     "--help",
+    "--all",
+    "--min-size",
+    "--baseline",
+    "--write-baseline",
 ];
 
 fn set_once<T>(slot: &mut Option<T>, v: T, flag: &str) -> Result<(), UsageError> {
@@ -358,6 +384,9 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     let (mut release, mut timings, mut watch, mut alloc_check, mut json, mut dry_run, mut check) =
         (false, false, false, false, false, false, false);
     let mut exact = false;
+    let mut all = false;
+    let mut min_size: Option<u32> = None;
+    let (mut baseline, mut write_baseline): (Option<PathBuf>, Option<PathBuf>) = (None, None);
 
     let mut i = 1;
     while i < argv.len() {
@@ -417,6 +446,15 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
             "--dry-run" => set_flag(&mut dry_run, flag)?,
             "--check" => set_flag(&mut check, flag)?,
             "--exact" => set_flag(&mut exact, flag)?,
+            "--all" => set_flag(&mut all, flag)?,
+            "--min-size" => {
+                let Ok(n) = value.parse::<u32>() else {
+                    return err(format!("--min-size takes a number, not `{value}`"));
+                };
+                set_once(&mut min_size, n, flag)?;
+            }
+            "--baseline" => set_once(&mut baseline, PathBuf::from(value), flag)?,
+            "--write-baseline" => set_once(&mut write_baseline, PathBuf::from(value), flag)?,
             "--target" => set_once(&mut target, value, flag)?,
             // A list: repeated --features accumulate.
             "--features" => features.push(value),
@@ -559,6 +597,9 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     if exact && filter.is_none() {
         return err("--exact needs --filter NAME");
     }
+    if [json, baseline.is_some(), write_baseline.is_some()].iter().filter(|x| **x).count() > 1 {
+        return err("--json, --baseline, and --write-baseline exclude each other");
+    }
 
     Ok(Parsed::Args(Box::new(Args {
         cmd,
@@ -581,6 +622,10 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
         watch,
         alloc_check,
         json,
+        all,
+        min_size,
+        baseline,
+        write_baseline,
         dry_run,
         paths,
         check,
@@ -712,6 +757,14 @@ mod tests {
         assert_eq!((a.daemon, a.pkg_dir), (Some(DaemonCmd::Evict), Some(PathBuf::from("pkg"))));
         assert_eq!(args("build --target gpu-sm86 --alloc-check").target.triple, Triple::GpuSm86);
         assert_eq!(args("run --target gpu-sm86").target.triple, Triple::GpuSm86);
+        let a = args("dup stage1 --all --min-size 20 --baseline b.txt");
+        assert_eq!((a.cmd, a.all, a.min_size), (Cmd::Dup, true, Some(20)));
+        assert_eq!((a.pkg_dir, a.baseline), (Some(PathBuf::from("stage1")), Some(PathBuf::from("b.txt"))));
+        assert_eq!(args("dup --write-baseline=b.txt").write_baseline, Some(PathBuf::from("b.txt")));
+        assert!(args("dup --json").json && !args("dup").all);
+        assert!(usage("dup --json --baseline b").contains("exclude each other"));
+        assert!(usage("dup --min-size x").contains("takes a number"));
+        assert!(usage("check --all").contains("does not take --all"));
     }
 
     #[test]
