@@ -42,6 +42,7 @@ pub mod layout;
 pub mod link;
 pub mod mem;
 pub mod memcheck;
+pub mod opt_table;
 pub mod simd;
 pub mod text;
 pub mod traps;

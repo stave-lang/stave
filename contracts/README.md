@@ -17,6 +17,7 @@ GPU) both implement them.
 | `cli.md` | `stave` command line |
 | `simd-ops.md` | portable vector ops and lowering classes (stave-target's tests check `crates/stave-target/tables/` against it) |
 | `checked-ir.md` | checked IR: levels, the meaning of every line of its text, canonical order, loading |
+| `opt-passes.md` | the release passes from level `checked` to `opt`: inlining decision and expansion, clean-up, base passes, their order and gates (constants in `crates/stave-ir/tables/opt.toml`) |
 | `lang-details.md` | fine print behind one-sentence rules of `LANG.md`: output formats, case lists, reasons |
 | `soundness.md` | the argument for each static rule whose failure would let an accepted program misbehave |
 | `known-limits.md` | what the compiler does not guarantee, what it rejects without need, and what it rejects on purpose, with examples and rewrites |

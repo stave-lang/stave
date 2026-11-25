@@ -1,0 +1,415 @@
+# The release optimizer's tunables and op attributes (contracts/opt-passes.md): the one table
+# both compilers read. `tools/gen-tables` checks it and writes stave-ir's form
+# (`crates/stave-ir/src/generated/opt_table.rs`, included by `opt_table.rs`).
+#
+# The numbers in [limits], [term] and the `weight` column are starting values: a measured sweep
+# may change them, and every change re-blesses the optimizer goldens. The `removable` and `fold`
+# columns are semantics, not tunables.
+#
+# [limits] (names as in opt-passes.md "Constants"):
+#   threshold    T: the largest closed size of a callee that is inlined
+#   cap          CAP: the closed size up to which a caller still grows
+#   call_saved   W_CALL: the weight an inlined call removes
+#   slot_callee  SLOT_CALLEE: the most closed slot bytes of a callee that is inlined
+#   slot_caller  SLOT_CALLER: the most slot bytes a caller gains
+#   rounds       ROUNDS: how many times decision, expansion and clean-up run
+#
+# [term]: the weight of each terminator.
+#
+# [known] inline: the compiler-known items (stave-ir `Known` variants) that are inlined like
+# ordinary fns; every other known item is never inlined. An item with an ABI signature may not
+# be listed.
+#
+# [[op]]: one row per op name; a name ending in `*` stands for every op name with that prefix
+# that no other row names. Every op of stave-ir `Op` matches exactly one row.
+#   weight     the instruction weight
+#   removable  when clean-up and dead-code removal may delete an unused result:
+#              `yes`, `no`, `float` (the result type is a float type), `const-index` (operand 1
+#              is a constant), `lanes` (the vector or mask op neither traps nor accesses memory)
+#   fold       `int`: folded when every operand is an int constant (a trapping op only when it
+#              does not trap); `cond`: folded when the condition (operand 0) is a constant;
+#              `no`: never folded
+
+[limits]
+threshold = 32
+cap = 2000
+call_saved = 3
+slot_callee = 64
+slot_caller = 1024
+rounds = 1
+
+[term]
+br = 0
+cbr = 1
+switch = 2
+ret = 0
+unreachable = 0
+
+[known]
+inline = ["SetUserSite"]
+
+[[op]]
+name = "add"
+weight = 1
+removable = "float"
+fold = "int"
+
+[[op]]
+name = "sub"
+weight = 1
+removable = "float"
+fold = "int"
+
+[[op]]
+name = "mul"
+weight = 1
+removable = "float"
+fold = "int"
+
+[[op]]
+name = "div"
+weight = 1
+removable = "float"
+fold = "int"
+
+[[op]]
+name = "rem"
+weight = 1
+removable = "float"
+fold = "int"
+
+[[op]]
+name = "neg"
+weight = 1
+removable = "float"
+fold = "int"
+
+[[op]]
+name = "add.wrap"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "sub.wrap"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "mul.wrap"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "shl.wrap"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "add.sat"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "sub.sat"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "mul.sat"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "shl"
+weight = 1
+removable = "no"
+fold = "int"
+
+[[op]]
+name = "shr"
+weight = 1
+removable = "no"
+fold = "int"
+
+[[op]]
+name = "and"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "or"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "xor"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "not"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "popcount"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "clz"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "ctz"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "mul.wide"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "eq"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "ne"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "lt"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "le"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "gt"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "ge"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "select"
+weight = 1
+removable = "yes"
+fold = "cond"
+
+[[op]]
+name = "cast"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "cast.wrap"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "cast.sat"
+weight = 1
+removable = "yes"
+fold = "int"
+
+[[op]]
+name = "cast.round"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "cast.try"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "make"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "get"
+weight = 1
+removable = "const-index"
+fold = "no"
+
+[[op]]
+name = "set"
+weight = 1
+removable = "const-index"
+fold = "no"
+
+[[op]]
+name = "enum.make"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "enum.tag"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "enum.get"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "slot"
+weight = 0
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "load"
+weight = 1
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "store"
+weight = 1
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "addr.field"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "addr.enum_field"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "addr.elem"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "slice.make"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "slice.len"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "slice.ptr"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "fn.make"
+weight = 1
+removable = "yes"
+fold = "no"
+
+[[op]]
+name = "check.bounds"
+weight = 1
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "mem.prefetch_*"
+weight = 1
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "mem.store_stream"
+weight = 1
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "mem.fence_stream"
+weight = 1
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "call"
+weight = 3
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "call.ind"
+weight = 3
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "intrinsic.*"
+weight = 2
+removable = "no"
+fold = "no"
+
+[[op]]
+name = "vec.*"
+weight = 1
+removable = "lanes"
+fold = "no"
+
+[[op]]
+name = "mask.*"
+weight = 1
+removable = "lanes"
+fold = "no"
+
+[[op]]
+name = "panic.*"
+weight = 1
+removable = "no"
+fold = "no"

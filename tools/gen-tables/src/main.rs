@@ -1,5 +1,5 @@
-//! `gen-tables` writes the generated lowering tables; `gen-tables --check` exits 1 if a checked-in
-//! file differs from what it would write (or a table fails its checks).
+//! `gen-tables` writes the generated tables (SIMD lowering, optimizer); `gen-tables --check` exits 1
+//! if a checked-in file differs from what it would write (or a table fails its checks).
 
 use std::process::ExitCode;
 

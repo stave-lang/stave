@@ -14,7 +14,7 @@ error diagnostics; with errors, its file is not written.
 |---|---|---|
 | `lowered` | lowering and the IR verifier, before the removal of proven checks ("Bounds checks"), which reads this canonical module | `lir` |
 | `checked` | the removal of the checks that have a witness, which keeps the module canonical, then the IR verifier: the input of the interpreter and of both back ends | `ir` |
-| `opt` | the release passes, then the IR verifier and the bounds audit on their output; release builds only | `opt` |
+| `opt` | the release passes ([opt-passes.md](opt-passes.md)), which keep the module canonical, then the IR verifier on their output; release builds only | `opt` |
 
 Each level is printed from the canonical module of that point ("Canonical module"), so ids of
 one level do not correspond to those of another.
@@ -158,7 +158,9 @@ call-graph node n; `rec`: the node of a `rec fn`. `edge`: the call-graph edge fr
 to node `<to>` (at most one per pair): `spawn` a `spawn` edge, `indirect` a call through a fn
 value, `call` every other kind (a call, a dispatch arm, a member, a drop). `nodes @<inst>`: the
 nodes fn `@<inst>` stands for, ascending; a fn without the line stands for none. A module loaded without the
-section builds with an empty stack table: every stack gets the `[run] stack` default.
+section builds with an empty stack table: every stack gets the `[run] stack` default. The
+release passes keep the nodes and edges, and never give a fn a `call.ind` through a value that
+its `checked` body lacks: the bound stays sound when a caller holds a callee's code.
 
 **fn header.** Every fn of the module, with or without a body.
 
@@ -190,7 +192,8 @@ division, `tail exact`) are single instructions and create no blocks. An instruc
 its result value exactly when it prints a result type; an instruction with no result prints
 `()` there (`store () %3 %1`). `!<row>`: the instruction's site, absent when it has none;
 lowering gives one to every trapping instruction, every call, and every `store` of a user
-assignment. Terminators have no site.
+assignment. Terminators have no site. At level `opt` an instruction's `!<row>` may name a row
+whose fn path is not the fn's: inlined code keeps the rows of its source.
 
 **claim.** The summary the witness checker certified for the fn ("Contracts across calls"),
 rows only: `<a> <= <b> + <w>` over the terms `zero`, `p <i>` (int param i), `lenp <i>` (the
@@ -198,7 +201,8 @@ length of slice param i), `result` (the int result), `lenresult` (the length of 
 result). `pre` rows are what a call proves of its arguments; `checked` marks a `pre` row that
 reads a `requires` check of the fn, which is also a fact about the arguments after a call.
 `post` rows hold at every reachable `ret`. The proofs are not printed. A fn that states nothing
-has no `claim` line; at level `lowered` no fn has one.
+has no `claim` line; at level `lowered` no fn has one. The release passes do not change `claim`
+lines.
 
 ## Ids
 
@@ -300,16 +304,18 @@ step stops before the next.
    is about: a block error at the block's terminator, except the entry block's params, at its
    header (a module error: the line of the `type` or `static` it names, else line 1). The
    verifier requires every `intrinsic.<name>` to be an intrinsic of intrinsics.md with its
-   operand and result types, and a `known` fn to have its item's signature; against the header,
+   operand and result types, the `slot` instructions of a body to be a prefix of `b0` (every
+   level), and a `known` fn to have its item's signature; against the header,
    every intrinsic must be built for the target's arch (intrinsics.md, the rule E0704 applies to
    a declaration).
 4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds
    checks"); it computes the summaries. A contract check that fails whenever reached, and a call
    that fails a `requires` whenever reached, are reported as in step 3 where a build reports them
    as errors (E0215, E0217, E0218: not in an instance of a generic fn).
-5. **Audit.** The bounds audit of every fn, reading calls by the loaded `claim` rows (level
-   `checked` or `opt`) or the computed ones (`lowered`); an unguarded access is reported as in
-   step 3.
+5. **Audit.** At levels `lowered` and `checked`: the bounds audit of every fn, reading calls by
+   the loaded `claim` rows (`checked`) or the computed ones (`lowered`); an unguarded access is
+   reported as in step 3. At level `opt` no audit runs: the release passes inline calls and
+   substitute arguments for params, and the audit takes facts from calls and params.
 
 After steps 3-5 the loaded module is renumbered canonically. At level `lowered` the removal of
 step 4 follows, which keeps the module canonical, and then the IR verifier, as in a build; at the
@@ -317,18 +323,22 @@ other levels the verifier runs on the renumbered module.
 
 What loading proves depends on the level:
 - Every level: the module is well formed (steps 1-3: types, shapes, statics, signatures,
-  `known` items, intrinsics and their arch, SSA and op typing), and every element access has a
-  `check.bounds` or a proof the audit accepts (step 5).
+  `known` items, intrinsics and their arch, SSA and op typing).
+- `lowered`, `checked`: every element access has a `check.bounds` or a proof the audit accepts
+  (step 5).
 - `lowered`: no `claim` line. Step 4 computes the summaries from the bodies; a check is removed
   only by a proof the witness checker accepts. This is the one level whose memory safety loading
   establishes.
-- `checked`, `opt`: the `claim` rows are assertions of the text, not facts loading proves; the
-  text holds no proof to check them by. The audit trusts them as it trusts computed summaries: a
+- `checked`: the `claim` rows are assertions of the text, not facts loading proves; the text
+  holds no proof to check them by. The audit trusts them as it trusts computed summaries: a
   `pre` row lets an access of the fn go without a check, a `post` row lets a caller's access go
-  without one. So a text at these levels may omit checks by construction, and loading does not
-  establish its memory safety. A claim does nothing else: no step and no later pass (`ir opt`'s
-  release passes, `ir build`, `ir run`) removes a check, retargets a call, or reads a claim to
-  change code; the removal of proven checks runs only at level `lowered`.
+  without one. So a text at this level may omit checks by construction, and loading does not
+  establish its memory safety.
+- `opt`: well-formedness only. The text is trusted as the output of the release passes; its
+  `claim` rows are carried, not read.
+- A claim does nothing else: no step and no later pass (`ir opt`'s release passes, `ir build`,
+  `ir run`) reads a claim to remove a check, retarget a call, or change code; the removal of
+  proven checks runs only at level `lowered`.
 
 Building from `checked` or `opt` text is therefore a developer path, not a safety boundary.
 
@@ -469,7 +479,25 @@ rule is in stage-gates.md).
    operation; call arguments left to right; an autoref `&mut self` borrow is two-phase: in
    `v.push(v.len())` the arguments are evaluated before the `&mut` loan activates.
 
+## Order at level `opt`
+
+Rules 2 and 4 of "Order" state levels `lowered` and `checked`. At level `opt` the block order is
+the stored order the release passes give (opt-passes.md "Order and invariants of level `opt`"),
+which "Canonical module" keeps: (1) blocks of the input keep their relative order; (2) an inlined call
+in a block puts, directly after the block that holds the code before the call, the callee's
+blocks other than its entry in the callee's order, then the block that holds the code after the
+call; the entry's instructions follow the code before the call; calls of one block are expanded
+left to right; (3) a removed block leaves the others in order; (4) a merged block stands where
+its first part stood and holds the first part's instructions, then the second's. Values and
+pools are numbered by "Canonical module". Every `slot` of a body is in `b0` before every other
+instruction: first the fn's own in declaration order, then those of inlined calls, calls in
+(block, instruction) order of the body before inlining, each callee's slots in its own order.
+
 ## SSA rule (pruned SSA)
+
+This section states levels `lowered` and `checked`. At level `opt` the release passes
+(opt-passes.md) may have folded, merged, deleted, and moved code, and a block may have any params;
+the **Slots** rule still holds.
 
 - Every `let` binding is its own local. A local lives in a `slot` created in `b0`, in declaration
   order, and is read and written with `load`/`store`, when its address is taken (`&`, `&mut`,
@@ -553,8 +581,8 @@ rule is in stage-gates.md).
   up to the goal (stave-ir `witness`; mostly chains, every multiplier 1); an
   independent checker validates every witness, and every refutation of a contract check, before
   the check is deleted or the error reported, and a witness it refuses is a compiler bug (exit
-  3). Release passes remove no check; the IR verifier and the bounds audit run again on their
-  output.
+  3). Release passes remove no check an execution would reach (opt-passes.md "Order and
+  invariants of level `opt`"); the IR verifier runs again on their output.
   Compiler-made accesses (`for` over an array or slice, drop loops, array → slice coercion
   `addr.elem p 0` + `slice.make`) index below a length the generated code compares against.
 - **Memory hints**: `s.prefetch_<rw>_<loc>(i)` is `slice.ptr s` and the prefetch of it with `i`;

@@ -176,28 +176,29 @@ Outputs and statuses of the code-generating commands:
   [ir-text.ebnf](ir-text.ebnf)). The target, mode, and level come from the file's header, so
   these verbs take no `--target`, `--release`, or `--features`. Every verb first loads FILE
   (checked-ir.md "Loading": lines, structure, verification, at level `lowered` the removal of
-  proven checks, the bounds audit). An error prints `FILE:LINE:COL: error: MSG` (lines and
-  structure, at most 100) or `FILE:LINE: verify: MSG` (verification, removal, audit) on stderr
-  and exits 1: the text is input, so a rejected file is never exit 3. The one exit 3 is a witness
-  the witness checker refuses at level `lowered` (a compiler bug). A FILE that cannot be read
-  is exit 2. No verb prints a summary line, a stack line, or an `emulated:` line, and every verb
-  runs stage0.
+  proven checks, at levels `lowered` and `checked` the bounds audit). An error prints
+  `FILE:LINE:COL: error: MSG` (lines and structure, at most 100) or `FILE:LINE: verify: MSG`
+  (verification, removal, audit) on stderr and exits 1: the text is input, so a rejected file
+  is never exit 3. The one exit 3 is a witness the witness checker refuses at level `lowered`
+  (a compiler bug). A FILE that cannot be read is exit 2. No verb prints a summary line, a stack
+  line, or an `emulated:` line, and every verb runs stage0.
   - `check`: loads, prints nothing, exits 0.
   - `fmt`: prints the canonical text of the loaded module on stdout, at the file's level (a
     file a compiler printed comes back unchanged).
-  - `opt`: runs the release passes on the loaded module, then the IR verifier and the bounds
-    audit on their output, and prints the module at level `opt` on stdout. The header must say
-    `release` and a level other than `opt` (exit 1 otherwise).
+  - `opt`: runs stage0's release passes (opt-passes.md, the base passes: rule P3) on the loaded
+    module, then the IR verifier on their output, and prints the module at level `opt` on
+    stdout. The header must say `release` and a level other than `opt` (exit 1 otherwise). The
+    full pipeline, inlining included, is stage1's `stage1 ir opt` (cli-stage1.md).
   - `run [-- ARGS...]`: runs the loaded module's `main` in the stave-ir interpreter with `ARGS`
     and the inherited stdio, and exits with the program's status, as `stave run`. A file without
     a `main` line is exit 1. `STAVE_INTERP_CHECK` works as below, except that borrow tracking is
     never on: the text has no borrow side table.
   - `build [-o OUT]`: builds the static executable for the header's target, as `stave build`
     does from the loaded module: a `release` file at level `lowered` or `checked` goes through
-    the release passes, their IR verifier and bounds audit; at level `opt` it skips the passes and
-    still runs the verifier and the audit. The stack table comes from the stack section; without
-    one it is empty (every stack gets the `[run] stack` default). Default OUT: `./<file stem>`,
-    refused as for `stave build`. A file without a `main` line is exit 1.
+    the release passes and their IR verifier; at level `opt` it skips the passes and still runs
+    the verifier. The stack table comes from the stack section; without one it is empty (every
+    stack gets the `[run] stack` default). Default OUT: `./<file stem>`, refused as for
+    `stave build`. A file without a `main` line is exit 1.
 - `stave ir emit [PKG_DIR] [--release] [--target T] [-o FILE]`: compiles the
   program as `stave build` does, through the removal of proven checks, and prints its IR text at
   level `checked` in the emit form (the gate form plus the stack-section lines) to FILE, default

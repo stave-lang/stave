@@ -6,12 +6,16 @@
 //! apply to every type of the entry, a class that agrees with the recipe's instruction count (N at
 //! most [`NATIVE_MAX`], M more), and no (op, form, type) covered twice. The generator expands
 //! type groups to concrete keys, expands placeholders per key, and counts the cost.
+//!
+//! [`opt`]: the release optimizer's table (`crates/stave-ir/tables/opt.toml`).
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+pub mod opt;
 
 /// One target architecture: its table, its generated file, its tiers in order.
 pub struct Arch {
@@ -412,6 +416,13 @@ pub fn generate(root: &Path) -> Result<Vec<(&'static str, String)>, String> {
             Ok(entries) => out.push((arch.out, emit(arch, &entries))),
             Err(e) => errors.push(e),
         }
+    }
+    match std::fs::read_to_string(root.join(opt::TABLE)) {
+        Ok(t) => match opt::generate(&t) {
+            Ok(files) => out.extend(files),
+            Err(e) => errors.push(e),
+        },
+        Err(e) => errors.push(format!("{}: {e}", opt::TABLE)),
     }
     if errors.is_empty() { Ok(out) } else { Err(errors.join("\n")) }
 }
