@@ -30,9 +30,6 @@ import std.idx;
 import std.mem;
 import std.vec;
 
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_FMT: u8 = terminals.T_FMT_LIT as% u8;
-
 const B_DQUOTE: u8 = 34;
 const B_SLASH: u8 = 47;
 const B_0: u8 = 48;
@@ -354,13 +351,13 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
     for f in 0..t.files() {
         let src = set.file(f);
         for i in ft[f] as usize..ft[f + 1] as usize {
-            if kind[i] == T_IDENT {
+            if kind[i] == terminals.T_IDENT {
                 let s = start[i] as usize;
                 let mut e = s;
                 while e < src.len() && idc[src[e] as usize] { e = e + 1; }
                 nid = nid + 1;
                 nbytes = nbytes + (e - s);
-            } else if kind[i] == T_FMT {
+            } else if kind[i] == terminals.T_FMT_LIT {
                 fmt_holes(src, start[i] as usize, i as% u32, &mut holes);
             }
         }
@@ -378,7 +375,7 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
         for f in 0..t.files() {
             let src = set.file(f);
             for i in ft[f] as usize..ft[f + 1] as usize {
-                if kind[i] != T_IDENT { continue; }
+                if kind[i] != terminals.T_IDENT { continue; }
                 let mut e = start[i] as usize;
                 while e < src.len() && idc[src[e] as usize] {
                     bs[o] = src[e];
@@ -423,7 +420,7 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
         let ts = tok_str.as_mut_slice();
         for k in 0..ntok {
             let x = gt[k] as usize;
-            if kind[x] == T_FMT { nhole = nhole + 1; } else { ts[x] = cs[k]; }
+            if kind[x] == terminals.T_FMT_LIT { nhole = nhole + 1; } else { ts[x] = cs[k]; }
         }
     }
     let mut hole_tok = col.filled(nhole, 0u32);
@@ -433,7 +430,7 @@ pub fn build(set: &source.SourceSet, t: &lex.Tokens, fl: &files.FileList) -> Int
         let hs = hole_str.as_mut_slice();
         let mut h: usize = 0;
         for k in 0..ntok {
-            if kind[gt[k] as usize] == T_FMT {
+            if kind[gt[k] as usize] == terminals.T_FMT_LIT {
                 ht[h] = gt[k];
                 hs[h] = cs[k];
                 h = h + 1;

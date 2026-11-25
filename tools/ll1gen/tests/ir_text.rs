@@ -135,6 +135,17 @@ fn checked_in_rust_tables_equal_a_fresh_build() {
     assert_eq!(lt::START, 0);
 }
 
+/// The IR terminal ids are `u16`: the profile has more terminals than a `u8` kind column holds.
+#[test]
+fn terminal_ids_are_u16_and_exceed_the_u8_limit() {
+    let (t, out) = ll1gen::generate(&ir_src(), IR_TEXT.grammar, &IR_TEXT).expect("generate ir-text");
+    assert!(t.nterm() > ll1gen::LANGUAGE.terminal_ids.max_terminals(), "{}", t.nterm());
+    let terminals = out.iter().find(|o| o.path.ends_with("ir_text_terminals.stv")).expect("terminals file");
+    let ids: Vec<&str> = terminals.content.lines().filter(|l| l.starts_with("pub const IR_T_")).collect();
+    assert_eq!(ids.len(), t.nterm());
+    assert!(ids.iter().all(|l| l.contains(": u16 = ")), "{ids:?}");
+}
+
 /// The IR tables share nothing with the language tables: every Stave name carries the prefix,
 /// the file stems carry theirs, and the output directories do not overlap in file names.
 #[test]

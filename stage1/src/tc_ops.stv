@@ -13,24 +13,6 @@ import ir.types;
 const NONE: u32 = tc_rows.NONE;
 const UNK: u32 = tc_rows.UNK;
 
-const T_PLUS: u8 = terminals.T_PLUS as% u8;
-const T_PLUS_PERCENT: u8 = terminals.T_PLUS_PERCENT as% u8;
-const T_PLUS_PIPE: u8 = terminals.T_PLUS_PIPE as% u8;
-const T_MINUS: u8 = terminals.T_MINUS as% u8;
-const T_MINUS_PERCENT: u8 = terminals.T_MINUS_PERCENT as% u8;
-const T_MINUS_PIPE: u8 = terminals.T_MINUS_PIPE as% u8;
-const T_STAR: u8 = terminals.T_STAR as% u8;
-const T_STAR_PERCENT: u8 = terminals.T_STAR_PERCENT as% u8;
-const T_STAR_PIPE: u8 = terminals.T_STAR_PIPE as% u8;
-const T_SLASH: u8 = terminals.T_SLASH as% u8;
-const T_PERCENT: u8 = terminals.T_PERCENT as% u8;
-const T_LT_LT: u8 = terminals.T_LT_LT as% u8;
-const T_LT_LT_PERCENT: u8 = terminals.T_LT_LT_PERCENT as% u8;
-const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
-const T_AMP: u8 = terminals.T_AMP as% u8;
-const T_PIPE: u8 = terminals.T_PIPE as% u8;
-const T_CARET: u8 = terminals.T_CARET as% u8;
-
 // The positions of `Neg` and `Not` in `traits.OPS`.
 pub const OP_NEG: usize = 17;
 pub const OP_NOT: usize = 18;
@@ -44,23 +26,23 @@ pub fn user_ty(tab: &types.Table, ty: u32) -> bool {
 
 // The position in `traits.OPS` of the trait of binary operator token op, or NONE.
 pub fn binop_trait(op: u8) -> usize {
-    if op == T_PLUS { return 0; }
-    if op == T_PLUS_PERCENT { return 1; }
-    if op == T_PLUS_PIPE { return 2; }
-    if op == T_MINUS { return 3; }
-    if op == T_MINUS_PERCENT { return 4; }
-    if op == T_MINUS_PIPE { return 5; }
-    if op == T_STAR { return 6; }
-    if op == T_STAR_PERCENT { return 7; }
-    if op == T_STAR_PIPE { return 8; }
-    if op == T_SLASH { return 9; }
-    if op == T_PERCENT { return 10; }
-    if op == T_LT_LT { return 11; }
-    if op == T_LT_LT_PERCENT { return 12; }
-    if op == T_GT_GT { return 13; }
-    if op == T_AMP { return 14; }
-    if op == T_PIPE { return 15; }
-    if op == T_CARET { return 16; }
+    if op == terminals.T_PLUS { return 0; }
+    if op == terminals.T_PLUS_PERCENT { return 1; }
+    if op == terminals.T_PLUS_PIPE { return 2; }
+    if op == terminals.T_MINUS { return 3; }
+    if op == terminals.T_MINUS_PERCENT { return 4; }
+    if op == terminals.T_MINUS_PIPE { return 5; }
+    if op == terminals.T_STAR { return 6; }
+    if op == terminals.T_STAR_PERCENT { return 7; }
+    if op == terminals.T_STAR_PIPE { return 8; }
+    if op == terminals.T_SLASH { return 9; }
+    if op == terminals.T_PERCENT { return 10; }
+    if op == terminals.T_LT_LT { return 11; }
+    if op == terminals.T_LT_LT_PERCENT { return 12; }
+    if op == terminals.T_GT_GT { return 13; }
+    if op == terminals.T_AMP { return 14; }
+    if op == terminals.T_PIPE { return 15; }
+    if op == terminals.T_CARET { return 16; }
     return NONE as usize;
 }
 

@@ -50,35 +50,6 @@ pub const CV_FAIL: u8 = 2;
 pub const CV_UNSUP: u8 = 3;
 pub const CV_LAYOUT: u8 = 4;
 
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
-const T_FLOAT_LIT: u8 = terminals.T_FLOAT_LIT as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_COMMA: u8 = terminals.T_COMMA as% u8;
-const T_DOT: u8 = terminals.T_DOT as% u8;
-const T_MINUS: u8 = terminals.T_MINUS as% u8;
-const T_TILDE: u8 = terminals.T_TILDE as% u8;
-const T_PLUS: u8 = terminals.T_PLUS as% u8;
-const T_STAR: u8 = terminals.T_STAR as% u8;
-const T_SLASH: u8 = terminals.T_SLASH as% u8;
-const T_PERCENT: u8 = terminals.T_PERCENT as% u8;
-const T_PLUS_PERCENT: u8 = terminals.T_PLUS_PERCENT as% u8;
-const T_MINUS_PERCENT: u8 = terminals.T_MINUS_PERCENT as% u8;
-const T_STAR_PERCENT: u8 = terminals.T_STAR_PERCENT as% u8;
-const T_PLUS_PIPE: u8 = terminals.T_PLUS_PIPE as% u8;
-const T_MINUS_PIPE: u8 = terminals.T_MINUS_PIPE as% u8;
-const T_STAR_PIPE: u8 = terminals.T_STAR_PIPE as% u8;
-const T_AMP: u8 = terminals.T_AMP as% u8;
-const T_PIPE: u8 = terminals.T_PIPE as% u8;
-const T_CARET: u8 = terminals.T_CARET as% u8;
-const T_LT_LT: u8 = terminals.T_LT_LT as% u8;
-const T_LT_LT_PERCENT: u8 = terminals.T_LT_LT_PERCENT as% u8;
-const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
-const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
-const T_AS_PERCENT: u8 = terminals.T_AS_PERCENT as% u8;
-const T_AS_PIPE: u8 = terminals.T_AS_PIPE as% u8;
-const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
-
 const K_ADD: u8 = node_kinds.KIND_ADD;
 const K_MUL: u8 = node_kinds.KIND_MUL;
 const K_SHIFT: u8 = node_kinds.KIND_SHIFT;
@@ -335,7 +306,7 @@ pub fn generic_index(cx: &Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, 
     let d = ds.item_decl.as_slice()[it as usize];
     let container = d != NONE && (ds.kind.as_slice()[d as usize] == decls.DK_IMPL || ds.kind.as_slice()[d as usize] == decls.DK_TRAIT);
     let level1 = container && ok != K_IMPL_DECL && ok != K_TRAIT_DECL;
-    let is_const = tk(t, tree.tok.as_slice()[gp]) == T_KW_CONST;
+    let is_const = tk(t, tree.tok.as_slice()[gp]) == terminals.T_KW_CONST;
     return (if level1 then sc.n_parent() + idx else idx, is_const, true);
 }
 
@@ -582,13 +553,13 @@ fn path_decl(cx: &Cx, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, g: u
         if kind(tree, head) != K_PRIMARY { return (NONE, 2u8); }
     }
     let a = tree.tok.as_slice()[head];
-    if tk(t, a) != T_IDENT { return (NONE, 2u8); }
+    if tk(t, a) != terminals.T_IDENT { return (NONE, 2u8); }
     let end = tree.tok_end.as_slice()[g];
     if kind(tree, head) == K_PRIMARY && tree.kids.row(head).len() > 0 { return (NONE, 2u8); }
     // identifiers `a . b . c` up to the node's end
     let mut last = a;
     let mut p = a + 1;
-    while p + 1 < end && tk(t, p) == T_DOT && tk(t, p + 1) == T_IDENT {
+    while p + 1 < end && tk(t, p) == terminals.T_DOT && tk(t, p + 1) == terminals.T_IDENT {
         last = p + 1;
         p = p + 2;
     }
@@ -623,7 +594,7 @@ fn cast_target(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned
     }
     if kind(tree, x) != K_TYPE_BASE || tree.kids.row(x).len() != 0 { return NONE; }
     let a = tree.tok.as_slice()[x];
-    if tk(t, a) != T_IDENT || tree.tok_end.as_slice()[x] != a + 1 { return NONE; }
+    if tk(t, a) != terminals.T_IDENT || tree.tok_end.as_slice()[x] != a + 1 { return NONE; }
     let s = nm.tok_str.as_slice()[a as usize];
     if s == NONE { return NONE; }
     let k = int_suffix(nm.tab.text(s as usize));
@@ -654,7 +625,7 @@ fn names_generic(cx: &Cx, tree: &ast.Ast, it: u32, base: usize, g: usize) -> boo
 pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32) -> (u8, u32, bool, u64) {
     let base = tree.item_node.as_slice()[it as usize] as usize;
     let a = tree.tok.as_slice()[g];
-    if kind(tree, g) == K_PRIMARY && tk(t, a) == T_INT_LIT && tree.tok_end.as_slice()[g] == a + 1 {
+    if kind(tree, g) == K_PRIMARY && tk(t, a) == terminals.T_INT_LIT && tree.tok_end.as_slice()[g] == a + 1 {
         return lone_literal(cx, t, set, cut, it, a, want);
     }
     let lo = g - tree.size.as_slice()[g] as usize;
@@ -699,7 +670,7 @@ pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, s
         let rule = (is_chain(k) && tree.kids.row(lo + x).len() > 1) || k == K_UNARY;
         if ev.lit.as_slice()[x] == 0 && rule {
             if cx.tab.tag_of(rt as% u32) != types.TK_INT { return (CV_FAIL, types.ERR, false, 0); }
-            if k == K_UNARY && tk(t, tree.tok.as_slice()[lo + x]) == T_MINUS && !cx.tab.is_signed(rt as% u32) { return (CV_FAIL, types.ERR, false, 0); }
+            if k == K_UNARY && tk(t, tree.tok.as_slice()[lo + x]) == terminals.T_MINUS && !cx.tab.is_signed(rt as% u32) { return (CV_FAIL, types.ERR, false, 0); }
         }
     }
     let r = value(cx, tree, t, ds, &mut ev, g);
@@ -757,9 +728,9 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
             if k == K_UNARY {
                 let c = base + ks[0] as usize;
                 let op = tk(t, a);
-                if op == T_MINUS {
+                if op == terminals.T_MINUS {
                     let p = down_to_primary(tree, t, base, c);
-                    if p != NONE && tree.tok.as_slice()[p as usize] == a + 1 && tk(t, a + 1) == T_INT_LIT {
+                    if p != NONE && tree.tok.as_slice()[p as usize] == a + 1 && tk(t, a + 1) == terminals.T_INT_LIT {
                         let r = literal(cx, t, set, cut, ev, cur, a + 1, true, hint);
                         let mut x = c;
                         while x != p as usize {
@@ -771,12 +742,12 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                         entering = false;
                         continue;
                     }
-                    if p != NONE && tree.tok.as_slice()[p as usize] == a + 1 && tk(t, a + 1) == T_FLOAT_LIT {
+                    if p != NONE && tree.tok.as_slice()[p as usize] == a + 1 && tk(t, a + 1) == terminals.T_FLOAT_LIT {
                         ev.fail(CV_UNSUP);
                         continue;
                     }
                 }
-                if op != T_MINUS && op != T_TILDE {
+                if op != terminals.T_MINUS && op != terminals.T_TILDE {
                     ev.fail(CV_UNSUP);
                     continue;
                 }
@@ -803,14 +774,14 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
             }
             if k == K_PRIMARY {
                 let op = tk(t, a);
-                if op == T_INT_LIT {
+                if op == terminals.T_INT_LIT {
                     ret = literal(cx, t, set, cut, ev, cur, a, false, hint);
                     entering = false;
                     continue;
                 }
-                if op == T_L_PAREN {
+                if op == terminals.T_L_PAREN {
                     let close = tree.tok_end.as_slice()[cur] - 1;
-                    if ks.len() == 1 && tk(t, close - 1) != T_COMMA {
+                    if ks.len() == 1 && tk(t, close - 1) != terminals.T_COMMA {
                         fr.node.push(cur as% u32);
                         fr.hint.push(hint);
                         fr.k.push(1);
@@ -821,7 +792,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                     ev.fail(CV_UNSUP);
                     continue;
                 }
-                if op != T_IDENT {
+                if op != terminals.T_IDENT {
                     ev.fail(CV_UNSUP);
                     continue;
                 }
@@ -831,7 +802,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 if k == K_POSTFIX {
                     let head = base + ks[0] as usize;
                     let ha = tree.tok.as_slice()[head];
-                    if kind(tree, head) == K_PRIMARY && tk(t, ha) == T_IDENT && is_layout_fn(nm, name_of(nm, ha)) {
+                    if kind(tree, head) == K_PRIMARY && tk(t, ha) == terminals.T_IDENT && is_layout_fn(nm, name_of(nm, ha)) {
                         let (ulo, uhi) = cx.uses.range(it, (head - base) as% u32);
                         if ulo == uhi {
                             let ga = child(tree, base, head, K_GENERIC_ARGS);
@@ -950,11 +921,11 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 let c = base + fks[j] as usize;
                 let op = tk(t, tree.tok.as_slice()[c] - 1);
                 let to = cast_target(cx, tree, t, nm, base, c);
-                if to == NONE || cx.tab.tag_of(src) != types.TK_INT || (op != T_KW_AS && op != T_AS_PERCENT && op != T_AS_PIPE) {
+                if to == NONE || cx.tab.tag_of(src) != types.TK_INT || (op != terminals.T_KW_AS && op != terminals.T_AS_PERCENT && op != terminals.T_AS_PIPE) {
                     ev.fail(CV_UNSUP);
                     return NO_TY;
                 }
-                if op == T_KW_AS && src != to {
+                if op == terminals.T_KW_AS && src != to {
                     let fs = cx.tab.is_signed(src);
                     let ts = cx.tab.is_signed(to);
                     let fb = cx.tab.int_bits(src);
@@ -994,10 +965,10 @@ fn down_to_primary(tree: &ast.Ast, t: &lex.Tokens, base: usize, c: usize) -> u32
     loop {
         if kind(tree, cur) != K_PRIMARY { return NONE; }
         let a = tree.tok.as_slice()[cur];
-        if tk(t, a) != T_L_PAREN { return cur as% u32; }
+        if tk(t, a) != terminals.T_L_PAREN { return cur as% u32; }
         let ks = tree.kids.row(cur);
         let close = tree.tok_end.as_slice()[cur] - 1;
-        if ks.len() != 1 || tk(t, close - 1) == T_COMMA { return NONE; }
+        if ks.len() != 1 || tk(t, close - 1) == terminals.T_COMMA { return NONE; }
         cur = base + ks[0] as usize;
     }
 }
@@ -1064,7 +1035,7 @@ fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, ev: &mut
             let c = base + ks[0] as usize - ev.lo;
             let cn = ev.vneg.as_slice()[c];
             let cm = ev.vmag.as_slice()[c];
-            if tk(t, tree.tok.as_slice()[row]) == T_MINUS {
+            if tk(t, tree.tok.as_slice()[row]) == terminals.T_MINUS {
                 let (_, lo, _) = range_of(&cx.tab, tt);
                 if cn && cm == lo { return CV_FAIL; }
                 ev.vneg.as_mut_slice()[x] = !cn && cm != 0;
@@ -1082,7 +1053,7 @@ fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, ev: &mut
             let op = tk(t, tree.tok.as_slice()[base + ks[1] as usize] - 1);
             let cn = ev.vneg.as_slice()[c];
             let cm = ev.vmag.as_slice()[c];
-            let (rn, rm) = if op == T_AS_PERCENT then wrap(word(cn, cm), cx.tab.is_signed(to), cx.tab.int_bits(to)) else clamp(&cx.tab, to, cn, cm, false);
+            let (rn, rm) = if op == terminals.T_AS_PERCENT then wrap(word(cn, cm), cx.tab.is_signed(to), cx.tab.int_bits(to)) else clamp(&cx.tab, to, cn, cm, false);
             ev.vneg.as_mut_slice()[x] = rn;
             ev.vmag.as_mut_slice()[x] = rm;
             continue;
@@ -1124,61 +1095,61 @@ fn clamp(tab: &types.Table, t: u32, neg: bool, mag: u64, exact_over: bool) -> (b
 fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64) -> (bool, bool, u64) {
     let signed = tab.is_signed(t);
     let bits = tab.int_bits(t);
-    if op == T_PLUS || op == T_MINUS || op == T_PLUS_PIPE || op == T_MINUS_PIPE {
-        let sub = op == T_MINUS || op == T_MINUS_PIPE;
+    if op == terminals.T_PLUS || op == terminals.T_MINUS || op == terminals.T_PLUS_PIPE || op == terminals.T_MINUS_PIPE {
+        let sub = op == terminals.T_MINUS || op == terminals.T_MINUS_PIPE;
         let (rn, rm, over) = add_exact(an, am, if sub then !bn && bm != 0 else bn, bm);
-        if op == T_PLUS_PIPE || op == T_MINUS_PIPE {
+        if op == terminals.T_PLUS_PIPE || op == terminals.T_MINUS_PIPE {
             let (cn, cm) = clamp(tab, t, rn, rm, over);
             return (true, cn, cm);
         }
         if over || !in_range(tab, t, rn, rm) { return (false, false, 0); }
         return (true, rn, rm);
     }
-    if op == T_STAR || op == T_STAR_PIPE {
+    if op == terminals.T_STAR || op == terminals.T_STAR_PIPE {
         let over = am.mul_hi(bm) != 0;
         let rm = am *% bm;
         let rn = (an != bn) && rm != 0;
-        if op == T_STAR_PIPE {
+        if op == terminals.T_STAR_PIPE {
             let (cn, cm) = clamp(tab, t, an != bn, rm, over);
             return (true, cn, cm);
         }
         if over || !in_range(tab, t, rn, rm) { return (false, false, 0); }
         return (true, rn, rm);
     }
-    if op == T_SLASH || op == T_PERCENT {
+    if op == terminals.T_SLASH || op == terminals.T_PERCENT {
         let (_, lo, _) = range_of(tab, t);
         if bm == 0 || (signed && an && am == lo && bn && bm == 1) { return (false, false, 0); }
-        if op == T_SLASH {
+        if op == terminals.T_SLASH {
             let q = am / bm;
             return (true, (an != bn) && q != 0, q);
         }
         let r = am % bm;
         return (true, an && r != 0, r);
     }
-    if op == T_PLUS_PERCENT || op == T_MINUS_PERCENT || op == T_STAR_PERCENT {
+    if op == terminals.T_PLUS_PERCENT || op == terminals.T_MINUS_PERCENT || op == terminals.T_STAR_PERCENT {
         let x = word(an, am);
         let y = word(bn, bm);
-        let w = if op == T_PLUS_PERCENT then x +% y else if op == T_MINUS_PERCENT then x -% y else x *% y;
+        let w = if op == terminals.T_PLUS_PERCENT then x +% y else if op == terminals.T_MINUS_PERCENT then x -% y else x *% y;
         let (rn, rm) = wrap(w, signed, bits);
         return (true, rn, rm);
     }
-    if op == T_AMP || op == T_PIPE || op == T_CARET {
+    if op == terminals.T_AMP || op == terminals.T_PIPE || op == terminals.T_CARET {
         let x = word(an, am);
         let y = word(bn, bm);
-        let w = if op == T_AMP then x & y else if op == T_PIPE then x | y else x ^ y;
+        let w = if op == terminals.T_AMP then x & y else if op == terminals.T_PIPE then x | y else x ^ y;
         let (rn, rm) = wrap(w, signed, bits);
         return (true, rn, rm);
     }
-    if op == T_LT_LT || op == T_LT_LT_PERCENT || op == T_GT_GT {
+    if op == terminals.T_LT_LT || op == terminals.T_LT_LT_PERCENT || op == terminals.T_GT_GT {
         let mut amt_neg = bn && bm != 0;
         let mut amt = bm;
-        if op == T_LT_LT_PERCENT {
+        if op == terminals.T_LT_LT_PERCENT {
             amt = word(bn, bm) & (bits as u64 - 1);
             amt_neg = false;
         }
         if amt_neg || amt >= bits as u64 { return (false, false, 0); }
         let x = word(an, am);
-        if op == T_GT_GT {
+        if op == terminals.T_GT_GT {
             if signed {
                 let (vn, vm) = wrap(x, true, bits);
                 if vn {
@@ -1202,11 +1173,11 @@ fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64
 // other expression is evaluated as type `want`.
 pub fn eval_u64(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32, sc: Scope) -> (u32, u32, u32) {
     let base = tree.item_node.as_slice()[it as usize] as usize;
-    if kind(tree, g) == K_PRIMARY && tk(t, tree.tok.as_slice()[g]) == T_IDENT && tree.tok_end.as_slice()[g] == tree.tok.as_slice()[g] + 1 {
+    if kind(tree, g) == K_PRIMARY && tk(t, tree.tok.as_slice()[g]) == terminals.T_IDENT && tree.tok_end.as_slice()[g] == tree.tok.as_slice()[g] + 1 {
         let (lo, hi) = cx.uses.range(it, (g - base) as% u32);
         if lo < hi && cx.uses.tag.as_slice()[lo] == resolve.TAG_LOCAL {
             let gp = base + cx.uses.target.as_slice()[lo] as usize;
-            if kind(tree, gp) == K_GENERIC_PARAM && tk(t, tree.tok.as_slice()[gp]) == T_KW_CONST {
+            if kind(tree, gp) == K_GENERIC_PARAM && tk(t, tree.tok.as_slice()[gp]) == terminals.T_KW_CONST {
                 let (idx, _, _) = generic_index(cx, tree, t, ds, it, gp, sc);
                 return const_param_arg(cx, idx, want, sc);
             }
