@@ -40,6 +40,9 @@ const M_MUT: u8 = 2;
 impl tc_rows.Typeck {
     // Binds the names of pattern row p (a `Pattern`) to the parts of a value of type ty.
     pub fn bind_pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, p: usize, ty: u32) {
+        // the pattern's nesting is at most its node count: a pattern that may pass the nesting
+        // limit is not modeled
+        if self.depth as usize + tree.size.as_slice()[p] as usize + 1 > tc_rows.MAX_DEPTH as usize { self.bad = true; }
         if ty == UNK { return; }
         if ty == NONE || ty == ERR {
             self.bad = true;

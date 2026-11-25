@@ -359,7 +359,8 @@ fn main() -> i32 {
         // (whose table it extends).
         if cli.want_types && sg.cx.skip == consteval.CV_NONE {
             let x86 = target.alias.as_bytes()[0] == 120;
-            let tc = typeck.build(&mut sg, &ds, &fl, &md, &nm, &set, &toks, &cut, &tree, x86);
+            let base = sigs.baseline(target.name.as_bytes());
+            let tc = typeck.build(&mut sg, &ds, &fl, &md, &nm, &set, &toks, &cut, &tree, x86, base);
             let out = dump.types_txt(&tc, &sg.cx.tab, &tree);
             let code = write_dump(cli.dump_dir.as_str(), "types.txt", out.as_slice());
             if code != EXIT_OK { return code; }

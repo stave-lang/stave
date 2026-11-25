@@ -35,6 +35,12 @@ const ERR: u32 = types.ERR;
 pub const UNK: u32 = tc_builtins.UNK;
 // `LIT | g`: the value of literal group g.
 pub const LIT: u32 = 0x8000_0000;
+// The `Self` of a call of a trait method named through its trait or a generic param (`Tr.m(..)`,
+// `T.m(..)`): a binding of the call after the method's generics, and every argument is passed.
+pub const SELF_VAR: u32 = 0xffff_fefe;
+// The nesting a body may have: expression nodes, blocks, and patterns nested deeper than this
+// are E0005 case `expr`, an error.
+pub const MAX_DEPTH: u32 = 20000;
 
 pub struct Typeck {
     // per node row: its type, `NONE` (no value), `UNK`, or `LIT | g` while its body is checked
@@ -58,9 +64,11 @@ pub struct Typeck {
     pub chain: vec.Vec<u8>,
     pub pos: vec.Vec<u32>,
     pub pend: vec.Vec<u8>,
-    // the walk: node rows and the next child of each
+    // the walk: node rows and the next child of each; the nesting levels on it (`depth`, counted
+    // as `MAX_DEPTH` counts them)
     pub st_row: vec.Vec<u32>,
     pub st_kid: vec.Vec<u32>,
+    pub depth: u32,
     // the body being checked: item, its first node row, module, scope, `self` binding row, error
     // found
     pub it: u32,
@@ -109,6 +117,18 @@ pub struct Typeck {
     pub t_unit: u32,
     pub t_never: u32,
     pub t_ref_str: u32,
+    // `std.string.String` (NONE: none in this program)
+    pub string: u32,
+    // the features every value made in the body may assume: its fn's and the target's baseline
+    // (`base_feats`)
+    pub proven: u64,
+    pub base_feats: u64,
+    // per node row: it made a fn item a value (`tc_closure`)
+    pub fn_item: vec.Vec<bool>,
+    // the coercions `coerce` leaves to `tc_closure.node_coercions` (they depend on the node's
+    // form): node, wanted type
+    pub fc_node: vec.Vec<u32>,
+    pub fc_want: vec.Vec<u32>,
 }
 
 // Whether value v is a literal group's.
@@ -283,19 +303,36 @@ impl Typeck {
             return;
         }
         if v == want || v == self.t_never { return; }
-        if !self.coercible(tab, v, want) { self.bad = true; }
+        if self.coercible(tab, v, want) { return; }
+        let fns = tab.tag_of(v) == types.TK_FN && tab.tag_of(want) == types.TK_FN;
+        let fstr = want == self.t_ref_str && self.string != NONE && tab.tag_of(v) == types.TK_ADT && tab.a_of(v) == self.string;
+        if fns || fstr {
+            // fn types: decided from the node's arms and how its value was made; `String` to
+            // `&str`: an f-string's
+            self.fc_node.push(e as% u32);
+            self.fc_want.push(want);
+            return;
+        }
+        self.bad = true;
     }
 
-    // stage0's implicit coercions this stage knows: `&mut T` to `&T`, `&[T; N]` and
-    // `&[T align A]` to `&[T]` (shared or mut).
+    // stage0's implicit coercions: `&mut T` to `&T`, `&[T; N]` and `&[T align A]` to `&[T]`
+    // (shared or mut), `&String` to `&str`, a fn type to one with the same params and return
+    // that needs no feature beyond its own and `proven` and denies no more effects.
     pub fn coercible(&self, tab: &types.Table, v: u32, want: u32) -> bool {
-        if v == NONE || v == ERR || tab.tag_of(v) != types.TK_REF || tab.tag_of(want) != types.TK_REF { return false; }
+        if v == NONE || v == ERR { return false; }
+        if tab.tag_of(v) == types.TK_FN && tab.tag_of(want) == types.TK_FN {
+            let (shape, widened) = fn_conv(tab, v, want, self.proven);
+            return shape && widened == 0;
+        }
+        if tab.tag_of(v) != types.TK_REF || tab.tag_of(want) != types.TK_REF { return false; }
         let vm = tab.a_of(v) == 1;
         let wm = tab.a_of(want) == 1;
         if wm && !vm { return false; }
         let vi = tab.b_of(v);
         let wi = tab.b_of(want);
         if !wm && vm && vi == wi { return true; }
+        if !wm && tab.tag_of(wi) == types.TK_STR && self.string != NONE && tab.tag_of(vi) == types.TK_ADT && tab.a_of(vi) == self.string { return true; }
         if tab.tag_of(wi) != types.TK_SLICE || tab.b_of(wi) != 0 { return false; }
         let vt = tab.tag_of(vi);
         if vt == types.TK_ARRAY { return tab.a_of(vi) == tab.a_of(wi); }
@@ -340,6 +377,18 @@ impl Typeck {
         self.bad = true;
         return UNK;
     }
+}
+
+// Fn type v against fn type want: (same params and return, and v needs no feature beyond want's
+// and proven; the effects want denies beyond v's).
+pub fn fn_conv(tab: &types.Table, v: u32, want: u32, proven: u64) -> (bool, u32) {
+    let n = tab.a_of(v) as usize;
+    let vx = tab.x(v);
+    let wx = tab.x(want);
+    if tab.a_of(want) as usize != n || !vx[0..n + 1].eq(&wx[0..n + 1]) { return (false, 0); }
+    let vf = (vx[n + 1] as u64) << 32 | vx[n + 2] as u64;
+    let wf = (wx[n + 1] as u64) << 32 | wx[n + 2] as u64;
+    return (vf & ~(wf | proven) == 0, wx[n + 3] & ~vx[n + 3]);
 }
 
 impl Typeck {
