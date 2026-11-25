@@ -1,12 +1,20 @@
-// Closure literals of the body checker (types/check, see `typeck`), as stage0's `closure`: the
-// params take their written types, the body is checked with the written return type (none:
-// `()`) for its `return`s, and the value is the fn type of those params and that return, with
-// the enclosing fn's features and no deny clause. What a closure captures does not change its
-// type. A param or return type that does not lower is a type error.
+// Closure literals and fn-type coercions of the body checker (types/check, see `typeck`).
+//
+// A closure literal, as stage0's `closure`: the params take their written types, the body is
+// checked with the written return type (none: `()`) for its `return`s, and the value is the fn
+// type of those params and that return, with the enclosing fn's features and no deny clause.
+// What a closure captures does not change its type. A param or return type that does not lower
+// is a type error.
+//
+// A fn-type coercion `coerce` cannot decide from the two types alone (`fn_coercions`), as
+// stage0's `coerce`: a value `if` / `match` or parentheses convert each arm instead; a fn value
+// made right there (a closure literal or a fn item, through wrappers) also converts to a type
+// that denies more effects (it is made with them); any other is a type error.
 import ast;
 import consteval;
 import decls;
 import generated.node_kinds;
+import generated.terminals;
 import intern;
 import items;
 import lex;
@@ -24,6 +32,14 @@ const K_BLOCK: u8 = node_kinds.KIND_BLOCK;
 const K_PARAM: u8 = node_kinds.KIND_PARAM;
 const K_PARAMS: u8 = node_kinds.KIND_PARAMS;
 const K_TYPE: u8 = node_kinds.KIND_TYPE;
+const K_IF_EXPR: u8 = node_kinds.KIND_IF_EXPR;
+const K_MATCH: u8 = node_kinds.KIND_MATCH_EXPR;
+const K_PRIMARY: u8 = node_kinds.KIND_PRIMARY;
+const K_POSTFIX: u8 = node_kinds.KIND_POSTFIX;
+const K_UNARY: u8 = node_kinds.KIND_UNARY;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_COMMA: u8 = terminals.T_COMMA as% u8;
+const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
 
 impl tc_rows.Typeck {
     // Before child c of closure Primary r: the params' bindings take their types, the return
@@ -89,4 +105,94 @@ impl tc_rows.Typeck {
         let ft = tab.intern(types.TK_FN, ps.len() as% u32, 0);
         return self.known(ft);
     }
+
+    // Decides the fn-type coercions `coerce` left (`fc_node`, `fc_want`).
+    pub fn fn_coercions(&mut self, tab: &types.Table, t: &lex.Tokens, tree: &ast.Ast) {
+        let mut arms = vec.Vec::<u32>.new();
+        for i in 0..self.fc_node.len() {
+            let e = self.fc_node.as_slice()[i] as usize;
+            let want = self.fc_want.as_slice()[i];
+            value_arms(t, tree, self.base, e, &mut arms);
+            for j in 0..arms.len() {
+                let a = arms.as_slice()[j] as usize;
+                let v = self.resolve_at(a);
+                if v == NONE || v == UNK || v == want || v == self.t_never { continue; }
+                if self.coercible(tab, v, want) { continue; }
+                if !is_lit(v) && tab.tag_of(v) == types.TK_FN {
+                    let (shape, widened) = tc_rows.fn_conv(tab, v, want, self.proven);
+                    if shape && widened != 0 && self.made_fn_value(t, tree, a) { continue; }
+                }
+                self.bad = true;
+            }
+        }
+        self.fc_node.clear();
+        self.fc_want.clear();
+    }
+
+    // Whether node n's value is a fn value made right there: n or a node it wraps (stage0
+    // `wrapper_chain`) is a closure literal or made a fn item a value.
+    fn made_fn_value(&self, t: &lex.Tokens, tree: &ast.Ast, n: usize) -> bool {
+        let mut c = n;
+        while c != NONE as usize {
+            let k = tree.kind.as_slice()[c];
+            if k == K_PRIMARY && t.kind.as_slice()[tree.tok.as_slice()[c] as usize] == T_KW_FN { return true; }
+            if self.fn_item.as_slice()[c] { return true; }
+            c = wrapped(tree, self.base, c);
+        }
+        return false;
+    }
+}
+
+// The nodes whose value node n's value is, unchanged (stage0 `value_arms`): the arms of a value
+// `if` / `match` and the inside of parentheses (through wrappers), recursively; else n itself.
+fn value_arms(t: &lex.Tokens, tree: &ast.Ast, base: usize, n: usize, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let mut todo = vec.Vec::<u32>.new();
+    todo.push(n as% u32);
+    while todo.len() > 0 {
+        let x = todo.as_slice()[todo.len() - 1] as usize;
+        todo.truncate(todo.len() - 1);
+        let k = tree.kind.as_slice()[x];
+        let ks = tree.kids.row(x);
+        if k == K_IF_EXPR && ks.len() == 3 {
+            todo.push((base + ks[2] as usize) as% u32);
+            todo.push((base + ks[1] as usize) as% u32);
+            continue;
+        }
+        if k == K_MATCH {
+            for j in 1..ks.len() {
+                let ak = tree.kids.row(base + ks[j] as usize);
+                if ak.len() >= 2 { todo.push((base + ak[ak.len() - 1] as usize) as% u32); }
+            }
+            continue;
+        }
+        let mut core = x;
+        let mut w = wrapped(tree, base, x);
+        while w != NONE as usize {
+            core = w;
+            w = wrapped(tree, base, w);
+        }
+        let cs = tree.kids.row(core);
+        let a = tree.tok.as_slice()[core] as usize;
+        let end = tree.tok_end.as_slice()[core] as usize;
+        if tree.kind.as_slice()[core] == K_PRIMARY && t.kind.as_slice()[a] == T_L_PAREN && cs.len() == 1 && end >= 2 && t.kind.as_slice()[end - 2] != T_COMMA {
+            todo.push((base + cs[0] as usize) as% u32);
+            continue;
+        }
+        out.push(x as% u32);
+    }
+}
+
+// The node a `Unary` or `Postfix` row c only wraps (one child, starting where c starts), else
+// NONE.
+fn wrapped(tree: &ast.Ast, base: usize, c: usize) -> usize {
+    let k = tree.kind.as_slice()[c];
+    let cs = tree.kids.row(c);
+    if k != K_UNARY && k != K_POSTFIX || cs.len() != 1 { return NONE as usize; }
+    let kid = base + cs[0] as usize;
+    return if tree.tok.as_slice()[kid] == tree.tok.as_slice()[c] then kid else NONE as usize;
+}
+
+fn is_lit(v: u32) -> bool {
+    return tc_rows.is_lit(v);
 }

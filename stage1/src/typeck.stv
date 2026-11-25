@@ -189,7 +189,11 @@ impl tc_rows.Typeck {
         self.binds.clear();
         self.rets.clear();
         let k = ds.kind.as_slice()[d as usize];
+        self.proven = self.base_feats;
+        self.fc_node.clear();
+        self.fc_want.clear();
         if k == decls.DK_FN || k == decls.DK_METHOD {
+            self.proven = self.base_feats | sg.feats.as_slice()[d as usize];
             let st = sigs.self_of(&mut sg.cx, ds, d);
             self.sc = sigs.scope_of(&sg.cx, ds, d, st);
             let ret = sg.cx.ty.as_slice()[d as usize];
@@ -254,7 +258,9 @@ impl tc_rows.Typeck {
             if k < ks.len() {
                 self.st_kid.as_mut_slice()[top] = (k + 1) as% u32;
                 let c = self.base + ks[k] as usize;
-                if self.enter(sg, ds, nm, set, t, cut, tree, r, k, c) {
+                let ent = self.enter(sg, ds, nm, set, t, cut, tree, r, k, c);
+                if self.fc_node.len() > 0 { self.fn_coercions(&sg.cx.tab, t, tree); }
+                if ent {
                     self.st_row.push(c as% u32);
                     self.st_kid.push(0);
                     if is_level(kind(tree, c)) {
@@ -268,6 +274,7 @@ impl tc_rows.Typeck {
             self.st_kid.truncate(top);
             if is_level(kind(tree, r)) { self.depth = self.depth - 1; }
             self.finish(sg, ds, nm, set, t, cut, tree, r);
+            if self.fc_node.len() > 0 { self.fn_coercions(&sg.cx.tab, t, tree); }
         }
     }
 
@@ -765,8 +772,9 @@ impl tc_rows.Typeck {
     }
 
     // An identifier Primary: a bare name, or the head of a postfix chain. A local, a const, or a
-    // static is a value; any other head names no value (`-`).
-    fn path_head(&mut self, sg: &sigs.Sigs, ds: &decls.Decls, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
+    // static is a value, and a bare fn name is its fn item's value; any other head names no
+    // value (`-`).
+    fn path_head(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
         let p = sg.cx.parent.as_slice()[r];
         let head = p != NONE && kind(tree, p as usize) == K_POSTFIX && self.base + tree.kids.row(p as usize)[0] as usize == r;
         let n = (r - self.base) as% u32;
@@ -786,6 +794,11 @@ impl tc_rows.Typeck {
         if dk == decls.DK_CONST || dk == decls.DK_STATIC {
             let ty = sg.cx.ty.as_slice()[target as usize];
             return if ty == ERR || ty == NONE then UNK else ty;
+        }
+        // with written generic arguments: not checked yet
+        if dk == decls.DK_FN && !head && tree.kids.row(r).len() == 0 {
+            let h = self.hint.as_slice()[r];
+            return self.fn_item_value(sg, r, target, NONE, h);
         }
         return if head then NONE else UNK;
     }
@@ -1099,7 +1112,6 @@ impl tc_rows.Typeck {
             let tab = &sg.cx.tab;
             if (at == h || self.coercible(tab, at, h)) && (bt == h || self.coercible(tab, bt, h)) { return h; }
         }
-        if both && at != NONE && bt != NONE && sg.cx.tab.tag_of(at) == types.TK_FN && sg.cx.tab.tag_of(bt) == types.TK_FN { return UNK; }
         return self.unify(&sg.cx.tab, at, bt);
     }
 
@@ -1460,7 +1472,7 @@ fn is_body(sg: &sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, d: usize, x86: bool
     return built_on(sg.feats.as_slice()[d], x86);
 }
 
-pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, x86: bool) -> tc_rows.Typeck {
+pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, x86: bool, base_feats: u64) -> tc_rows.Typeck {
     let n = tree.nodes();
     let tab = &mut sg.cx.tab;
     let t_bool = tab.key(types.TK_BOOL, 0, 0);
@@ -1475,6 +1487,8 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
     let opt = if md.core_mod == NONE || opt_s == NONE then NONE else ds.module_item(md.core_mod, opt_s);
     let res_s = modules.lookup(&nm.tab, mem.str_bytes("Result"));
     let res = if md.core_mod == NONE || res_s == NONE then NONE else ds.module_item(md.core_mod, res_s);
+    let string_s = modules.lookup(&nm.tab, mem.str_bytes("String"));
+    let string = if md.string_mod == NONE || string_s == NONE then NONE else ds.module_item(md.string_mod, string_s);
     let (hl_name, hl_m) = tc_rows.headless_impls(ds);
     let mut tc = tc_rows.Typeck.{
         nty: col.filled(n, NONE),
@@ -1525,6 +1539,12 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         t_unit: t_unit,
         t_never: t_never,
         t_ref_str: t_ref_str,
+        string: string,
+        proven: 0,
+        base_feats: base_feats,
+        fn_item: col.filled(n, false),
+        fc_node: vec.Vec::<u32>.new(),
+        fc_want: vec.Vec::<u32>.new(),
     };
     // rounds (`tc_traits`): the bodies that asked a trait question without an answer are checked
     // again after the questions are solved
