@@ -1106,6 +1106,10 @@ impl<'a> FnVerifier<'a> {
                 if blk.0 != 0 {
                     return Err("slot outside b0".into());
                 }
+                let first = b.block(blk).map_or(i, |bd| bd.insts.start);
+                if i > first && b.insts.op[i as usize - 1] != Op::Slot {
+                    return Err("slot after a non-slot instruction of b0 (slots are a prefix of b0)".into());
+                }
                 let p = pointee(types, t).ok_or("slot result must be a pointer type")?;
                 if crate::layout::is_unsized_pointee(types, p) {
                     return Err("slot of an unsized type".into());
