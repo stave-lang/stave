@@ -194,7 +194,7 @@ fn parse_size(s: &[u8]) -> u64 {
     } else {
         return 0;
     }
-    let max: u64 = 18446744073709551615;
+    let max: u64 = 0xffff_ffff_ffff_ffff;
     let mut n: u64 = 0;
     for k in 0..digits {
         let dv = (s[k] - 48) as u64;

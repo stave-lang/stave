@@ -8,13 +8,14 @@
 
 use std::fmt::Write;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::Program;
 use crate::dump_sigs::SigTable;
 use crate::ids::DeclId;
 use crate::resolve::TypeHead;
-use crate::traits::{self, NoLayout, Unlaid, WithSigs, World};
+use crate::sigs::TraitRef;
+use crate::traits::{self, Answers, NoLayout, Unlaid, WithSigs, World};
 use crate::typeck::Typeck;
 use crate::types::{Interner, Overlay, TypeId, TypeKind};
 
@@ -33,8 +34,13 @@ pub fn dump_kinds(prog: &Program, tc: &Typeck) -> String {
 
     let depths = crate::typedepth::depths(sigs, &tc.types, &table.order);
     let mut drop_memo = FxHashMap::default();
+    let mut kept = Answers::default();
+    let mut warm = Warm { traits: warm_traits(&w), done: FxHashSet::default() };
+    for &t in &table.order {
+        warm.parts_first(&w, &mut cx, t, &mut kept);
+    }
     for (&t, depth) in table.order.iter().zip(depths) {
-        let k = crate::kinds::kind_of(w, &mut cx, t, &[]);
+        let k = crate::kinds::kind_of(w, &mut cx, t, &[], &mut kept);
         let bits = [
             k.copy,
             k.view,
@@ -43,7 +49,7 @@ pub fn dump_kinds(prog: &Program, tc: &Typeck) -> String {
             k.sized,
             k.flat,
             k.frozen,
-            crate::mono::drop_impl(&w, &mut cx, t),
+            crate::mono::drop_impl_kept(&w, &mut cx, t, &mut kept),
             crate::mono::needs_drop(&w, &mut cx, t, &[], &mut drop_memo),
             !crate::ranks::lock_parts(&mut cx, prog, sigs, &[], t).is_empty(),
         ];
@@ -132,7 +138,7 @@ pub fn dump_kinds(prog: &Program, tc: &Typeck) -> String {
             let mut first = true;
             for i in positions.into_iter().filter_map(|k| list.get(k as usize).copied()) {
                 let Some(imp) = sigs.impl_def(i) else { continue };
-                if w.impl_applies(&mut cx, imp, t, &[]).is_some() {
+                if w.impl_applies_kept(&mut cx, imp, t, &[], &mut kept).is_some() {
                     if !first {
                         out.push(' ');
                     }
@@ -144,6 +150,69 @@ pub fn dump_kinds(prog: &Program, tc: &Typeck) -> String {
         }
     }
     out
+}
+
+/// The traits a query of this dump can reach on a part of a type: Copy and the derived and
+/// marker traits ([`crate::kinds::kind_of`]), and every trait an impl param is bounded by
+/// without trait arguments (impl selection asks those of the impl's arguments).
+fn warm_traits(w: &World<'_>) -> Vec<DeclId> {
+    let lang = &w.sigs.lang;
+    let mut out: Vec<DeclId> =
+        [lang.copy, lang.send, lang.sync, lang.flat, lang.frozen].into_iter().collect();
+    for s in &w.sigs.decls {
+        let crate::sigs::DeclSig::Impl(i) = s else { continue };
+        let bounds = i.generics.iter().flat_map(|g| g.bounds.iter());
+        out.extend(bounds.filter(|b| b.args.is_empty()).map(|b| b.trait_decl));
+    }
+    out.retain(|d| d.is_some());
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Asks the trait queries of every part of a type before the type's own, deepest first, so
+/// each query finds the answers one step down kept ([`Answers`]) and descends no further than
+/// a cycle of parts: the dump's answers for a type nested past the depth limit, or holding a
+/// chain of references or type arguments as long, take no stack in proportion to it.
+struct Warm {
+    traits: Vec<DeclId>,
+    /// Types expanded: their parts answered, or pending below them on the stack.
+    done: FxHashSet<TypeId>,
+}
+
+impl Warm {
+    /// The queries of `root` and everything it reaches through components (type arguments,
+    /// elements, pointees, fn params and result) and fields after substitution, in post-order
+    /// by an explicit stack. A type met again while its parts are pending is a cycle: its
+    /// queries run when its own turn comes.
+    fn parts_first(&mut self, w: &World<'_>, cx: &mut Overlay<'_>, root: TypeId, kept: &mut Answers) {
+        let mut stack = vec![(root, false)];
+        let mut kids = Vec::new();
+        while let Some((u, expanded)) = stack.pop() {
+            if expanded {
+                for &tr in &self.traits {
+                    w.implements_kept(cx, u, &TraitRef { trait_decl: tr, args: Vec::new() }, &[], kept);
+                }
+                continue;
+            }
+            // a type queued twice is expanded at its first pop, below the holder that popped it
+            if u.is_none() || !self.done.insert(u) {
+                continue;
+            }
+            stack.push((u, true));
+            kids.clear();
+            let k = cx.kind(u).clone();
+            k.children(&mut kids);
+            if let TypeKind::Adt { def, args } = k
+                && let Some(adt) = w.sigs.adt(def)
+            {
+                for f in adt.variants.iter().flat_map(|v| v.fields.iter()) {
+                    kids.push(cx.subst(f.ty, &args, None));
+                }
+            }
+            stack.extend(kids.iter().rev().filter(|c| !self.done.contains(c)).map(|&c| (c, false)));
+        }
+    }
 }
 
 /// Sort key of an impl head: none, then ADTs by D, then built-in types by spelling.

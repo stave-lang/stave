@@ -10,10 +10,10 @@
 //!
 //! Implemented: `tokens items ast strings names sigs kinds types borrow lir ir opt diags stats`
 //! (`sigs` is [`stave_sema::dump_sigs`], the printer of the decl table and signature types;
-//! `kinds` is [`stave_sema::dump_kinds`], the kinds, layouts, and impls of those types; `types`
-//! is [`stave_sema::dump_types`], the one printer of the expression-node set and TypeKey text;
-//! `lir`, `ir`, and `opt` are [`stave_ir::print_module`] of the module at level `lowered`,
-//! `checked`, and `opt` (module `ir`), and none of those files exists when the build has error
+//! `kinds` is [`stave_sema::dump_kinds`], the kinds, layouts, and impls of those types; `types` is
+//! [`stave_sema::dump_types`], the one printer of the expression-node set and TypeKey text; `lir`,
+//! `ir`, and `opt` are [`stave_ir::print_module`] of the module at level `lowered`, `checked`,
+//! and `opt` (module `ir`), and none of those files exists when the build has error
 //! diagnostics). `borrow` is stave-borrow's per-access lines (module `borrow`).
 
 mod ast;

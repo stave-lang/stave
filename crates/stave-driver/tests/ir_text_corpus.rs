@@ -23,8 +23,17 @@ fn programs() -> Vec<PathBuf> {
         .filter(|p| p.extension().is_some_and(|x| x == "stv"))
         .collect();
     v.sort();
-    if std::env::var_os("STAVE_IR_TEXT_ALL").is_some() { v } else { v.into_iter().step_by(5).collect() }
+    if std::env::var_os("STAVE_IR_TEXT_ALL").is_some() {
+        return v;
+    }
+    // Every fifth program, plus the ones a line kind depends on: a new file in the directory
+    // shifts the stride, and the kinds asserted below must not depend on where it lands.
+    let named = |p: &PathBuf| ALWAYS.iter().any(|n| p.file_name().is_some_and(|f| f == *n));
+    v.into_iter().enumerate().filter(|(i, p)| i % 5 == 0 || named(p)).map(|(_, p)| p).collect()
 }
+
+/// Programs in every sample: `static_str.stv` has the data blobs with address words (`ref`).
+const ALWAYS: [&str; 1] = ["static_str.stv"];
 
 fn lowered(root: &Path, release: bool) -> Output {
     let mut opts = Options::new(Goal::Check).threads(Some(2));

@@ -35,7 +35,7 @@ impl Word for u16 {
     fn bits() -> u32 { return 16; }
     fn byte(self, k: u32) -> usize {
         let sh = (k * 8) as% u16;
-        return ((self >> sh) & 255) as usize;
+        return ((self >> sh) & 0xff) as usize;
     }
     fn wide(self) -> u64 { return self as u64; }
 }
@@ -46,7 +46,7 @@ impl Word for u32 {
     fn same(self, o: u32) -> bool { return self == o; }
     fn less(self, o: u32) -> bool { return self < o; }
     fn bits() -> u32 { return 32; }
-    fn byte(self, k: u32) -> usize { return ((self >> (k * 8)) & 255) as usize; }
+    fn byte(self, k: u32) -> usize { return ((self >> (k * 8)) & 0xff) as usize; }
     fn wide(self) -> u64 { return self as u64; }
 }
 
@@ -58,7 +58,7 @@ impl Word for u64 {
     fn bits() -> u32 { return 64; }
     fn byte(self, k: u32) -> usize {
         let sh = (k * 8) as u64;
-        return ((self >> sh) & 255) as usize;
+        return ((self >> sh) & 0xff) as usize;
     }
     fn wide(self) -> u64 { return self; }
 }

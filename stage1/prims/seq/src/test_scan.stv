@@ -76,8 +76,8 @@ test fn random_columns() {
 
 test fn total_at_the_limit() {
     // the sum may reach the type's maximum
-    let xs = [4294967290u32, 5, 0];
-    debug.assert(scan.inclusive(&xs).as_slice().eq(&[4294967290u32, 4294967295, 4294967295]), "u32 max total");
+    let xs = [0xffff_fffau32, 5, 0];
+    debug.assert(scan.inclusive(&xs).as_slice().eq(&[0xffff_fffau32, 0xffff_ffff, 0xffff_ffff]), "u32 max total");
     let ys = [255u8, 0];
-    debug.assert(scan.offsets(&ys).as_slice().eq(&[0u8, 255, 255]), "u8 max total");
+    debug.assert(scan.offsets(&ys).as_slice().eq(&[0u8, 0xff, 0xff]), "u8 max total");
 }

@@ -46,14 +46,14 @@ test fn one_key() {
 }
 
 test fn extreme_keys() {
-    let ks = [0u64, 18446744073709551615, 1, 9223372036854775808, 0];
+    let ks = [0u64, 0xffff_ffff_ffff_ffff, 1, 0x8000_0000_0000_0000, 0];
     let h = hindex.HashIndex.build(&ks);
     debug.assert(h.probe(0) == 0 && h.probe_after(0, 0) == 4 && h.probe_after(0, 4) == idx.NONE, "zero twice");
-    debug.assert(h.probe(18446744073709551615) == 1, "max");
-    debug.assert(h.probe(9223372036854775808) == 3, "top bit");
+    debug.assert(h.probe(0xffff_ffff_ffff_ffff) == 1, "max");
+    debug.assert(h.probe(0x8000_0000_0000_0000) == 3, "top bit");
     debug.assert(h.probe(2) == idx.NONE, "absent");
     debug.assert(h.probe_after(0, idx.NONE) == idx.NONE, "after NONE is NONE");
-    check(&ks, &[0u64, 1, 2, 18446744073709551615, 9223372036854775808, 9223372036854775807], "extremes");
+    check(&ks, &[0u64, 1, 2, 0xffff_ffff_ffff_ffff, 0x8000_0000_0000_0000, 0x7fff_ffff_ffff_ffff], "extremes");
 }
 
 test fn duplicates_in_order() {

@@ -38,10 +38,11 @@ import prims.xxhash;
 import resdiag;
 import source;
 import text;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 
 const T_IDENT: u8 = terminals.T_IDENT as% u8;
 const T_DOT: u8 = terminals.T_DOT as% u8;
@@ -66,9 +67,10 @@ pub struct Modules {
     pub text_bytes: vec.Vec<u8>,
     // the module sees the prelude (its package is `std` or binds it)
     pub prelude_ok: vec.Vec<bool>,
-    // `std.core` (the prelude) and `std.soa` of the built-in `std`, or NONE
+    // `std.core` (the prelude), `std.soa`, and `std.string` of the built-in `std`, or NONE
     pub core_mod: u32,
     pub soa_mod: u32,
+    pub string_mod: u32,
     // the trie: node -> module (NONE for a package root or a directory only), sorted edges
     pub node_mod: vec.Vec<u32>,
     pub edge_key: vec.Vec<u64>,
@@ -312,6 +314,7 @@ fn module_table(fl: &files.FileList, nm: &intern.Interned) -> Modules {
         prelude_ok: vec.Vec::<bool>.new(),
         core_mod: NONE,
         soa_mod: NONE,
+        string_mod: NONE,
         node_mod: col.filled(npkg, NONE),
         edge_key: vec.Vec::<u64>.new(),
         edge_node: vec.Vec::<u32>.new(),
@@ -359,6 +362,8 @@ fn module_table(fl: &files.FileList, nm: &intern.Interned) -> Modules {
         if c != NONE { md.core_mod = md.node_mod.as_slice()[c as usize]; }
         let s = md.child(std_pkg, lookup(tab, mem.str_bytes("soa")));
         if s != NONE { md.soa_mod = md.node_mod.as_slice()[s as usize]; }
+        let st = md.child(std_pkg, lookup(tab, mem.str_bytes("string")));
+        if st != NONE { md.string_mod = md.node_mod.as_slice()[st as usize]; }
     }
     for m in 0..nfile {
         let p = md.mod_pkg.as_slice()[m] as usize;

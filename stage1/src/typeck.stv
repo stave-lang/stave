@@ -1,0 +1,1702 @@
+// Expression type checking (types/check): the type of every expression node of every body (fn
+// and method bodies, const and static initializers), as stage0's checker gives it.
+//
+// A body is checked in one left-to-right walk over its nodes with an explicit stack: a node is
+// finished after its children, so finishing follows the node ids (postorder). A parent decides,
+// before it enters each child, the child's context type (`hint`: the expected type stage0 passes
+// down: an annotation, a parameter, the other operand) from its own context and the children it
+// has finished; a child is finished from its children's types and its context. The facts a
+// statement makes for the later ones (a `let` binding's type) are set when the statement is
+// finished.
+//
+// A literal without a suffix and without a context type is a literal group (`LIT | g`, union-find
+// over groups by index): an operator unites its operands' groups or fixes them to the other
+// operand's type, a coercion site fixes them. What a group is fixed to is every member's type.
+//
+// Not decided yet (`UNK`, printed `?`): a node of a form this stage does not check yet, and every
+// node whose type depends on one. A form not checked yet makes its children's literal groups
+// unknown too (stage0 may have fixed them there), so an unknown never turns into a guess. A
+// context stage0 passes that this stage does not know is `UNK` as a hint: a literal without a
+// suffix under it is unknown (stage0 may have given it that context's type).
+//
+// A body in which this stage finds a type error prints `?` for all its nodes: stage0's types
+// after an error are not modeled.
+//
+// `NONE` (printed `-`): a node that denotes no value (the head of a path naming a module, type,
+// or fn), or that the checker never visits (types, patterns, nodes outside any body).
+//
+// The checker is nine modules, each owning one concern:
+// - `typeck` (this one): the walk, statements, primaries, operators, casts, `for` loops, array
+//   literals; the entry point `build` and its rounds.
+// - `tc_rows`: the state (`Typeck`: the node rows and the body's literal groups) and what every
+//   other module calls on it: literal groups, `coerce`, `unify`, `force`, hints, `err`.
+// - `tc_chain`: postfix chains (path steps, fields, tuple elements, indexing, calls, method
+//   lookup); the walk calls `chain_start`, `chain_steps`, `chain_apply`, `chain_value`,
+//   `arg_hint`.
+// - `tc_builtins`: the built-in methods and type-relative built-ins, as a table (`Builtins`).
+// - `tc_pat`: pattern bindings (`bind_pattern`).
+// - `tc_traits`: the trait questions a body asks of the one solver, in rounds.
+// - `tc_method`: method lookup on a receiver value.
+// - `tc_ops`: user operators through their operator traits.
+// - `tc_closure`: closure literals, and the coercions a node's form decides (`node_coercions`).
+import ast;
+import consteval;
+import decls;
+import files;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import items;
+import lex;
+import modules;
+import resolve;
+import sigs;
+import source;
+import tc_builtins;
+import tc_chain;
+import tc_closure;
+import tc_ops;
+import tc_pat;
+import tc_rows;
+import tc_traits;
+import ir.types;
+import prims.col;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = tc_rows.NONE;
+const ERR: u32 = types.ERR;
+const UNK: u32 = tc_rows.UNK;
+const LIT: u32 = tc_rows.LIT;
+
+const K_ADD: u8 = node_kinds.KIND_ADD;
+const K_AND: u8 = node_kinds.KIND_AND_EXPR;
+const K_BIT_AND: u8 = node_kinds.KIND_BIT_AND;
+const K_BIT_OR: u8 = node_kinds.KIND_BIT_OR;
+const K_BIT_XOR: u8 = node_kinds.KIND_BIT_XOR;
+const K_BLOCK: u8 = node_kinds.KIND_BLOCK;
+const K_CAST: u8 = node_kinds.KIND_CAST;
+const K_CMP: u8 = node_kinds.KIND_CMP_EXPR;
+const K_CMP_OP: u8 = node_kinds.KIND_CMP_OP;
+const K_CONST_DECL: u8 = node_kinds.KIND_CONST_DECL;
+const K_ENSURES: u8 = node_kinds.KIND_ENSURES;
+const K_EXPR_STMT: u8 = node_kinds.KIND_EXPR_STMT;
+const K_FN_DECL: u8 = node_kinds.KIND_FN_DECL;
+const K_IF_EXPR: u8 = node_kinds.KIND_IF_EXPR;
+const K_IF_STMT: u8 = node_kinds.KIND_IF_STMT;
+const K_MATCH: u8 = node_kinds.KIND_MATCH_EXPR;
+const K_MUL: u8 = node_kinds.KIND_MUL;
+const K_OR: u8 = node_kinds.KIND_OR_EXPR;
+const K_PARAM: u8 = node_kinds.KIND_PARAM;
+const K_PARAMS: u8 = node_kinds.KIND_PARAMS;
+const K_PATTERN: u8 = node_kinds.KIND_PATTERN;
+const K_POSTFIX: u8 = node_kinds.KIND_POSTFIX;
+const K_PRIMARY: u8 = node_kinds.KIND_PRIMARY;
+const K_RANGE: u8 = node_kinds.KIND_RANGE_EXPR;
+const K_REQUIRES: u8 = node_kinds.KIND_REQUIRES;
+const K_SELF_PARAM: u8 = node_kinds.KIND_SELF_PARAM;
+const K_SHIFT: u8 = node_kinds.KIND_SHIFT;
+const K_STATIC_DECL: u8 = node_kinds.KIND_STATIC_DECL;
+const K_STMT: u8 = node_kinds.KIND_STMT;
+const K_TYPE: u8 = node_kinds.KIND_TYPE;
+const K_UNARY: u8 = node_kinds.KIND_UNARY;
+const K_GENERIC_PARAM: u8 = node_kinds.KIND_GENERIC_PARAM;
+const K_ARGS: u8 = node_kinds.KIND_ARGS;
+const K_FOR_STMT: u8 = node_kinds.KIND_FOR_STMT;
+const K_STMT_ARM: u8 = node_kinds.KIND_STMT_ARM;
+const K_EXPR_ARM: u8 = node_kinds.KIND_EXPR_ARM;
+const K_ARM_PATTERN: u8 = node_kinds.KIND_ARM_PATTERN;
+const K_STRUCT_LIT: u8 = node_kinds.KIND_STRUCT_LIT;
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
+const T_FLOAT_LIT: u8 = terminals.T_FLOAT_LIT as% u8;
+const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
+const T_FMT_LIT: u8 = terminals.T_FMT_LIT as% u8;
+const T_CHAR_LIT: u8 = terminals.T_CHAR_LIT as% u8;
+const T_COMMA: u8 = terminals.T_COMMA as% u8;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
+const T_SEMI: u8 = terminals.T_SEMI as% u8;
+const T_KW_MASKED: u8 = terminals.T_KW_MASKED as% u8;
+const T_KW_SCALAR: u8 = terminals.T_KW_SCALAR as% u8;
+const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
+const T_DOT_DOT_EQ: u8 = terminals.T_DOT_DOT_EQ as% u8;
+const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
+const T_KW_TRUE: u8 = terminals.T_KW_TRUE as% u8;
+const T_KW_FALSE: u8 = terminals.T_KW_FALSE as% u8;
+const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
+const T_KW_SELF_TYPE: u8 = terminals.T_KW_SELF_TYPE as% u8;
+const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
+const T_KW_LET: u8 = terminals.T_KW_LET as% u8;
+const T_KW_MATCH: u8 = terminals.T_KW_MATCH as% u8;
+const T_KW_IF: u8 = terminals.T_KW_IF as% u8;
+const T_KW_WHILE: u8 = terminals.T_KW_WHILE as% u8;
+const T_KW_LOOP: u8 = terminals.T_KW_LOOP as% u8;
+const T_KW_RETURN: u8 = terminals.T_KW_RETURN as% u8;
+const T_KW_BREAK: u8 = terminals.T_KW_BREAK as% u8;
+const T_KW_CONTINUE: u8 = terminals.T_KW_CONTINUE as% u8;
+const T_KW_UNSAFE: u8 = terminals.T_KW_UNSAFE as% u8;
+const T_KW_SCOPE: u8 = terminals.T_KW_SCOPE as% u8;
+const T_KW_SPAWN: u8 = terminals.T_KW_SPAWN as% u8;
+const T_KW_STRICT: u8 = terminals.T_KW_STRICT as% u8;
+const T_KW_EMULATE: u8 = terminals.T_KW_EMULATE as% u8;
+const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
+const T_AS_PERCENT: u8 = terminals.T_AS_PERCENT as% u8;
+const T_AS_PIPE: u8 = terminals.T_AS_PIPE as% u8;
+const T_AS_TILDE: u8 = terminals.T_AS_TILDE as% u8;
+const T_AS_QUESTION: u8 = terminals.T_AS_QUESTION as% u8;
+const T_EQ: u8 = terminals.T_EQ as% u8;
+const T_EQ_EQ: u8 = terminals.T_EQ_EQ as% u8;
+const T_BANG_EQ: u8 = terminals.T_BANG_EQ as% u8;
+const T_MINUS: u8 = terminals.T_MINUS as% u8;
+const T_BANG: u8 = terminals.T_BANG as% u8;
+const T_TILDE: u8 = terminals.T_TILDE as% u8;
+const T_STAR: u8 = terminals.T_STAR as% u8;
+const T_AMP: u8 = terminals.T_AMP as% u8;
+const T_AMP_AMP: u8 = terminals.T_AMP_AMP as% u8;
+const T_PLUS: u8 = terminals.T_PLUS as% u8;
+const T_PLUS_PERCENT: u8 = terminals.T_PLUS_PERCENT as% u8;
+const T_PLUS_PIPE: u8 = terminals.T_PLUS_PIPE as% u8;
+const T_MINUS_PERCENT: u8 = terminals.T_MINUS_PERCENT as% u8;
+const T_MINUS_PIPE: u8 = terminals.T_MINUS_PIPE as% u8;
+const T_STAR_PERCENT: u8 = terminals.T_STAR_PERCENT as% u8;
+const T_STAR_PIPE: u8 = terminals.T_STAR_PIPE as% u8;
+const T_SLASH: u8 = terminals.T_SLASH as% u8;
+const T_PERCENT: u8 = terminals.T_PERCENT as% u8;
+const T_PIPE: u8 = terminals.T_PIPE as% u8;
+const T_CARET: u8 = terminals.T_CARET as% u8;
+const T_LT_LT: u8 = terminals.T_LT_LT as% u8;
+const T_LT_LT_PERCENT: u8 = terminals.T_LT_LT_PERCENT as% u8;
+const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
+// Target features owned by one architecture (the `sigs` feature bits): x86-64 0..=16, AArch64
+// 17..=22; `cuda` (23) belongs to both.
+const X86_FEATS: u64 = 0x1ffff;
+const A64_FEATS: u64 = 0x7e_0000;
+
+impl tc_rows.Typeck {
+    fn body(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, d: u32) {
+        let it = ds.item.as_slice()[d as usize];
+        let base = tree.item_node.as_slice()[it as usize] as usize;
+        let g = base + ds.node.as_slice()[d as usize] as usize;
+        let lo = g - tree.size.as_slice()[g] as usize;
+        self.it = it;
+        self.base = base;
+        self.module = ds.module.as_slice()[d as usize];
+        self.bad = false;
+        self.self_row = NONE;
+        self.lg_parent.clear();
+        self.lg_fixed.clear();
+        self.lg_float.clear();
+        self.binds.clear();
+        self.rets.clear();
+        let k = ds.kind.as_slice()[d as usize];
+        self.proven = self.base_feats;
+        self.fc_node.clear();
+        self.fc_want.clear();
+        if k == decls.DK_FN || k == decls.DK_METHOD {
+            self.proven = self.base_feats | sg.feats.as_slice()[d as usize];
+            let st = sigs.self_of(&mut sg.cx, ds, d);
+            self.sc = sigs.scope_of(&sg.cx, ds, d, st);
+            let ret = sg.cx.ty.as_slice()[d as usize];
+            let rk = self.known(ret);
+            self.rets.push(rk);
+            self.bind_params(sg, tree, d, g);
+        } else {
+            self.sc = consteval.no_scope();
+            let ty = sg.cx.ty.as_slice()[d as usize];
+            let tk0 = self.known(ty);
+            self.acc.as_mut_slice()[g] = tk0;
+        }
+        self.walk(sg, ds, nm, set, t, cut, tree, g);
+        // literal values take their group's type; a group no context fixed is E0202
+        for r in lo..g + 1 {
+            let v = self.nty.as_slice()[r];
+            if is_lit(v) {
+                let x = self.resolve(v);
+                if is_lit(x) { self.bad = true; }
+                self.nty.as_mut_slice()[r] = if is_lit(x) then UNK else x;
+            }
+        }
+        if self.bad {
+            for r in lo..g + 1 {
+                if is_expr(kind(tree, r)) { self.nty.as_mut_slice()[r] = UNK; }
+            }
+        }
+    }
+
+    fn bind_params(&mut self, sg: &sigs.Sigs, tree: &ast.Ast, d: u32, g: usize) {
+        let pn = consteval.child(tree, self.base, g, K_PARAMS);
+        if pn == NONE { return; }
+        let ps = sg.params.row(d as usize);
+        let ks = tree.kids.row(pn as usize);
+        let mut i: usize = 0;
+        for j in 0..ks.len() {
+            let p = self.base + ks[j] as usize;
+            if kind(tree, p) != K_PARAM { continue; }
+            let ty = if i < ps.len() then ps[i] else ERR;
+            let v = if ty == ERR then UNK else ty;
+            self.loc.as_mut_slice()[p] = v;
+            let sp = consteval.child(tree, self.base, p, K_SELF_PARAM);
+            if sp != NONE {
+                self.loc.as_mut_slice()[sp as usize] = v;
+                self.self_row = sp;
+            }
+            i = i + 1;
+        }
+    }
+
+    fn walk(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, g: usize) {
+        self.st_row.clear();
+        self.st_kid.clear();
+        self.st_row.push(g as% u32);
+        self.st_kid.push(0);
+        self.depth = 0;
+        while self.st_row.len() > 0 {
+            let top = self.st_row.len() - 1;
+            let r = self.st_row.as_slice()[top] as usize;
+            let k = self.st_kid.as_slice()[top] as usize;
+            let ks = tree.kids.row(r);
+            if k < ks.len() {
+                self.st_kid.as_mut_slice()[top] = (k + 1) as% u32;
+                let c = self.base + ks[k] as usize;
+                let ent = self.enter(sg, ds, nm, set, t, cut, tree, r, k, c);
+                if self.fc_node.len() > 0 { self.node_coercions(&sg.cx.tab, t, tree); }
+                if ent {
+                    self.st_row.push(c as% u32);
+                    self.st_kid.push(0);
+                    if is_level(kind(tree, c)) {
+                        self.depth = self.depth + 1;
+                        if self.depth > tc_rows.MAX_DEPTH { self.bad = true; }
+                    }
+                }
+                continue;
+            }
+            self.st_row.truncate(top);
+            self.st_kid.truncate(top);
+            if is_level(kind(tree, r)) { self.depth = self.depth - 1; }
+            self.finish(sg, ds, nm, set, t, cut, tree, r);
+            if self.fc_node.len() > 0 { self.node_coercions(&sg.cx.tab, t, tree); }
+        }
+    }
+
+    // Marks the expression nodes of row c's subtree unknown (a part stage0 checks that this
+    // stage does not enter).
+    fn unknown_subtree(&mut self, tree: &ast.Ast, c: usize) {
+        let lo = c - tree.size.as_slice()[c] as usize;
+        for r in lo..c + 1 {
+            if is_expr(kind(tree, r)) { self.nty.as_mut_slice()[r] = UNK; }
+        }
+    }
+
+    // Before child c (the k-th) of row r: whether the walk enters it, and its context type.
+    fn enter(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
+        let pk = kind(tree, r);
+        let ck = kind(tree, c);
+        let h = self.hint.as_slice()[r];
+        if pk == K_FN_DECL {
+            if ck == K_BLOCK { return true; }
+            if ck == K_REQUIRES || ck == K_ENSURES { self.unknown_subtree(tree, c); }
+            return false;
+        }
+        if pk == K_CONST_DECL || pk == K_STATIC_DECL {
+            if !is_expr(ck) { return false; }
+            self.set_hint_acc(c, r);
+            return true;
+        }
+        if pk == K_STMT { return self.enter_stmt(sg, ds, nm, set, t, cut, tree, r, k, c); }
+        if pk == K_EXPR_STMT {
+            if k == 0 {
+                self.set_hint(c, NONE);
+                return true;
+            }
+            if !is_expr(ck) { return false; }
+            let ks = tree.kids.row(r);
+            // `a = b` and `a op= b`: b under a's type
+            let lt = self.force_at(self.base + ks[0] as usize);
+            self.acc.as_mut_slice()[r] = lt;
+            self.set_hint(c, lt);
+            return true;
+        }
+        if pk == K_FOR_STMT { return self.enter_for(sg, ds, nm, set, t, cut, tree, r, c); }
+        if pk == K_IF_STMT {
+            if k == 0 {
+                self.set_hint_bool(c);
+                return true;
+            }
+            return ck == K_BLOCK || ck == K_IF_STMT;
+        }
+        if pk == K_PRIMARY && tk(t, first_tok(tree, r)) == T_KW_FN { return self.enter_closure(sg, ds, nm, set, t, cut, tree, r, c); }
+        if pk == K_PRIMARY { return self.enter_primary(sg, t, tree, r, k, c, h); }
+        if pk == K_UNARY { return self.enter_unary(sg, t, tree, r, c, h); }
+        if pk == K_CAST {
+            if k == 0 {
+                self.set_hint(c, NONE);
+                return true;
+            }
+            return false;
+        }
+        if is_chain(pk) {
+            if k == 0 {
+                self.set_hint(c, h);
+                return true;
+            }
+            let ks = tree.kids.row(r);
+            let prev = self.base + ks[k - 1] as usize;
+            if k == 1 {
+                self.acc.as_mut_slice()[r] = self.nty.as_slice()[prev];
+            } else {
+                let acc = self.acc.as_slice()[r];
+                let v = self.binop(sg, t, tree, prev, acc);
+                self.acc.as_mut_slice()[r] = v;
+            }
+            let a = self.resolve_acc(r);
+            let ch = if a == UNK then UNK else if is_lit(a) || a == NONE || a == self.t_never then h else a;
+            self.set_hint(c, ch);
+            return true;
+        }
+        if pk == K_CMP {
+            if ck == K_CMP_OP { return false; }
+            if k == 0 {
+                self.set_hint(c, NONE);
+                return true;
+            }
+            let ks = tree.kids.row(r);
+            let l = self.resolve_at(self.base + ks[0] as usize);
+            self.set_hint(c, if is_lit(l) then NONE else l);
+            return true;
+        }
+        if pk == K_MATCH { return self.enter_match(tree, r, k, c); }
+        if pk == K_STMT_ARM || pk == K_EXPR_ARM { return self.enter_arm(sg, ds, nm, t, tree, r, k, c); }
+        if pk == K_IF_EXPR {
+            if k == 0 {
+                self.set_hint_bool(c);
+            } else if k == 1 {
+                self.set_hint(c, h);
+            } else {
+                let ks = tree.kids.row(r);
+                let at = self.resolve_at(self.base + ks[1] as usize);
+                let bh = if at == UNK then UNK else if is_lit(at) || at == NONE || at == self.t_never then h else at;
+                self.set_hint(c, bh);
+            }
+            return true;
+        }
+        if pk == K_AND || pk == K_OR {
+            self.set_hint_bool(c);
+            return true;
+        }
+        if pk == K_RANGE {
+            let eh = self.range_elem_hint(&sg.cx.tab, h);
+            if k == 0 {
+                self.set_hint(c, eh);
+                return true;
+            }
+            let ks = tree.kids.row(r);
+            let l = self.resolve_at(self.base + ks[0] as usize);
+            let lh = if l == UNK then UNK else if is_lit(l) || l == self.t_never then eh else l;
+            self.set_hint(c, lh);
+            return true;
+        }
+        if pk == K_POSTFIX {
+            if k == 0 {
+                self.set_hint(c, NONE);
+                return true;
+            }
+            if k == 1 {
+                self.chain_start(sg, ds, nm, set, t, cut, tree, r);
+            } else {
+                let prev = self.base + tree.kids.row(r)[k - 1] as usize;
+                self.chain_apply(sg, ds, tree, r, prev);
+            }
+            return self.chain_steps(sg, ds, nm, set, t, cut, tree, r, c as% u32);
+        }
+        // a call's arguments and a struct literal's field expressions
+        if pk == K_ARGS || pk == K_STRUCT_LIT {
+            let ah = self.arg_hint(sg, ds, tree, r, k);
+            self.set_hint(c, ah);
+            return true;
+        }
+        // a form not checked yet: its expression and statement children are walked with an
+        // unknown context; types, patterns, and parameter lists hold no checked node
+        if ck == K_TYPE || ck == K_PATTERN || ck == node_kinds.KIND_ARM_PATTERN || ck == K_PARAMS || ck == node_kinds.KIND_GENERIC_ARGS || ck == node_kinds.KIND_RET_CLAUSE || ck == node_kinds.KIND_TAIL_BIND { return false; }
+        self.set_hint(c, UNK);
+        if ck == K_BLOCK && pk == K_PRIMARY { self.rets.push(UNK); }
+        return true;
+    }
+
+    fn range_elem_hint(&self, tab: &types.Table, h: u32) -> u32 {
+        if h == UNK { return UNK; }
+        if h == NONE || tab.tag_of(h) != types.TK_RANGE { return NONE; }
+        return tab.a_of(h);
+    }
+
+    fn enter_stmt(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
+        let ck = kind(tree, c);
+        let a = tk(t, first_tok(tree, r));
+        if a == T_KW_LET {
+            if ck == K_TYPE {
+                let ty = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, c, false, self.sc);
+                let lk = self.known(ty);
+                self.acc.as_mut_slice()[r] = lk;
+                return false;
+            }
+            if is_expr(ck) {
+                let ks = tree.kids.row(r);
+                let typed = ks.len() >= 3;
+                let lh = if typed then self.acc.as_slice()[r] else NONE;
+                self.set_hint(c, lh);
+                return true;
+            }
+            return false;
+        }
+        if a == T_KW_WHILE {
+            if k == 0 {
+                self.set_hint_bool(c);
+                return true;
+            }
+            return ck == K_BLOCK;
+        }
+        if a == T_KW_RETURN {
+            if !is_expr(ck) { return false; }
+            let ret = self.rets.as_slice()[self.rets.len() - 1];
+            self.set_hint(c, if ret == self.t_never then NONE else ret);
+            return true;
+        }
+        if a == T_KW_SPAWN {
+            if ck == K_BLOCK { self.rets.push(self.t_unit); }
+            return ck == K_BLOCK;
+        }
+        if a == T_KW_IF || a == T_KW_LOOP || a == T_KW_UNSAFE || a == T_KW_SCOPE || a == T_KW_STRICT || a == T_KW_EMULATE || a == T_L_BRACE {
+            return ck == K_BLOCK || ck == K_IF_STMT;
+        }
+        if a == T_KW_MATCH { return self.enter_match(tree, r, k, c); }
+        if ck == K_EXPR_STMT { return true; }
+        if ck == K_TYPE || ck == K_PATTERN || ck == node_kinds.KIND_TAIL_BIND { return false; }
+        self.set_hint(c, UNK);
+        return true;
+    }
+
+    fn enter_primary(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize, k: usize, c: usize, h: u32) -> bool {
+        let a = first_tok(tree, r);
+        let ft = tk(t, a);
+        let ck = kind(tree, c);
+        if ft == T_L_BRACKET && is_expr(ck) {
+            self.enter_array(sg, t, tree, r, k, c, h);
+            return true;
+        }
+        if ft == T_L_PAREN {
+            let n = tree.kids.row(r).len();
+            let close = tree.tok_end.as_slice()[r] - 1;
+            if n == 1 && tk(t, close - 1) != T_COMMA {
+                self.set_hint(c, h);
+                return true;
+            }
+            let th = tuple_elem_hint(&sg.cx.tab, h, n, k);
+            self.set_hint(c, th);
+            return true;
+        }
+        if ck == K_TYPE || ck == K_PATTERN || ck == K_PARAMS || ck == node_kinds.KIND_GENERIC_ARGS || ck == node_kinds.KIND_RET_CLAUSE { return false; }
+        self.set_hint(c, UNK);
+        if ck == K_BLOCK { self.rets.push(UNK); }
+        return true;
+    }
+
+    // Before element c (the k-th) of array literal row r, stage0's `array_lit`: a repeat's value
+    // has the context's element type as its context, its count `usize`. A list's element type so
+    // far (in `acc`) starts as the context's element type; without one, the first element whose
+    // value is a type other than `never` decides it, and is every later element's context.
+    fn enter_array(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize, k: usize, c: usize, h: u32) {
+        let tab = &mut sg.cx.tab;
+        if is_repeat(t, tree, self.base, r) {
+            let ch = if k == 0 then elem_hint(tab, h) else tab.usize_t();
+            self.set_hint(c, ch);
+            return;
+        }
+        if k == 0 {
+            self.acc.as_mut_slice()[r] = elem_hint(tab, h);
+        } else {
+            self.array_elem_after(tree, r, k - 1);
+        }
+        self.set_hint_acc(c, r);
+    }
+
+    // Element j of array literal row r is checked: its value decides the element type if none
+    // did yet.
+    fn array_elem_after(&mut self, tree: &ast.Ast, r: usize, j: usize) {
+        if self.acc.as_slice()[r] != NONE { return; }
+        let v = self.resolve_at(self.base + tree.kids.row(r)[j] as usize);
+        if v == UNK || (!is_lit(v) && v != NONE && v != self.t_never) { self.acc.as_mut_slice()[r] = v; }
+    }
+
+    // An array literal `[]`, `[e; n]`, or `[a, b, ..]` with context type h (stage0 `array_lit`).
+    fn array_lit(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
+        let ks = tree.kids.row(r);
+        let n = ks.len();
+        if n == 0 {
+            if h == UNK { return UNK; }
+            let tab = &sg.cx.tab;
+            if h != NONE && tab.tag_of(h) == types.TK_ARRAY {
+                let xs = tab.x(h);
+                if xs[0] == types.GA_VALUE && xs[1] == 0 && xs[2] == 0 { return h; }
+            }
+            return self.err();
+        }
+        if is_repeat(t, tree, self.base, r) {
+            let e = self.base + ks[0] as usize;
+            let cnt = self.base + ks[1] as usize;
+            let eh = elem_hint(&sg.cx.tab, h);
+            let v = self.resolve_at(e);
+            let mut et = v;
+            if is_lit(v) {
+                if eh == UNK {
+                    self.poison(v);
+                    et = UNK;
+                } else if eh != NONE {
+                    self.coerce(&sg.cx.tab, e, eh);
+                    et = eh;
+                } else {
+                    et = self.force(v);
+                }
+            }
+            let us = sg.cx.tab.usize_t();
+            self.coerce(&sg.cx.tab, cnt, us);
+            // a count stage1 does not evaluate, or one stage0 rejects, is not modeled
+            let (gk, gx, gy) = consteval.eval_u64(&mut sg.cx, tree, t, nm, set, cut, ds, self.it, cnt, us, self.sc);
+            if et == NONE { return self.err(); }
+            if et == UNK || gk == types.GA_ERROR { return UNK; }
+            return array_ty(&mut sg.cx.tab, et, gk, gx, gy);
+        }
+        self.array_elem_after(tree, r, n - 1);
+        let mut elem = self.acc.as_slice()[r];
+        if elem == UNK { return self.unknown(tree, r); }
+        if elem == NONE {
+            // every element pending or `never`: one group, then no context
+            let mut u = self.resolve_at(self.base + ks[0] as usize);
+            for j in 1..n {
+                let v = self.resolve_at(self.base + ks[j] as usize);
+                u = self.unify(&sg.cx.tab, u, v);
+            }
+            elem = self.force(u);
+            if elem == UNK { return self.unknown(tree, r); }
+        }
+        for j in 0..n {
+            self.coerce(&sg.cx.tab, self.base + ks[j] as usize, elem);
+        }
+        let len = n as u64;
+        return array_ty(&mut sg.cx.tab, elem, types.GA_VALUE, (len >> 32) as% u32, len as% u32);
+    }
+
+    fn enter_unary(&mut self, sg: &sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize, c: usize, h: u32) -> bool {
+        let a = first_tok(tree, r);
+        let op = tk(t, a);
+        if op == T_MINUS && self.folds(t, tree, a, c) { return false; }
+        if op == T_BANG {
+            self.set_hint_bool(c);
+        } else if op == T_STAR {
+            self.set_hint(c, NONE);
+        } else if op == T_AMP || op == T_AMP_AMP {
+            let tab = &sg.cx.tab;
+            let inner = if h == UNK then UNK else if h != NONE && tab.tag_of(h) == types.TK_REF then tab.b_of(h) else NONE;
+            self.set_hint(c, inner);
+        } else {
+            self.set_hint(c, h);
+        }
+        return true;
+    }
+
+    // `-` directly before a literal: the minus is folded into the literal (child c is not
+    // checked on its own).
+    fn folds(&self, t: &lex.Tokens, tree: &ast.Ast, a: u32, c: usize) -> bool {
+        if kind(tree, c) != K_PRIMARY || first_tok(tree, c) != a + 1 { return false; }
+        let lt = tk(t, a + 1);
+        return lt == T_INT_LIT || lt == T_FLOAT_LIT;
+    }
+
+    fn finish(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) {
+        let k = kind(tree, r);
+        if k == K_FN_DECL || k == K_BLOCK || k == K_FOR_STMT { return; }
+        if k == K_STMT_ARM || k == K_EXPR_ARM {
+            self.finish_arm(sg, tree, r);
+            return;
+        }
+        if k == K_IF_STMT {
+            let ks = tree.kids.row(r);
+            self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
+            return;
+        }
+        if k == K_CONST_DECL || k == K_STATIC_DECL {
+            let e = self.expr_kid(tree, r);
+            if e != NONE { self.coerce_acc(&sg.cx.tab, e as usize, r); }
+            return;
+        }
+        if k == K_STMT {
+            self.finish_stmt(sg, ds, nm, t, tree, r);
+            return;
+        }
+        if k == K_EXPR_STMT {
+            let ks = tree.kids.row(r);
+            let lhs = self.base + ks[0] as usize;
+            if ks.len() >= 3 {
+                let rhs = self.base + ks[2] as usize;
+                let op = tk(t, first_tok(tree, self.base + ks[1] as usize));
+                self.coerce_acc(&sg.cx.tab, rhs, r);
+                let lt = self.acc.as_slice()[r];
+                if op != T_EQ { self.compound(sg, op, lt); }
+            } else {
+                let _ = self.force_at(lhs);
+            }
+            return;
+        }
+        // a chain step consumes its arguments and struct literal fields
+        if k == K_ARGS || k == K_STRUCT_LIT { return; }
+        if !is_expr(k) {
+            self.poison_kids(tree, r);
+            return;
+        }
+        let v = self.expr_value(sg, ds, nm, set, t, cut, tree, r, k);
+        self.nty.as_mut_slice()[r] = v;
+    }
+
+    fn finish_stmt(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, r: usize) {
+        let a = tk(t, first_tok(tree, r));
+        let ks = tree.kids.row(r);
+        if a == T_KW_LET {
+            let pat = self.base + ks[0] as usize;
+            let init = self.expr_kid(tree, r);
+            let typed = ks.len() >= 3;
+            let mut ty = UNK;
+            if typed {
+                ty = self.acc.as_slice()[r];
+                if init != NONE { self.coerce(&sg.cx.tab, init as usize, ty); }
+            } else if init != NONE {
+                ty = self.force_at(init as usize);
+            }
+            self.bind_pattern(sg, ds, nm, t, tree, pat, ty);
+            return;
+        }
+        if a == T_KW_WHILE {
+            self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
+            return;
+        }
+        if a == T_KW_RETURN {
+            let ret = self.rets.as_slice()[self.rets.len() - 1];
+            let e = self.expr_kid(tree, r);
+            if e == NONE { return; }
+            if ret == self.t_never {
+                self.poison_at(e as usize);
+                return;
+            }
+            self.coerce(&sg.cx.tab, e as usize, ret);
+            return;
+        }
+        if a == T_KW_SPAWN {
+            self.rets.truncate(self.rets.len() - 1);
+            return;
+        }
+        if a == T_KW_MATCH { return; }
+        if a == T_KW_IF || a == T_KW_LOOP || a == T_KW_UNSAFE || a == T_KW_SCOPE || a == T_KW_STRICT || a == T_KW_EMULATE || a == T_L_BRACE || a == T_KW_BREAK || a == T_KW_CONTINUE { return; }
+        if ks.len() == 1 && kind(tree, self.base + ks[0] as usize) == K_EXPR_STMT { return; }
+        self.poison_kids(tree, r);
+    }
+
+    fn expr_value(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, k: u8) -> u32 {
+        let h = self.hint.as_slice()[r];
+        if k == K_PRIMARY { return self.primary(sg, ds, nm, set, t, cut, tree, r, h); }
+        if k == K_UNARY { return self.unary(sg, set, t, cut, tree, r, h); }
+        if k == K_CAST { return self.cast(sg, ds, nm, set, t, cut, tree, r); }
+        if is_chain(k) {
+            let ks = tree.kids.row(r);
+            let last = self.base + ks[ks.len() - 1] as usize;
+            let acc = if ks.len() == 1 then self.nty.as_slice()[last] else self.acc.as_slice()[r];
+            if ks.len() == 1 { return acc; }
+            return self.binop(sg, t, tree, last, acc);
+        }
+        if k == K_CMP { return self.compare(sg, t, tree, r); }
+        if k == K_AND || k == K_OR {
+            let ks = tree.kids.row(r);
+            for j in 0..ks.len() {
+                self.coerce_bool(&sg.cx.tab, self.base + ks[j] as usize);
+            }
+            return self.t_bool;
+        }
+        if k == K_RANGE { return self.range(sg, t, tree, r); }
+        if k == K_POSTFIX {
+            let ks = tree.kids.row(r);
+            if ks.len() == 1 {
+                self.chain_start(sg, ds, nm, set, t, cut, tree, r);
+            } else {
+                let last = self.base + ks[ks.len() - 1] as usize;
+                self.chain_apply(sg, ds, tree, r, last);
+            }
+            let _ = self.chain_steps(sg, ds, nm, set, t, cut, tree, r, NONE);
+            return self.chain_final(sg, ds, r);
+        }
+        if k == K_IF_EXPR { return self.if_value(sg, tree, r); }
+        if k == K_MATCH {
+            let v = self.arm.as_slice()[r];
+            return if v == NONE then self.t_never else v;
+        }
+        return self.unknown(tree, r);
+    }
+
+    fn primary(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
+        let a = first_tok(tree, r);
+        let ft = tk(t, a);
+        if ft == T_INT_LIT || ft == T_FLOAT_LIT { return self.literal(&mut sg.cx.tab, set, t, cut, a, false, h); }
+        if ft == T_KW_TRUE || ft == T_KW_FALSE { return self.t_bool; }
+        if ft == T_CHAR_LIT {
+            let q = quoted_text(t, set, cut, self.it, a);
+            if q.len() < 2 || unescaped_chars(&q[1..q.len() - 1]) != 1 { return UNK; }
+            return self.t_char;
+        }
+        if ft == T_STR_LIT {
+            let q = quoted_text(t, set, cut, self.it, a);
+            if q.len() < 2 || unescaped_chars(&q[1..q.len() - 1]) == NONE { return UNK; }
+            return self.t_ref_str;
+        }
+        if ft == T_KW_SELF {
+            if self.self_row == NONE { return UNK; }
+            return self.loc.as_slice()[self.self_row as usize];
+        }
+        if ft == T_KW_SELF_TYPE { return NONE; }
+        if ft == T_IDENT { return self.path_head(sg, ds, t, tree, r); }
+        if ft == T_L_PAREN { return self.paren(sg, t, tree, r); }
+        if ft == T_L_BRACKET { return self.array_lit(sg, ds, nm, set, t, cut, tree, r, h); }
+        if ft == T_KW_FN { return self.closure_value(sg, tree, r); }
+        if ft == T_FMT_LIT { return self.fstring_value(sg, ds, nm, set, t, cut, tree, r); }
+        return self.unknown(tree, r);
+    }
+
+    // An identifier Primary: a bare name, or the head of a postfix chain. A local, a const, or a
+    // static is a value, and a bare fn name is its fn item's value; any other head names no
+    // value (`-`).
+    fn path_head(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
+        let p = sg.cx.parent.as_slice()[r];
+        let head = p != NONE && kind(tree, p as usize) == K_POSTFIX && self.base + tree.kids.row(p as usize)[0] as usize == r;
+        let n = (r - self.base) as% u32;
+        let (lo, hi) = sg.cx.uses.range(self.it, n);
+        // the uses keyed at the Primary are by offset: the first is its head identifier's
+        let off = t.start.as_slice()[first_tok(tree, r) as usize];
+        if lo == hi || sg.cx.uses.off.as_slice()[lo] != off { return if head then NONE else UNK; }
+        let tag = sg.cx.uses.tag.as_slice()[lo];
+        let target = sg.cx.uses.target.as_slice()[lo];
+        if tag == resolve.TAG_LOCAL {
+            let b = self.base + target as usize;
+            // a generic param: a const one is a value of its type, a type one names none
+            if kind(tree, b) == K_GENERIC_PARAM {
+                let (ty, is_const) = self.generic_param(sg, ds, t, tree, b);
+                if ty == UNK || is_const { return ty; }
+                return if head then NONE else UNK;
+            }
+            return self.loc.as_slice()[b];
+        }
+        let dk = ds.kind.as_slice()[target as usize];
+        if dk == decls.DK_CONST || dk == decls.DK_STATIC {
+            let ty = sg.cx.ty.as_slice()[target as usize];
+            return if ty == ERR || ty == NONE then UNK else ty;
+        }
+        // with written generic arguments: not checked yet
+        if dk == decls.DK_FN && !head && tree.kids.row(r).len() == 0 {
+            let h = self.hint.as_slice()[r];
+            return self.fn_item_value(sg, r, target, NONE, h);
+        }
+        return if head then NONE else UNK;
+    }
+
+    fn paren(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
+        let ks = tree.kids.row(r);
+        if ks.len() == 0 { return self.t_unit; }
+        let close = tree.tok_end.as_slice()[r] - 1;
+        if ks.len() == 1 && tk(t, close - 1) != T_COMMA { return self.nty.as_slice()[self.base + ks[0] as usize]; }
+        let h = self.hint.as_slice()[r];
+        if h == UNK { return self.unknown(tree, r); }
+        let n = ks.len();
+        let tab = &mut sg.cx.tab;
+        let hinted = h != NONE && tab.tag_of(h) == types.TK_TUPLE;
+        // a tuple context of another length: E0201
+        if hinted && tab.x(h).len() != n { return self.err(); }
+        let mut elems = vec.Vec::<u32>.new();
+        let mut unk = false;
+        for j in 0..n {
+            let c = self.base + ks[j] as usize;
+            let mut e = UNK;
+            if hinted {
+                // an element with a context: a pending group takes it, a type stays as it is
+                let eh = tab.x(h)[j];
+                let v = self.resolve_at(c);
+                if is_lit(v) {
+                    self.coerce(tab, c, eh);
+                    e = eh;
+                } else {
+                    e = v;
+                }
+            } else {
+                e = self.force_at(c);
+            }
+            if e == NONE { return self.err(); }
+            if e == UNK { unk = true; }
+            elems.push(e);
+        }
+        if unk { return self.unknown(tree, r); }
+        tab.begin();
+        for j in 0..elems.len() {
+            tab.push(elems.as_slice()[j]);
+        }
+        return tab.intern(types.TK_TUPLE, 0, 0);
+    }
+
+    // An int or float literal at token tok (`neg`: a folded minus) with context type h.
+    fn literal(&mut self, tab: &mut types.Table, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tok: u32, neg: bool, h: u32) -> u32 {
+        let _ = neg;
+        if tk(t, tok) == T_INT_LIT {
+            let b = tc_rows.tok_text(t, set, cut, self.it, tok, false);
+            let (_, _, suf) = consteval.parse_int(b);
+            if suf == 255 {
+                self.bad = true;
+                return UNK;
+            }
+            if suf >= 1 && suf <= 10 { return consteval.suffix_ty(tab, suf); }
+            if suf == 100 {
+                let fs = if b.len() >= 4 && float_suffix(&b[b.len() - 4..b.len()]) == 3 then 3u32 else float_suffix(&b[b.len() - 3..b.len()]);
+                return tab.key(types.TK_FLOAT, fs, 0);
+            }
+            if h == UNK { return UNK; }
+            let g = self.new_lit(false);
+            if h != NONE && h != UNK && tab.tag_of(h) == types.TK_INT {
+                let _ = self.fix(tab, g, h);
+                return h;
+            }
+            return g;
+        }
+        let b = tc_rows.tok_text(t, set, cut, self.it, tok, true);
+        let suf = float_lit_suffix(b);
+        if suf.len() > 0 {
+            let f = float_suffix(suf);
+            if f == NONE {
+                self.bad = true;
+                return UNK;
+            }
+            return tab.key(types.TK_FLOAT, f, 0);
+        }
+        if h == UNK { return UNK; }
+        let g = self.new_lit(true);
+        if h != NONE && h != UNK && tab.tag_of(h) == types.TK_FLOAT {
+            let _ = self.fix(tab, g, h);
+            return h;
+        }
+        return g;
+    }
+
+    fn unary(&mut self, sg: &mut sigs.Sigs, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
+        let a = first_tok(tree, r);
+        let op = tk(t, a);
+        let ks = tree.kids.row(r);
+        let c = self.base + ks[ks.len() - 1] as usize;
+        if op == T_KW_UNSAFE || (op != T_MINUS && op != T_BANG && op != T_TILDE && op != T_STAR && op != T_AMP && op != T_AMP_AMP) { return self.nty.as_slice()[c]; }
+        if op == T_MINUS && self.folds(t, tree, a, c) {
+            let v = self.literal(&mut sg.cx.tab, set, t, cut, a + 1, true, h);
+            self.nty.as_mut_slice()[c] = v;
+            return v;
+        }
+        let tab = &mut sg.cx.tab;
+        if op == T_BANG {
+            self.coerce_bool(tab, c);
+            return self.t_bool;
+        }
+        if op == T_STAR {
+            let ct = self.force_at(c);
+            if ct == UNK { return UNK; }
+            let tag = tab.tag_of(ct);
+            if tag == types.TK_REF || tag == types.TK_PTR { return tab.b_of(ct); }
+            self.bad = true;
+            return UNK;
+        }
+        if op == T_AMP || op == T_AMP_AMP {
+            let outer = op == T_AMP_AMP && kind(tree, c) == K_UNARY && first_tok(tree, c) == a;
+            let mutable = !outer && tk(t, a + 1) == T_KW_MUT;
+            let ct = self.force_at(c);
+            if ct == UNK { return UNK; }
+            if ct == NONE {
+                self.bad = true;
+                return UNK;
+            }
+            return tab.mk_ref(mutable, ct);
+        }
+        let ct = self.resolve_at(c);
+        if ct == UNK { return UNK; }
+        if ct == NONE {
+            self.bad = true;
+            return UNK;
+        }
+        if is_lit(ct) {
+            if op == T_TILDE && self.lg_float.as_slice()[(ct & (LIT - 1)) as usize] {
+                self.bad = true;
+                return UNK;
+            }
+            return ct;
+        }
+        let tag = tab.tag_of(ct);
+        if op == T_MINUS {
+            if tag == types.TK_FLOAT || (tag == types.TK_INT && tab.a_of(ct) == 1) { return ct; }
+            if tag == types.TK_VECTOR {
+                if tab.tag_of(tab.a_of(ct)) == types.TK_FLOAT { return ct; }
+                self.bad = true;
+                return UNK;
+            }
+            if tag == types.TK_INT || tag == types.TK_BOOL || tag == types.TK_CHAR {
+                self.bad = true;
+                return UNK;
+            }
+            return self.user_op(sg, tc_ops.OP_NEG, ct);
+        }
+        if tag == types.TK_INT || tag == types.TK_MASK { return ct; }
+        if tag == types.TK_VECTOR {
+            if tab.tag_of(tab.a_of(ct)) == types.TK_INT { return ct; }
+            self.bad = true;
+            return UNK;
+        }
+        if tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR {
+            self.bad = true;
+            return UNK;
+        }
+        return self.user_op(sg, tc_ops.OP_NOT, ct);
+    }
+
+    // The value of `l op r` in a chain: the operator is the token before child row c, the left
+    // value `lv`.
+    fn binop(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, c: usize, lv: u32) -> u32 {
+        let optok = first_tok(tree, c) - 1;
+        let op = tk(t, optok);
+        let tab = &mut sg.cx.tab;
+        let lt = self.resolve(lv);
+        let rt = self.resolve_at(c);
+        if lt == UNK || rt == UNK {
+            self.poison(lt);
+            self.poison(rt);
+            return UNK;
+        }
+        if is_lit(lt) && !is_lit(rt) && rt != NONE && tab.tag_of(rt) == types.TK_VECTOR {
+            self.bad = true;
+            return UNK;
+        }
+        if is_shift(op) && is_lit(rt) && !is_lit(lt) && lt != NONE && tab.tag_of(lt) == types.TK_VECTOR {
+            if !self.fix(tab, rt, tab.a_of(lt)) {
+                self.bad = true;
+                return UNK;
+            }
+            return self.op_on(tab, op, lt);
+        }
+        let u = self.unify(tab, lt, rt);
+        if u == UNK { return UNK; }
+        if is_lit(u) {
+            let float = self.lg_float.as_slice()[(u & (LIT - 1)) as usize];
+            if float && !is_shift(op) && (is_wrap_sat(op) || is_bit(op)) {
+                self.bad = true;
+                return UNK;
+            }
+            return u;
+        }
+        if tc_ops.user_ty(tab, u) { return self.user_op(sg, tc_ops.binop_trait(op), u); }
+        return self.op_on(tab, op, u);
+    }
+
+    // `a op= b` with a of type lt, b checked against it (stage0 `compound_assign`): the binary
+    // operator's rule on two operands of type lt.
+    fn compound(&mut self, sg: &mut sigs.Sigs, op: u8, lt: u32) {
+        if lt == UNK || lt == NONE { return; }
+        let bin = compound_op(op);
+        if tc_ops.user_ty(&sg.cx.tab, lt) {
+            let _ = self.user_op(sg, tc_ops.binop_trait(bin), lt);
+            return;
+        }
+        let _ = self.op_on(&sg.cx.tab, bin, lt);
+    }
+
+    // stage0's `op_on`: the type of a binary operator on two operands of type ty.
+    fn op_on(&mut self, tab: &types.Table, op: u8, ty: u32) -> u32 {
+        if ty == self.t_never { return ty; }
+        let tag = tab.tag_of(ty);
+        if tag == types.TK_INT { return ty; }
+        if tag == types.TK_FLOAT {
+            if is_wrap_sat(op) || is_bit(op) || is_shift(op) { return self.err(); }
+            return ty;
+        }
+        if tag == types.TK_BOOL || tag == types.TK_MASK {
+            if is_bit(op) { return ty; }
+            return self.err();
+        }
+        if tag == types.TK_VECTOR {
+            let int_lane = tab.tag_of(tab.a_of(ty)) == types.TK_INT;
+            if int_lane {
+                if is_plain(op) || op == T_SLASH || op == T_PERCENT { return self.err(); }
+                return ty;
+            }
+            if is_wrap_sat(op) || is_bit(op) || is_shift(op) || op == T_PERCENT { return self.err(); }
+            return ty;
+        }
+        // a user type: its operator trait (not checked yet)
+        return UNK;
+    }
+
+    // A value `if c then a else b`: stage0's `arms_unify` of the arms under the context type.
+    fn if_value(&mut self, sg: &mut sigs.Sigs, tree: &ast.Ast, r: usize) -> u32 {
+        let ks = tree.kids.row(r);
+        let h = self.hint.as_slice()[r];
+        self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
+        let a = self.nty.as_slice()[self.base + ks[1] as usize];
+        let b = self.nty.as_slice()[self.base + ks[2] as usize];
+        return self.arms_join(sg, a, b, h);
+    }
+
+    // Before child c (the k-th) of a `match` (value or statement) row r: the scrutinee without a
+    // context, then the arms; the scrutinee's type (kept in `acc`) is decided before the first.
+    fn enter_match(&mut self, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
+        if k == 0 {
+            self.set_hint(c, NONE);
+            return true;
+        }
+        if k == 1 {
+            let s = self.force_at(self.base + tree.kids.row(r)[0] as usize);
+            self.acc.as_mut_slice()[r] = s;
+        }
+        return true;
+    }
+
+    // Before child c (the k-th) of an arm row r: its patterns bind against the scrutinee's type,
+    // a guard is `bool`, a value arm's context is the arms' type so far when the `match` has none.
+    fn enter_arm(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
+        let m = sg.cx.parent.as_slice()[r] as usize;
+        let ck = kind(tree, c);
+        if ck == K_ARM_PATTERN {
+            let st = self.acc.as_slice()[m];
+            let ps = tree.kids.row(c);
+            for j in 0..ps.len() {
+                self.bind_pattern(sg, ds, nm, t, tree, self.base + ps[j] as usize, st);
+            }
+            return false;
+        }
+        let ks = tree.kids.row(r);
+        if k == 1 && ks.len() >= 3 {
+            self.set_hint_bool(c);
+            return true;
+        }
+        if ck == K_BLOCK { return true; }
+        let hm = self.hint.as_slice()[m];
+        let so_far = self.arm.as_slice()[m];
+        let rr = if so_far == NONE then NONE else self.resolve(so_far);
+        let typed = rr != NONE && rr != UNK && !is_lit(rr) && rr != self.t_never;
+        let h = if rr == UNK then UNK else if typed && hm == UNK then UNK else if typed && hm == NONE then rr else hm;
+        self.set_hint(c, h);
+        return true;
+    }
+
+    // An arm finished: its guard is `bool`; a value arm's value joins the arms' type so far.
+    fn finish_arm(&mut self, sg: &mut sigs.Sigs, tree: &ast.Ast, r: usize) {
+        let ks = tree.kids.row(r);
+        if ks.len() >= 3 { self.coerce_bool(&sg.cx.tab, self.base + ks[1] as usize); }
+        if kind(tree, r) != K_EXPR_ARM { return; }
+        let m = sg.cx.parent.as_slice()[r] as usize;
+        let v = self.nty.as_slice()[self.base + ks[ks.len() - 1] as usize];
+        let so_far = self.arm.as_slice()[m];
+        if so_far == NONE {
+            self.arm.as_mut_slice()[m] = v;
+            return;
+        }
+        let h = self.hint.as_slice()[m];
+        let j = self.arms_join(sg, so_far, v, h);
+        self.arm.as_mut_slice()[m] = j;
+    }
+
+    // stage0's `arms_unify`: the type of two arms' values a and b under context type h.
+    fn arms_join(&mut self, sg: &mut sigs.Sigs, a: u32, b: u32, h: u32) -> u32 {
+        let at = self.resolve(a);
+        let bt = self.resolve(b);
+        if at == UNK || bt == UNK {
+            self.poison(at);
+            self.poison(bt);
+            return UNK;
+        }
+        if at == self.t_never { return bt; }
+        if bt == self.t_never { return at; }
+        let both = !is_lit(at) && !is_lit(bt) && at != bt;
+        if both && h == UNK { return UNK; }
+        if both && h != NONE {
+            let tab = &sg.cx.tab;
+            if (at == h || self.coercible(tab, at, h)) && (bt == h || self.coercible(tab, bt, h)) { return h; }
+        }
+        return self.unify(&sg.cx.tab, at, bt);
+    }
+
+    fn compare(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
+        let ks = tree.kids.row(r);
+        let l = self.base + ks[0] as usize;
+        let opn = self.base + ks[1] as usize;
+        let rr = self.base + ks[2] as usize;
+        let op = tk(t, first_tok(tree, opn));
+        let tab = &mut sg.cx.tab;
+        let lt = self.resolve_at(l);
+        let rt = self.resolve_at(rr);
+        let u = self.unify(tab, lt, rt);
+        if u == UNK { return UNK; }
+        if is_lit(u) { return self.t_bool; }
+        let eq_only = op == T_EQ_EQ || op == T_BANG_EQ;
+        let tag = tab.tag_of(u);
+        if tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR { return self.t_bool; }
+        if eq_only && (tag == types.TK_PTR || tag == types.TK_FN) { return self.t_bool; }
+        if tag == types.TK_VECTOR {
+            let lane = tab.a_of(u);
+            let w = lane_bits(tab, lane);
+            return tab.key(types.TK_MASK, w, tab.b_of(u));
+        }
+        if tag == types.TK_MASK && eq_only { return u; }
+        return self.err();
+    }
+
+    fn range(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
+        let ks = tree.kids.row(r);
+        let l = self.base + ks[0] as usize;
+        let rr = self.base + ks[1] as usize;
+        let incl = tk(t, first_tok(tree, rr) - 1) == T_DOT_DOT_EQ;
+        let tab = &mut sg.cx.tab;
+        let lt = self.resolve_at(l);
+        let rt = self.resolve_at(rr);
+        let u = self.unify(tab, lt, rt);
+        if u == UNK { return UNK; }
+        let e = self.force(u);
+        if e == UNK { return UNK; }
+        let tag = tab.tag_of(e);
+        if tag != types.TK_INT && tag != types.TK_CHAR { return self.err(); }
+        return tab.key(types.TK_RANGE, e, if incl then 1u32 else 0u32);
+    }
+
+    fn cast(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) -> u32 {
+        let ks = tree.kids.row(r);
+        let first = self.base + ks[0] as usize;
+        let mut acc = self.force_at(first);
+        for j in 1..ks.len() {
+            let tn = self.base + ks[j] as usize;
+            let op = tk(t, first_tok(tree, tn) - 1);
+            let to = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, tn, false, self.sc);
+            if to == ERR || to == NONE { return self.err(); }
+            if acc == UNK || acc == NONE { return UNK; }
+            if op != T_KW_AS && op != T_AS_PERCENT && op != T_AS_PIPE && op != T_AS_TILDE && op != T_AS_QUESTION { return UNK; }
+            if !cast_ok(&sg.cx.tab, op, acc, to) { return self.err(); }
+            acc = if op == T_AS_QUESTION then self.option_of(&mut sg.cx.tab, to) else to;
+            if acc == UNK { return UNK; }
+        }
+        return acc;
+    }
+
+    // `Option<t>` (the result of `as?`); `UNK` in a program without `Option`.
+    fn option_of(&mut self, tab: &mut types.Table, t: u32) -> u32 {
+        if self.opt == NONE { return UNK; }
+        tab.begin();
+        tab.push_garg(types.GA_TYPE, t, 0);
+        return tab.intern(types.TK_ADT, self.opt, 0);
+    }
+
+    // Before child c of `ForStmt` row r: the annotation (kept in `acc`), the source with the
+    // annotation's range as its context, the binding before the body, the tail clause's bindings.
+    fn enter_for(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, c: usize) -> bool {
+        let ck = kind(tree, c);
+        if ck == K_PATTERN { return false; }
+        if ck == K_TYPE {
+            let ty = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, c, false, self.sc);
+            let b = self.known(ty);
+            self.acc.as_mut_slice()[r] = b;
+            return false;
+        }
+        if is_expr(ck) {
+            let b = self.acc.as_slice()[r];
+            let tag = if b == NONE || b == UNK then types.TK_NEVER else sg.cx.tab.tag_of(b);
+            // a vector or reference binding gives its source no context
+            let h = if b == UNK then UNK else if b == NONE || tag == types.TK_VECTOR || tag == types.TK_REF then NONE else sg.cx.tab.key(types.TK_RANGE, b, 0);
+            self.set_hint(c, h);
+            return true;
+        }
+        if ck == K_BLOCK {
+            let it = self.expr_kid(tree, r);
+            let src = if it == NONE then UNK else self.force_at(it as usize);
+            let mut b = self.acc.as_slice()[r];
+            // a chunk loop binds its vector annotation whatever the source's element
+            if chunk_vec(&sg.cx.tab, b) == NONE {
+                let e = self.element(sg, ds, nm, src);
+                if b != NONE && b != UNK && e != UNK && e != b { self.bad = true; }
+                if b == NONE { b = e; }
+            }
+            let pat = self.base + tree.kids.row(r)[0] as usize;
+            self.bind_pattern(sg, ds, nm, t, tree, pat, b);
+            return true;
+        }
+        if ck == node_kinds.KIND_TAIL_CLAUSE {
+            self.bind_tail(&mut sg.cx.tab, t, tree, r, c);
+            return true;
+        }
+        self.set_hint(c, UNK);
+        return true;
+    }
+
+    // Tail clause c of `for` row r (stage0 `tail_clause`): `masked (v, m)` binds v as the loop's
+    // binding and m as the mask of its vector's shape, `scalar (x)` binds x as a lane. An element
+    // loop has no tail (E0601).
+    fn bind_tail(&mut self, tab: &mut types.Table, t: &lex.Tokens, tree: &ast.Ast, r: usize, c: usize) {
+        let b = self.acc.as_slice()[r];
+        if b == UNK { return; }
+        let v = chunk_vec(tab, b);
+        if v == NONE {
+            self.bad = true;
+            return;
+        }
+        let lane = tab.a_of(v);
+        let mode = tk(t, first_tok(tree, c) + 1);
+        let mask = tab.key(types.TK_MASK, lane_bits(tab, lane), tab.b_of(v));
+        let ks = tree.kids.row(c);
+        let mut i: usize = 0;
+        for j in 0..ks.len() {
+            let x = self.base + ks[j] as usize;
+            if kind(tree, x) != node_kinds.KIND_TAIL_BIND { continue; }
+            let mut ty = UNK;
+            if mode == T_KW_MASKED {
+                ty = if i == 0 then b else if i == 1 then mask else UNK;
+            } else if mode == T_KW_SCALAR && i == 0 {
+                ty = lane;
+            }
+            self.loc.as_mut_slice()[x] = ty;
+            i = i + 1;
+        }
+    }
+
+    // The element a `for` loop over a source of type src binds (stage0 `element_type`): an int
+    // range's int, an array's element, `&T` / `&mut T` over a referenced array or slice, and over
+    // an iterator (a struct, enum, or generic param, or `&mut` one) X of its `next(&mut self) ->
+    // Option<X>`, the method a call `src.next()` finds.
+    fn element(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, src: u32) -> u32 {
+        if src == UNK { return UNK; }
+        if src == NONE { return self.err(); }
+        let tab = &mut sg.cx.tab;
+        let tag = tab.tag_of(src);
+        if tag == types.TK_RANGE {
+            if tab.tag_of(tab.a_of(src)) == types.TK_INT { return tab.a_of(src); }
+            return self.err();
+        }
+        if tag == types.TK_ARRAY { return tab.a_of(src); }
+        let mut iter = tag == types.TK_ADT || tag == types.TK_PARAM;
+        if tag == types.TK_REF {
+            let inner = tab.b_of(src);
+            let it = tab.tag_of(inner);
+            if it == types.TK_ARRAY || it == types.TK_SLICE { return tab.mk_ref(tab.a_of(src) == 1, tab.a_of(inner)); }
+            iter = (it == types.TK_ADT || it == types.TK_PARAM) && tab.a_of(src) == 1;
+        }
+        if !iter { return self.err(); }
+        let next = modules.lookup(&nm.tab, mem.str_bytes("next"));
+        let (m, inst, b) = self.recv_method(sg, ds, src, next);
+        if m == NONE || tc_builtins.is_builtin(m) { return UNK; }
+        let lo = sg.cx.gens.lo.as_slice()[m as usize];
+        let hi = sg.cx.gens.lo.as_slice()[m as usize + 1];
+        if sg.sflags.as_slice()[m as usize] & sigs.SF_SELF_MASK != sigs.SF_SELF_MUT || sg.params.row(m as usize).len() != 1 || lo != hi { return self.err(); }
+        let ret = self.method_ret(sg, ds, m, inst, b);
+        if ret == UNK { return UNK; }
+        let tab2 = &sg.cx.tab;
+        if tab2.tag_of(ret) != types.TK_ADT || tab2.a_of(ret) != self.opt || self.opt == NONE { return self.err(); }
+        let xs = tab2.x(ret);
+        if xs.len() < 3 || xs[0] != types.GA_TYPE { return self.err(); }
+        return self.known(xs[1]);
+    }
+}
+
+fn kind(tree: &ast.Ast, g: usize) -> u8 {
+    return tree.kind.as_slice()[g];
+}
+
+fn tk(t: &lex.Tokens, tok: u32) -> u8 {
+    return consteval.tk(t, tok);
+}
+
+fn first_tok(tree: &ast.Ast, g: usize) -> u32 {
+    return tree.tok.as_slice()[g];
+}
+
+fn is_expr(k: u8) -> bool {
+    return consteval.is_expr_kind(k);
+}
+
+// The binary operator of compound assignment operator op.
+fn compound_op(op: u8) -> u8 {
+    if op == terminals.T_PLUS_EQ as% u8 { return T_PLUS; }
+    if op == terminals.T_MINUS_EQ as% u8 { return T_MINUS; }
+    if op == terminals.T_STAR_EQ as% u8 { return T_STAR; }
+    if op == terminals.T_SLASH_EQ as% u8 { return T_SLASH; }
+    if op == terminals.T_PERCENT_EQ as% u8 { return T_PERCENT; }
+    if op == terminals.T_PLUS_PERCENT_EQ as% u8 { return T_PLUS_PERCENT; }
+    if op == terminals.T_MINUS_PERCENT_EQ as% u8 { return T_MINUS_PERCENT; }
+    if op == terminals.T_STAR_PERCENT_EQ as% u8 { return T_STAR_PERCENT; }
+    if op == terminals.T_PLUS_PIPE_EQ as% u8 { return T_PLUS_PIPE; }
+    if op == terminals.T_MINUS_PIPE_EQ as% u8 { return T_MINUS_PIPE; }
+    if op == terminals.T_STAR_PIPE_EQ as% u8 { return T_STAR_PIPE; }
+    if op == terminals.T_AMP_EQ as% u8 { return T_AMP; }
+    if op == terminals.T_PIPE_EQ as% u8 { return T_PIPE; }
+    if op == terminals.T_CARET_EQ as% u8 { return T_CARET; }
+    if op == terminals.T_LT_LT_EQ as% u8 { return T_LT_LT; }
+    if op == terminals.T_GT_GT_EQ as% u8 { return T_GT_GT; }
+    return T_LT_LT_PERCENT;
+}
+
+// A node that is one level of `tc_rows.MAX_DEPTH` when the walk enters it.
+fn is_level(k: u8) -> bool {
+    return is_expr(k) || k == K_BLOCK;
+}
+
+fn is_chain(k: u8) -> bool {
+    return k == K_ADD || k == K_MUL || k == K_SHIFT || k == K_BIT_AND || k == K_BIT_OR || k == K_BIT_XOR;
+}
+
+// The context of element k of an n-element tuple under context type h (stage0 `paren`): a tuple
+// context's element, none for any other context.
+fn tuple_elem_hint(tab: &types.Table, h: u32, n: usize, k: usize) -> u32 {
+    if h == UNK { return UNK; }
+    if h == NONE || tab.tag_of(h) != types.TK_TUPLE { return NONE; }
+    let xs = tab.x(h);
+    return if xs.len() == n then xs[k] else NONE;
+}
+
+// The vector of a chunk loop's binding type b (a vector or a reference to one), else NONE.
+fn chunk_vec(tab: &types.Table, b: u32) -> u32 {
+    if b == NONE || b == UNK { return NONE; }
+    let v = if tab.tag_of(b) == types.TK_REF then tab.b_of(b) else b;
+    return if tab.tag_of(v) == types.TK_VECTOR then v else NONE;
+}
+
+// Whether array literal row r is a repeat `[e; n]`.
+fn is_repeat(t: &lex.Tokens, tree: &ast.Ast, base: usize, r: usize) -> bool {
+    let ks = tree.kids.row(r);
+    return ks.len() == 2 && tk(t, tree.tok_end.as_slice()[base + ks[0] as usize]) == T_SEMI;
+}
+
+// The context of an array literal's elements under context type h: an array context's element
+// type, else none.
+fn elem_hint(tab: &types.Table, h: u32) -> u32 {
+    if h == UNK { return UNK; }
+    if h == NONE || tab.tag_of(h) != types.TK_ARRAY { return NONE; }
+    return tab.a_of(h);
+}
+
+fn array_ty(tab: &mut types.Table, elem: u32, k: u32, x: u32, y: u32) -> u32 {
+    tab.begin();
+    tab.push_garg(k, x, y);
+    return tab.intern(types.TK_ARRAY, elem, 0);
+}
+
+fn is_plain(op: u8) -> bool {
+    return op == T_PLUS || op == T_MINUS || op == T_STAR;
+}
+
+fn is_wrap_sat(op: u8) -> bool {
+    return op == T_PLUS_PERCENT || op == T_MINUS_PERCENT || op == T_STAR_PERCENT || op == T_PLUS_PIPE || op == T_MINUS_PIPE || op == T_STAR_PIPE || op == T_LT_LT_PERCENT;
+}
+
+fn is_bit(op: u8) -> bool {
+    return op == T_AMP || op == T_PIPE || op == T_CARET;
+}
+
+fn is_shift(op: u8) -> bool {
+    return op == T_LT_LT || op == T_GT_GT || op == T_LT_LT_PERCENT;
+}
+
+// The bytes of a string or char literal token (quotes included): from its start to the closing
+// quote on its line.
+fn quoted_text(t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, tok: u32) -> &[u8] from set {
+    let f = cut.file.as_slice()[it as usize] as usize;
+    let src = set.file(f);
+    let s = t.start.as_slice()[tok as usize] as usize;
+    let q = src[s];
+    let mut e = s + 1;
+    while e < src.len() && src[e] != q && src[e] != 10 {
+        if src[e] == 92 { e = e + 1; }
+        e = e + 1;
+    }
+    if e >= src.len() { return &src[s..src.len()]; }
+    return &src[s..e + 1];
+}
+
+fn hex(c: u8) -> u32 {
+    if c >= 48 && c <= 57 { return (c - 48) as u32; }
+    if c >= 97 && c <= 102 { return (c - 87) as u32; }
+    if c >= 65 && c <= 70 { return (c - 55) as u32; }
+    return NONE;
+}
+
+// The number of chars a literal body unescapes to (UTF-8 lead bytes and escapes), or NONE for an
+// escape stage0 rejects or a `\x` above 0x7F (not one char).
+fn unescaped_chars(b: &[u8]) -> u32 {
+    let mut n: u32 = 0;
+    let mut i: usize = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c != 92 {
+            if c & 0xc0 != 0x80 { n = n + 1; }
+            i = i + 1;
+            continue;
+        }
+        if i + 1 >= b.len() { return NONE; }
+        let e = b[i + 1];
+        i = i + 2;
+        if e == 110 || e == 116 || e == 114 || e == 48 || e == 92 || e == 39 || e == 34 || e == 123 || e == 125 {
+            n = n + 1;
+        } else if e == 120 {
+            if i + 2 > b.len() { return NONE; }
+            let h = hex(b[i]);
+            let l = hex(b[i + 1]);
+            if h == NONE || l == NONE || h > 7 { return NONE; }
+            n = n + 1;
+            i = i + 2;
+        } else if e == 117 {
+            if i >= b.len() || b[i] != 123 { return NONE; }
+            let mut j = i + 1;
+            let mut cp: u32 = 0;
+            while j < b.len() && b[j] != 125 {
+                let d = hex(b[j]);
+                if d == NONE || cp > 0x10_ffff { return NONE; }
+                cp = cp * 16 + d;
+                j = j + 1;
+            }
+            if j >= b.len() || j == i + 1 || cp > 0x10_ffff || (cp >= 0xd800 && cp <= 0xdfff) { return NONE; }
+            n = n + 1;
+            i = j + 1;
+        } else {
+            return NONE;
+        }
+    }
+    return n;
+}
+
+// The float format of a float suffix (types FLOAT a), or NONE.
+fn float_suffix(b: &[u8]) -> u32 {
+    if b.len() == 3 && b[0] == 102 && b[1] == 49 && b[2] == 54 { return 0; }
+    if b.len() == 3 && b[0] == 102 && b[1] == 51 && b[2] == 50 { return 1; }
+    if b.len() == 3 && b[0] == 102 && b[1] == 54 && b[2] == 52 { return 2; }
+    if b.len() == 4 && b[0] == 98 && b[1] == 102 && b[2] == 49 && b[3] == 54 { return 3; }
+    return NONE;
+}
+
+// A float literal's suffix (after the number part: digits, `.` digits, an exponent).
+fn float_lit_suffix(b: &[u8]) -> &[u8] from b {
+    let mut i: usize = 0;
+    while i < b.len() && ((b[i] >= 48 && b[i] <= 57) || b[i] == 95) {
+        i = i + 1;
+    }
+    if i < b.len() && b[i] == 46 {
+        i = i + 1;
+        while i < b.len() && ((b[i] >= 48 && b[i] <= 57) || b[i] == 95) {
+            i = i + 1;
+        }
+    }
+    if i < b.len() && (b[i] == 101 || b[i] == 69) {
+        let save = i;
+        i = i + 1;
+        if i < b.len() && (b[i] == 43 || b[i] == 45) { i = i + 1; }
+        let ds = i;
+        while i < b.len() && ((b[i] >= 48 && b[i] <= 57) || b[i] == 95) {
+            i = i + 1;
+        }
+        if ds == i { i = save; }
+    }
+    return &b[i..b.len()];
+}
+
+// Whether a fn needing feature bits `feats` is built for the target.
+fn built_on(feats: u64, x86: bool) -> bool {
+    return if x86 then feats & A64_FEATS == 0 else feats & X86_FEATS == 0;
+}
+
+// Whether decl d has a body the checker visits.
+fn is_body(sg: &sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, d: usize, x86: bool) -> bool {
+    let k = ds.kind.as_slice()[d];
+    let it = ds.item.as_slice()[d];
+    if it == NONE || ds.node.as_slice()[d] == NONE || !tree.ok(it as usize) { return false; }
+    if k == decls.DK_CONST || k == decls.DK_STATIC { return true; }
+    if k != decls.DK_FN && k != decls.DK_METHOD { return false; }
+    let f = ds.flags.as_slice()[d];
+    if f & (decls.F_EXTERN_IMPORT | decls.F_DISPATCH) != 0 { return false; }
+    return built_on(sg.feats.as_slice()[d], x86);
+}
+
+pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, x86: bool, base_feats: u64) -> tc_rows.Typeck {
+    let n = tree.nodes();
+    let tab = &mut sg.cx.tab;
+    let t_bool = tab.key(types.TK_BOOL, 0, 0);
+    let t_char = tab.key(types.TK_CHAR, 0, 0);
+    let t_unit = tab.unit();
+    let t_never = tab.key(types.TK_NEVER, 0, 0);
+    let t_str = tab.key(types.TK_STR, 0, 0);
+    let t_ref_str = tab.mk_ref(false, t_str);
+    let soa_s = modules.lookup(&nm.tab, mem.str_bytes("Soa"));
+    let soa = if md.soa_mod == NONE || soa_s == NONE then NONE else ds.module_item(md.soa_mod, soa_s);
+    let opt_s = modules.lookup(&nm.tab, mem.str_bytes("Option"));
+    let opt = if md.core_mod == NONE || opt_s == NONE then NONE else ds.module_item(md.core_mod, opt_s);
+    let res_s = modules.lookup(&nm.tab, mem.str_bytes("Result"));
+    let res = if md.core_mod == NONE || res_s == NONE then NONE else ds.module_item(md.core_mod, res_s);
+    let string_s = modules.lookup(&nm.tab, mem.str_bytes("String"));
+    let string = if md.string_mod == NONE || string_s == NONE then NONE else ds.module_item(md.string_mod, string_s);
+    let (hl_name, hl_m) = tc_rows.headless_impls(ds);
+    let mut tc = tc_rows.Typeck.{
+        nty: col.filled(n, NONE),
+        hint: col.filled(n, NONE),
+        acc: col.filled(n, NONE),
+        loc: col.filled(n, UNK),
+        lg_parent: vec.Vec::<u32>.new(),
+        lg_fixed: vec.Vec::<u32>.new(),
+        lg_float: vec.Vec::<bool>.new(),
+        rets: vec.Vec::<u32>.new(),
+        chain: col.filled(n, tc_chain.S_ERR),
+        pos: col.filled(n, NONE),
+        pend: col.filled(n, tc_chain.P_NONE),
+        st_row: vec.Vec::<u32>.new(),
+        st_kid: vec.Vec::<u32>.new(),
+        depth: 0,
+        it: 0,
+        base: 0,
+        module: NONE,
+        sc: consteval.no_scope(),
+        self_row: NONE,
+        bad: false,
+        lw: sigs.Lw.new(),
+        soa: soa,
+        soa_mod: md.soa_mod,
+        args: vec.Vec::<u32>.new(),
+        headless: tc_chain.headless_names(ds),
+        hl_name: hl_name,
+        hl_m: hl_m,
+        pat_row: vec.Vec::<u32>.new(),
+        pat_ty: vec.Vec::<u32>.new(),
+        pat_mode: vec.Vec::<u8>.new(),
+        arm: col.filled(n, NONE),
+        binds: vec.Vec::<u32>.new(),
+        blo: col.filled(n, NONE),
+        waits: col.filled(n, false),
+        mt_p: vec.Vec::<u32>.new(),
+        mt_x: vec.Vec::<u32>.new(),
+        mt_new: vec.Vec::<u32>.new(),
+        mt_h: vec.Vec::<u32>.new(),
+        mt_k: vec.Vec::<u32>.new(),
+        bt: tc_builtins.table(&nm.tab, opt),
+        tq: tc_traits.new(sg, ds, fl, md, nm),
+        opt: opt,
+        res: res,
+        t_bool: t_bool,
+        t_char: t_char,
+        t_unit: t_unit,
+        t_never: t_never,
+        t_ref_str: t_ref_str,
+        string: string,
+        proven: 0,
+        base_feats: base_feats,
+        fn_item: col.filled(n, false),
+        fc_node: vec.Vec::<u32>.new(),
+        fc_want: vec.Vec::<u32>.new(),
+    };
+    // rounds (`tc_traits`): the bodies that asked a trait question without an answer are checked
+    // again after the questions are solved
+    let mut todo = vec.Vec::<u32>.new();
+    for d in 0..ds.decls() {
+        if is_body(sg, ds, tree, d, x86) { todo.push(d as% u32); }
+    }
+    loop {
+        let mut next = vec.Vec::<u32>.new();
+        for k in 0..todo.len() {
+            let d = todo.as_slice()[k];
+            tc.begin_body(tree, ds, d);
+            tc.body(sg, ds, nm, set, t, cut, tree, d);
+            if tc.tq.pending && !tc.tq.last { next.push(d); }
+        }
+        if next.len() == 0 { break; }
+        tc.tq.solve(sg);
+        tc.tq.round = tc.tq.round + 1;
+        tc.tq.last = tc.tq.round + 1 >= tc_traits.MAX_ROUNDS;
+        todo = next;
+    }
+    return tc;
+}
+
+// The bits of a vector lane type (an int or float type).
+fn lane_bits(tab: &types.Table, lane: u32) -> u32 {
+    if tab.tag_of(lane) == types.TK_INT { return tab.int_bits(lane); }
+    let f = tab.a_of(lane);
+    return if f == 1 then 32u32 else if f == 2 then 64u32 else 16u32;
+}
+
+// The significand bits of a float type (format a).
+fn sig_bits(f: u32) -> u32 {
+    return if f == 0 then 11u32 else if f == 3 then 8u32 else if f == 1 then 24u32 else 53u32;
+}
+
+fn is_64(tab: &types.Table, ty: u32) -> bool {
+    return tab.tag_of(ty) == types.TK_INT && tab.b_of(ty) >= types.W_64;
+}
+
+// stage0's cast table for `as`, `as%`, `as|`, `as~`, `as?`: whether `src op dst` is allowed; the
+// result type is `dst` (`Option<dst>` for `as?`).
+fn cast_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
+    let fk = tab.tag_of(src);
+    let tk2 = tab.tag_of(dst);
+    let plain = op == T_KW_AS;
+    let identity = src == dst && (fk == types.TK_INT || fk == types.TK_FLOAT || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_VECTOR || fk == types.TK_MASK || fk == types.TK_REF || fk == types.TK_PTR);
+    if identity { return true; }
+    if fk == types.TK_VECTOR && tk2 == types.TK_VECTOR {
+        if tab.b_of(src) != tab.b_of(dst) { return false; }
+        return scalar_ok(tab, op, tab.a_of(src), tab.a_of(dst));
+    }
+    if fk == types.TK_REF {
+        if tk2 == types.TK_PTR && plain && tab.b_of(dst) == tab.b_of(src) && (tab.a_of(src) == 1 || tab.a_of(dst) == 0) { return true; }
+        return false;
+    }
+    return scalar_ok(tab, op, src, dst);
+}
+
+fn scalar_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
+    let fk = tab.tag_of(src);
+    let tk2 = tab.tag_of(dst);
+    let fint = fk == types.TK_INT;
+    let tint = tk2 == types.TK_INT;
+    let ffloat = fk == types.TK_FLOAT;
+    let tfloat = tk2 == types.TK_FLOAT;
+    if op == T_KW_AS {
+        if fint && tint {
+            let fs = tab.a_of(src) == 1;
+            let ts = tab.a_of(dst) == 1;
+            let fb = tab.int_bits(src);
+            let tb = tab.int_bits(dst);
+            return (fs == ts && tb >= fb) || (!fs && ts && tb > fb);
+        }
+        if fk == types.TK_BOOL && tint { return true; }
+        if fk == types.TK_CHAR {
+            if !tint { return false; }
+            let w = tab.b_of(dst);
+            if tab.a_of(dst) == 0 { return w == types.W_32 || w == types.W_64 || w == types.W_SIZE; }
+            return w == types.W_64 || w == types.W_SIZE;
+        }
+        if fint && tab.a_of(src) == 0 && tab.b_of(src) == types.W_8 && tk2 == types.TK_CHAR { return true; }
+        if fint && tfloat {
+            let fb = tab.int_bits(src);
+            let need = if tab.a_of(src) == 1 then fb - 1 else fb;
+            return need <= sig_bits(tab.a_of(dst));
+        }
+        if ffloat && tfloat {
+            let f = tab.a_of(src);
+            let g = tab.a_of(dst);
+            return ((f == 0 || f == 3) && (g == 1 || g == 2)) || (f == 1 && g == 2);
+        }
+        if fk == types.TK_PTR && tk2 == types.TK_PTR { return true; }
+        return (fk == types.TK_PTR && is_64(tab, dst)) || (is_64(tab, src) && tk2 == types.TK_PTR);
+    }
+    if op == T_AS_PERCENT { return tint && (fint || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_PTR); }
+    if op == T_AS_PIPE { return tint && (fint || ffloat || fk == types.TK_CHAR); }
+    if op == T_AS_TILDE { return tfloat && (fint || ffloat); }
+    if op == T_AS_QUESTION {
+        if tint { return fint || ffloat || fk == types.TK_CHAR; }
+        if tk2 == types.TK_CHAR || tfloat { return fint || (ffloat && tfloat); }
+    }
+    return false;
+}
+
+fn is_lit(v: u32) -> bool {
+    return tc_rows.is_lit(v);
+}

@@ -48,7 +48,7 @@ test fn edge_shapes() {
         let mut same = vec.Vec::<u32>.new();
         let mut distinct = vec.Vec::<u64>.new();
         for i in 0..n {
-            same.push(4294967295);
+            same.push(0xffff_ffff);
             distinct.push((i as u64) << 33);
         }
         check(same.as_slice(), "all equal");

@@ -1,0 +1,205 @@
+// Pattern bindings of the body checker (types/check, see `typeck`): the types of the names a
+// pattern binds, given the type of the value it matches, as stage0's `patterns.rs` gives them
+// (`let`, `for`, `match` arms; every pattern starts by value).
+//
+// Forms: `_`; a binding `x` / `mut x` (the value whole); a literal or const pattern (no names);
+// parentheses; a tuple; a struct or variant by path with a payload `(p, ..)`, fields `.{ f: p, g }`
+// (a shorthand field binds the `FieldPat`), or none. A constructor or tuple pattern matched
+// against a reference peels it, and the names below bind by reference (`&F`, or `&mut F` when
+// every peeled reference is `&mut`). A pattern stage0 rejects (wrong constructor, arity, field,
+// a field named twice) makes the body `bad`.
+//
+// Owns: the `loc` rows of binding nodes inside patterns, and the pattern stack `pat_*` of
+// `tc_rows.Typeck`. Entry point: `bind_pattern`. A pattern under a value of unknown type leaves
+// its bindings `UNK` (their default), so every use of them prints `?`.
+import ast;
+import consteval;
+import decls;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import lex;
+import sigs;
+import tc_rows;
+import ir.types;
+import prims.search;
+
+const NONE: u32 = tc_rows.NONE;
+const ERR: u32 = types.ERR;
+const UNK: u32 = tc_rows.UNK;
+
+const K_LITERAL: u8 = node_kinds.KIND_LITERAL;
+const K_PATTERN: u8 = node_kinds.KIND_PATTERN;
+const K_FIELD_PAT: u8 = node_kinds.KIND_FIELD_PAT;
+
+const T_IDENT: u8 = terminals.T_IDENT as% u8;
+const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
+const T_UNDERSCORE: u8 = terminals.T_UNDERSCORE as% u8;
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_COMMA: u8 = terminals.T_COMMA as% u8;
+const T_DOT: u8 = terminals.T_DOT as% u8;
+const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
+
+// How a name binds: the value itself, or a reference to it (shared, mut).
+const M_MOVE: u8 = 0;
+const M_REF: u8 = 1;
+const M_MUT: u8 = 2;
+
+impl tc_rows.Typeck {
+    // Binds the names of pattern row p (a `Pattern`) to the parts of a value of type ty.
+    pub fn bind_pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, p: usize, ty: u32) {
+        // the pattern's nesting is at most its node count: a pattern that may pass the nesting
+        // limit is not modeled
+        if self.depth as usize + tree.size.as_slice()[p] as usize + 1 > tc_rows.MAX_DEPTH as usize { self.bad = true; }
+        if ty == UNK { return; }
+        if ty == NONE || ty == ERR {
+            self.bad = true;
+            return;
+        }
+        self.pat_row.clear();
+        self.pat_ty.clear();
+        self.pat_mode.clear();
+        self.pat_row.push(p as% u32);
+        self.pat_ty.push(ty);
+        self.pat_mode.push(M_MOVE);
+        while self.pat_row.len() > 0 {
+            let top = self.pat_row.len() - 1;
+            let n = self.pat_row.as_slice()[top] as usize;
+            let pt = self.pat_ty.as_slice()[top];
+            let m = self.pat_mode.as_slice()[top];
+            self.pat_row.truncate(top);
+            self.pat_ty.truncate(top);
+            self.pat_mode.truncate(top);
+            if !self.pattern(sg, ds, nm, t, tree, n, pt, m) {
+                self.bad = true;
+                return;
+            }
+        }
+    }
+
+    // One pattern node n against a value of type ty bound in mode m: binds its name or pushes its
+    // sub-patterns. False: a pattern stage0 rejects.
+    fn pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, n: usize, ty: u32, m: u8) -> bool {
+        let a = tree.tok.as_slice()[n];
+        let ft = consteval.tk(t, a);
+        if ft == T_UNDERSCORE { return true; }
+        if ft == T_KW_MUT { return self.bind(&mut sg.cx.tab, n, ty, m); }
+        let ks = tree.kids.row(n);
+        if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL { return true; }
+        if ft == T_L_PAREN {
+            let close = tree.tok_end.as_slice()[n] - 1;
+            if ks.len() == 1 && consteval.tk(t, close - 1) != T_COMMA {
+                self.push_pat(self.base + ks[0] as usize, ty, m);
+                return true;
+            }
+            let (pt, pm) = peel(&sg.cx.tab, ty, m);
+            if sg.cx.tab.tag_of(pt) != types.TK_TUPLE || sg.cx.tab.x(pt).len() != ks.len() { return false; }
+            for j in 0..ks.len() {
+                let e = sg.cx.tab.x(pt)[j];
+                self.push_pat(self.base + ks[j] as usize, e, pm);
+            }
+            return true;
+        }
+        if ft != T_IDENT { return false; }
+        let mut e = a;
+        while consteval.tk(t, e + 1) == T_DOT && consteval.tk(t, e + 2) == T_IDENT {
+            e = e + 2;
+        }
+        let paren = consteval.tk(t, e + 1) == T_L_PAREN;
+        let braces = consteval.tk(t, e + 1) == T_DOT_L_BRACE;
+        if e == a && !paren && !braces { return self.bind(&mut sg.cx.tab, n, ty, m); }
+        let (lo, hi) = sg.cx.uses.range(self.it, (n - self.base) as% u32);
+        if lo == hi || sg.cx.uses.tag.as_slice()[hi - 1] != 0 { return false; }
+        let d = sg.cx.uses.target.as_slice()[hi - 1];
+        let dk = ds.kind.as_slice()[d as usize];
+        if dk == decls.DK_CONST { return !paren && !braces; }
+        if dk != decls.DK_VARIANT && dk != decls.DK_STRUCT { return false; }
+        let adt = if dk == decls.DK_VARIANT then ds.parent.as_slice()[d as usize] else d;
+        let (pt, pm) = peel(&sg.cx.tab, ty, m);
+        if sg.cx.tab.tag_of(pt) != types.TK_ADT || sg.cx.tab.a_of(pt) != adt { return false; }
+        let fl = ds.flags.as_slice()[d as usize];
+        let tuple = dk == decls.DK_VARIANT && fl & decls.F_TUPLE != 0;
+        let record = dk == decls.DK_STRUCT || fl & decls.F_RECORD != 0;
+        if braces {
+            if !record { return false; }
+            for j in 0..ks.len() {
+                let fp = self.base + ks[j] as usize;
+                if tree.kind.as_slice()[fp] != K_FIELD_PAT { continue; }
+                let s = nm.tok_str.as_slice()[tree.tok.as_slice()[fp] as usize];
+                let f = field(ds, d, s);
+                if f == NONE { return false; }
+                // a field named twice
+                for i in 0..j {
+                    let fq = self.base + ks[i] as usize;
+                    if tree.kind.as_slice()[fq] == K_FIELD_PAT && nm.tok_str.as_slice()[tree.tok.as_slice()[fq] as usize] == s { return false; }
+                }
+                let decl_ty = sg.cx.ty.as_slice()[f as usize];
+                let fty = self.field_ty(sg, decl_ty, pt);
+                if fty == ERR || fty == NONE { return false; }
+                let sub = consteval.child(tree, self.base, fp, K_PATTERN);
+                if sub == NONE {
+                    if !self.bind(&mut sg.cx.tab, fp, fty, pm) { return false; }
+                } else {
+                    self.push_pat(sub as usize, fty, pm);
+                }
+            }
+            return true;
+        }
+        if paren {
+            if !tuple || sg.params.row(d as usize).len() != ks.len() { return false; }
+            for j in 0..ks.len() {
+                let payload = sg.params.row(d as usize)[j];
+                let fty = self.field_ty(sg, payload, pt);
+                if fty == ERR || fty == NONE { return false; }
+                self.push_pat(self.base + ks[j] as usize, fty, pm);
+            }
+            return true;
+        }
+        return !tuple && !record;
+    }
+
+    // A field or payload type with the arguments of the ADT type adt_ty.
+    fn field_ty(&mut self, sg: &mut sigs.Sigs, fty: u32, adt_ty: u32) -> u32 {
+        if fty == ERR || fty == NONE { return ERR; }
+        self.args.clear();
+        self.args.extend_from_slice(sg.cx.tab.x(adt_ty));
+        return sg.cx.tab.subst(fty, self.args.as_slice());
+    }
+
+    fn push_pat(&mut self, n: usize, ty: u32, m: u8) {
+        self.pat_row.push(n as% u32);
+        self.pat_ty.push(ty);
+        self.pat_mode.push(m);
+    }
+
+    // Binding node n takes a value of type ty in mode m.
+    fn bind(&mut self, tab: &mut types.Table, n: usize, ty: u32, m: u8) -> bool {
+        let bt = if m == M_MOVE then ty else tab.mk_ref(m == M_MUT, ty);
+        if bt == ERR { return false; }
+        self.loc.as_mut_slice()[n] = bt;
+        return true;
+    }
+}
+
+// Type ty with its references peeled, and the mode below them.
+fn peel(tab: &types.Table, ty: u32, m: u8) -> (u32, u8) {
+    let mut x = ty;
+    let mut mode = m;
+    while tab.tag_of(x) == types.TK_REF {
+        let mutable = tab.a_of(x) == 1;
+        mode = if mode == M_MOVE then (if mutable then M_MUT else M_REF) else if mode == M_MUT && mutable then M_MUT else M_REF;
+        x = tab.b_of(x);
+    }
+    return (x, mode);
+}
+
+// The field named s of struct or record variant d, or NONE.
+fn field(ds: &decls.Decls, d: u32, s: u32) -> u32 {
+    if s == NONE { return NONE; }
+    let key = search.pair(d, s);
+    let k = search.lower_bound(ds.mem_key.as_slice(), key);
+    if k == ds.mem_key.len() || ds.mem_key.as_slice()[k] != key { return NONE; }
+    let f = ds.mem_decl.as_slice()[k];
+    if ds.kind.as_slice()[f as usize] != decls.DK_FIELD { return NONE; }
+    return f;
+}

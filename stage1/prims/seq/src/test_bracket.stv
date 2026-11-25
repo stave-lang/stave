@@ -3,10 +3,11 @@
 import bracket;
 import test_util;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 // The steps of a string of '(' ')' and other characters.
 fn steps_of(b: &[u8]) -> vec.Vec<i8> {

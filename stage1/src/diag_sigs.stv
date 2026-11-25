@@ -14,10 +14,11 @@ import source;
 import text;
 import ir.types;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 const DISPLAY_MAX: usize = 4096;
 const DEPTH_MAX: u32 = 64;
 
@@ -177,7 +178,7 @@ fn fn_clauses(out: &mut vec.Vec<u8>, tab: &types.Table, t: u32) {
         out.push(41);
     }
     let mut deny = xs[np + 3];
-    if deny & 64 != 0 { deny = deny & 127; }
+    if deny & 0x40 != 0 { deny = deny & 0x7f; }
     if deny != 0 {
         out.extend_from_slice(mem.str_bytes(" without("));
         let mut first = true;

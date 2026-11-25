@@ -16,10 +16,11 @@
 // Per item: `status` (`ITEM_OK` or why it was dropped) and a `fail` row: the state the parser
 // stopped in, for the diagnostic of a dropped item (all `NONE` for an ok item).
 import prims.ragged;
+import std.idx;
 import std.soa;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 
 pub const ITEM_OK: u8 = 0;
 // An error token in the item: the lexer reports it, the parser does not run.
@@ -58,7 +59,7 @@ pub struct Fail {
 
 impl Copy for Fail {}
 
-pub const NONE16: u32 = 65535;
+pub const NONE16: u32 = 0xffff;
 
 pub fn no_fail() -> Fail {
     return Fail.{ tok: NONE, expected: NONE16, top: NONE, la_kind: NONE16, shift: 0, d2_lt: NONE, open_kind: NONE16, open_tok: NONE };

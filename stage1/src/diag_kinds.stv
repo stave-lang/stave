@@ -28,10 +28,11 @@ import ir.types;
 import prims.col;
 import prims.search;
 import prims.sort;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 
 const T_KW_PUB: u8 = terminals.T_KW_PUB as% u8;
@@ -92,7 +93,7 @@ fn by_parent(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
     for j in 0..perm.len() {
         let k = keys.as_slice()[perm.as_slice()[j] as usize];
         sk.push(k);
-        si.push((k & 4294967295) as% u32);
+        si.push((k & 0xffff_ffff) as% u32);
     }
     return (sk, si);
 }

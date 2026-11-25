@@ -87,7 +87,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 - Identifiers are ASCII: `[A-Za-z_][A-Za-z0-9_]*`. Non-ASCII only inside literals and comments; `@ $ \ #`, backtick, control bytes elsewhere = E0018.
 - A first line starting `#!` is a comment (shebang: `#!/usr/bin/env -S stave run`). `#!` anywhere else = E0018.
 - Float text (`Display`, f-strings): shortest round-trip digits: `6.0`, `0.1`, `1e-6`, `1e21`, `inf`, `-inf`, `NaN`, `-0.0` (exact form: std/README.md Floats).
-- Ints: `1_000`, `0xff`, `0b1010`, `0o17`, suffix `5u8`. Floats need a digit after `.` (`1.0`, not `1.`), suffix `1.0f32`. `-128i8` legal (minus folded in), `128i8` = E0203.
+- Ints: `1_000`, `0xff`, `0b1010`, `0o17`, suffix `5u8`; bit patterns in hex. Floats: a digit after `.` (`1.0`, not `1.`), suffix `1.0f32`. `-128i8` legal (minus folded), `128i8` = E0203.
 - Statements end with `;`. `if`/`while`/`for`/`loop`/`match` statements take no `;` after the block.
 - Syntax errors: a file with unbalanced brackets gets one E0016 and nothing else. Otherwise each item shows only its **first** syntax error and is dropped.
 - Reserved (never use as names): `fn let mut const static struct enum trait impl for in while loop if then else match return break continue pub import as from needs dispatch unsafe extern self Self true false tail masked scalar exact align copy type view scope spawn strict emulate test allocator kernel requires ensures rec without invariant decreases ghost pure spec forall exists derive async await yield` (the last eleven have no meaning yet; `result` is not: Contracts bullet).

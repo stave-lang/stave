@@ -65,14 +65,6 @@ pub fn canonicalize_by<E>(m: &mut Module, each: E) -> Vec<FuncId>
 where
     E: Fn(&mut [Func], &(dyn Fn(&mut Func) + Sync)),
 {
-    let n = m.funcs.len();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| m.funcs[a].instance.cmp(&m.funcs[b].instance));
-    let mut remap = vec![FuncId(0); n];
-    for (new, &old) in order.iter().enumerate() {
-        remap[old] = FuncId(new as u32);
-    }
-
     // Only reachable blocks count: the body rewrite drops the others, so a name that only dead
     // code uses would be kept by one pass and dropped by the next.
     let mut used: Vec<&str> = Vec::new();
@@ -95,17 +87,8 @@ where
         .iter()
         .map(|s| names.binary_search(s).map_or(IntrinsicId(u32::MAX), |i| IntrinsicId(i as u32)))
         .collect();
-
-    let mut old: Vec<Option<Func>> = std::mem::take(&mut m.funcs).into_iter().map(Some).collect();
-    m.funcs = order.iter().filter_map(|&i| old[i].take()).collect();
-    if !m.stated.is_empty() {
-        permute_by_func(&mut m.stated, &remap);
-    }
-    if !m.clauses.is_empty() {
-        permute_by_func(&mut m.clauses, &remap);
-    }
     m.intrinsics = names;
-    m.main = m.main.map(|f| remap.get(f.index()).copied().unwrap_or(FuncId(u32::MAX)));
+    let remap = order_funcs(m);
 
     let maps = Maps { funcs: &remap, intrinsics: &intrinsics };
     each(&mut m.funcs, &|f: &mut Func| {
@@ -115,6 +98,189 @@ where
     });
     canonical_types(m, &each);
     remap
+}
+
+/// Rules 1 and 2 of [`canonicalize`] without the operands: the functions in instance order
+/// (stable), `main` and the per-function tables moved with them. Returns where each function
+/// went (`old -> new`).
+fn order_funcs(m: &mut Module) -> Vec<FuncId> {
+    let n = m.funcs.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| m.funcs[a].instance.cmp(&m.funcs[b].instance));
+    let mut remap = vec![FuncId(0); n];
+    for (new, &old) in order.iter().enumerate() {
+        remap[old] = FuncId(new as u32);
+    }
+    let mut old: Vec<Option<Func>> = std::mem::take(&mut m.funcs).into_iter().map(Some).collect();
+    m.funcs = order.iter().filter_map(|&i| old[i].take()).collect();
+    if !m.stated.is_empty() {
+        permute_by_func(&mut m.stated, &remap);
+    }
+    if !m.clauses.is_empty() {
+        permute_by_func(&mut m.clauses, &remap);
+    }
+    m.main = m.main.map(|f| remap.get(f.index()).copied().unwrap_or(FuncId(u32::MAX)));
+    remap
+}
+
+/// What an edit of a canonical module may change, for [`restore_by`]: the functions whose bodies
+/// it may change (`edited`, by function id; the functions past it after the edit are new ones),
+/// and the types and intrinsic names those bodies used before it.
+#[derive(Clone, Debug, Default)]
+pub struct Edits {
+    edited: Vec<bool>,
+    before: Uses,
+}
+
+impl Edits {
+    /// Taken on the canonical module `m` before the edit: what the bodies flagged in `edited`
+    /// use.
+    pub fn new(m: &Module, edited: Vec<bool>) -> Edits {
+        let mut before = Uses::new(m);
+        for (f, _) in m.funcs.iter().zip(&edited).filter(|(_, e)| **e) {
+            if let Some(b) = &f.body {
+                before.add(b);
+            }
+        }
+        Edits { edited, before }
+    }
+}
+
+/// Per type id and per intrinsic id: whether a body uses it (rule 8's seeds of a body, rule
+/// 3's names). Ids out of range are not recorded.
+#[derive(Clone, Debug, Default)]
+struct Uses {
+    types: Vec<bool>,
+    intrinsics: Vec<bool>,
+}
+
+impl Uses {
+    fn new(m: &Module) -> Uses {
+        Uses { types: vec![false; m.types.len()], intrinsics: vec![false; m.intrinsics.len()] }
+    }
+
+    /// Records what `b` uses: every instruction counts, as every block of a canonical body is
+    /// reachable.
+    fn add(&mut self, b: &Body) {
+        let mut ty = |t: TypeId| {
+            if let Some(x) = self.types.get_mut(t.index()) {
+                *x = true;
+            }
+        };
+        b.values.iter().for_each(|v| ty(v.ty));
+        b.insts.ty.iter().flatten().for_each(|&t| ty(t));
+        for o in &b.operands {
+            if let Operand::Type(t) = o {
+                ty(*t);
+            }
+        }
+        for op in &b.insts.op {
+            if let Op::Intrinsic(id) = op
+                && let Some(x) = self.intrinsics.get_mut(id.index())
+            {
+                *x = true;
+            }
+        }
+    }
+}
+
+/// The canonical form of a module that was canonical before an edit described by `edits`,
+/// equal to [`canonicalize_by`] on it: the edit may delete instructions, blocks and values,
+/// change operands, and append new functions that use no type or intrinsic name the module did
+/// not use before, but it changes no signature, static or type table. Rules 1 and 2 as there;
+/// the edited and the new bodies are rewritten by rules 4 to 7, the others only get their
+/// function operands renumbered; rule 3 and rule 8 renumber only when the edit removed the last
+/// use of an intrinsic name or of a type that seeds rule 8. `each` as for [`canonicalize_by`],
+/// with the index of the function. Returns where each function went (`old -> new`).
+pub fn restore_by<E>(m: &mut Module, edits: &Edits, each: E) -> Vec<FuncId>
+where
+    E: Fn(&mut [Func], &(dyn Fn(usize, &mut Func) + Sync)),
+{
+    let remap = order_funcs(m);
+    let mut edited = vec![false; m.funcs.len()];
+    for (old, &new) in remap.iter().enumerate() {
+        edited[new.index()] = edits.edited.get(old).copied().unwrap_or(true);
+    }
+    let same: Vec<IntrinsicId> = (0..m.intrinsics.len() as u32).map(IntrinsicId).collect();
+    let moved = !is_identity(&remap);
+    let maps = Maps { funcs: &remap, intrinsics: &same };
+    each(&mut m.funcs, &|i: usize, f: &mut Func| {
+        let Some(b) = &mut f.body else { return };
+        if edited[i] {
+            *b = canonical_body(b, &maps);
+        } else if moved {
+            renumber_funcs(b, &remap);
+        }
+    });
+
+    let mut after = Uses::new(m);
+    for (f, _) in m.funcs.iter().zip(&edited).filter(|(_, e)| **e) {
+        if let Some(b) = &f.body {
+            after.add(b);
+        }
+    }
+    let lost = |before: &[bool], after: &[bool]| -> Vec<usize> {
+        (0..before.len()).filter(|&k| before[k] && !after.get(k).copied().unwrap_or(false)).collect()
+    };
+    let lost_types = lost(&edits.before.types, &after.types);
+    let lost_names = lost(&edits.before.intrinsics, &after.intrinsics);
+    if lost_types.is_empty() && lost_names.is_empty() {
+        return remap;
+    }
+    let mut still = Uses::new(m);
+    for f in m.funcs.iter().filter(|f| f.body.is_some()) {
+        for t in f.signature_types() {
+            if let Some(x) = still.types.get_mut(t.index()) {
+                *x = true;
+            }
+        }
+    }
+    for (f, _) in m.funcs.iter().zip(&edited).filter(|(_, e)| !**e) {
+        if let Some(b) = &f.body {
+            still.add(b);
+        }
+    }
+    if lost_names.iter().any(|&k| !still.intrinsics[k]) {
+        let gone = |k: usize| lost_names.binary_search(&k).is_ok() && !still.intrinsics[k];
+        let mut names = Vec::with_capacity(m.intrinsics.len());
+        let mut to = vec![IntrinsicId(u32::MAX); m.intrinsics.len()];
+        for (k, name) in std::mem::take(&mut m.intrinsics).into_iter().enumerate() {
+            if !gone(k) {
+                to[k] = IntrinsicId(names.len() as u32);
+                names.push(name);
+            }
+        }
+        m.intrinsics = names;
+        each(&mut m.funcs, &|_, f: &mut Func| {
+            for op in f.body.iter_mut().flat_map(|b| &mut b.insts.op) {
+                if let Op::Intrinsic(id) = op {
+                    *id = to.get(id.index()).copied().unwrap_or(IntrinsicId(u32::MAX));
+                }
+            }
+        });
+    }
+    if lost_types.iter().any(|&k| !still.types[k]) {
+        canonical_types(m, &|funcs: &mut [Func], one: &(dyn Fn(&mut Func) + Sync)| {
+            each(funcs, &|_, f| one(f))
+        });
+    }
+    remap
+}
+
+/// Rewrites every function operand of `b` through `remap`.
+fn renumber_funcs(b: &mut Body, remap: &[FuncId]) {
+    let to = |o: &mut Operand| {
+        if let Operand::Func(f) = o {
+            *f = remap.get(f.index()).copied().unwrap_or(FuncId(u32::MAX));
+        }
+    };
+    b.operands.iter_mut().for_each(to);
+    for bd in &mut b.blocks {
+        match &mut bd.term {
+            Term::Cbr { cond: o, .. } | Term::Switch { scrut: o, .. } | Term::Ret(Some(o)) => to(o),
+            Term::Br(_) | Term::Ret(None) | Term::Unreachable => {}
+        }
+    }
 }
 
 /// Rule 8 of [`canonicalize`], on a module whose bodies are already canonical (only reachable
@@ -424,8 +590,8 @@ impl Rewrite<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize;
-    use crate::{FuncBuilder, InstanceId, Module, Op};
+    use super::{Edits, canonicalize, restore_by};
+    use crate::{FuncBuilder, FuncId, InstanceId, Module, Op, Term};
 
     #[test]
     fn a_name_only_dead_code_uses_is_dropped_by_the_first_pass() {
@@ -453,5 +619,59 @@ mod tests {
         assert!(once == twice);
         let body = once.funcs[0].body.as_ref().unwrap();
         assert!(body.insts.op.iter().any(|op| matches!(op, Op::Intrinsic(id) if id.0 == 0)));
+    }
+
+    /// An edit that leaves a block unreachable, and with it the last use of an intrinsic name and
+    /// of a type, and appends a function that sorts before an old one: restoring renumbers it as
+    /// a whole renumbering does.
+    #[test]
+    fn restoring_an_edit_equals_renumbering_it() {
+        let mut m = Module::new();
+        let i32t = m.types.i32();
+        let bt = m.types.bool();
+        let us = m.types.usize();
+        let wide = m.types.u64();
+        let live = m.intrinsic("thread_start_addr");
+        let dead_only = m.intrinsic("stack_table");
+        let g = m.declare(InstanceId(vec![0]), "app.g", vec![i32t], Some(i32t));
+        let f = m.declare(InstanceId(vec![1]), "app.f", vec![i32t], Some(i32t));
+        let mut b = FuncBuilder::new(&[i32t]);
+        let x = b.param(0).unwrap();
+        b.ret(Some(x.into()));
+        m.define(g, b.finish().unwrap());
+        let mut b = FuncBuilder::new(&[i32t]);
+        let x = b.param(0).unwrap();
+        let (dead, kept) = (b.create_block(), b.create_block());
+        let three = b.int(3);
+        let c = b.cmp(Op::Lt, bt, x, three);
+        b.cbr(c, kept, &[], dead, &[]);
+        for (blk, name, ty) in [(dead, dead_only, wide), (kept, live, us)] {
+            b.switch_to(blk);
+            b.intrinsic(name, Some(ty), &[]);
+            let r = b.call(g, Some(i32t), &[x.into()]).unwrap();
+            b.ret(Some(r.into()));
+        }
+        m.define(f, b.finish().unwrap());
+        canonicalize(&mut m);
+        let types = m.types.len();
+
+        let edits = Edits::new(&m, vec![false, true]);
+        let body = m.funcs[1].body.as_mut().unwrap();
+        let Term::Cbr { then, .. } = body.blocks[0].term else { panic!("not a cbr") };
+        body.blocks[0].term = Term::Br(then);
+        let mut entry = m.funcs[0].clone();
+        entry.instance = InstanceId(vec![0, InstanceId::UNCHECKED_ENTRY]);
+        m.funcs.push(entry);
+
+        let mut want = m.clone();
+        let want_remap = canonicalize(&mut want);
+        let remap = restore_by(&mut m, &edits, |funcs, one| {
+            funcs.iter_mut().enumerate().for_each(|(i, f)| one(i, f))
+        });
+        assert_eq!(remap, want_remap);
+        assert_eq!(remap, [FuncId(0), FuncId(2), FuncId(1)]);
+        assert!(m == want);
+        assert_eq!(m.intrinsics, ["thread_start_addr"]);
+        assert!(m.types.len() < types, "the type only the dead block used is kept");
     }
 }

@@ -33,7 +33,7 @@ impl HashIndex {
     // The index of `keys` (fewer than u32::MAX of them: `idx.NONE` is no id).
     pub fn build(keys: &[u64]) -> HashIndex {
         let n = keys.len();
-        debug.assert(n < 4294967295, "hindex: too many keys for u32 ids");
+        debug.assert(n < 0xffff_ffff, "hindex: too many keys for u32 ids");
         let mut cap: usize = 8;
         while cap < 2 * n {
             cap = cap * 2;

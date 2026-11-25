@@ -26,10 +26,11 @@
 // `ERR`). A key taller than `MAX_HEIGHT` is refused: interning it gives `ERR` and counts a refusal.
 import prims.col;
 import prims.ragged;
+import std.idx;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
-pub const ERR: u32 = 4294967294;
+pub const NONE: u32 = idx.NONE;
+pub const ERR: u32 = 0xffff_fffe;
 
 pub const TK_INT: u8 = 0;
 pub const TK_FLOAT: u8 = 1;

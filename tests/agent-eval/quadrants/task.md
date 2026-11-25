@@ -1,7 +1,3 @@
-Write a complete Stave program in one source file. It reads no input and exits with status 0.
-Its standard output must be exactly the text under "Output" (every line ends with a newline).
-Compute the values in the program; do not print them as literal text.
-
 ## Task
 
 Classify the `(i32, i32)` points (0, 0), (0, 5), (-3, 0), (2, 3), (-1, 4), (-2, -2), (5, -1) with a

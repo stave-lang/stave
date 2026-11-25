@@ -2,9 +2,9 @@
 //! runs, as glue over [`stave_ir::text::read`], [`build`] and [`interp`].
 //!
 //! - [`load`]: contracts/checked-ir.md "Loading": the reader (lines, structure, verification,
-//!   audit), then the canonical numbering and the verifier ([`build::canonical_verified`]), and
-//!   at level `lowered` the removal of proven checks (step 4) by the build's own
-//!   [`build::checked_module`].
+//!   audit), then the canonical numbering ([`build::canonical_moving`]); at level `lowered` the
+//!   removal of proven checks (step 4) and the verifier by the build's own
+//!   [`build::checked_module`], at the other levels the verifier ([`build::verified_final`]).
 //! - [`fmt`], [`opt`]: the canonical text of the loaded module, or of the release passes' output.
 //! - [`build`]: the image, as `stave build` makes it from the same module.
 //! - [`run`]: the loaded module's `main` in the interpreter.
@@ -84,15 +84,15 @@ pub fn load(file: &str, src: &[u8]) -> Result<LoadedIr, IrError> {
     // The reader keeps the text's type numbering; the module the passes get is canonical. Fns,
     // blocks and instructions keep their places (the reader numbered them canonically), so the
     // line map still locates them.
-    build::canonical_verified(&mut module, stack.as_mut().map(|s| &mut s.nodes_of_func))
-        .map_err(IrError::failure)?;
+    build::canonical_moving(&mut module, stack.as_mut().map(|s| &mut s.nodes_of_func));
     let read = module.clone();
     let read_stack = stack.clone();
     if header.level != Level::Lowered {
+        build::verified_final(&module).map_err(IrError::failure)?;
         return Ok(LoadedIr { file: file.to_string(), header, read, module, read_stack, stack });
     }
     let mut m = module;
-    let (r, _) = build::checked_module(&mut m, stack.as_mut().map(|s| &mut s.nodes_of_func))
+    let r = build::checked_module(&mut m, stack.as_mut().map(|s| &mut s.nodes_of_func))
         .map_err(IrError::failure)?;
     let mut errs = Vec::new();
     let line_of = |f: FuncId, site: Site| -> u32 {

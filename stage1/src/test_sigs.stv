@@ -14,10 +14,11 @@ import test_kit;
 import text;
 import ir.types;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 fn tuple(tab: &mut types.Table, xs: &[u32]) -> u32 {
     tab.begin();
@@ -157,7 +158,7 @@ test fn const_values_and_typing() {
     debug.assert(value_is(&o, &sg, "WRAP", false, 44) && value_is(&o, &sg, "SAT", false, 255), "`as%` truncates, `as|` saturates");
     debug.assert(value_is(&o, &sg, "WADD", false, 4) && value_is(&o, &sg, "SSUB", true, 128), "wrapping and saturating operators");
     debug.assert(value_is(&o, &sg, "MASKED", false, 2), "`<<%` masks the amount");
-    debug.assert(value_is(&o, &sg, "BIG", false, 18446744073709551615), "u64::MAX");
+    debug.assert(value_is(&o, &sg, "BIG", false, 0xffff_ffff_ffff_ffff), "u64::MAX");
 }
 
 test fn const_failures() {

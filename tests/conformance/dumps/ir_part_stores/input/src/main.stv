@@ -1,0 +1,40 @@
+//~ CHECK-ONLY
+// ir golden: an assignment to a part of a local (an element, a field, a tuple field, nested)
+// puts the local in a `slot`; the store is `addr.elem` / `addr.field` + `store` in place (no
+// `set` rebuilding the whole value) and a read of a part loads that part. A copy of the whole
+// value is one `load`; a repeat initializer too long for one `make` fills the local's slot.
+struct P { pub xs: [u32; 4], pub n: u32 }
+
+fn elems(k: usize) -> u32 {
+    let mut a = [0u32; 8];
+    let mut i: usize = 0;
+    while i < 8 {
+        a[i] = i as% u32;
+        i = i + 1;
+    }
+    a[k % 8] += 1;
+    return a[k % 8];
+}
+
+fn fields(k: u32) -> u32 {
+    let mut p = P.{ xs: [1, 2, 3, 4], n: 0 };
+    p.n = k;
+    p.xs[2] = p.n + 1;
+    let mut t = (0u32, [0u32; 2]);
+    t.0 = 5;
+    t.1[1] = t.0;
+    return p.xs[2] + t.1[1];
+}
+
+fn whole(k: u32) -> [u32; 20] {
+    let mut a = [k; 20];
+    a[0] = 1;
+    let b = a;
+    a[1] = 2;
+    return b;
+}
+
+fn main() -> i32 {
+    let w = whole(3);
+    return if elems(3) + fields(1) + w[1] == 14 then 0 else 1;
+}

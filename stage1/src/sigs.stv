@@ -34,10 +34,11 @@ import ir.types;
 import prims.col;
 import prims.ragged;
 import prims.search;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 
 // Fn signature flags.
@@ -187,6 +188,28 @@ fn feature_of(b: &[u8]) -> (bool, u64) {
     if b.eq(mem.str_bytes("v3")) { return (true, feature_closure(V3 as u64)); }
     if b.eq(mem.str_bytes("v4")) { return (true, feature_closure((V3 | V4) as u64)); }
     return (false, 0);
+}
+
+// The features every program built for target `name` may assume (closed): `sse42` on x86-64 v2,
+// the `v3` and `v4` groups, `neon` on AArch64, `sve` and `sve2` with those extensions.
+pub fn baseline(name: &[u8]) -> u64 {
+    let n = name.len();
+    let lo = if n >= 4 then n - 4 else 0;
+    let end4 = &name[lo..n];
+    let mut f = "neon";
+    if end4.eq(mem.str_bytes("sve2")) {
+        f = "sve2";
+    } else if end4.eq(mem.str_bytes("+sve")) {
+        f = "sve";
+    } else if end4.eq(mem.str_bytes("x-v3")) {
+        f = "v3";
+    } else if end4.eq(mem.str_bytes("x-v4")) {
+        f = "v4";
+    } else if n > 0 && name[0] == 120 {
+        f = "sse42";
+    }
+    let (_, bits) = feature_of(mem.str_bytes(f));
+    return bits;
 }
 
 // The deny bits a `without` name stands for (`block` also denies `park`).
@@ -435,7 +458,7 @@ pub struct Lw {
 }
 
 impl Lw {
-    fn new() -> Lw {
+    pub fn new() -> Lw {
         return Lw.{ op: vec.Vec::<u8>.new(), row: vec.Vec::<u32>.new(), fx: vec.Vec::<u32>.new(), fy: vec.Vec::<u32>.new(), vals: vec.Vec::<u32>.new(), gas: vec.Vec::<u32>.new(), tmp: vec.Vec::<u32>.new(), prim: vec.Vec::<u32>.new() };
     }
 
@@ -746,7 +769,7 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
             lw.vals.push(ERR);
             return;
         }
-        let rpbit: u32 = if rp then 2147483648u32 else 0u32;
+        let rpbit: u32 = if rp then 0x8000_0000u32 else 0u32;
         lw.frame(if dk == decls.DK_TYPE_ALIAS then OP_ALIAS else OP_ADT, g, id, (n as% u32) | rpbit);
         for j in 0..n {
             let ga = base + tree.kids.row(gargs as usize)[n - 1 - j] as usize;
@@ -776,7 +799,7 @@ fn visit_garg(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens
                 return;
             }
             let bits = cx.tab.int_bits(cty);
-            let hi: u64 = if bits == 0 || bits == 64 then (if cx.tab.is_signed(cty) then 9223372036854775807u64 else 18446744073709551615u64) else if cx.tab.is_signed(cty) then (1u64 << (bits - 1) as u64) - 1 else (1u64 << bits as u64) - 1;
+            let hi: u64 = if bits == 0 || bits == 64 then (if cx.tab.is_signed(cty) then 0x7fff_ffff_ffff_ffffu64 else 0xffff_ffff_ffff_ffffu64) else if cx.tab.is_signed(cty) then (1u64 << (bits - 1) as u64) - 1 else (1u64 << bits as u64) - 1;
             if big || v > hi {
                 lw.garg(types.GA_ERROR, 0, 0);
                 return;
@@ -1003,7 +1026,7 @@ fn finish(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm
         return;
     }
     if op == OP_ADT || op == OP_ALIAS {
-        let n = (y & 2147483647) as usize;
+        let n = (y & 0x7fff_ffff) as usize;
         let at_ret = y >> 31 == 1;
         let lo = lw.gas.len() - 3 * n;
         lw.tmp.clear();
@@ -1113,7 +1136,7 @@ fn run(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &
 
 // The generic arguments at `GenericArgs` row ga (NONE: none) for the params of decl d, into
 // out (3 words each); false on a count mismatch (E0201).
-fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, d: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) -> bool {
+pub fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, d: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) -> bool {
     out.clear();
     let base = tree.item_node.as_slice()[it as usize] as usize;
     let glo = cx.gens.lo.as_slice()[d as usize] as usize;
@@ -1134,6 +1157,23 @@ fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Token
     return true;
 }
 
+// The generic arguments at `GenericArgs` row ga, each for a type param (a callee with no decl:
+// a built-in fn), into out as `lower_gargs` writes them.
+pub fn lower_type_args(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let n = tree.kids.row(ga as usize).len();
+    let f0 = lw.op.len();
+    let g0 = lw.gas.len();
+    for j in 0..n {
+        let a = base + tree.kids.row(ga as usize)[n - 1 - j] as usize;
+        lw.frame(OP_GARG, a, NONE, 0);
+    }
+    run(cx, lw, tree, t, nm, set, cut, ds, it, f0, sc);
+    out.extend_from_slice(&lw.gas.as_slice()[g0..lw.gas.len()]);
+    lw.gas.truncate(g0);
+}
+
 // The trait a `BoundItem` or `TypeBase` path row names, with its arguments: a row of `bounds`,
 // or NONE (not a trait, or a wrong argument count).
 fn trait_ref_at(sg: &mut Sigs, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, sc: consteval.Scope) -> u32 {
@@ -1151,7 +1191,7 @@ fn trait_ref_at(sg: &mut Sigs, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: 
 }
 
 // The scope of decl d's signature: a method's container params, then its own.
-fn scope_of(cx: &consteval.Cx, ds: &decls.Decls, d: u32, self_ty: u32) -> consteval.Scope {
+pub fn scope_of(cx: &consteval.Cx, ds: &decls.Decls, d: u32, self_ty: u32) -> consteval.Scope {
     let k = ds.kind.as_slice()[d as usize];
     let p = ds.parent.as_slice()[d as usize];
     let lo = cx.gens.lo.as_slice()[d as usize];
@@ -1163,7 +1203,7 @@ fn scope_of(cx: &consteval.Cx, ds: &decls.Decls, d: u32, self_ty: u32) -> conste
 }
 
 // `Self` in the signature of member d: its impl's self type, or a trait's `Self`; NONE else.
-fn self_of(cx: &mut consteval.Cx, ds: &decls.Decls, d: u32) -> u32 {
+pub fn self_of(cx: &mut consteval.Cx, ds: &decls.Decls, d: u32) -> u32 {
     let k = ds.kind.as_slice()[d as usize];
     let p = ds.parent.as_slice()[d as usize];
     if (k != decls.DK_METHOD && k != decls.DK_TRAIT_METHOD) || p == NONE { return NONE; }
@@ -1253,7 +1293,7 @@ fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: u
         if tk(t, if cp then a + 1 else a) == T_KW_SELF {
             for k in 0..ps.len() {
                 if child(tree, base, ps[k] as usize, K_SELF_PARAM) != NONE {
-                    out.push((if k > 255 then 255u32 else k as% u32) | (if cp then 256u32 else 0u32));
+                    out.push((if k > 255 then 255u32 else k as% u32) | (if cp then 0x100u32 else 0u32));
                     at.push(o as% u32);
                     break;
                 }
@@ -1265,7 +1305,7 @@ fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: u
         let b = base + sg.cx.uses.target.as_slice()[lo] as usize;
         let i = param_index(tree, base, ps, b);
         if i != NONE {
-            out.push(i | (if cp then 256u32 else 0u32));
+            out.push(i | (if cp then 0x100u32 else 0u32));
             at.push(o as% u32);
         }
     }
@@ -1449,7 +1489,7 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
     // E0520 E0521: a return `from` entry outside the origin table
     if stave_abi {
         for j in 0..ro.len() {
-            let src = ro.as_slice()[j] & 255;
+            let src = ro.as_slice()[j] & 0xff;
             let cp = ro.as_slice()[j] >> 8 == 1;
             let pt = tys.as_slice()[src as usize];
             if valid(classify(&sg.cx, ds, pt, sc), cp) { continue; }
@@ -1486,7 +1526,7 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
         let fr = child(tree, base, pf as usize, K_FROM);
         origins(sg, tree, t, it, base, if fr == NONE then pf as usize else fr as usize, ps.as_slice(), &mut ent, &mut ent_at);
         for e in 0..ent.len() {
-            let src = ent.as_slice()[e] & 255;
+            let src = ent.as_slice()[e] & 0xff;
             let cp = ent.as_slice()[e] >> 8 == 1;
             let o = ent_at.as_slice()[e] as usize;
             let (lo, hi) = span_of(tree, t, cut, o);
