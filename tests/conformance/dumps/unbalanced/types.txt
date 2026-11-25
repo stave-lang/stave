@@ -1,8 +1,8 @@
-t16 str
-t18 ref t16
-t21 ref mut t25
-t23 tuple
-t25 param 0
-5 16 t21
-5 17 t18
-5 19 t23
+t0 str
+t1 ref t0
+t2 ref mut t4
+t3 tuple
+t4 param 0
+5 16 t2
+5 17 t1
+5 19 t3

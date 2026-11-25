@@ -39,7 +39,7 @@ const FLAG_NAMES: [&str; 14] = [
 /// The `sigs` dump: `t<T> key` per table type, by T, then one decl line per decl, by D.
 pub fn dump_sigs(prog: &Program, tc: &Typeck) -> String {
     let members = Members::new(prog, tc);
-    let table = SigTable::new(prog, tc, &members);
+    let table = TypeRank::new(prog, tc, &members);
     let mut out = String::new();
     for &t in &table.order {
         let _ = writeln!(out, "t{} {}", table.at(t), types::type_key_text_as(&tc.types, t, &|c| table.at(c)));
@@ -51,9 +51,10 @@ pub fn dump_sigs(prog: &Program, tc: &Typeck) -> String {
     out
 }
 
-/// The `sigs` type table: the types the decl lines name, closed over key components, numbered
-/// by rank among themselves. Every dump that names `t<T>` of `sigs` reads this numbering.
-pub(crate) struct SigTable {
+/// A dump's type table: the types its lines name, closed over key components, numbered by rank
+/// among themselves in the canonical type-key order. The `sigs` and `types` dumps both number
+/// this way; every dump that names `t<T>` of `sigs` reads the `sigs` numbering.
+pub(crate) struct TypeRank {
     /// The table's types by local T.
     pub order: Vec<TypeId>,
     /// Global id -> local T; the error type and types outside the table map to `next`.
@@ -62,12 +63,13 @@ pub(crate) struct SigTable {
     next: u32,
 }
 
-impl SigTable {
-    pub(crate) fn of(prog: &Program, tc: &Typeck) -> SigTable {
-        SigTable::new(prog, tc, &Members::new(prog, tc))
+impl TypeRank {
+    /// The `sigs` table.
+    pub(crate) fn of(prog: &Program, tc: &Typeck) -> TypeRank {
+        TypeRank::new(prog, tc, &Members::new(prog, tc))
     }
 
-    fn new(prog: &Program, tc: &Typeck, members: &Members) -> SigTable {
+    fn new(prog: &Program, tc: &Typeck, members: &Members) -> TypeRank {
         // The decl lines are rendered by the same code as the dump, to collect the types they
         // name, so the table holds exactly what the lines name.
         let mut cx = Cx { tc, num: None, roots: Vec::new() };
@@ -76,9 +78,14 @@ impl SigTable {
             scratch.clear();
             decl_line(prog, tc, members, &mut cx, DeclId(d as u32), &mut scratch);
         }
+        TypeRank::from_roots(tc, std::mem::take(&mut cx.roots))
+    }
+
+    /// The table of `roots` and the types their keys reference.
+    pub(crate) fn from_roots(tc: &Typeck, roots: Vec<TypeId>) -> TypeRank {
         let err = tc.error_type;
         let mut used = vec![false; tc.types.len()];
-        let mut stack = std::mem::take(&mut cx.roots);
+        let mut stack = roots;
         let mut kids = Vec::new();
         while let Some(t) = stack.pop() {
             let Some(u) = used.get_mut(t.idx()) else { continue };
@@ -102,7 +109,7 @@ impl SigTable {
         if let Some(e) = num.get_mut(err.idx()) {
             *e = next;
         }
-        SigTable { order, num, next }
+        TypeRank { order, num, next }
     }
 
     /// The local T of global type `t` (the error type: the number of table lines).

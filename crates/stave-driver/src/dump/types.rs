@@ -2,7 +2,7 @@
 //! item not dropped (stage-gates.md).
 //!
 //! The printer is stave-sema's [`stave_sema::dump_types`]: stave-sema owns the expression-node set
-//! (`typeck::is_expr_kind`), the canonical type ids, and the checked-IR TypeKey text, so the dump
+//! (`typeck::is_expr_kind`), the table numbering, and the checked-IR TypeKey text, so the dump
 //! and the type checker cannot disagree.
 
 use std::io::{self, Write};

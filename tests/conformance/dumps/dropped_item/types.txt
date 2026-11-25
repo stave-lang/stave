@@ -1,12 +1,12 @@
-t7 int s 32
-t16 str
-t18 ref t16
-t21 ref mut t25
-t23 tuple
-t25 param 0
-0 3 t7
+t0 int s 32
+t1 str
+t2 ref t1
+t3 ref mut t5
+t4 tuple
+t5 param 0
+0 3 t0
 2 3 -
-2 4 t7
-8 16 t21
-8 17 t18
-8 19 t23
+2 4 t0
+8 16 t3
+8 17 t2
+8 19 t4
