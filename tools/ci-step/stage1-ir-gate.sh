@@ -17,8 +17,10 @@
 # `error:` line), or refused by the verifier (a `verify:` line).
 #
 # Optimizer goldens: `stage1 ir opt --dump=inline` on every tests/opt case with an `inline.txt`,
-# under the case's `limits` (each line one `--limit`), on its input and on the input's
-# `stage1 ir fmt` text: both equal `inline.txt` byte for byte.
+# and `--dump-phase=inline --verify-phases` on every case with an `inline.ir`, each on its input
+# and on the input's `stage1 ir fmt` text; stage0's `stave ir check` loads every such module at
+# level `opt`. A case whose `limits` asks for more than one round is skipped (the clean-up between
+# rounds is not built) and counted.
 #
 # Corpus: the roots of the stage1 gate (every package and other `.stv` file below
 # tests/conformance), the bench programs, and the stage1 package itself (the largest text: its
@@ -72,30 +74,23 @@ if [ "$PROFILE" = release ]; then cargo build -q --locked --release -p stave-cli
 mkdir -p "$OUT"
 "$S0" build "$ROOT/stage1" -o "$S1" >"$OUT/build.log" 2>&1 || { cat "$OUT/build.log"; exit 1; }
 
+# Optimizer goldens (opt-passes.md "Gates"): per case of tests/opt with an `inline.txt`, the
+# `inline` dump of `input.ir` under the case's `limits`, and the dump of its `stage1 ir fmt` text,
+# equal that file byte for byte.
 fail=0
 ocases=0
 osame=0
-orounds=0
+oskip=0
 for c in "$ROOT"/tests/opt/*/; do
   [ -f "$c/inline.txt" ] || continue
+  if [ -f "$c/limits" ] && awk -F= '$1 == "rounds" && $2 > 1 { r = 1 } END { exit !r }' "$c/limits"; then
+    oskip=$((oskip + 1))
+    continue
+  fi
   ocases=$((ocases + 1))
   lims=""
   if [ -f "$c/limits" ]; then lims=$(sed 's/^/--limit /' "$c/limits" | tr '\n' ' '); fi
   o="$OUT/opt-$(basename "$c")"
-  # Only round 1 is built: a case with `rounds` above 1 is skipped, and only when stage1 refuses
-  # it for that reason (exit 2 and the one-round message).
-  if [ -f "$c/limits" ] && grep -Eq '^rounds=0*([2-9]|[1-9][0-9]+)$' "$c/limits"; then
-    st=0
-    # shellcheck disable=SC2086
-    "$S1" ir opt --dump=inline $lims "$c/input.ir" > "$o.inline" 2> "$o.err" || st=$?
-    if [ "$st" = 2 ] && grep -q 'only --dump=inline of one round is built' "$o.err"; then
-      orounds=$((orounds + 1))
-    else
-      echo "OPT SKIP $(basename "$c") (exit $st: $(head -c 200 "$o.err"))"
-      fail=1
-    fi
-    continue
-  fi
   # shellcheck disable=SC2086
   if "$S1" ir opt --dump=inline $lims "$c/input.ir" > "$o.inline" 2> "$o.err" &&
      "$S1" ir fmt "$c/input.ir" > "$o.fmt" &&
@@ -107,7 +102,36 @@ for c in "$ROOT"/tests/opt/*/; do
     fail=1
   fi
 done
-echo "stage1-ir-gate: opt inline dumps $osame / $ocases equal, $orounds need more rounds"
+echo "stage1-ir-gate: opt inline dumps $osame / $ocases equal ($oskip cases of more than one round skipped)"
+
+# The module after the expansion (`--dump-phase=inline`, verified by stage1) of every case with an
+# `inline.ir`, on its input and on its `stage1 ir fmt` text, equals that file; stage0 loads it.
+xcases=0
+xsame=0
+xskip=0
+for c in "$ROOT"/tests/opt/*/; do
+  [ -f "$c/inline.ir" ] || continue
+  if [ -f "$c/limits" ] && awk -F= '$1 == "rounds" && $2 > 1 { r = 1 } END { exit !r }' "$c/limits"; then
+    xskip=$((xskip + 1))
+    continue
+  fi
+  xcases=$((xcases + 1))
+  lims=""
+  if [ -f "$c/limits" ]; then lims=$(sed 's/^/--limit /' "$c/limits" | tr '\n' ' '); fi
+  o="$OUT/opt-$(basename "$c")"
+  # shellcheck disable=SC2086
+  if "$S1" ir opt --dump-phase=inline --verify-phases $lims "$c/input.ir" > "$o.x.ir" 2> "$o.x.err" &&
+     "$S1" ir fmt "$c/input.ir" > "$o.x.fmt" &&
+     "$S1" ir opt --dump-phase=inline --verify-phases $lims "$o.x.fmt" > "$o.x.fmt.ir" 2>> "$o.x.err" &&
+     cmp -s "$c/inline.ir" "$o.x.ir" && cmp -s "$c/inline.ir" "$o.x.fmt.ir" &&
+     "$S0" ir check "$o.x.ir" 2>> "$o.x.err"; then
+    xsame=$((xsame + 1))
+  else
+    echo "OPT X DIFF $(basename "$c") ($(diff "$c/inline.ir" "$o.x.ir" 2>&1 | head -3 | tr '\n' ' ')$(head -c 200 "$o.x.err"))"
+    fail=1
+  fi
+done
+echo "stage1-ir-gate: opt modules after X $xsame / $xcases equal and loaded by stage0 ($xskip cases of more than one round skipped)"
 
 LIST="$OUT/roots.txt"
 CONF="$ROOT/tests/conformance"

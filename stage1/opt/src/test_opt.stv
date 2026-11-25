@@ -1,8 +1,10 @@
-// The decision's facts and verdicts on hand-written `release checked` texts; the expected tables
-// follow contracts/opt-passes.md sections 2, 3, and 8.
+// The decision's facts and verdicts, and the expansion, on hand-written `release checked` texts;
+// the expected tables and texts follow contracts/opt-passes.md sections 2, 3, 4, and 8.
 import decide;
+import expand;
 import facts;
 import ir.bytes;
+import ir.canon;
 import ir.features;
 import ir.load;
 import ir.model;
@@ -183,4 +185,77 @@ test fn limits_refuse_what_k3_refuses() {
     debug.assert(lim.set(mem.str_bytes("slot_callee"), 8) && lim.slot_callee == 8, "slot_callee");
     debug.assert(facts.op_weight(mem.str_bytes("slot")) == 0 && facts.op_weight(mem.str_bytes("intrinsic.syscall0")) == 2 && facts.op_weight(mem.str_bytes("vec.add")) == 1, "op rows: exact, then the longest `*` prefix");
     debug.assert(facts.op_weight(mem.str_bytes("nosuchop")) == facts.NONE, "no row");
+}
+
+// The module of `lines` after `canon`, D under `lim`, X, and `canon` (rule P1), printed.
+fn after_x(lines: &[&str], lim: &decide.Limits) -> vec.Vec<u8> {
+    let mut ld = loaded(lines);
+    canon.canon(&mut ld.m);
+    let fx = facts.build(&ld.m);
+    let d = decide.decide(&ld.m, &fx, lim);
+    expand.run(&mut ld.m, &fx, &d);
+    canon.canon(&mut ld.m);
+    return print.print(&ld.m);
+}
+
+// Whether X prints the module of `lines` as: its header at level `opt`, its lines 1..keep
+// unchanged, then `want`; and the printed text loads.
+fn expands(lines: &[&str], keep: usize, want: &[&str]) -> bool {
+    let got = after_x(lines, &decide.Limits.table());
+    let mut w = vec.Vec::<u8>.new();
+    bytes.push_str(&mut w, "stave.ir 4 \"x86_64-linux-v2\" release opt\n");
+    for i in 1..keep {
+        bytes.push_str(&mut w, lines[i]);
+        w.push(10);
+    }
+    for i in 0..want.len() {
+        bytes.push_str(&mut w, want[i]);
+        w.push(10);
+    }
+    let again = load.load(got.as_slice());
+    return again.ok() && got.as_slice().eq(w.as_slice());
+}
+
+test fn x2_x3_every_argument_kind_binds_its_param() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 int u size", "type t2 bool", "type t3 str", "type t4 ref t3", "type t5 fntype t0 -> t0", "str s0 \"ab\"", "fn @0 m.inc(t0) -> t0 {", "b0(%0: t0):", "  %1 = add.wrap t0 %0 1", "  ret %1", "}", "fn @1 m.pick(t2, t5, t4, t0) -> t5 {", "b0(%0: t2, %1: t5, %2: t4, %3: t0):", "  %4 = slice.len t1 %2", "  %5 = select t5 %0 %1 @0", "  ret %5", "}", "fn @2 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = mul.wrap t0 %0 3", "  %2 = call t5 @1 1 @0 s0 %1", "  %3 = call.ind t0 %2 %1", "  ret %3", "}"];
+    let want = ["fn @2 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = mul.wrap t0 %0 3", "  %2 = slice.len t1 s0", "  %3 = select t5 1 @0 @0", "  br b1(%3)", "b1(%4: t5):", "  %5 = call.ind t0 %4 %1", "  ret %5", "}"];
+    debug.assert(expands(&lines, 19, &want), "a constant, an @fn, a string, and a value for the params; the code after the call in the continuation");
+}
+
+test fn x4_x5_callee_blocks_rets_and_a_unit_call() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 bool", "type t2 ref mut t0", "fn @0 m.clamp(t0) -> t0 {", "b0(%0: t0):", "  %1 = lt t1 %0 10", "  cbr %1 b1() b2()", "b1():", "  ret %0", "b2():", "  ret 10", "}", "fn @1 m.put(t2, t0) {", "b0(%0: t2, %1: t0):", "  switch %1 0:b1() _:b2()", "b1():", "  ret", "b2():", "  store () %0 %1", "  ret", "}", "fn @2 m.top(t2, t0) -> t0 {", "b0(%0: t2, %1: t0):", "  br b1(%1)", "b1(%2: t0):", "  %3 = call t0 @0 %2", "  call () @1 %0 %3", "  %4 = eq t1 %3 0", "  cbr %4 b1(%3) b2()", "b2():", "  ret %2", "}"];
+    let want = ["fn @2 m.top(t2, t0) -> t0 {", "b0(%0: t2, %1: t0):", "  br b1(%1)", "b1(%2: t0):", "  %3 = lt t1 %2 10", "  cbr %3 b2() b3()", "b2():", "  br b4(%2)", "b3():", "  br b4(10)", "b4(%4: t0):", "  switch %4 0:b5() _:b6()", "b5():", "  br b7()", "b6():", "  store () %0 %4", "  br b7()", "b7():", "  %5 = eq t1 %4 0", "  cbr %5 b1(%4) b8()", "b8():", "  ret %2", "}"];
+    debug.assert(expands(&lines, 22, &want), "each ret a br to the continuation, with the value only when the call has a result; the caller's targets past the copies");
+}
+
+test fn x6_rows_of_one_block_left_to_right_and_their_sites() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "site 0 \"a.stv\" 1 1 m.f", "site 1 \"a.stv\" 2 1 m.top", "site 2 \"a.stv\" 3 1 m.top", "site 3 \"a.stv\" 4 1 m.top", "fn @0 m.f(t0) -> t0 {", "b0(%0: t0):", "  %1 = add t0 %0 1 !0", "  ret %1", "}", "fn @1 m.ext(t0) -> t0 symbol \"ext\"", "fn @2 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = call t0 @0 %0 !1", "  %2 = call t0 @1 %1 !2", "  %3 = call t0 @0 %2 !3", "  ret %3", "}"];
+    let want = ["fn @2 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = add t0 %0 1 !0", "  br b1(%1)", "b1(%2: t0):", "  %3 = call t0 @1 %2 !2", "  %4 = add t0 %3 1 !0", "  br b2(%4)", "b2(%5: t0):", "  ret %5", "}"];
+    debug.assert(expands(&lines, 12, &want), "the second row splits the first one's continuation; copies keep their rows, the inlined calls' rows go");
+}
+
+test fn x7_x1_slots_of_nested_copies_go_to_b0_in_preorder() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 ref mut t0", "fn @0 m.h(t0) -> t0 {", "b0(%0: t0):", "  %1 = slot t1", "  store () %1 %0", "  %2 = load t0 %1", "  ret %2", "}", "fn @1 m.g(t0) -> t0 {", "b0(%0: t0):", "  %1 = slot t1", "  store () %1 7", "  %2 = call t0 @0 %0", "  %3 = load t0 %1", "  %4 = add.wrap t0 %2 %3", "  ret %4", "}", "fn @2 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = slot t1", "  %2 = call t0 @0 %0", "  %3 = call t0 @1 %2", "  store () %1 %3", "  ret %3", "}"];
+    let want = ["fn @1 m.g(t0) -> t0 {", "b0(%0: t0):", "  %1 = slot t1", "  %2 = slot t1", "  store () %1 7", "  store () %2 %0", "  %3 = load t0 %2", "  br b1(%3)", "b1(%4: t0):", "  %5 = load t0 %1", "  %6 = add.wrap t0 %4 %5", "  ret %6", "}", "fn @2 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = slot t1", "  %2 = slot t1", "  %3 = slot t1", "  %4 = slot t1", "  store () %2 %0", "  %5 = load t0 %2", "  br b1(%5)", "b1(%6: t0):", "  store () %3 7", "  store () %4 %6", "  %7 = load t0 %4", "  br b2(%7)", "b2(%8: t0):", "  %9 = load t0 %3", "  %10 = add.wrap t0 %8 %9", "  br b3(%10)", "b3(%11: t0):", "  store () %1 %11", "  ret %11", "}"];
+    debug.assert(expands(&lines, 10, &want), "the fn's own slots, then per row in (b, k) order F(g)'s slots; F(g) is g expanded");
+}
+
+test fn x4_x6_a_loop_callee_twice_in_one_block() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 bool", "fn @0 m.sum(t0) -> t0 {", "b0(%0: t0):", "  br b1(0, 0)", "b1(%1: t0, %2: t0):", "  %3 = lt t1 %1 %0", "  cbr %3 b2() b3()", "b2():", "  %4 = add.wrap t0 %2 %1", "  %5 = add.wrap t0 %1 1", "  br b1(%5, %4)", "b3():", "  ret %2", "}", "fn @1 m.top(t0) -> t0 {", "b0(%0: t0):", "  %1 = call t0 @0 %0", "  %2 = call t0 @0 5", "  %3 = add.wrap t0 %1 %2", "  ret %3", "}"];
+    let want = ["fn @1 m.top(t0) -> t0 {", "b0(%0: t0):", "  br b1(0, 0)", "b1(%1: t0, %2: t0):", "  %3 = lt t1 %1 %0", "  cbr %3 b2() b3()", "b2():", "  %4 = add.wrap t0 %2 %1", "  %5 = add.wrap t0 %1 1", "  br b1(%5, %4)", "b3():", "  br b4(%2)", "b4(%6: t0):", "  br b5(0, 0)", "b5(%7: t0, %8: t0):", "  %9 = lt t1 %7 5", "  cbr %9 b6() b7()", "b6():", "  %10 = add.wrap t0 %8 %7", "  %11 = add.wrap t0 %7 1", "  br b5(%11, %10)", "b7():", "  br b8(%8)", "b8(%12: t0):", "  %13 = add.wrap t0 %6 %12", "  ret %13", "}"];
+    debug.assert(expands(&lines, 16, &want), "fresh blocks and values per copy, loop params and back edges mapped, a constant argument in the copy");
+}
+
+test fn x_without_accepted_rows_changes_only_the_level() {
+    let lines = five_adds();
+    let mut lim = decide.Limits.table();
+    debug.assert(lim.set(mem.str_bytes("cap"), 0), "cap 0");
+    let got = after_x(&lines, &lim);
+    let mut w = vec.Vec::<u8>.new();
+    bytes.push_str(&mut w, "stave.ir 4 \"x86_64-linux-v2\" release opt\n");
+    for i in 1..lines.len() {
+        bytes.push_str(&mut w, lines[i]);
+        w.push(10);
+    }
+    debug.assert(got.as_slice().eq(w.as_slice()), "every row refused on budget: the bodies stay as they are");
 }

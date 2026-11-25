@@ -3,14 +3,18 @@
 // `FILE:LINE:COL: error: MSG` or `FILE:LINE: verify: MSG` on stderr (at most 100) and exits 1;
 // an unreadable FILE or a bad command line exits 2.
 //
-// `stage1 ir opt --dump=inline [--limit NAME=N]... FILE` (contracts/cli-stage1.md): the decision
-// tables of the release passes' one round on a `release checked` FILE. The expansion and the
-// clean-up are not built: every other form of `ir opt` is a usage error.
+// `stage1 ir opt --dump=inline|--dump-phase=inline [--verify-phases] [--limit NAME=N]... FILE`
+// (contracts/cli-stage1.md): on a `release checked` FILE, canonical as loaded, the decision tables
+// of the release passes' one round, or the canonical module after its expansion; with
+// `--verify-phases` the stage1 verifier checks that module (a fault: exit 3). The clean-up and
+// the base passes are not built: every other form of `ir opt` is a usage error.
 import ir.canon;
 import ir.load;
 import ir.model;
 import ir.print;
 import opt.decide;
+import opt.expand;
+import opt.facts;
 import text;
 import std.env;
 import std.io;
@@ -72,11 +76,17 @@ fn read_into(file: &string.String, src: &mut vec.Vec<u8>) -> bool {
 fn opt_run(a: &[string.String]) -> i32 {
     let mut lim = decide.Limits.table();
     let mut dump = false;
+    let mut phase = false;
+    let mut verify = false;
     let mut k: usize = 3;
     while k + 1 < a.len() {
         let f = a[k].as_bytes();
         if text.eq_str(f, "--dump=inline") {
             dump = true;
+        } else if text.eq_str(f, "--dump-phase=inline") {
+            phase = true;
+        } else if text.eq_str(f, "--verify-phases") {
+            verify = true;
         } else if text.eq_str(f, "--limit") && k + 2 < a.len() {
             k = k + 1;
             if !set_limit(&mut lim, a[k].as_bytes()) {
@@ -84,7 +94,7 @@ fn opt_run(a: &[string.String]) -> i32 {
                 io.eprint(f"stage1: ir opt: bad --limit `{s}` (NAME=N, NAME one of threshold cap call_saved slot_callee slot_caller rounds, within opt-passes.md K3)\n");
                 return 2;
             }
-        } else {
+        } else if !text.eq_str(f, "--passes=full") {
             let s = &a[k];
             io.eprint(f"stage1: ir opt: unknown flag `{s}`\n");
             return 2;
@@ -92,17 +102,21 @@ fn opt_run(a: &[string.String]) -> i32 {
         k = k + 1;
     }
     if k + 1 != a.len() || text.starts_with(a[k].as_bytes(), mem.str_bytes("--")) {
-        io.eprint("stage1: usage: stage1 ir opt --dump=inline [--limit NAME=N]... FILE\n");
+        io.eprint("stage1: usage: stage1 ir opt --dump=inline|--dump-phase=inline [--verify-phases] [--limit NAME=N]... FILE\n");
         return 2;
     }
-    if !dump || lim.rounds != 1 {
-        io.eprint("stage1: ir opt: only --dump=inline of one round is built (no expansion or clean-up yet)\n");
+    if dump && phase {
+        io.eprint("stage1: ir opt: --dump and --dump-phase exclude each other\n");
+        return 2;
+    }
+    if !(dump || phase) || lim.rounds != 1 {
+        io.eprint("stage1: ir opt: only --dump=inline and --dump-phase=inline of one round are built (no clean-up or base passes yet)\n");
         return 2;
     }
     let file = &a[k];
     let mut src = vec.Vec::<u8>.new();
     if !read_into(file, &mut src) { return 2; }
-    let ld = load.load(src.as_slice());
+    let mut ld = load.load(src.as_slice());
     if !ld.ok() {
         let out = ld.errs.render(file.as_bytes());
         let _ = io.write_all(2, out.as_slice());
@@ -112,9 +126,48 @@ fn opt_run(a: &[string.String]) -> i32 {
         io.eprint(f"{file}: error: ir opt reads a `release checked` module\n");
         return 1;
     }
-    let out = decide.inline_dump(&ld.m, &lim);
+    canon.canon(&mut ld.m);
+    if dump {
+        let out = decide.inline_dump(&ld.m, &lim);
+        let _ = io.write_all(1, out.as_slice());
+        return 0;
+    }
+    let fx = facts.build(&ld.m);
+    let d = decide.decide(&ld.m, &fx, &lim);
+    expand.run(&mut ld.m, &fx, &d);
+    canon.canon(&mut ld.m);
+    let out = print.print(&ld.m);
+    if verify && !phase_verified(file, "inline", out.as_slice()) { return 3; }
     let _ = io.write_all(1, out.as_slice());
     return 0;
+}
+
+// The stage1 verifier on t, the printed module after phase `ph`: each fault prints
+// `FILE: internal error: PH: @<inst>: MSG` on stderr, `<inst>` the fn whose lines hold it.
+fn phase_verified(file: &string.String, ph: &str, t: &[u8]) -> bool {
+    let ld = load.load(t);
+    if ld.ok() { return true; }
+    let mut e = vec.Vec::<u8>.new();
+    for j in 0..ld.errs.len() {
+        e.extend_from_slice(file.as_bytes());
+        e.extend_from_slice(mem.str_bytes(": internal error: "));
+        e.extend_from_slice(mem.str_bytes(ph));
+        e.extend_from_slice(mem.str_bytes(": "));
+        let line = ld.errs.line.as_slice()[j];
+        let mut at = ld.fn_line.len();
+        for f in 0..ld.fn_line.len() {
+            if ld.fn_line.as_slice()[f] <= line { at = f; }
+        }
+        if at < ld.m.fn_inst.rows() {
+            e.push(64);
+            print.push_inst(&mut e, ld.m.fn_inst.row(at));
+            e.extend_from_slice(mem.str_bytes(": "));
+        }
+        e.extend_from_slice(ld.errs.msg.row(j));
+        e.push(10);
+    }
+    let _ = io.write_all(2, e.as_slice());
+    return false;
 }
 
 // `NAME=N` into lim.
