@@ -78,35 +78,6 @@ pub const G_DECL: u8 = 1;
 pub const G_PRIM: u8 = 2;
 pub const G_BUILTIN: u8 = 3;
 
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_KW_PUB: u8 = terminals.T_KW_PUB as% u8;
-const T_KW_TEST: u8 = terminals.T_KW_TEST as% u8;
-const T_KW_REC: u8 = terminals.T_KW_REC as% u8;
-const T_KW_UNSAFE: u8 = terminals.T_KW_UNSAFE as% u8;
-const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
-const T_KW_VIEW: u8 = terminals.T_KW_VIEW as% u8;
-const T_KW_ENUM: u8 = terminals.T_KW_ENUM as% u8;
-const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
-const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
-const T_KW_STRUCT: u8 = terminals.T_KW_STRUCT as% u8;
-const T_KW_TRAIT: u8 = terminals.T_KW_TRAIT as% u8;
-const T_KW_TYPE: u8 = terminals.T_KW_TYPE as% u8;
-const T_KW_DISPATCH: u8 = terminals.T_KW_DISPATCH as% u8;
-const T_KW_KERNEL: u8 = terminals.T_KW_KERNEL as% u8;
-const T_KW_STATIC: u8 = terminals.T_KW_STATIC as% u8;
-const T_KW_EXTERN: u8 = terminals.T_KW_EXTERN as% u8;
-const T_KW_IMPL: u8 = terminals.T_KW_IMPL as% u8;
-const T_KW_IMPORT: u8 = terminals.T_KW_IMPORT as% u8;
-const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
-const T_SEMI: u8 = terminals.T_SEMI as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
-const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
-const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
-const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
-const T_R_BRACKET: u8 = terminals.T_R_BRACKET as% u8;
-const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
-
 // The decls being collected, in stage0's collection order (module decls, then file by file).
 struct Raw {
     kind: vec.Vec<u8>,
@@ -329,11 +300,11 @@ fn name_of(nm: &intern.Interned, g: u32) -> u32 {
 
 // `rec`? `fn` Ident: the name token of a fn whose first token is a.
 fn fn_name(t: &lex.Tokens, a: u32) -> u32 {
-    return if kind_at(t, a as usize) == T_KW_REC then a + 2 else a + 1;
+    return if kind_at(t, a as usize) == terminals.T_KW_REC then a + 2 else a + 1;
 }
 
 fn rec_flag(t: &lex.Tokens, a: u32) -> u16 {
-    return if kind_at(t, a as usize) == T_KW_REC then F_REC else 0u16;
+    return if kind_at(t, a as usize) == terminals.T_KW_REC then F_REC else 0u16;
 }
 
 // Whether row p (a `Params` node, or NONE) has a `self` parameter.
@@ -367,16 +338,16 @@ fn fields(raw: &mut Raw, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.I
         let f = (it.base + ks[j] as usize) as% u32;
         if tree.kind.as_slice()[f as usize] != node_kinds.KIND_FIELD { continue; }
         let a = tree.tok.as_slice()[f as usize];
-        let is_pub = kind_at(t, a as usize) == T_KW_PUB;
+        let is_pub = kind_at(t, a as usize) == terminals.T_KW_PUB;
         let _ = push_decl(raw, it, tree, t, nm, DK_FIELD, if is_pub then a + 1 else a, f, parent, if is_pub then F_PUB else 0u16, j as% u32);
     }
 }
 
 fn adt(raw: &mut Raw, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, n: u32, pub_flag: u16) -> u32 {
     let a = tree.tok.as_slice()[n as usize];
-    let is_view = kind_at(t, a as usize) == T_KW_VIEW;
+    let is_view = kind_at(t, a as usize) == terminals.T_KW_VIEW;
     let kw = if is_view then a + 1 else a;
-    let dk = if kind_at(t, kw as usize) == T_KW_ENUM then DK_ENUM else DK_STRUCT;
+    let dk = if kind_at(t, kw as usize) == terminals.T_KW_ENUM then DK_ENUM else DK_STRUCT;
     let d = push_decl(raw, it, tree, t, nm, dk, kw + 1, n, NONE, pub_flag | (if is_view then F_VIEW else 0u16), 0);
     if dk == DK_STRUCT {
         let f = child(tree, it.base, n as usize, node_kinds.KIND_FIELDS);
@@ -390,7 +361,7 @@ fn adt(raw: &mut Raw, it: Item, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Inte
         if tree.kind.as_slice()[v as usize] != node_kinds.KIND_VARIANT { continue; }
         let vt = tree.tok.as_slice()[v as usize];
         let next = kind_at(t, vt as usize + 1);
-        let shape = if next == T_L_PAREN then F_TUPLE else if next == T_L_BRACE then F_RECORD else 0u16;
+        let shape = if next == terminals.T_L_PAREN then F_TUPLE else if next == terminals.T_L_BRACE then F_RECORD else 0u16;
         let vd = push_decl(raw, it, tree, t, nm, DK_VARIANT, vt, v, d, shape | F_PUB, k);
         k = k + 1;
         let f = child(tree, it.base, v as usize, node_kinds.KIND_FIELDS);
@@ -405,8 +376,8 @@ fn name_after(t: &lex.Tokens, it: Item, at: u32, kw: u8) -> u32 {
     let lim = if i + 8 < it.hi then i + 8 else it.hi;
     while i < lim {
         let k = kind_at(t, i);
-        if k == kw { return if kind_at(t, i + 1) == T_IDENT then (i + 1) as% u32 else NONE; }
-        if k == T_KW_UNSAFE {
+        if k == kw { return if kind_at(t, i + 1) == terminals.T_IDENT then (i + 1) as% u32 else NONE; }
+        if k == terminals.T_KW_UNSAFE {
             i = i + 4;
             continue;
         }
@@ -446,7 +417,7 @@ fn impl_decl(raw: &mut Raw, c: &mut Collect, it: Item, tree: &ast.Ast, t: &lex.T
             let mut fl = trait_flag;
             if has_self(tree, it.base, child(tree, it.base, x as usize, node_kinds.KIND_PARAMS)) { fl = fl | F_HAS_SELF; }
             if first != x { fl = fl | F_UNSAFE; }
-            if fa > it.lo && kind_at(t, fa - 1) == T_KW_PUB { fl = fl | F_PUB; }
+            if fa > it.lo && kind_at(t, fa - 1) == terminals.T_KW_PUB { fl = fl | F_PUB; }
             let a = tree.tok.as_slice()[x as usize];
             fl = fl | rec_flag(t, a);
             let _ = push_decl(raw, it, tree, t, nm, DK_METHOD, fn_name(t, a), x, d, fl, k);
@@ -505,7 +476,7 @@ fn item_body(raw: &mut Raw, c: &mut Collect, it: Item, tree: &ast.Ast, t: &lex.T
         } else if xk == node_kinds.KIND_CONST_DECL {
             main = push_decl(raw, it, tree, t, nm, DK_CONST, a + 1, x, NONE, pub_flag, 0);
         } else if xk == node_kinds.KIND_STATIC_DECL {
-            let m = kind_at(t, a as usize + 1) == T_KW_MUT;
+            let m = kind_at(t, a as usize + 1) == terminals.T_KW_MUT;
             main = push_decl(raw, it, tree, t, nm, DK_STATIC, if m then a + 2 else a + 1, x, NONE, pub_flag | (if m then F_MUT else 0u16), 0);
         } else if xk == node_kinds.KIND_TYPE_ALIAS {
             main = push_decl(raw, it, tree, t, nm, DK_TYPE_ALIAS, a + 1, x, NONE, pub_flag, 0);
@@ -520,7 +491,7 @@ fn item_body(raw: &mut Raw, c: &mut Collect, it: Item, tree: &ast.Ast, t: &lex.T
                 let f = (it.base + fs[q] as usize) as% u32;
                 if tree.kind.as_slice()[f as usize] != node_kinds.KIND_TRAIT_FN { continue; }
                 let fa = tree.tok.as_slice()[f as usize];
-                let name_tok = name_after(t, it, fa, T_KW_FN);
+                let name_tok = name_after(t, it, fa, terminals.T_KW_FN);
                 let mut fl = F_PUB;
                 if child(tree, it.base, f as usize, node_kinds.KIND_UNSAFE) != NONE { fl = fl | F_UNSAFE; }
                 if has_self(tree, it.base, child(tree, it.base, f as usize, node_kinds.KIND_PARAMS)) { fl = fl | F_HAS_SELF; }
@@ -554,12 +525,12 @@ fn dropped(c: &mut Collect, t: &lex.Tokens, nm: &intern.Interned, module: u32, l
     let mut i = lo;
     loop {
         let k = kind_at(t, i);
-        if k == T_KW_PUB || k == T_KW_TEST || k == T_KW_REC {
+        if k == terminals.T_KW_PUB || k == terminals.T_KW_TEST || k == terminals.T_KW_REC {
             i = i + 1;
-        } else if k == T_KW_UNSAFE {
+        } else if k == terminals.T_KW_UNSAFE {
             i = i + 1;
-            if kind_at(t, i) == T_L_PAREN {
-                while i < hi && kind_at(t, i) != T_R_PAREN { i = i + 1; }
+            if kind_at(t, i) == terminals.T_L_PAREN {
+                while i < hi && kind_at(t, i) != terminals.T_R_PAREN { i = i + 1; }
                 i = i + 1;
             }
         } else {
@@ -568,58 +539,58 @@ fn dropped(c: &mut Collect, t: &lex.Tokens, nm: &intern.Interned, module: u32, l
     }
     let k = kind_at(t, i);
     let mut name = NONE;
-    if k == T_KW_IMPORT {
+    if k == terminals.T_KW_IMPORT {
         let mut j = i + 1;
-        while j < hi && kind_at(t, j) != T_SEMI {
-            if kind_at(t, j) == T_KW_AS {
-                name = if kind_at(t, j + 1) == T_IDENT then (j + 1) as% u32 else NONE;
+        while j < hi && kind_at(t, j) != terminals.T_SEMI {
+            if kind_at(t, j) == terminals.T_KW_AS {
+                name = if kind_at(t, j + 1) == terminals.T_IDENT then (j + 1) as% u32 else NONE;
                 break;
             }
-            if kind_at(t, j) == T_IDENT { name = j as% u32; }
+            if kind_at(t, j) == terminals.T_IDENT { name = j as% u32; }
             j = j + 1;
         }
         push_dropped(c, nm, module, name);
         return;
     }
-    if k == T_KW_FN || k == T_KW_STRUCT || k == T_KW_ENUM || k == T_KW_TRAIT || k == T_KW_CONST || k == T_KW_TYPE {
+    if k == terminals.T_KW_FN || k == terminals.T_KW_STRUCT || k == terminals.T_KW_ENUM || k == terminals.T_KW_TRAIT || k == terminals.T_KW_CONST || k == terminals.T_KW_TYPE {
         name = i as% u32 + 1;
-    } else if k == T_KW_VIEW || k == T_KW_DISPATCH || k == T_KW_KERNEL {
+    } else if k == terminals.T_KW_VIEW || k == terminals.T_KW_DISPATCH || k == terminals.T_KW_KERNEL {
         name = i as% u32 + 2;
-    } else if k == T_KW_STATIC {
-        name = if kind_at(t, i + 1) == T_KW_MUT then i as% u32 + 2 else i as% u32 + 1;
-    } else if k == T_KW_EXTERN {
-        if kind_at(t, i + 2) == T_KW_FN {
+    } else if k == terminals.T_KW_STATIC {
+        name = if kind_at(t, i + 1) == terminals.T_KW_MUT then i as% u32 + 2 else i as% u32 + 1;
+    } else if k == terminals.T_KW_EXTERN {
+        if kind_at(t, i + 2) == terminals.T_KW_FN {
             name = i as% u32 + 3;
         } else {
             let mut depth: i32 = 0;
             for j in i + 1..hi {
                 let x = kind_at(t, j);
-                if x == T_L_BRACE || x == T_L_PAREN || x == T_L_BRACKET || x == T_DOT_L_BRACE {
+                if x == terminals.T_L_BRACE || x == terminals.T_L_PAREN || x == terminals.T_L_BRACKET || x == terminals.T_DOT_L_BRACE {
                     depth = depth + 1;
-                } else if x == T_R_BRACE || x == T_R_PAREN || x == T_R_BRACKET {
+                } else if x == terminals.T_R_BRACE || x == terminals.T_R_PAREN || x == terminals.T_R_BRACKET {
                     depth = depth - 1;
-                } else if x == T_KW_FN && depth == 1 && j + 1 < hi && kind_at(t, j + 1) == T_IDENT {
+                } else if x == terminals.T_KW_FN && depth == 1 && j + 1 < hi && kind_at(t, j + 1) == terminals.T_IDENT {
                     push_dropped(c, nm, module, (j + 1) as% u32);
                 }
             }
         }
-    } else if k == T_KW_IMPL {
+    } else if k == terminals.T_KW_IMPL {
         let mut depth: i32 = 0;
         for j in i + 1..hi {
             let x = kind_at(t, j);
-            if x == T_L_BRACE && depth == 0 { break; }
-            if x == T_L_PAREN || x == T_L_BRACKET || x == T_L_BRACE || x == T_DOT_L_BRACE {
+            if x == terminals.T_L_BRACE && depth == 0 { break; }
+            if x == terminals.T_L_PAREN || x == terminals.T_L_BRACKET || x == terminals.T_L_BRACE || x == terminals.T_DOT_L_BRACE {
                 depth = depth + 1;
-            } else if x == T_R_PAREN || x == T_R_BRACKET || x == T_R_BRACE {
+            } else if x == terminals.T_R_PAREN || x == terminals.T_R_BRACKET || x == terminals.T_R_BRACE {
                 depth = depth - 1;
-            } else if x == T_IDENT {
+            } else if x == terminals.T_IDENT {
                 let s = nm.tok_str.as_slice()[j];
                 if s != NONE { c.poisoned.push(s); }
             }
         }
         return;
     }
-    if name != NONE && (name as usize) < hi && kind_at(t, name as usize) == T_IDENT { push_dropped(c, nm, module, name); }
+    if name != NONE && (name as usize) < hi && kind_at(t, name as usize) == terminals.T_IDENT { push_dropped(c, nm, module, name); }
 }
 
 fn push_dropped(c: &mut Collect, nm: &intern.Interned, module: u32, g: u32) {
@@ -897,8 +868,8 @@ pub fn build(md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &s
         if tree.kind.as_slice()[root] != node_kinds.KIND_ITEM { continue; }
         let it = Item.{ i: i as% u32, base: base, module: module, lo: lo, hi: hi };
         let a = tree.tok.as_slice()[root];
-        let pub_flag = if kind_at(t, a as usize) == T_KW_PUB then F_PUB else 0u16;
-        let is_test = kind_at(t, a as usize) == T_KW_TEST;
+        let pub_flag = if kind_at(t, a as usize) == terminals.T_KW_PUB then F_PUB else 0u16;
+        let is_test = kind_at(t, a as usize) == terminals.T_KW_TEST;
         let nimpl = c.impl_decl.len();
         let ks = kids(tree, root);
         for j in 0..ks.len() {
@@ -1158,7 +1129,7 @@ fn impl_generics(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, base: usi
     let ks = kids(tree, g as usize);
     for j in 0..ks.len() {
         let a = tree.tok.as_slice()[base + ks[j] as usize];
-        let nt = if kind_at(t, a as usize) == T_KW_CONST then a + 1 else a;
+        let nt = if kind_at(t, a as usize) == terminals.T_KW_CONST then a + 1 else a;
         out.push(nm.tok_str.as_slice()[nt as usize]);
     }
 }

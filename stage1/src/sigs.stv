@@ -50,39 +50,6 @@ pub const SF_UNSAFE: u16 = 16;
 pub const SF_VARIADIC: u16 = 32;
 pub const SF_BUILT: u16 = 64;
 
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
-const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
-const T_AMP: u8 = terminals.T_AMP as% u8;
-const T_AMP_AMP: u8 = terminals.T_AMP_AMP as% u8;
-const T_STAR: u8 = terminals.T_STAR as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
-const T_COMMA: u8 = terminals.T_COMMA as% u8;
-const T_DOT: u8 = terminals.T_DOT as% u8;
-const T_DOT_DOT_DOT: u8 = terminals.T_DOT_DOT_DOT as% u8;
-const T_MINUS_GT: u8 = terminals.T_MINUS_GT as% u8;
-const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
-const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
-const T_KW_SELF_TYPE: u8 = terminals.T_KW_SELF_TYPE as% u8;
-const T_KW_ALIGN: u8 = terminals.T_KW_ALIGN as% u8;
-const T_KW_COPY: u8 = terminals.T_KW_COPY as% u8;
-const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
-const T_KW_VIEW: u8 = terminals.T_KW_VIEW as% u8;
-const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
-const T_KW_PUB: u8 = terminals.T_KW_PUB as% u8;
-const T_LT: u8 = terminals.T_LT as% u8;
-const T_GT: u8 = terminals.T_GT as% u8;
-const T_GT_EQ: u8 = terminals.T_GT_EQ as% u8;
-const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
-const T_GT_GT_EQ: u8 = terminals.T_GT_GT_EQ as% u8;
-const T_EOF: u8 = terminals.T_EOF as% u8;
-const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
-const T_R_BRACKET: u8 = terminals.T_R_BRACKET as% u8;
-const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
-const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
-const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
-
 const K_TYPE: u8 = node_kinds.KIND_TYPE;
 const K_TYPE_BASE: u8 = node_kinds.KIND_TYPE_BASE;
 const K_GENERIC_ARGS: u8 = node_kinds.KIND_GENERIC_ARGS;
@@ -349,7 +316,7 @@ fn span_of(tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, g: usize) -> (u32,
         let a = tree.tok.as_slice()[n];
         let k = kind(tree, n);
         if k == K_TYPE {
-            if tk(t, a) == T_L_BRACKET { return (a0, close_of(cut, a)); }
+            if tk(t, a) == terminals.T_L_BRACKET { return (a0, close_of(cut, a)); }
             let c = first_child(tree, base, n);
             if c == NONE { return (a0, a); }
             n = c as usize;
@@ -357,14 +324,14 @@ fn span_of(tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, g: usize) -> (u32,
         }
         if k == K_TYPE_BASE {
             let ta = tk(t, a);
-            if ta == T_L_PAREN { return (a0, close_of(cut, a)); }
-            if ta == T_KW_FN {
+            if ta == terminals.T_L_PAREN { return (a0, close_of(cut, a)); }
+            if ta == terminals.T_KW_FN {
                 let close = close_of(cut, a + 1);
                 let wd = child(tree, base, n, K_WITHOUT);
                 if wd != NONE { return (a0, close_of(cut, tree.tok.as_slice()[wd as usize] + 1)); }
                 let nd = child(tree, base, n, K_NEEDS);
                 if nd != NONE { return (a0, close_of(cut, tree.tok.as_slice()[nd as usize] + 1)); }
-                if tk(t, close + 1) == T_MINUS_GT {
+                if tk(t, close + 1) == terminals.T_MINUS_GT {
                     let ks = tree.kids.row(n);
                     if ks.len() == 0 { return (a0, close); }
                     n = base + ks[ks.len() - 1] as usize;
@@ -372,15 +339,15 @@ fn span_of(tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, g: usize) -> (u32,
                 }
                 return (a0, close);
             }
-            if ta == T_IDENT {
+            if ta == terminals.T_IDENT {
                 let mut e = a;
-                while tk(t, e + 1) == T_DOT && tk(t, e + 2) == T_IDENT {
+                while tk(t, e + 1) == terminals.T_DOT && tk(t, e + 2) == terminals.T_IDENT {
                     e = e + 2;
                 }
-                if tk(t, e + 1) == T_LT { return (a0, angle_end(t, e + 1) - 1); }
+                if tk(t, e + 1) == terminals.T_LT { return (a0, angle_end(t, e + 1) - 1); }
                 return (a0, e);
             }
-            if ta == T_KW_SELF_TYPE { return (a0, a); }
+            if ta == terminals.T_KW_SELF_TYPE { return (a0, a); }
         }
         if k == K_GENERIC_ARGS { return (a0, angle_end(t, a) - 1); }
         let ks = tree.kids.row(n);
@@ -404,14 +371,14 @@ fn angle_end(t: &lex.Tokens, lt: u32) -> u32 {
     let mut i = lt;
     while (i as usize) < t.kind.len() {
         let k = tk(t, i);
-        if k == T_EOF { return i; }
-        if k == T_L_PAREN || k == T_L_BRACKET || k == T_L_BRACE || k == T_DOT_L_BRACE {
+        if k == terminals.T_EOF { return i; }
+        if k == terminals.T_L_PAREN || k == terminals.T_L_BRACKET || k == terminals.T_L_BRACE || k == terminals.T_DOT_L_BRACE {
             bracket = bracket + 1;
-        } else if k == T_R_PAREN || k == T_R_BRACKET || k == T_R_BRACE {
+        } else if k == terminals.T_R_PAREN || k == terminals.T_R_BRACKET || k == terminals.T_R_BRACE {
             bracket = bracket - 1;
             if bracket < 0 { return i; }
         } else if bracket == 0 {
-            let delta: i64 = if k == T_LT then 1 else if k == T_GT || k == T_GT_EQ then -1 else if k == T_GT_GT || k == T_GT_GT_EQ then -2 else 0;
+            let delta: i64 = if k == terminals.T_LT then 1 else if k == terminals.T_GT || k == terminals.T_GT_EQ then -1 else if k == terminals.T_GT_GT || k == terminals.T_GT_GT_EQ then -2 else 0;
             angle = angle + delta;
             if delta < 0 && angle <= 0 { return i + 1; }
         }
@@ -532,7 +499,7 @@ fn path_res(cx: &consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Inter
     let end = tree.tok_end.as_slice()[g];
     let mut last = a;
     let mut p = a + 1;
-    while p + 1 < end && tk(t, p) == T_DOT && tk(t, p + 1) == T_IDENT {
+    while p + 1 < end && tk(t, p) == terminals.T_DOT && tk(t, p + 1) == terminals.T_IDENT {
         last = p + 1;
         p = p + 2;
     }
@@ -572,7 +539,7 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
     let k = kind(tree, g);
     let a = tree.tok.as_slice()[g];
     if k == K_TYPE {
-        if tk(t, a) == T_L_BRACKET {
+        if tk(t, a) == terminals.T_L_BRACKET {
             let e = child(tree, base, g, K_TYPE);
             if e == NONE {
                 lw.vals.push(ERR);
@@ -595,16 +562,16 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
         return;
     }
     let ta = tk(t, a);
-    if ta == T_AMP || ta == T_AMP_AMP {
+    if ta == terminals.T_AMP || ta == terminals.T_AMP_AMP {
         let c = first_child(tree, base, g);
         if c == NONE {
             lw.vals.push(ERR);
             return;
         }
-        if ta == T_AMP_AMP {
+        if ta == terminals.T_AMP_AMP {
             let inner = first_child(tree, base, c as usize);
             if inner != NONE && tree.tok.as_slice()[inner as usize] == a {
-                let m = tk(t, a + 1) == T_KW_MUT;
+                let m = tk(t, a + 1) == terminals.T_KW_MUT;
                 lw.frame(OP_WRAP, g, 1, 0);
                 lw.frame(OP_WRAP, g, 1, if m then 1u32 else 0u32);
                 let cc = first_child(tree, base, inner as usize);
@@ -616,13 +583,13 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
                 return;
             }
         }
-        let m = tk(t, a + 1) == T_KW_MUT;
+        let m = tk(t, a + 1) == terminals.T_KW_MUT;
         lw.frame(OP_WRAP, g, 1, if m then 1u32 else 0u32);
         lw.frame(OP_TY, c as usize, 0, chain + 1);
         return;
     }
-    if ta == T_STAR {
-        let m = tk(t, a + 1) == T_KW_MUT;
+    if ta == terminals.T_STAR {
+        let m = tk(t, a + 1) == terminals.T_KW_MUT;
         let c = first_child(tree, base, g);
         if c == NONE {
             lw.vals.push(ERR);
@@ -632,7 +599,7 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
         lw.frame(OP_TY, c as usize, 0, chain + 1);
         return;
     }
-    if ta == T_L_PAREN {
+    if ta == terminals.T_L_PAREN {
         lw.tmp.clear();
         let ks = tree.kids.row(g);
         for j in 0..ks.len() {
@@ -647,9 +614,9 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
         }
         return;
     }
-    if ta == T_KW_FN {
+    if ta == terminals.T_KW_FN {
         let close = close_of(cut, a + 1);
-        let has_ret = tk(t, close + 1) == T_MINUS_GT;
+        let has_ret = tk(t, close + 1) == terminals.T_MINUS_GT;
         lw.tmp.clear();
         let ks = tree.kids.row(g);
         for j in 0..ks.len() {
@@ -668,11 +635,11 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
         }
         return;
     }
-    if ta == T_KW_SELF_TYPE {
+    if ta == terminals.T_KW_SELF_TYPE {
         lw.vals.push(if sc.self_ty == NONE then ERR else sc.self_ty);
         return;
     }
-    if ta != T_IDENT {
+    if ta != terminals.T_IDENT {
         lw.vals.push(ERR);
         return;
     }
@@ -790,7 +757,7 @@ fn visit_garg(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens
             return;
         }
         let cty = if want == NONE then cx.tab.usize_t() else want;
-        if tk(t, a) == T_INT_LIT {
+        if tk(t, a) == terminals.T_INT_LIT {
             let (ok, v, big) = int_lit(t, set, cut, it, a);
             if !ok {
                 lw.garg(types.GA_ERROR, 0, 0);
@@ -886,7 +853,7 @@ fn array_of(cx: &mut consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.I
     }
     let close = close_of(cut, open);
     let mut al: u32 = 0;
-    if close >= 2 && tk(t, close - 2) == T_KW_ALIGN && (!need_lit || tk(t, close - 1) == T_INT_LIT) {
+    if close >= 2 && tk(t, close - 2) == terminals.T_KW_ALIGN && (!need_lit || tk(t, close - 1) == terminals.T_INT_LIT) {
         let (ok, v, big) = int_lit(t, set, cut, it, close - 1);
         if ok { al = if big || v > 1048576 then 1048576u32 else v as% u32; }
     }
@@ -908,7 +875,7 @@ fn unknown_names(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Inte
         let ks = tree.kids.row(wd as usize);
         for j in 0..ks.len() {
             let tok = tree.tok.as_slice()[base + ks[j] as usize];
-            let name = if tk(t, tok) == T_IDENT then sym_text(nm, tok) else mem.str_bytes("unsafe");
+            let name = if tk(t, tok) == terminals.T_IDENT then sym_text(nm, tok) else mem.str_bytes("unsafe");
             let (ok, _) = effect_of(name);
             if !ok { sg.rows.add(D_E1404, it, tok, tok, NONE, NONE, ERR, consteval.no_scope()); }
         }
@@ -934,7 +901,7 @@ fn deny_bits(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.
     for j in 0..ks.len() {
         let e = base + ks[j] as usize;
         let tok = tree.tok.as_slice()[e];
-        let name = if tk(t, tok) == T_IDENT then sym_text(nm, tok) else mem.str_bytes("unsafe");
+        let name = if tk(t, tok) == terminals.T_IDENT then sym_text(nm, tok) else mem.str_bytes("unsafe");
         let (ok, b) = effect_of(name);
         if ok { bits = bits | b; }
     }
@@ -979,7 +946,7 @@ fn finish(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm
         let lo = lw.vals.len() - n;
         let a = tree.tok.as_slice()[g];
         let close = close_of(cut, a);
-        if n == 1 && tk(t, close - 1) != T_COMMA {
+        if n == 1 && tk(t, close - 1) != terminals.T_COMMA {
             return;
         }
         let mut err = false;
@@ -1286,9 +1253,9 @@ fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: u
         let o = base + ks[j] as usize;
         if kind(tree, o) != K_ORIGIN { continue; }
         let a = tree.tok.as_slice()[o];
-        let cp = tk(t, a) == T_KW_COPY;
+        let cp = tk(t, a) == terminals.T_KW_COPY;
         // `self` has no resolution row: it names the fn's `self` parameter
-        if tk(t, if cp then a + 1 else a) == T_KW_SELF {
+        if tk(t, if cp then a + 1 else a) == terminals.T_KW_SELF {
             for k in 0..ps.len() {
                 if child(tree, base, ps[k] as usize, K_SELF_PARAM) != NONE {
                     out.push((if k > 255 then 255u32 else k as% u32) | (if cp then 0x100u32 else 0u32));
@@ -1315,7 +1282,7 @@ fn is_intrinsic(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, set: &source.SourceSe
     loop {
         if kind(tree, x) == K_EXTERN_ITEM {
             let s = tree.tok.as_slice()[x] + 1;
-            if tk(t, s) != T_STR_LIT { return false; }
+            if tk(t, s) != terminals.T_STR_LIT { return false; }
             let f = cut.file.as_slice()[it as usize] as usize;
             let src = set.file(f);
             let o = t.start.as_slice()[s as usize] as usize;
@@ -1444,7 +1411,7 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
     }
     let mut xp = child(tree, base, g, K_X_PARAMS);
     while xp != NONE {
-        if tk(t, tree.tok.as_slice()[xp as usize]) == T_DOT_DOT_DOT { variadic = true; }
+        if tk(t, tree.tok.as_slice()[xp as usize]) == terminals.T_DOT_DOT_DOT { variadic = true; }
         let p = child(tree, base, xp as usize, K_PARAM);
         if p != NONE { ps.push(p); }
         xp = child(tree, base, xp as usize, K_X_PARAMS);
@@ -1456,7 +1423,7 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
         let sp = child(tree, base, p, K_SELF_PARAM);
         if sp != NONE {
             let a = tree.tok.as_slice()[sp as usize];
-            let sk = if tk(t, a) == T_AMP then (if tk(t, a + 1) == T_KW_MUT then SF_SELF_MUT else SF_SELF_REF) else SF_SELF_VALUE;
+            let sk = if tk(t, a) == terminals.T_AMP then (if tk(t, a + 1) == terminals.T_KW_MUT then SF_SELF_MUT else SF_SELF_REF) else SF_SELF_VALUE;
             let s0 = if st == NONE then ERR else st;
             let ty = if sk == SF_SELF_VALUE then s0 else sg.cx.tab.mk_ref(sk == SF_SELF_MUT, s0);
             if tys.len() == 0 { flags = flags | sk; }
@@ -1724,7 +1691,7 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
             let c = base + ks[j] as usize;
             if kind(tree, c) != K_GENERIC_PARAM { continue; }
             let a = tree.tok.as_slice()[c];
-            let is_const = tk(t, a) == T_KW_CONST;
+            let is_const = tk(t, a) == terminals.T_KW_CONST;
             let nt = if is_const then a + 1 else a;
             sg.cx.gens.name.push(nm.tok_str.as_slice()[nt as usize]);
             sg.cx.gens.node.push(ks[j]);
@@ -1827,7 +1794,7 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
                 let ks = tree.kids.row(bn as usize);
                 for j in 0..ks.len() {
                     let bi = base + ks[j] as usize;
-                    if tk(t, tree.tok.as_slice()[bi]) == T_KW_VIEW {
+                    if tk(t, tree.tok.as_slice()[bi]) == terminals.T_KW_VIEW {
                         sg.cx.gens.is_view.as_mut_slice()[r] = true;
                         continue;
                     }
@@ -1880,7 +1847,7 @@ fn field_or_variant(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.In
         sg.sflags.as_mut_slice()[d] = SF_BUILT;
         if adt != NONE && ds.flags.as_slice()[adt as usize] & decls.F_VIEW == 0 && ty != ERR && is_view_in(&sg.cx, ds, ty, consteval.no_scope()) {
             let a = tree.tok.as_slice()[g as usize];
-            let nt = if tk(t, a) == T_KW_PUB then a + 1 else a;
+            let nt = if tk(t, a) == terminals.T_KW_PUB then a + 1 else a;
             sg.rows.add(D_E0410, it, nt, nt, nt, adt, ty, sc);
         }
     } else if ds.flags.as_slice()[d] & decls.F_TUPLE != 0 {
@@ -1912,7 +1879,7 @@ fn syntactic(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned
         for g in base..inode[i + 1] as usize {
             let k = kind(tree, g);
             let a = tree.tok.as_slice()[g];
-            if k == K_TYPE_BASE && tk(t, a) == T_KW_FN {
+            if k == K_TYPE_BASE && tk(t, a) == terminals.T_KW_FN {
                 unknown_names(sg, tree, t, nm, i as% u32, base, child(tree, base, g, K_NEEDS), child(tree, base, g, K_WITHOUT));
             } else if k == K_DISP_ARM {
                 let ks = tree.kids.row(g);
@@ -1923,7 +1890,7 @@ fn syntactic(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned
                     let (ok, _) = feature_of(sym_text(nm, tok));
                     if !ok { sg.rows.add(D_E0708, i as% u32, tok, tok, NONE, NONE, ERR, consteval.no_scope()); }
                 }
-            } else if k == K_PRIMARY && tk(t, a) == T_KW_FN {
+            } else if k == K_PRIMARY && tk(t, a) == terminals.T_KW_FN {
                 let pn = child(tree, base, g, K_PARAMS);
                 if pn == NONE { continue; }
                 let ks = tree.kids.row(pn as usize);

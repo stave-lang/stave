@@ -110,66 +110,6 @@ const K_STMT_ARM: u8 = node_kinds.KIND_STMT_ARM;
 const K_EXPR_ARM: u8 = node_kinds.KIND_EXPR_ARM;
 const K_ARM_PATTERN: u8 = node_kinds.KIND_ARM_PATTERN;
 const K_STRUCT_LIT: u8 = node_kinds.KIND_STRUCT_LIT;
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
-const T_FLOAT_LIT: u8 = terminals.T_FLOAT_LIT as% u8;
-const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
-const T_CHAR_LIT: u8 = terminals.T_CHAR_LIT as% u8;
-const T_COMMA: u8 = terminals.T_COMMA as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
-const T_SEMI: u8 = terminals.T_SEMI as% u8;
-const T_KW_MASKED: u8 = terminals.T_KW_MASKED as% u8;
-const T_KW_SCALAR: u8 = terminals.T_KW_SCALAR as% u8;
-const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
-const T_DOT_DOT_EQ: u8 = terminals.T_DOT_DOT_EQ as% u8;
-const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
-const T_KW_TRUE: u8 = terminals.T_KW_TRUE as% u8;
-const T_KW_FALSE: u8 = terminals.T_KW_FALSE as% u8;
-const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
-const T_KW_SELF_TYPE: u8 = terminals.T_KW_SELF_TYPE as% u8;
-const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
-const T_KW_LET: u8 = terminals.T_KW_LET as% u8;
-const T_KW_MATCH: u8 = terminals.T_KW_MATCH as% u8;
-const T_KW_IF: u8 = terminals.T_KW_IF as% u8;
-const T_KW_WHILE: u8 = terminals.T_KW_WHILE as% u8;
-const T_KW_LOOP: u8 = terminals.T_KW_LOOP as% u8;
-const T_KW_RETURN: u8 = terminals.T_KW_RETURN as% u8;
-const T_KW_BREAK: u8 = terminals.T_KW_BREAK as% u8;
-const T_KW_CONTINUE: u8 = terminals.T_KW_CONTINUE as% u8;
-const T_KW_UNSAFE: u8 = terminals.T_KW_UNSAFE as% u8;
-const T_KW_SCOPE: u8 = terminals.T_KW_SCOPE as% u8;
-const T_KW_SPAWN: u8 = terminals.T_KW_SPAWN as% u8;
-const T_KW_STRICT: u8 = terminals.T_KW_STRICT as% u8;
-const T_KW_EMULATE: u8 = terminals.T_KW_EMULATE as% u8;
-const T_KW_AS: u8 = terminals.T_KW_AS as% u8;
-const T_AS_PERCENT: u8 = terminals.T_AS_PERCENT as% u8;
-const T_AS_PIPE: u8 = terminals.T_AS_PIPE as% u8;
-const T_AS_TILDE: u8 = terminals.T_AS_TILDE as% u8;
-const T_AS_QUESTION: u8 = terminals.T_AS_QUESTION as% u8;
-const T_EQ: u8 = terminals.T_EQ as% u8;
-const T_EQ_EQ: u8 = terminals.T_EQ_EQ as% u8;
-const T_BANG_EQ: u8 = terminals.T_BANG_EQ as% u8;
-const T_MINUS: u8 = terminals.T_MINUS as% u8;
-const T_BANG: u8 = terminals.T_BANG as% u8;
-const T_TILDE: u8 = terminals.T_TILDE as% u8;
-const T_STAR: u8 = terminals.T_STAR as% u8;
-const T_AMP: u8 = terminals.T_AMP as% u8;
-const T_AMP_AMP: u8 = terminals.T_AMP_AMP as% u8;
-const T_PLUS: u8 = terminals.T_PLUS as% u8;
-const T_PLUS_PERCENT: u8 = terminals.T_PLUS_PERCENT as% u8;
-const T_PLUS_PIPE: u8 = terminals.T_PLUS_PIPE as% u8;
-const T_MINUS_PERCENT: u8 = terminals.T_MINUS_PERCENT as% u8;
-const T_MINUS_PIPE: u8 = terminals.T_MINUS_PIPE as% u8;
-const T_STAR_PERCENT: u8 = terminals.T_STAR_PERCENT as% u8;
-const T_STAR_PIPE: u8 = terminals.T_STAR_PIPE as% u8;
-const T_SLASH: u8 = terminals.T_SLASH as% u8;
-const T_PERCENT: u8 = terminals.T_PERCENT as% u8;
-const T_PIPE: u8 = terminals.T_PIPE as% u8;
-const T_CARET: u8 = terminals.T_CARET as% u8;
-const T_LT_LT: u8 = terminals.T_LT_LT as% u8;
-const T_LT_LT_PERCENT: u8 = terminals.T_LT_LT_PERCENT as% u8;
-const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
 // Target features owned by one architecture (the `sigs` feature bits): x86-64 0..=16, AArch64
 // 17..=22; `cuda` (23) belongs to both.
 const X86_FEATS: u64 = 0x1ffff;
@@ -302,7 +242,7 @@ impl tc_rows.Typeck {
             if !is_expr(ck) { return false; }
             let ks = tree.kids.row(r);
             let op = tk(t, first_tok(tree, self.base + ks[1] as usize));
-            if op == T_EQ {
+            if op == terminals.T_EQ {
                 let lt = self.force_at(self.base + ks[0] as usize);
                 self.acc.as_mut_slice()[r] = lt;
                 self.set_hint(c, lt);
@@ -319,7 +259,7 @@ impl tc_rows.Typeck {
             }
             return ck == K_BLOCK || ck == K_IF_STMT;
         }
-        if pk == K_PRIMARY && tk(t, first_tok(tree, r)) == T_KW_FN { return self.enter_closure(sg, ds, nm, set, t, cut, tree, r, c); }
+        if pk == K_PRIMARY && tk(t, first_tok(tree, r)) == terminals.T_KW_FN { return self.enter_closure(sg, ds, nm, set, t, cut, tree, r, c); }
         if pk == K_PRIMARY { return self.enter_primary(sg, t, tree, r, k, c, h); }
         if pk == K_UNARY { return self.enter_unary(sg, t, tree, r, c, h); }
         if pk == K_CAST {
@@ -426,7 +366,7 @@ impl tc_rows.Typeck {
     fn enter_stmt(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
         let ck = kind(tree, c);
         let a = tk(t, first_tok(tree, r));
-        if a == T_KW_LET {
+        if a == terminals.T_KW_LET {
             if ck == K_TYPE {
                 let ty = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, c, false, self.sc);
                 let lk = self.known(ty);
@@ -442,27 +382,27 @@ impl tc_rows.Typeck {
             }
             return false;
         }
-        if a == T_KW_WHILE {
+        if a == terminals.T_KW_WHILE {
             if k == 0 {
                 self.set_hint_bool(c);
                 return true;
             }
             return ck == K_BLOCK;
         }
-        if a == T_KW_RETURN {
+        if a == terminals.T_KW_RETURN {
             if !is_expr(ck) { return false; }
             let ret = self.rets.as_slice()[self.rets.len() - 1];
             self.set_hint(c, if ret == self.t_never then NONE else ret);
             return true;
         }
-        if a == T_KW_SPAWN {
+        if a == terminals.T_KW_SPAWN {
             if ck == K_BLOCK { self.rets.push(self.t_unit); }
             return ck == K_BLOCK;
         }
-        if a == T_KW_IF || a == T_KW_LOOP || a == T_KW_UNSAFE || a == T_KW_SCOPE || a == T_KW_STRICT || a == T_KW_EMULATE || a == T_L_BRACE {
+        if a == terminals.T_KW_IF || a == terminals.T_KW_LOOP || a == terminals.T_KW_UNSAFE || a == terminals.T_KW_SCOPE || a == terminals.T_KW_STRICT || a == terminals.T_KW_EMULATE || a == terminals.T_L_BRACE {
             return ck == K_BLOCK || ck == K_IF_STMT;
         }
-        if a == T_KW_MATCH { return self.enter_match(tree, r, k, c); }
+        if a == terminals.T_KW_MATCH { return self.enter_match(tree, r, k, c); }
         if ck == K_EXPR_STMT { return true; }
         if ck == K_TYPE || ck == K_PATTERN || ck == node_kinds.KIND_TAIL_BIND { return false; }
         self.set_hint(c, UNK);
@@ -473,14 +413,14 @@ impl tc_rows.Typeck {
         let a = first_tok(tree, r);
         let ft = tk(t, a);
         let ck = kind(tree, c);
-        if ft == T_L_BRACKET && is_expr(ck) {
+        if ft == terminals.T_L_BRACKET && is_expr(ck) {
             self.enter_array(sg, t, tree, r, k, c, h);
             return true;
         }
-        if ft == T_L_PAREN {
+        if ft == terminals.T_L_PAREN {
             let n = tree.kids.row(r).len();
             let close = tree.tok_end.as_slice()[r] - 1;
-            if n == 1 && tk(t, close - 1) != T_COMMA {
+            if n == 1 && tk(t, close - 1) != terminals.T_COMMA {
                 self.set_hint(c, h);
                 return true;
             }
@@ -582,12 +522,12 @@ impl tc_rows.Typeck {
     fn enter_unary(&mut self, sg: &sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize, c: usize, h: u32) -> bool {
         let a = first_tok(tree, r);
         let op = tk(t, a);
-        if op == T_MINUS && self.folds(t, tree, a, c) { return false; }
-        if op == T_BANG {
+        if op == terminals.T_MINUS && self.folds(t, tree, a, c) { return false; }
+        if op == terminals.T_BANG {
             self.set_hint_bool(c);
-        } else if op == T_STAR {
+        } else if op == terminals.T_STAR {
             self.set_hint(c, NONE);
-        } else if op == T_AMP || op == T_AMP_AMP {
+        } else if op == terminals.T_AMP || op == terminals.T_AMP_AMP {
             let tab = &sg.cx.tab;
             let inner = if h == UNK then UNK else if h != NONE && tab.tag_of(h) == types.TK_REF then tab.b_of(h) else NONE;
             self.set_hint(c, inner);
@@ -602,7 +542,7 @@ impl tc_rows.Typeck {
     fn folds(&self, t: &lex.Tokens, tree: &ast.Ast, a: u32, c: usize) -> bool {
         if kind(tree, c) != K_PRIMARY || first_tok(tree, c) != a + 1 { return false; }
         let lt = tk(t, a + 1);
-        return lt == T_INT_LIT || lt == T_FLOAT_LIT;
+        return lt == terminals.T_INT_LIT || lt == terminals.T_FLOAT_LIT;
     }
 
     fn finish(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) {
@@ -632,7 +572,7 @@ impl tc_rows.Typeck {
             if ks.len() >= 3 {
                 let rhs = self.base + ks[2] as usize;
                 let op = tk(t, first_tok(tree, self.base + ks[1] as usize));
-                if op == T_EQ {
+                if op == terminals.T_EQ {
                     self.coerce_acc(&sg.cx.tab, rhs, r);
                 } else {
                     self.poison_kids(tree, r);
@@ -655,7 +595,7 @@ impl tc_rows.Typeck {
     fn finish_stmt(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, r: usize) {
         let a = tk(t, first_tok(tree, r));
         let ks = tree.kids.row(r);
-        if a == T_KW_LET {
+        if a == terminals.T_KW_LET {
             let pat = self.base + ks[0] as usize;
             let init = self.expr_kid(tree, r);
             let typed = ks.len() >= 3;
@@ -669,11 +609,11 @@ impl tc_rows.Typeck {
             self.bind_pattern(sg, ds, nm, t, tree, pat, ty);
             return;
         }
-        if a == T_KW_WHILE {
+        if a == terminals.T_KW_WHILE {
             self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
             return;
         }
-        if a == T_KW_RETURN {
+        if a == terminals.T_KW_RETURN {
             let ret = self.rets.as_slice()[self.rets.len() - 1];
             let e = self.expr_kid(tree, r);
             if e == NONE { return; }
@@ -684,12 +624,12 @@ impl tc_rows.Typeck {
             self.coerce(&sg.cx.tab, e as usize, ret);
             return;
         }
-        if a == T_KW_SPAWN {
+        if a == terminals.T_KW_SPAWN {
             self.rets.truncate(self.rets.len() - 1);
             return;
         }
-        if a == T_KW_MATCH { return; }
-        if a == T_KW_IF || a == T_KW_LOOP || a == T_KW_UNSAFE || a == T_KW_SCOPE || a == T_KW_STRICT || a == T_KW_EMULATE || a == T_L_BRACE || a == T_KW_BREAK || a == T_KW_CONTINUE { return; }
+        if a == terminals.T_KW_MATCH { return; }
+        if a == terminals.T_KW_IF || a == terminals.T_KW_LOOP || a == terminals.T_KW_UNSAFE || a == terminals.T_KW_SCOPE || a == terminals.T_KW_STRICT || a == terminals.T_KW_EMULATE || a == terminals.T_L_BRACE || a == terminals.T_KW_BREAK || a == terminals.T_KW_CONTINUE { return; }
         if ks.len() == 1 && kind(tree, self.base + ks[0] as usize) == K_EXPR_STMT { return; }
         self.poison_kids(tree, r);
     }
@@ -737,27 +677,27 @@ impl tc_rows.Typeck {
     fn primary(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, h: u32) -> u32 {
         let a = first_tok(tree, r);
         let ft = tk(t, a);
-        if ft == T_INT_LIT || ft == T_FLOAT_LIT { return self.literal(&mut sg.cx.tab, set, t, cut, a, false, h); }
-        if ft == T_KW_TRUE || ft == T_KW_FALSE { return self.t_bool; }
-        if ft == T_CHAR_LIT {
+        if ft == terminals.T_INT_LIT || ft == terminals.T_FLOAT_LIT { return self.literal(&mut sg.cx.tab, set, t, cut, a, false, h); }
+        if ft == terminals.T_KW_TRUE || ft == terminals.T_KW_FALSE { return self.t_bool; }
+        if ft == terminals.T_CHAR_LIT {
             let q = quoted_text(t, set, cut, self.it, a);
             if q.len() < 2 || unescaped_chars(&q[1..q.len() - 1]) != 1 { return UNK; }
             return self.t_char;
         }
-        if ft == T_STR_LIT {
+        if ft == terminals.T_STR_LIT {
             let q = quoted_text(t, set, cut, self.it, a);
             if q.len() < 2 || unescaped_chars(&q[1..q.len() - 1]) == NONE { return UNK; }
             return self.t_ref_str;
         }
-        if ft == T_KW_SELF {
+        if ft == terminals.T_KW_SELF {
             if self.self_row == NONE { return UNK; }
             return self.loc.as_slice()[self.self_row as usize];
         }
-        if ft == T_KW_SELF_TYPE { return NONE; }
-        if ft == T_IDENT { return self.path_head(sg, ds, t, tree, r); }
-        if ft == T_L_PAREN { return self.paren(sg, t, tree, r); }
-        if ft == T_L_BRACKET { return self.array_lit(sg, ds, nm, set, t, cut, tree, r, h); }
-        if ft == T_KW_FN { return self.closure_value(sg, tree, r); }
+        if ft == terminals.T_KW_SELF_TYPE { return NONE; }
+        if ft == terminals.T_IDENT { return self.path_head(sg, ds, t, tree, r); }
+        if ft == terminals.T_L_PAREN { return self.paren(sg, t, tree, r); }
+        if ft == terminals.T_L_BRACKET { return self.array_lit(sg, ds, nm, set, t, cut, tree, r, h); }
+        if ft == terminals.T_KW_FN { return self.closure_value(sg, tree, r); }
         // f-strings: not checked yet
         return self.unknown(tree, r);
     }
@@ -792,7 +732,7 @@ impl tc_rows.Typeck {
         let ks = tree.kids.row(r);
         if ks.len() == 0 { return self.t_unit; }
         let close = tree.tok_end.as_slice()[r] - 1;
-        if ks.len() == 1 && tk(t, close - 1) != T_COMMA { return self.nty.as_slice()[self.base + ks[0] as usize]; }
+        if ks.len() == 1 && tk(t, close - 1) != terminals.T_COMMA { return self.nty.as_slice()[self.base + ks[0] as usize]; }
         let h = self.hint.as_slice()[r];
         if h == UNK { return self.unknown(tree, r); }
         let n = ks.len();
@@ -833,7 +773,7 @@ impl tc_rows.Typeck {
     // An int or float literal at token tok (`neg`: a folded minus) with context type h.
     fn literal(&mut self, tab: &mut types.Table, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tok: u32, neg: bool, h: u32) -> u32 {
         let _ = neg;
-        if tk(t, tok) == T_INT_LIT {
+        if tk(t, tok) == terminals.T_INT_LIT {
             let b = tc_rows.tok_text(t, set, cut, self.it, tok, false);
             let (_, _, suf) = consteval.parse_int(b);
             if suf == 255 {
@@ -877,18 +817,18 @@ impl tc_rows.Typeck {
         let op = tk(t, a);
         let ks = tree.kids.row(r);
         let c = self.base + ks[ks.len() - 1] as usize;
-        if op == T_KW_UNSAFE || (op != T_MINUS && op != T_BANG && op != T_TILDE && op != T_STAR && op != T_AMP && op != T_AMP_AMP) { return self.nty.as_slice()[c]; }
-        if op == T_MINUS && self.folds(t, tree, a, c) {
+        if op == terminals.T_KW_UNSAFE || (op != terminals.T_MINUS && op != terminals.T_BANG && op != terminals.T_TILDE && op != terminals.T_STAR && op != terminals.T_AMP && op != terminals.T_AMP_AMP) { return self.nty.as_slice()[c]; }
+        if op == terminals.T_MINUS && self.folds(t, tree, a, c) {
             let v = self.literal(&mut sg.cx.tab, set, t, cut, a + 1, true, h);
             self.nty.as_mut_slice()[c] = v;
             return v;
         }
         let tab = &mut sg.cx.tab;
-        if op == T_BANG {
+        if op == terminals.T_BANG {
             self.coerce_bool(tab, c);
             return self.t_bool;
         }
-        if op == T_STAR {
+        if op == terminals.T_STAR {
             let ct = self.force_at(c);
             if ct == UNK { return UNK; }
             let tag = tab.tag_of(ct);
@@ -896,9 +836,9 @@ impl tc_rows.Typeck {
             self.bad = true;
             return UNK;
         }
-        if op == T_AMP || op == T_AMP_AMP {
-            let outer = op == T_AMP_AMP && kind(tree, c) == K_UNARY && first_tok(tree, c) == a;
-            let mutable = !outer && tk(t, a + 1) == T_KW_MUT;
+        if op == terminals.T_AMP || op == terminals.T_AMP_AMP {
+            let outer = op == terminals.T_AMP_AMP && kind(tree, c) == K_UNARY && first_tok(tree, c) == a;
+            let mutable = !outer && tk(t, a + 1) == terminals.T_KW_MUT;
             let ct = self.force_at(c);
             if ct == UNK { return UNK; }
             if ct == NONE {
@@ -914,14 +854,14 @@ impl tc_rows.Typeck {
             return UNK;
         }
         if is_lit(ct) {
-            if op == T_TILDE && self.lg_float.as_slice()[(ct & (LIT - 1)) as usize] {
+            if op == terminals.T_TILDE && self.lg_float.as_slice()[(ct & (LIT - 1)) as usize] {
                 self.bad = true;
                 return UNK;
             }
             return ct;
         }
         let tag = tab.tag_of(ct);
-        if op == T_MINUS {
+        if op == terminals.T_MINUS {
             if tag == types.TK_FLOAT || (tag == types.TK_INT && tab.a_of(ct) == 1) { return ct; }
             if tag == types.TK_VECTOR {
                 if tab.tag_of(tab.a_of(ct)) == types.TK_FLOAT { return ct; }
@@ -1001,10 +941,10 @@ impl tc_rows.Typeck {
         if tag == types.TK_VECTOR {
             let int_lane = tab.tag_of(tab.a_of(ty)) == types.TK_INT;
             if int_lane {
-                if is_plain(op) || op == T_SLASH || op == T_PERCENT { return self.err(); }
+                if is_plain(op) || op == terminals.T_SLASH || op == terminals.T_PERCENT { return self.err(); }
                 return ty;
             }
-            if is_wrap_sat(op) || is_bit(op) || is_shift(op) || op == T_PERCENT { return self.err(); }
+            if is_wrap_sat(op) || is_bit(op) || is_shift(op) || op == terminals.T_PERCENT { return self.err(); }
             return ty;
         }
         // a user type: its operator trait (not checked yet)
@@ -1113,7 +1053,7 @@ impl tc_rows.Typeck {
         let u = self.unify(tab, lt, rt);
         if u == UNK { return UNK; }
         if is_lit(u) { return self.t_bool; }
-        let eq_only = op == T_EQ_EQ || op == T_BANG_EQ;
+        let eq_only = op == terminals.T_EQ_EQ || op == terminals.T_BANG_EQ;
         let tag = tab.tag_of(u);
         if tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR { return self.t_bool; }
         if eq_only && (tag == types.TK_PTR || tag == types.TK_FN) { return self.t_bool; }
@@ -1130,7 +1070,7 @@ impl tc_rows.Typeck {
         let ks = tree.kids.row(r);
         let l = self.base + ks[0] as usize;
         let rr = self.base + ks[1] as usize;
-        let incl = tk(t, first_tok(tree, rr) - 1) == T_DOT_DOT_EQ;
+        let incl = tk(t, first_tok(tree, rr) - 1) == terminals.T_DOT_DOT_EQ;
         let tab = &mut sg.cx.tab;
         let lt = self.resolve_at(l);
         let rt = self.resolve_at(rr);
@@ -1153,9 +1093,9 @@ impl tc_rows.Typeck {
             let to = sigs.lower(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, tn, false, self.sc);
             if to == ERR || to == NONE { return self.err(); }
             if acc == UNK || acc == NONE { return UNK; }
-            if op != T_KW_AS && op != T_AS_PERCENT && op != T_AS_PIPE && op != T_AS_TILDE && op != T_AS_QUESTION { return UNK; }
+            if op != terminals.T_KW_AS && op != terminals.T_AS_PERCENT && op != terminals.T_AS_PIPE && op != terminals.T_AS_TILDE && op != terminals.T_AS_QUESTION { return UNK; }
             if !cast_ok(&sg.cx.tab, op, acc, to) { return self.err(); }
-            acc = if op == T_AS_QUESTION then self.option_of(&mut sg.cx.tab, to) else to;
+            acc = if op == terminals.T_AS_QUESTION then self.option_of(&mut sg.cx.tab, to) else to;
             if acc == UNK { return UNK; }
         }
         return acc;
@@ -1230,9 +1170,9 @@ impl tc_rows.Typeck {
             let x = self.base + ks[j] as usize;
             if kind(tree, x) != node_kinds.KIND_TAIL_BIND { continue; }
             let mut ty = UNK;
-            if mode == T_KW_MASKED {
+            if mode == terminals.T_KW_MASKED {
                 ty = if i == 0 then b else if i == 1 then mask else UNK;
-            } else if mode == T_KW_SCALAR && i == 0 {
+            } else if mode == terminals.T_KW_SCALAR && i == 0 {
                 ty = lane;
             }
             self.loc.as_mut_slice()[x] = ty;
@@ -1302,7 +1242,7 @@ fn chunk_vec(tab: &types.Table, b: u32) -> u32 {
 // Whether array literal row r is a repeat `[e; n]`.
 fn is_repeat(t: &lex.Tokens, tree: &ast.Ast, base: usize, r: usize) -> bool {
     let ks = tree.kids.row(r);
-    return ks.len() == 2 && tk(t, tree.tok_end.as_slice()[base + ks[0] as usize]) == T_SEMI;
+    return ks.len() == 2 && tk(t, tree.tok_end.as_slice()[base + ks[0] as usize]) == terminals.T_SEMI;
 }
 
 // The context of an array literal's elements under context type h: an array context's element
@@ -1320,19 +1260,19 @@ fn array_ty(tab: &mut types.Table, elem: u32, k: u32, x: u32, y: u32) -> u32 {
 }
 
 fn is_plain(op: u8) -> bool {
-    return op == T_PLUS || op == T_MINUS || op == T_STAR;
+    return op == terminals.T_PLUS || op == terminals.T_MINUS || op == terminals.T_STAR;
 }
 
 fn is_wrap_sat(op: u8) -> bool {
-    return op == T_PLUS_PERCENT || op == T_MINUS_PERCENT || op == T_STAR_PERCENT || op == T_PLUS_PIPE || op == T_MINUS_PIPE || op == T_STAR_PIPE || op == T_LT_LT_PERCENT;
+    return op == terminals.T_PLUS_PERCENT || op == terminals.T_MINUS_PERCENT || op == terminals.T_STAR_PERCENT || op == terminals.T_PLUS_PIPE || op == terminals.T_MINUS_PIPE || op == terminals.T_STAR_PIPE || op == terminals.T_LT_LT_PERCENT;
 }
 
 fn is_bit(op: u8) -> bool {
-    return op == T_AMP || op == T_PIPE || op == T_CARET;
+    return op == terminals.T_AMP || op == terminals.T_PIPE || op == terminals.T_CARET;
 }
 
 fn is_shift(op: u8) -> bool {
-    return op == T_LT_LT || op == T_GT_GT || op == T_LT_LT_PERCENT;
+    return op == terminals.T_LT_LT || op == terminals.T_GT_GT || op == terminals.T_LT_LT_PERCENT;
 }
 
 // The bytes of a string or char literal token (quotes included): from its start to the closing
@@ -1562,7 +1502,7 @@ fn is_64(tab: &types.Table, ty: u32) -> bool {
 fn cast_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
     let fk = tab.tag_of(src);
     let tk2 = tab.tag_of(dst);
-    let plain = op == T_KW_AS;
+    let plain = op == terminals.T_KW_AS;
     let identity = src == dst && (fk == types.TK_INT || fk == types.TK_FLOAT || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_VECTOR || fk == types.TK_MASK || fk == types.TK_REF || fk == types.TK_PTR);
     if identity { return true; }
     if fk == types.TK_VECTOR && tk2 == types.TK_VECTOR {
@@ -1583,7 +1523,7 @@ fn scalar_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
     let tint = tk2 == types.TK_INT;
     let ffloat = fk == types.TK_FLOAT;
     let tfloat = tk2 == types.TK_FLOAT;
-    if op == T_KW_AS {
+    if op == terminals.T_KW_AS {
         if fint && tint {
             let fs = tab.a_of(src) == 1;
             let ts = tab.a_of(dst) == 1;
@@ -1612,10 +1552,10 @@ fn scalar_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
         if fk == types.TK_PTR && tk2 == types.TK_PTR { return true; }
         return (fk == types.TK_PTR && is_64(tab, dst)) || (is_64(tab, src) && tk2 == types.TK_PTR);
     }
-    if op == T_AS_PERCENT { return tint && (fint || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_PTR); }
-    if op == T_AS_PIPE { return tint && (fint || ffloat || fk == types.TK_CHAR); }
-    if op == T_AS_TILDE { return tfloat && (fint || ffloat); }
-    if op == T_AS_QUESTION {
+    if op == terminals.T_AS_PERCENT { return tint && (fint || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_PTR); }
+    if op == terminals.T_AS_PIPE { return tint && (fint || ffloat || fk == types.TK_CHAR); }
+    if op == terminals.T_AS_TILDE { return tfloat && (fint || ffloat); }
+    if op == terminals.T_AS_QUESTION {
         if tint { return fint || ffloat || fk == types.TK_CHAR; }
         if tk2 == types.TK_CHAR || tfloat { return fint || (ffloat && tfloat); }
     }

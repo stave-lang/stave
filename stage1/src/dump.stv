@@ -27,6 +27,7 @@ import ast;
 import consteval;
 import files;
 import generated.ll1_table;
+import generated.terminals;
 import diag;
 import decls;
 import diag_out;
@@ -53,7 +54,7 @@ pub fn tokens(lx: &lex.Lexer, t: &lex.Tokens) -> vec.Vec<u8> {
         let lo = ft[f] as usize;
         let hi = ft[f + 1] as usize;
         for i in lo..hi {
-            if kind[i] == lex.T_EOF { continue; }
+            if kind[i] == terminals.T_EOF { continue; }
             text.push_u32(&mut buf, f as% u32);
             buf.push(32);
             text.push_u32(&mut buf, start[i]);
