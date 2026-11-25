@@ -23,6 +23,7 @@ import diag_kinds;
 import diag_sigs;
 import diag_out;
 import diag_syn;
+import diag_tc;
 import dump;
 import files;
 import intern;
@@ -38,6 +39,7 @@ import resolve;
 import sigs;
 import source;
 import text;
+import tc_rows;
 import typeck;
 import std.env;
 import std.io;
@@ -301,6 +303,23 @@ fn main() -> i32 {
     let mut sg = sigs.build(&fl, &md, &ds, &nm, &set, &toks, &cut, &tree, &res);
     diag_sigs.sigs_diags(&mut d, &sg, &ds, &nm, &lx, &set, &toks, &cut);
     diag_kinds.impl_diags(&mut d, &mut sg, &ds, &md, &nm, &fl, &lx, &set, &toks, &tree);
+    // Kinds, then the body checker (it extends the kinds' type table), when every signature's
+    // const forms are evaluated. The body checker evaluates const forms of its own, so whether
+    // the signatures need one stage1 does not evaluate is read before it runs.
+    let sigs_ok = sg.cx.skip == consteval.CV_NONE;
+    let mut kd: Option<kinds.Kinds> = Option.None;
+    let mut tc: Option<tc_rows.Typeck> = Option.None;
+    if sigs_ok {
+        let (_, order) = dump.sigs_order(&sg, &ds);
+        let k = kinds.build(&mut sg, &ds, &fl, &md, &nm, order.as_slice());
+        diag_kinds.const_drops(&mut d, &k, order.as_slice(), &sg, &ds, &nm, &lx, &set, &toks, &tree);
+        kd = Option.Some(k);
+        let x86 = target.alias.as_bytes()[0] == 120;
+        let base = sigs.baseline(target.name.as_bytes());
+        let c = typeck.build(&mut sg, &ds, &fl, &md, &nm, &set, &toks, &cut, &tree, x86, base);
+        diag_tc.typeck_diags(&mut d, &c, &sg, &ds, &md, &nm, &lx, &set, &toks, &tree);
+        tc = Option.Some(c);
+    }
     let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
     let rows = d.order(ft.rank.as_slice());
     let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);
@@ -343,7 +362,7 @@ fn main() -> i32 {
             if code != EXIT_OK { return code; }
         }
         if cli.want_sigs {
-            if sg.cx.skip != consteval.CV_NONE {
+            if !sigs_ok {
                 io.eprint("stage1: sigs.txt not written: a signature needs a const form stage1 does not evaluate\n");
             } else {
                 let out = dump.sigs_txt(&sg, &ds, &md);
@@ -351,22 +370,25 @@ fn main() -> i32 {
                 if code != EXIT_OK { return code; }
             }
         }
-        if cli.want_kinds && sg.cx.skip == consteval.CV_NONE {
-            let (_, order) = dump.sigs_order(&sg, &ds);
-            let kd = kinds.build(&mut sg, &ds, &fl, &md, &nm, order.as_slice());
-            let out = dump.kinds_txt(&kd);
-            let code = write_dump(cli.dump_dir.as_str(), "kinds.txt", out.as_slice());
-            if code != EXIT_OK { return code; }
+        if cli.want_kinds {
+            match &kd {
+                Option.Some(k) => {
+                    let out = dump.kinds_txt(k);
+                    let code = write_dump(cli.dump_dir.as_str(), "kinds.txt", out.as_slice());
+                    if code != EXIT_OK { return code; }
+                }
+                Option.None => {}
+            }
         }
-        // The body checker raises no diagnostic yet: it runs for its dump only, after `kinds`
-        // (whose table it extends).
-        if cli.want_types && sg.cx.skip == consteval.CV_NONE {
-            let x86 = target.alias.as_bytes()[0] == 120;
-            let base = sigs.baseline(target.name.as_bytes());
-            let tc = typeck.build(&mut sg, &ds, &fl, &md, &nm, &set, &toks, &cut, &tree, x86, base);
-            let out = dump.types_txt(&tc, &sg.cx.tab, &tree);
-            let code = write_dump(cli.dump_dir.as_str(), "types.txt", out.as_slice());
-            if code != EXIT_OK { return code; }
+        if cli.want_types {
+            match &tc {
+                Option.Some(c) => {
+                    let out = dump.types_txt(c, &sg.cx.tab, &tree);
+                    let code = write_dump(cli.dump_dir.as_str(), "types.txt", out.as_slice());
+                    if code != EXIT_OK { return code; }
+                }
+                Option.None => {}
+            }
         }
         if cli.want_diags {
             let out = dump.diags(&d, rows.as_slice(), &ft, &set);

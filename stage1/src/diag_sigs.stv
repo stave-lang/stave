@@ -364,6 +364,41 @@ pub fn sigs_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &int
                 display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
                 d.arg("type", buf.as_slice());
             }
+        } else if code == sigs.D_E0201 {
+            d.begin(201, "const-param-type");
+            d.arg("operand", nm.tab.text(sg.cx.gens.name.as_slice()[a as usize] as usize));
+            buf.clear();
+            display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
+            d.arg("found", buf.as_slice());
+        } else if code == sigs.D_E0203 {
+            d.begin(203, "");
+            buf.clear();
+            tok_text(&mut buf, lx, set, t, f, lo);
+            d.arg("literal", buf.as_slice());
+            let x = r.ty.as_slice()[k];
+            buf.clear();
+            display(&mut buf, sg, ds, nm, sc, x);
+            d.arg("type", buf.as_slice());
+            let bits = sg.cx.tab.int_bits(x);
+            let signed = sg.cx.tab.is_signed(x);
+            buf.clear();
+            if signed {
+                buf.push(45);
+                text.push_u64(&mut buf, 1u64 << (bits - 1) as u64);
+            } else {
+                buf.push(48);
+            }
+            d.arg("min", buf.as_slice());
+            buf.clear();
+            text.push_u64(&mut buf, if signed then (1u64 << (bits - 1) as u64) - 1 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1);
+            d.arg("max", buf.as_slice());
+        } else if code == sigs.D_E0413 {
+            let g = r.b.as_slice()[k];
+            d.begin(413, if ds.kind.as_slice()[g as usize] == decls.DK_STATIC then "static" else "");
+            d.arg("name", nm.tab.text(ds.name.as_slice()[g as usize] as usize));
+            buf.clear();
+            display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
+            d.arg("type", buf.as_slice());
         } else if code == sigs.D_E0410 {
             d.begin(410, "");
             buf.clear();
