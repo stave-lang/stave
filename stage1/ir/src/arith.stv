@@ -1,0 +1,333 @@
+// The integer evaluator of the checked IR (contracts/checked-ir.md "Ops" on constants): the ops
+// `add sub mul div rem neg`, their `wrap` and `sat` forms, `shl shr shl.wrap`, `and or xor not`,
+// `popcount clz ctz`, `eq ne lt le gt ge`, and `cast cast.wrap cast.sat` between int-like types.
+// Pure functions over raw bits; none traps.
+//
+// An int value is a u64 normalized to its type: truncated to the width, then sign-extended
+// (signed) or zero-extended (unsigned). An outcome is the result bits, or a refusal: the op would
+// trap (`E_OVERFLOW`, `E_DIV_ZERO`) or this function does not fold it (`E_OP`).
+//
+// No i128 type exists: mathematical values are `I128` words, with only the operations the ops need.
+import generated.ir_text_terminals as ops;
+
+pub const E_OVERFLOW: u8 = 1;
+pub const E_DIV_ZERO: u8 = 2;
+pub const E_OP: u8 = 3;
+
+const ONES: u64 = 0xffff_ffff_ffff_ffff;
+const TOP: u64 = 0x8000_0000_0000_0000;
+
+// An i128 as two's-complement words.
+pub struct I128 {
+    pub hi: u64,
+    pub lo: u64,
+}
+
+impl Copy for I128 {}
+
+fn neg_of(a: I128) -> bool {
+    return (a.hi >> 63) == 1;
+}
+
+fn add_wide(a: I128, b: I128) -> I128 {
+    let lo = a.lo +% b.lo;
+    let carry: u64 = if lo < a.lo then 1 else 0;
+    return I128.{ hi: a.hi +% b.hi +% carry, lo: lo };
+}
+
+fn negate(a: I128) -> I128 {
+    return add_wide(I128.{ hi: ~a.hi, lo: ~a.lo }, I128.{ hi: 0, lo: 1 });
+}
+
+fn less(a: I128, b: I128) -> bool {
+    if a.hi != b.hi { return (a.hi as% i64) < (b.hi as% i64); }
+    return a.lo < b.lo;
+}
+
+fn same(a: I128, b: I128) -> bool {
+    return a.hi == b.hi && a.lo == b.lo;
+}
+
+// a * b, or None when it lies outside the i128 range. The factors are values of int types, in
+// -2^63 ..= 2^64 - 1: a negative product is above -2^127, so only a positive one can overflow.
+fn mul_exact(a: I128, b: I128) -> Option<I128> {
+    let neg = neg_of(a) != neg_of(b);
+    let ma = if neg_of(a) then negate(a).lo else a.lo;
+    let mb = if neg_of(b) then negate(b).lo else b.lo;
+    let (hi, lo) = ma.mul_wide(mb);
+    if hi >= TOP { return Option.None; }
+    let m = I128.{ hi: hi, lo: lo };
+    return Option.Some(if neg then negate(m) else m);
+}
+
+// An integer type: width (1 to 64) and signedness.
+pub struct IntTy {
+    pub bits: u8,
+    pub signed: bool,
+}
+
+impl Copy for IntTy {}
+
+impl IntTy {
+    pub fn new(bits: u8, signed: bool) -> IntTy {
+        return IntTy.{ bits: bits, signed: signed };
+    }
+
+    pub fn mask(self) -> u64 {
+        return if self.bits >= 64 then ONES else (1u64 << (self.bits as u64)) - 1;
+    }
+
+    // v truncated to the width, then extended by signedness.
+    pub fn norm(self, v: u64) -> u64 {
+        if self.bits >= 64 { return v; }
+        let t = v & self.mask();
+        if self.signed && ((t >> ((self.bits - 1) as u64)) & 1) == 1 { return t | ~self.mask(); }
+        return t;
+    }
+
+    // The mathematical value of normalized bits.
+    pub fn value(self, v: u64) -> I128 {
+        let n = self.norm(v);
+        let neg = self.signed && (n >> 63) == 1;
+        return I128.{ hi: if neg then ONES else 0, lo: n };
+    }
+
+    pub fn min(self) -> I128 {
+        if !self.signed { return I128.{ hi: 0, lo: 0 }; }
+        return negate(I128.{ hi: 0, lo: 1u64 << ((self.bits - 1) as u64) });
+    }
+
+    pub fn max(self) -> I128 {
+        if !self.signed { return I128.{ hi: 0, lo: self.mask() }; }
+        return I128.{ hi: 0, lo: (1u64 << ((self.bits - 1) as u64)) - 1 };
+    }
+
+    pub fn fits(self, r: I128) -> bool {
+        return !less(r, self.min()) && !less(self.max(), r);
+    }
+
+    // r modulo 2^bits, normalized.
+    pub fn wrap(self, r: I128) -> u64 {
+        return self.norm(r.lo);
+    }
+
+    // r limited to the type's range, normalized.
+    pub fn clamp(self, r: I128) -> u64 {
+        if less(r, self.min()) { return self.wrap(self.min()); }
+        if less(self.max(), r) { return self.wrap(self.max()); }
+        return self.wrap(r);
+    }
+
+    // Normalized bits of r, or None if it is out of range.
+    pub fn fit(self, r: I128) -> Option<u64> {
+        return if self.fits(r) then Option.Some(self.wrap(r)) else Option.None;
+    }
+
+    fn checked(self, r: I128) -> Result<u64, u8> {
+        return match self.fit(r) {
+            Option.Some(v) => Result.Ok(v),
+            Option.None => Result.Err(E_OVERFLOW),
+        };
+    }
+}
+
+// `add sub mul`, their `wrap` and `sat` forms, `div rem`, `and or xor`; b has the type of a.
+pub fn int_binary(op: u16, t: IntTy, a: u64, b: u64) -> Result<u64, u8> {
+    let x = t.value(a);
+    let y = t.value(b);
+    if op == ops.IR_T_KW_ADD { return t.checked(add_wide(x, y)); }
+    if op == ops.IR_T_KW_SUB { return t.checked(add_wide(x, negate(y))); }
+    if op == ops.IR_T_KW_MUL {
+        return match mul_exact(x, y) {
+            Option.Some(r) => t.checked(r),
+            Option.None => Result.Err(E_OVERFLOW),
+        };
+    }
+    if op == ops.IR_T_ADD_DOT_WRAP { return Result.Ok(t.norm(a +% b)); }
+    if op == ops.IR_T_SUB_DOT_WRAP { return Result.Ok(t.norm(a -% b)); }
+    if op == ops.IR_T_MUL_DOT_WRAP { return Result.Ok(t.norm(a *% b)); }
+    if op == ops.IR_T_ADD_DOT_SAT { return Result.Ok(t.clamp(add_wide(x, y))); }
+    if op == ops.IR_T_SUB_DOT_SAT { return Result.Ok(t.clamp(add_wide(x, negate(y)))); }
+    if op == ops.IR_T_MUL_DOT_SAT {
+        // The product leaves the i128 range only for u64 * u64, where it is positive.
+        return match mul_exact(x, y) {
+            Option.Some(r) => Result.Ok(t.clamp(r)),
+            Option.None => Result.Ok(if neg_of(x) != neg_of(y) then t.wrap(t.min()) else t.wrap(t.max())),
+        };
+    }
+    if op == ops.IR_T_KW_DIV || op == ops.IR_T_KW_REM {
+        let na = t.norm(a);
+        let nb = t.norm(b);
+        if nb == 0 { return Result.Err(E_DIV_ZERO); }
+        if t.signed && same(x, t.min()) && same(y, I128.{ hi: ONES, lo: ONES }) { return Result.Err(E_OVERFLOW); }
+        let div = op == ops.IR_T_KW_DIV;
+        if t.signed {
+            // the values fit i64, and MIN / -1 is out
+            let sa = na as% i64;
+            let sb = nb as% i64;
+            return Result.Ok(t.norm((if div then sa / sb else sa % sb) as% u64));
+        }
+        return Result.Ok(t.norm(if div then na / nb else na % nb));
+    }
+    if op == ops.IR_T_KW_AND { return Result.Ok(t.norm(a & b)); }
+    if op == ops.IR_T_KW_OR { return Result.Ok(t.norm(a | b)); }
+    if op == ops.IR_T_KW_XOR { return Result.Ok(t.norm(a ^ b)); }
+    return Result.Err(E_OP);
+}
+
+// `shl shr shl.wrap`. `amount` is the shift amount's value (any int type); a negative one counts
+// as at least the width.
+pub fn int_shift(op: u16, t: IntTy, a: u64, amount: I128) -> Result<u64, u8> {
+    let bits = t.bits as u64;
+    let mut n: u64 = 0;
+    if op == ops.IR_T_SHL_DOT_WRAP {
+        n = amount.lo & (bits - 1);
+    } else if op == ops.IR_T_KW_SHL || op == ops.IR_T_KW_SHR {
+        if amount.hi != 0 || amount.lo >= bits { return Result.Err(E_OVERFLOW); }
+        n = amount.lo;
+    } else {
+        return Result.Err(E_OP);
+    }
+    if op == ops.IR_T_KW_SHR {
+        if t.signed { return Result.Ok(t.norm(((t.norm(a) as% i64) >> (n as% i64)) as% u64)); }
+        return Result.Ok(t.norm((a & t.mask()) >> n));
+    }
+    return Result.Ok(t.norm(a << n));
+}
+
+// `neg`; a signed op, but defined on every int type.
+pub fn int_neg(t: IntTy, a: u64) -> Result<u64, u8> {
+    return t.checked(negate(t.value(a)));
+}
+
+// `not` (`~`).
+pub fn int_not(t: IntTy, a: u64) -> u64 {
+    return t.norm(~a);
+}
+
+// `popcount clz ctz` within the type's width.
+pub fn int_count(op: u16, t: IntTy, a: u64) -> Result<u64, u8> {
+    let v = a & t.mask();
+    if op == ops.IR_T_KW_POPCOUNT { return Result.Ok(v.popcount() as u64); }
+    if op == ops.IR_T_KW_CLZ { return Result.Ok((v.clz() as u64) - (64 - (t.bits as u64))); }
+    if op == ops.IR_T_KW_CTZ {
+        let z = v.ctz() as u64;
+        return Result.Ok(if z < (t.bits as u64) then z else t.bits as u64);
+    }
+    return Result.Err(E_OP);
+}
+
+// `eq ne lt le gt ge` on ints of one type: 1 or 0.
+pub fn int_cmp(op: u16, t: IntTy, a: u64, b: u64) -> Result<u64, u8> {
+    let na = t.norm(a);
+    let nb = t.norm(b);
+    let lt = if t.signed then (na as% i64) < (nb as% i64) else na < nb;
+    let eq = na == nb;
+    let mut r = false;
+    if op == ops.IR_T_KW_EQ {
+        r = eq;
+    } else if op == ops.IR_T_KW_NE {
+        r = !eq;
+    } else if op == ops.IR_T_KW_LT {
+        r = lt;
+    } else if op == ops.IR_T_KW_LE {
+        r = lt || eq;
+    } else if op == ops.IR_T_KW_GT {
+        r = !(lt || eq);
+    } else if op == ops.IR_T_KW_GE {
+        r = !lt;
+    } else {
+        return Result.Err(E_OP);
+    }
+    return Result.Ok(if r then 1 else 0);
+}
+
+// The two-operand ops of the fold list: `b` is the second operand's value, in the range of its
+// type (of `t` but for a shift amount).
+pub fn fold_binary(op: u16, t: IntTy, a: u64, b: I128) -> Result<u64, u8> {
+    if op == ops.IR_T_KW_SHL || op == ops.IR_T_KW_SHR || op == ops.IR_T_SHL_DOT_WRAP {
+        return int_shift(op, t, a, b);
+    }
+    if op == ops.IR_T_KW_EQ || op == ops.IR_T_KW_NE || op == ops.IR_T_KW_LT || op == ops.IR_T_KW_LE || op == ops.IR_T_KW_GT || op == ops.IR_T_KW_GE {
+        return int_cmp(op, t, a, b.lo);
+    }
+    return int_binary(op, t, a, b.lo);
+}
+
+// The one-operand ops of the fold list.
+pub fn fold_unary(op: u16, t: IntTy, a: u64) -> Result<u64, u8> {
+    if op == ops.IR_T_KW_NEG { return int_neg(t, a); }
+    if op == ops.IR_T_KW_NOT { return Result.Ok(int_not(t, a)); }
+    return int_count(op, t, a);
+}
+
+pub const CT_INT: u8 = 0;
+pub const CT_BOOL: u8 = 1;
+pub const CT_CHAR: u8 = 2;
+pub const CT_PTR: u8 = 3;
+pub const CT_FLOAT: u8 = 4;
+
+// A scalar type class for casts. `ty` is the int type it reads as: `bool` one bit, `char` 32 bits
+// unsigned, a thin pointer or fn value 64 bits unsigned. A float never folds.
+pub struct CastTy {
+    pub class: u8,
+    pub ty: IntTy,
+}
+
+impl Copy for CastTy {}
+
+impl CastTy {
+    pub fn int(t: IntTy) -> CastTy {
+        return CastTy.{ class: CT_INT, ty: t };
+    }
+
+    pub fn of_class(class: u8) -> CastTy {
+        let bits: u8 = if class == CT_BOOL then 1 else if class == CT_CHAR then 32 else 64;
+        return CastTy.{ class: class, ty: IntTy.new(bits, false) };
+    }
+
+    fn is(self, o: CastTy) -> bool {
+        return self.class == o.class && self.ty.bits == o.ty.bits && self.ty.signed == o.ty.signed;
+    }
+
+    fn int_like(self) -> bool {
+        return self.class != CT_FLOAT;
+    }
+}
+
+fn is_char(v: I128) -> bool {
+    return v.hi == 0 && v.lo <= 0x10ffff && !(v.lo >= 0xd800 && v.lo <= 0xdfff);
+}
+
+// Whether a cast `op` (`cast`, `cast.wrap`, `cast.sat`) from `src` to `dst` is defined (the
+// verifier's rule). `cast` is allowed only when lossless for every value.
+pub fn cast_allowed(op: u16, src: CastTy, dst: CastTy) -> bool {
+    if !src.int_like() || !dst.int_like() { return false; }
+    let to_int = dst.class == CT_INT;
+    if op == ops.IR_T_CAST_DOT_WRAP { return to_int; }
+    if op == ops.IR_T_CAST_DOT_SAT { return to_int && (src.class == CT_INT || src.class == CT_CHAR); }
+    if op != ops.IR_T_KW_CAST { return false; }
+    if src.is(dst) { return true; }
+    let (a, b) = (src.ty, dst.ty);
+    if src.class == CT_INT && to_int {
+        return (a.signed == b.signed && b.bits >= a.bits) || (!a.signed && b.signed && b.bits > a.bits);
+    }
+    if src.class == CT_BOOL { return to_int; }
+    if src.class == CT_CHAR { return to_int && b.bits >= 32 && (!b.signed || b.bits > 32); }
+    if src.class == CT_INT && dst.class == CT_CHAR { return !a.signed && a.bits <= 8; }
+    if src.class == CT_PTR { return to_int && b.bits == 64; }
+    return src.class == CT_INT && dst.class == CT_PTR && a.bits == 64;
+}
+
+// The cast of `v` (bits of type `src`) to `dst`: E_OP for a cast that is not allowed, and for a
+// value that is no `char`.
+pub fn int_cast(op: u16, src: CastTy, dst: CastTy, v: u64) -> Result<u64, u8> {
+    if !cast_allowed(op, src, dst) { return Result.Err(E_OP); }
+    let val = src.ty.value(v);
+    if dst.class == CT_INT {
+        return Result.Ok(if op == ops.IR_T_CAST_DOT_SAT then dst.ty.clamp(val) else dst.ty.wrap(val));
+    }
+    if dst.class == CT_PTR { return Result.Ok(val.lo); }
+    if dst.class == CT_CHAR && is_char(val) { return Result.Ok(val.lo); }
+    return Result.Err(E_OP);
+}

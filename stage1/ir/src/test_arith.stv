@@ -1,0 +1,431 @@
+// The integer evaluator against the Rust one of stage0 (crates/stave-ir/src/arith.rs): every
+// digest and spot row below was printed by it.
+//
+// A case is (op, type, a, b). Per (op, type) the digest folds the outcome (status, value) of, in order:
+//   - all 2^n x 2^n pairs of raw patterns for n <= 8 (one operand: all 2^n), read through `norm`;
+//   - the grid: every pair of 16 boundary patterns (0 1 2 3 7, n - 1 n n + 1, the signed min with
+//     its neighbours, the unsigned max with its neighbours, 0101.. and 1010..) of width n;
+//   - 1000 seeded pairs: `a` a xorshift word, `b` alternately a word and a word modulo 2n (shift
+//     amounts and small divisors).
+// A shift's amount is the value of `b` read in the type. Types: s8 u8 s16 u16 s32 u32 s64 u64 bool.
+// Casts: per kind, every (from, to) of the classes s8 u8 s16 u16 s32 u32 s64 u64 bool char ptr, over
+// all 2^n values for n <= 8, the grid (for char also the edges of the scalar value range and of the
+// surrogates), and 64 seeded values; an outcome that is not a value is status 3.
+import arith;
+import generated.ir_text_terminals as ops;
+import std.debug;
+import std.io;
+import std.vec;
+
+const NOPS: usize = 28;
+const NTYPES: usize = 9;
+const NCLS: usize = 11;
+
+// Op codes: 0..=22 two operands, 23..=27 one, 28..=30 casts.
+const TERMS: [u16; 31] = [
+    ops.IR_T_KW_ADD, ops.IR_T_KW_SUB, ops.IR_T_KW_MUL, ops.IR_T_KW_DIV, ops.IR_T_KW_REM,
+    ops.IR_T_ADD_DOT_WRAP, ops.IR_T_SUB_DOT_WRAP, ops.IR_T_MUL_DOT_WRAP,
+    ops.IR_T_ADD_DOT_SAT, ops.IR_T_SUB_DOT_SAT, ops.IR_T_MUL_DOT_SAT,
+    ops.IR_T_KW_AND, ops.IR_T_KW_OR, ops.IR_T_KW_XOR, ops.IR_T_KW_SHL, ops.IR_T_KW_SHR, ops.IR_T_SHL_DOT_WRAP,
+    ops.IR_T_KW_EQ, ops.IR_T_KW_NE, ops.IR_T_KW_LT, ops.IR_T_KW_LE, ops.IR_T_KW_GT, ops.IR_T_KW_GE,
+    ops.IR_T_KW_NEG, ops.IR_T_KW_NOT, ops.IR_T_KW_POPCOUNT, ops.IR_T_KW_CLZ, ops.IR_T_KW_CTZ,
+    ops.IR_T_KW_CAST, ops.IR_T_CAST_DOT_WRAP, ops.IR_T_CAST_DOT_SAT,
+];
+const BITS: [u8; NTYPES] = [8, 8, 16, 16, 32, 32, 64, 64, 1];
+const SIGNED: [bool; NTYPES] = [true, false, true, false, true, false, true, false, false];
+
+fn ty(i: usize) -> arith.IntTy {
+    return arith.IntTy.new(BITS[i], SIGNED[i]);
+}
+
+// The cast class i: 0..=7 the int types, 8 bool, 9 char, 10 ptr.
+fn cls(i: usize) -> arith.CastTy {
+    if i < 8 { return arith.CastTy.int(ty(i)); }
+    return arith.CastTy.of_class(if i == 8 then arith.CT_BOOL else if i == 9 then arith.CT_CHAR else arith.CT_PTR);
+}
+
+fn cls_ty(i: usize) -> arith.IntTy {
+    return cls(i).ty;
+}
+
+fn outcome(r: Result<u64, u8>) -> (u64, u64) {
+    return match r {
+        Result.Ok(v) => (0, v),
+        Result.Err(e) => (e as u64, 0),
+    };
+}
+
+// The outcome of op `code` < 28 on a and b (bits), `amount` the value of b.
+fn eval(code: usize, t: arith.IntTy, a: u64, amount: arith.I128) -> (u64, u64) {
+    if code < 23 { return outcome(arith.fold_binary(TERMS[code], t, a, amount)); }
+    return outcome(arith.fold_unary(TERMS[code], t, a));
+}
+
+fn is_err(r: Result<u64, u8>, e: u8) -> bool {
+    return match r {
+        Result.Ok(_) => false,
+        Result.Err(x) => x == e,
+    };
+}
+
+fn upd(h: u64, w: u64) -> u64 {
+    let x = (h ^ w) *% 0x100000001b3;
+    return x ^ (x >> 29);
+}
+
+fn grid(n: u64) -> [u64; 16] {
+    let m = if n >= 64 then 0xffff_ffff_ffff_ffff else (1u64 << n) - 1;
+    let h = (m >> 1) +% 1;
+    return [0, 1, 2, 3, 7, n - 1, n, n + 1, h -% 1, h, h +% 1, m -% 2, m -% 1, m, 0x5555_5555_5555_5555 & m, 0xaaaa_aaaa_aaaa_aaaa & m];
+}
+
+fn next(x: &mut u64) -> u64 {
+    *x = *x ^ (*x << 13);
+    *x = *x ^ (*x >> 7);
+    *x = *x ^ (*x << 17);
+    return *x;
+}
+
+fn seed(code: usize, ti: usize) -> u64 {
+    return 0x9e37_79b9_7f4a_7c15 ^ (((code as u64) * 64 + (ti as u64) + 1) *% 0x100000001b3);
+}
+
+const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const RANDOM: usize = 1000;
+const RANDOM_CAST: usize = 64;
+
+// The digest of op `code` < 28 on type `ti`, and the number of cases it covers.
+fn digest(code: usize, ti: usize) -> (u64, u64) {
+    let t = ty(ti);
+    let n = BITS[ti] as u64;
+    let binary = code < 23;
+    let mut h = OFFSET;
+    let mut cases: u64 = 0;
+    let g = grid(n);
+    let mut pairs = vec.Vec::<(u64, u64)>.new();
+    if n <= 8 {
+        for a in 0..(1u64 << n) {
+            if binary {
+                for b in 0..(1u64 << n) {
+                    let (s, v) = eval(code, t, t.norm(a), t.value(t.norm(b)));
+                    h = upd(upd(h, s), v);
+                    cases = cases + 1;
+                }
+            } else {
+                let (s, v) = eval(code, t, t.norm(a), t.value(0));
+                h = upd(upd(h, s), v);
+                cases = cases + 1;
+            }
+        }
+    }
+    for i in 0..16usize {
+        for j in 0..(if binary then 16usize else 1usize) {
+            let b = if binary then t.norm(g[j]) else 0;
+            let (s, v) = eval(code, t, t.norm(g[i]), t.value(b));
+            h = upd(upd(h, s), v);
+            cases = cases + 1;
+        }
+    }
+    let mut x = seed(code, ti);
+    for k in 0..RANDOM {
+        let a = t.norm(next(&mut x));
+        let mut b: u64 = 0;
+        if binary {
+            let r = next(&mut x);
+            b = t.norm(if k % 2 == 0 then r else r % (2 * n));
+        }
+        let (s, v) = eval(code, t, a, t.value(b));
+        h = upd(upd(h, s), v);
+        cases = cases + 1;
+    }
+    return (h, cases);
+}
+
+fn cast_digest(k: usize) -> (u64, u64) {
+    let mut h = OFFSET;
+    let mut cases: u64 = 0;
+    for f in 0..NCLS {
+        for to in 0..NCLS {
+            let ft = cls_ty(f);
+            let n = ft.bits as u64;
+            let mut vals = vec.Vec::<u64>.new();
+            if n <= 8 {
+                for a in 0..(1u64 << n) { vals.push(ft.norm(a)); }
+            }
+            let g = grid(n);
+            for i in 0..16usize { vals.push(ft.norm(g[i])); }
+            if f == 9 {
+                vals.push(0xd7ff);
+                vals.push(0xd800);
+                vals.push(0xdfff);
+                vals.push(0xe000);
+                vals.push(0x10ffff);
+                vals.push(0x110000);
+            }
+            let mut x = seed(28 + k, f * NCLS + to);
+            for _ in 0..RANDOM_CAST { vals.push(ft.norm(next(&mut x))); }
+            for i in 0..vals.len() {
+                let (s, v) = outcome(arith.int_cast(TERMS[28 + k], cls(f), cls(to), vals.as_slice()[i]));
+                h = upd(upd(h, s), v);
+                cases = cases + 1;
+            }
+        }
+    }
+    return (h, cases);
+}
+
+// digests: index code * 9 + type
+const DIGEST: [u64; NOPS * NTYPES] = [
+    0x48112122afbadd4e, 0x6a93ba36bb77dd47, 0x52607a813a3f324a, 0x44470ff81b2a5714, 0x58d28de0fda3907c, 0x02497892aa53cff6, 0x73cf129d1ca35dd2, 0x6b27bdc8ed444b1f, 0x33f531b1a6ddb77c, // add
+    0x4a0b965b5ae00a62, 0x73852a1dd2b48f76, 0x9183b6d4bf8d0404, 0x549b614f24c7f058, 0x6547e4c3bc7c989e, 0xcb1f732b590ecd0e, 0x3b4adf2683bb23ef, 0x061ec0d5274534c9, 0x9b6c77b0d2871eb5, // sub
+    0x78fccc64572bdd91, 0xc268702283a89dd7, 0x2c3b7c6711d2da54, 0xa81642af0a7f43db, 0xa933d27887781722, 0x435a879fdbc1735f, 0xf97fb73407b82258, 0x6b172571c2e4375e, 0x1fe599a7c1bb2f81, // mul
+    0x97ac6d3e2469e1c4, 0x984a0bf8fa479126, 0x6ed28f59ba7cee27, 0xe37fab6419070dc0, 0x0f824582197c15c3, 0xfe9c16a699b9cf53, 0xe8bf3d22851f2a9b, 0x15f0320aab6edb43, 0xa7ad1eddf4713df0, // div
+    0x87006d9181a2c54f, 0xf0a7dfec38d8d28d, 0x5f5f07436ad5dfbd, 0x76672a7228dc69f0, 0xe2ced3509feea892, 0x03314d05b06b760f, 0x085cae4d60e17846, 0x43be1b705fa4ff3a, 0xf45a56cbef240c90, // rem
+    0x78d76a1b8aeb7e8b, 0x8c72fd64baca45bc, 0xa315f79e928ba274, 0x862d3c1151b049c0, 0xb83fab36cbb9966e, 0x105d0b24aa8a7e7e, 0xb8dd25bcf797c27b, 0x903181ed1be9c097, 0x03e57ef6ad8e6e2e, // add.wrap
+    0x62f21674d30753ba, 0x2351585cc8320bf5, 0xcbd19a0d6b9a0afc, 0xf2b97392de2a2187, 0xefbf9bbce817bb2d, 0x3782a5a3b2b157bb, 0x46bb6532feea72fc, 0xac9179951e7796ae, 0x9fcd4e8372e5a449, // sub.wrap
+    0xa9da86bb75069caa, 0x52fa6bd40199977f, 0x356169c9eedeeb40, 0xc180a1272254069a, 0x7ac69216fb8ad6c7, 0xfd1a6be99dc67220, 0x3b2682d27216ccba, 0x766818cb2330d5b3, 0x8ee2e67e2016a600, // mul.wrap
+    0xffb2342fd0f36945, 0xabb261cacd121941, 0xda9f9e664398dd31, 0x5924efe87a119f09, 0x29971d28f2dc96f3, 0xc6097708bac1799d, 0x8d122cc56197579f, 0xf58208e1e7042337, 0xa0ad8ed03efab11e, // add.sat
+    0x0e1d2596b5312bba, 0x8e075a7dd5f15520, 0x4ceaec54bcbd7a2e, 0x709636d46168e6a7, 0x667dfb12cdf8c2be, 0x3a0295056ae2285c, 0xfd523848d7631422, 0x6299f3e556eadad3, 0x38286491b2f0ff29, // sub.sat
+    0x08313931a9113a2a, 0x8eabcb75749ac11e, 0x080fe2ed94e9fd5e, 0xd297a650ab4baa73, 0x5edc09039ab95843, 0x4036fa787f01bccd, 0xee9701a6fe7069f4, 0xa7a4f781897a3edf, 0x71f32e14b02df5fd, // mul.sat
+    0x143ca39a966c99aa, 0x023a6139c1ef151e, 0xcff09bc61dfdf1f5, 0xbf88d9cbb4c525c9, 0xdebeeda37a21e6f0, 0xc88fe959fe042c10, 0xf180b7359d74cc92, 0x9dcd65dd0e5968b8, 0xceb1f5efe1927cae, // and
+    0xbb8014a3e8a803bb, 0xdbb7f8366e7f87cb, 0x54620df23ca5c104, 0xba93952ff982a76c, 0x18190e7e0e11a577, 0xa5083b381e6d3d76, 0xf094e51d9f8434fa, 0x782959631fc16c76, 0x0ee220f2c9ff09c2, // or
+    0x8d2f40f9cbd3afac, 0xb1a06b2340d80c43, 0x20d2c0e1f058837a, 0x3a771f97946153be, 0xf9dda78cddbbbff2, 0xe76744ecff3e386a, 0x05645a313d6eb884, 0x5109e563bbb82d6a, 0xcd11cc940c8d2355, // xor
+    0xde64efe0e6dc71f8, 0xe7b64847585c5347, 0x90b00ad5ea064182, 0xfc438869eedf0381, 0x97397f03241e123f, 0x858d23de29cbd547, 0x331ffcd661ff89c8, 0xb86cfe65e3014f51, 0x9bba26fd7130befd, // shl
+    0x88ccfb03b4de7fe0, 0xb28a31069490c396, 0x4efaaa19dd97b2ee, 0x75e0c1c5a3dabcd8, 0xd9c2de5e5d8c608c, 0x0c99c97809a4aae2, 0xbe005a44430d215a, 0x37cddc707800d4cc, 0xbbab089dd73a8a8d, // shr
+    0x77940c8e406748ae, 0xd42dfb7c1e497b2d, 0xbb64300848e49e74, 0xd2276bce90f566f3, 0x3f40e84bb5bf7172, 0x8c629188601b4fdb, 0xeccc3430b355e118, 0x8c86bec4f2c4997b, 0x2da49598f250397c, // shl.wrap
+    0x209a9458e7f9c8d6, 0xf425ee682b8ffeeb, 0x906e20daa607e24e, 0x906e20daa607e24e, 0x906e20daa607e24e, 0x906e20daa607e24e, 0x906e20daa607e24e, 0x906e20daa607e24e, 0x21753fec5d489163, // eq
+    0x35c4e132992c17fa, 0x5270fa92fa71ab02, 0xcfdb2accebc9c920, 0xcfdb2accebc9c920, 0xcfdb2accebc9c920, 0xcfdb2accebc9c920, 0xcfdb2accebc9c920, 0xcfdb2accebc9c920, 0x3c84b6365d1c453f, // ne
+    0x5be3cba17779d0a7, 0xe0c93e6c820244db, 0x4cda5444eb7b6955, 0x053bf3e5856463e0, 0x0bdc595693072079, 0xc66719b3118457aa, 0x99939a36e8701885, 0xefafb6ef3113c952, 0x184c4982a3caf7ae, // lt
+    0x37376675d6117adb, 0xeeda82b732cf920b, 0xe1c791d91954f219, 0x2d0522466d226103, 0x80100efaf92cc8f8, 0xfce10b17146491d9, 0x829adf10817900a2, 0x7139ab45f25f32e8, 0xbab27d540c0cec1e, // le
+    0x18a7feb58a4f4d0d, 0x84291bd064bdd5ce, 0x01f8177306ca0ece, 0x95d2ca7e4d034a95, 0x22eeaa0b53aa2ff4, 0xeb10131f9d4d2769, 0x036908c430cbcd01, 0xa664273ec3fe1226, 0x7800e4e6b8096bb3, // gt
+    0x4db7c8c349b239de, 0x2e2d5bce408724e4, 0x302c16583ccce191, 0xf9f98655d00ecbe1, 0x9caa4a3450eb5b71, 0xcb3124edb14cab42, 0x8f4a6734a783686f, 0x1a03aac2134dd21f, 0x0db1aa3636072c96, // ge
+    0xf1c537a13e2854b2, 0x728cca78def1a32b, 0x4c83f8aee7c4dcbb, 0x494297c856c7e65c, 0x3be1d8b660a6c222, 0x494297c856c7e65c, 0x459bd5802ccd4019, 0x494297c856c7e65c, 0xc6999c78579b06cd, // neg
+    0x69edca0ee9aaa496, 0xc74c3c8fe08ec2f4, 0x0026c260b018a151, 0xfc26edbfc628e0d7, 0xdd6dcca51abe283e, 0x551aeab14e5f3a07, 0xe1058f05808e9cc0, 0x0acc0ff87b18f812, 0xd9dc330e68fa6d37, // not
+    0xe6ce8c1351cdd94e, 0x4bd8d3f2198ca859, 0x2b1e613353ce1c21, 0x3c47af61d665ad39, 0x7f450688ec691ebd, 0xf9432dc0cac372af, 0x05dad01c85ee8b55, 0xcdb5b39780c274eb, 0x1134e77acd6e1212, // popcount
+    0xf70cb1f71b800760, 0x008c3f72820c67b4, 0x9aeb8fb0b6fe9dc4, 0x0faa4c19ba322d6c, 0xdb39de4d8687a716, 0x67a7cc397db44203, 0x0287aead4448c086, 0xb8532347ef66207a, 0x4bc3036ce49e2356, // clz
+    0x36084ddcfee36baf, 0x101b7b82f37c8161, 0x4e03f102496b69b9, 0xb677e28eb9bcf7c4, 0xc7e7b0149322c4bc, 0x71dd2e5d186fdd42, 0x81cdfa6eb7328f0e, 0xd5d0f7bc52a25ead, 0x9387a173a5b07651, // ctz
+];
+
+// cast digests: cast, cast.wrap, cast.sat
+const CAST_DIGEST: [u64; 3] = [
+    0x3ca80f0465f52a60, 0x332b3e2272b16faa, 0x3f6b2b79efc77513,
+];
+
+const INT_CASES: u64 = 3323030;
+const CAST_CASES: u64 = 46200;
+
+// spot rows: [code, type, type2, a, b_lo, b_hi, status, value]
+const SPOTS: [[u64; 8]; 160] = [
+    [0, 0, 0, 0x7f, 0x1, 0x0, 1, 0x0],
+    [0, 0, 0, 0xffffffffffffff80, 0xffffffffffffffff, 0xffffffffffffffff, 1, 0x0],
+    [0, 0, 0, 0x64, 0x1b, 0x0, 0, 0x7f],
+    [0, 1, 0, 0xff, 0x1, 0x0, 1, 0x0],
+    [0, 7, 0, 0xffffffffffffffff, 0x1, 0x0, 1, 0x0],
+    [0, 6, 0, 0x8000000000000000, 0xffffffffffffffff, 0xffffffffffffffff, 1, 0x0],
+    [0, 6, 0, 0x7fffffffffffffff, 0x1, 0x0, 1, 0x0],
+    [1, 1, 0, 0x0, 0x1, 0x0, 1, 0x0],
+    [1, 0, 0, 0xffffffffffffff80, 0x1, 0x0, 1, 0x0],
+    [1, 6, 0, 0x0, 0x8000000000000000, 0xffffffffffffffff, 1, 0x0],
+    [1, 7, 0, 0x0, 0x1, 0x0, 1, 0x0],
+    [1, 4, 0, 0xffffffff80000000, 0x1, 0x0, 1, 0x0],
+    [2, 0, 0, 0xffffffffffffff80, 0xffffffffffffffff, 0xffffffffffffffff, 1, 0x0],
+    [2, 0, 0, 0x10, 0x8, 0x0, 1, 0x0],
+    [2, 5, 0, 0x10000, 0x10000, 0x0, 1, 0x0],
+    [2, 6, 0, 0x8000000000000000, 0x8000000000000000, 0xffffffffffffffff, 1, 0x0],
+    [2, 7, 0, 0xffffffffffffffff, 0xffffffffffffffff, 0x0, 1, 0x0],
+    [2, 6, 0, 0xb504f334, 0xb504f334, 0x0, 1, 0x0],
+    [2, 7, 0, 0x100000000, 0x80000000, 0x0, 0, 0x8000000000000000],
+    [3, 0, 0, 0xffffffffffffff80, 0xffffffffffffffff, 0xffffffffffffffff, 1, 0x0],
+    [3, 0, 0, 0x5, 0x0, 0x0, 2, 0x0],
+    [3, 0, 0, 0xfffffffffffffff9, 0x2, 0x0, 0, 0xfffffffffffffffd],
+    [4, 0, 0, 0xfffffffffffffff9, 0x2, 0x0, 0, 0xffffffffffffffff],
+    [4, 0, 0, 0x7, 0xfffffffffffffffe, 0xffffffffffffffff, 0, 0x1],
+    [3, 7, 0, 0xffffffffffffffff, 0x3, 0x0, 0, 0x5555555555555555],
+    [3, 6, 0, 0x8000000000000000, 0xffffffffffffffff, 0xffffffffffffffff, 1, 0x0],
+    [4, 6, 0, 0x8000000000000000, 0xffffffffffffffff, 0xffffffffffffffff, 1, 0x0],
+    [4, 5, 0, 0x5, 0x0, 0x0, 2, 0x0],
+    [3, 6, 0, 0x8000000000000000, 0x2, 0x0, 0, 0xc000000000000000],
+    [23, 0, 0, 0xffffffffffffff80, 0x0, 0x0, 1, 0x0],
+    [23, 0, 0, 0x5, 0x0, 0x0, 0, 0xfffffffffffffffb],
+    [23, 1, 0, 0x0, 0x0, 0x0, 0, 0x0],
+    [23, 1, 0, 0x1, 0x0, 0x0, 1, 0x0],
+    [23, 6, 0, 0x8000000000000000, 0x0, 0x0, 1, 0x0],
+    [5, 1, 0, 0xff, 0x1, 0x0, 0, 0x0],
+    [5, 0, 0, 0x7f, 0x1, 0x0, 0, 0xffffffffffffff80],
+    [6, 7, 0, 0x0, 0x1, 0x0, 0, 0xffffffffffffffff],
+    [7, 4, 0, 0x10000, 0x10000, 0x0, 0, 0x0],
+    [7, 6, 0, 0x8000000000000000, 0xffffffffffffffff, 0xffffffffffffffff, 0, 0x8000000000000000],
+    [8, 0, 0, 0x7f, 0x1, 0x0, 0, 0x7f],
+    [8, 0, 0, 0xffffffffffffff80, 0xffffffffffffffff, 0xffffffffffffffff, 0, 0xffffffffffffff80],
+    [8, 1, 0, 0xfa, 0xa, 0x0, 0, 0xff],
+    [8, 7, 0, 0xffffffffffffffff, 0x1, 0x0, 0, 0xffffffffffffffff],
+    [9, 1, 0, 0x3, 0x5, 0x0, 0, 0x0],
+    [9, 0, 0, 0xffffffffffffff80, 0x1, 0x0, 0, 0xffffffffffffff80],
+    [9, 6, 0, 0x7fffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0, 0x7fffffffffffffff],
+    [10, 0, 0, 0x64, 0x64, 0x0, 0, 0x7f],
+    [10, 0, 0, 0xffffffffffffff9c, 0x64, 0x0, 0, 0xffffffffffffff80],
+    [10, 7, 0, 0xffffffffffffffff, 0xffffffffffffffff, 0x0, 0, 0xffffffffffffffff],
+    [10, 6, 0, 0x8000000000000000, 0x8000000000000000, 0xffffffffffffffff, 0, 0x7fffffffffffffff],
+    [10, 6, 0, 0x8000000000000000, 0x7fffffffffffffff, 0x0, 0, 0x8000000000000000],
+    [14, 1, 0, 0x1, 0x7, 0x0, 0, 0x80],
+    [14, 1, 0, 0x1, 0x8, 0x0, 1, 0x0],
+    [14, 0, 0, 0x1, 0x7, 0x0, 0, 0xffffffffffffff80],
+    [14, 4, 0, 0x1, 0xffffffffffffffff, 0xffffffffffffffff, 1, 0x0],
+    [14, 5, 0, 0x1, 0xffffffffffffffff, 0x0, 1, 0x0],
+    [14, 7, 0, 0x1, 0x3f, 0x0, 0, 0x8000000000000000],
+    [14, 7, 0, 0x1, 0x40, 0x0, 1, 0x0],
+    [14, 6, 0, 0xffffffffffffffff, 0x3f, 0x0, 0, 0x8000000000000000],
+    [15, 0, 0, 0xffffffffffffff80, 0x7, 0x0, 0, 0xffffffffffffffff],
+    [15, 1, 0, 0x80, 0x7, 0x0, 0, 0x1],
+    [15, 4, 0, 0xffffffffffffffff, 0x1f, 0x0, 0, 0xffffffffffffffff],
+    [15, 4, 0, 0xffffffffffffffff, 0x20, 0x0, 1, 0x0],
+    [15, 6, 0, 0x8000000000000000, 0x3f, 0x0, 0, 0xffffffffffffffff],
+    [15, 7, 0, 0xffffffffffffffff, 0x3f, 0x0, 0, 0x1],
+    [16, 1, 0, 0x1, 0x9, 0x0, 0, 0x2],
+    [16, 4, 0, 0x1, 0xffffffffffffffff, 0xffffffffffffffff, 0, 0xffffffff80000000],
+    [16, 6, 0, 0x1, 0x40, 0x0, 0, 0x1],
+    [16, 7, 0, 0x3, 0xffffffffffffffff, 0x0, 0, 0x8000000000000000],
+    [16, 0, 0, 0x3, 0x8000000000000000, 0xffffffffffffffff, 0, 0x3],
+    [14, 1, 0, 0x1, 0x3, 0x1, 1, 0x0],
+    [15, 6, 0, 0xffffffffffffffff, 0x3, 0xffffffffffffffff, 1, 0x0],
+    [16, 3, 0, 0x1, 0x3, 0x1, 0, 0x8],
+    [16, 3, 0, 0x1, 0x3, 0xffffffffffffffff, 0, 0x8],
+    [11, 0, 0, 0xffffffffffffffff, 0xf, 0x0, 0, 0xf],
+    [12, 0, 0, 0xffffffffffffff80, 0x1, 0x0, 0, 0xffffffffffffff81],
+    [13, 0, 0, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0, 0x0],
+    [13, 7, 0, 0xffffffffffffffff, 0x1, 0x0, 0, 0xfffffffffffffffe],
+    [11, 8, 0, 0x1, 0x1, 0x0, 0, 0x1],
+    [12, 8, 0, 0x1, 0x0, 0x0, 0, 0x1],
+    [13, 8, 0, 0x1, 0x1, 0x0, 0, 0x0],
+    [24, 1, 0, 0x0, 0x0, 0x0, 0, 0xff],
+    [24, 0, 0, 0x0, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [24, 8, 0, 0x1, 0x0, 0x0, 0, 0x0],
+    [24, 7, 0, 0x0, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [25, 1, 0, 0xff, 0x0, 0x0, 0, 0x8],
+    [25, 0, 0, 0xffffffffffffffff, 0x0, 0x0, 0, 0x8],
+    [25, 6, 0, 0xffffffffffffffff, 0x0, 0x0, 0, 0x40],
+    [25, 5, 0, 0x0, 0x0, 0x0, 0, 0x0],
+    [26, 1, 0, 0x0, 0x0, 0x0, 0, 0x8],
+    [26, 1, 0, 0x1, 0x0, 0x0, 0, 0x7],
+    [26, 0, 0, 0xffffffffffffffff, 0x0, 0x0, 0, 0x0],
+    [26, 7, 0, 0x0, 0x0, 0x0, 0, 0x40],
+    [26, 4, 0, 0x1, 0x0, 0x0, 0, 0x1f],
+    [27, 1, 0, 0x0, 0x0, 0x0, 0, 0x8],
+    [27, 6, 0, 0x0, 0x0, 0x0, 0, 0x40],
+    [27, 5, 0, 0x80000000, 0x0, 0x0, 0, 0x1f],
+    [27, 2, 0, 0xffffffffffffffff, 0x0, 0x0, 0, 0x0],
+    [19, 0, 0, 0xffffffffffffffff, 0x1, 0x0, 0, 0x1],
+    [19, 1, 0, 0xff, 0x1, 0x0, 0, 0x0],
+    [21, 1, 0, 0xff, 0x1, 0x0, 0, 0x1],
+    [22, 6, 0, 0xffffffffffffffff, 0x0, 0x0, 0, 0x0],
+    [22, 7, 0, 0xffffffffffffffff, 0x0, 0x0, 0, 0x1],
+    [20, 4, 0, 0xffffffff80000000, 0x7fffffff, 0x0, 0, 0x1],
+    [17, 2, 0, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0, 0x1],
+    [18, 3, 0, 0x0, 0x0, 0x0, 0, 0x0],
+    [28, 1, 0, 0xc8, 0x0, 0x0, 3, 0x0],
+    [28, 1, 2, 0xc8, 0x0, 0x0, 0, 0xc8],
+    [28, 0, 3, 0xffffffffffffffff, 0x0, 0x0, 3, 0x0],
+    [28, 0, 6, 0xffffffffffffff80, 0x0, 0x0, 0, 0xffffffffffffff80],
+    [28, 5, 6, 0xffffffff, 0x0, 0x0, 0, 0xffffffff],
+    [28, 7, 6, 0xffffffffffffffff, 0x0, 0x0, 3, 0x0],
+    [28, 4, 4, 0xfffffffffffffffb, 0x0, 0x0, 0, 0xfffffffffffffffb],
+    [28, 8, 1, 0x1, 0x0, 0x0, 0, 0x1],
+    [28, 8, 0, 0x1, 0x0, 0x0, 0, 0x1],
+    [28, 1, 9, 0xff, 0x0, 0x0, 0, 0xff],
+    [28, 0, 9, 0x5, 0x0, 0x0, 3, 0x0],
+    [28, 9, 5, 0x10ffff, 0x0, 0x0, 0, 0x10ffff],
+    [28, 9, 4, 0x41, 0x0, 0x0, 3, 0x0],
+    [28, 9, 6, 0x41, 0x0, 0x0, 0, 0x41],
+    [28, 9, 1, 0x41, 0x0, 0x0, 3, 0x0],
+    [28, 5, 9, 0x41, 0x0, 0x0, 3, 0x0],
+    [28, 9, 9, 0x41, 0x0, 0x0, 0, 0x41],
+    [28, 9, 9, 0xd800, 0x0, 0x0, 3, 0x0],
+    [28, 9, 9, 0x110000, 0x0, 0x0, 3, 0x0],
+    [28, 10, 7, 0xffffffffffffffff, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [28, 7, 10, 0xffffffffffffffff, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [28, 10, 6, 0xffffffffffffffff, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [28, 6, 10, 0xffffffffffffffff, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [28, 10, 5, 0x7, 0x0, 0x0, 3, 0x0],
+    [28, 1, 8, 0x1, 0x0, 0x0, 3, 0x0],
+    [28, 8, 9, 0x1, 0x0, 0x0, 3, 0x0],
+    [28, 9, 10, 0x41, 0x0, 0x0, 3, 0x0],
+    [29, 2, 1, 0xffffffffffffffff, 0x0, 0x0, 0, 0xff],
+    [29, 7, 0, 0xffffffffffffffff, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [29, 7, 0, 0x1ff, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [29, 0, 7, 0xffffffffffffffff, 0x0, 0x0, 0, 0xffffffffffffffff],
+    [29, 0, 6, 0xffffffffffffff80, 0x0, 0x0, 0, 0xffffffffffffff80],
+    [29, 8, 4, 0x1, 0x0, 0x0, 0, 0x1],
+    [29, 9, 1, 0x10ffff, 0x0, 0x0, 0, 0xff],
+    [29, 10, 1, 0xffffffffffffffff, 0x0, 0x0, 0, 0xff],
+    [29, 10, 9, 0x41, 0x0, 0x0, 3, 0x0],
+    [29, 5, 9, 0x41, 0x0, 0x0, 3, 0x0],
+    [29, 5, 8, 0x1, 0x0, 0x0, 3, 0x0],
+    [29, 6, 10, 0xffffffffffffffff, 0x0, 0x0, 3, 0x0],
+    [30, 4, 1, 0xfffffffffffffffb, 0x0, 0x0, 0, 0x0],
+    [30, 4, 1, 0x12c, 0x0, 0x0, 0, 0xff],
+    [30, 4, 1, 0xff, 0x0, 0x0, 0, 0xff],
+    [30, 6, 0, 0x8000000000000000, 0x0, 0x0, 0, 0xffffffffffffff80],
+    [30, 6, 0, 0x7fffffffffffffff, 0x0, 0x0, 0, 0x7f],
+    [30, 7, 6, 0xffffffffffffffff, 0x0, 0x0, 0, 0x7fffffffffffffff],
+    [30, 7, 0, 0xffffffffffffffff, 0x0, 0x0, 0, 0x7f],
+    [30, 0, 7, 0xffffffffffffffff, 0x0, 0x0, 0, 0x0],
+    [30, 0, 1, 0xffffffffffffffff, 0x0, 0x0, 0, 0x0],
+    [30, 1, 0, 0xff, 0x0, 0x0, 0, 0x7f],
+    [30, 9, 1, 0x10ffff, 0x0, 0x0, 0, 0xff],
+    [30, 9, 2, 0x10ffff, 0x0, 0x0, 0, 0x7fff],
+    [30, 8, 1, 0x1, 0x0, 0x0, 3, 0x0],
+    [30, 10, 7, 0xffffffffffffffff, 0x0, 0x0, 3, 0x0],
+    [30, 1, 9, 0x1, 0x0, 0x0, 3, 0x0],
+];
+
+test fn every_int_op_matches_the_reference() {
+    let mut cases: u64 = 0;
+    for code in 0..NOPS {
+        for ti in 0..NTYPES {
+            let (h, c) = digest(code, ti);
+            cases = cases + c;
+            if h != DIGEST[code * NTYPES + ti] {
+                io.print(f"digest mismatch: op code {code}, type {ti}\n");
+            }
+            debug.assert(h == DIGEST[code * NTYPES + ti], "the outcomes of an op on a type");
+        }
+    }
+    debug.assert(cases == INT_CASES, "the number of cases");
+}
+
+test fn every_int_cast_matches_the_reference() {
+    let mut cases: u64 = 0;
+    for k in 0..3usize {
+        let (h, c) = cast_digest(k);
+        cases = cases + c;
+        if h != CAST_DIGEST[k] { io.print(f"cast digest mismatch: kind {k}\n"); }
+        debug.assert(h == CAST_DIGEST[k], "the outcomes of a cast kind");
+    }
+    debug.assert(cases == CAST_CASES, "the number of cases");
+}
+
+test fn the_spot_cases_match_the_reference() {
+    for i in 0..SPOTS.len() {
+        let r = SPOTS[i];
+        let code = r[0] as usize;
+        let got = if code >= 28 then outcome(arith.int_cast(TERMS[code], cls(r[1] as usize), cls(r[2] as usize), r[3])) else eval(code, ty(r[1] as usize), r[3], arith.I128.{ hi: r[5], lo: r[4] });
+        if got.0 != r[6] || got.1 != r[7] { io.print(f"spot row {i} differs\n"); }
+        debug.assert(got.0 == r[6] && got.1 == r[7], "a spot row");
+    }
+}
+
+test fn what_is_no_int_fold_is_refused() {
+    let t = arith.IntTy.new(32, true);
+    let one = t.value(1);
+    let refused = [ops.IR_T_KW_CALL, ops.IR_T_MUL_DOT_WIDE, ops.IR_T_CAST_DOT_TRY, ops.IR_T_CAST_DOT_ROUND, ops.IR_T_KW_NEG, ops.IR_T_KW_POPCOUNT];
+    for i in 0..4usize {
+        debug.assert(is_err(arith.fold_binary(refused[i], t, 1, one), arith.E_OP), "an op of no fold is E_OP");
+    }
+    debug.assert(is_err(arith.fold_unary(refused[0], t, 1), arith.E_OP), "a unary op of no fold");
+    let fl = arith.CastTy.of_class(arith.CT_FLOAT);
+    let i32 = arith.CastTy.int(t);
+    debug.assert(is_err(arith.int_cast(ops.IR_T_KW_CAST, fl, i32, 0), arith.E_OP), "a float source");
+    debug.assert(is_err(arith.int_cast(ops.IR_T_KW_CAST, i32, fl, 0), arith.E_OP), "a float target");
+    debug.assert(is_err(arith.int_cast(refused[2], i32, i32, 0), arith.E_OP), "cast.try does not fold");
+    debug.assert(is_err(arith.int_cast(refused[3], i32, i32, 0), arith.E_OP), "cast.round does not fold");
+}
