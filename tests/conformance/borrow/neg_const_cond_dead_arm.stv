@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// The dead arm of an `if` on a constant condition is borrow-checked as written: a move in it
+// counts for the code after the `if`, and a conflict inside it is reported.
+import std.string;
+
+fn take(s: string.String) {}
+
+fn moved_in_dead() -> usize {
+    let s = string.String.new();
+    if false {
+        take(s);
+    }
+    return s.len(); //~ ERROR E0502
+}
+
+fn conflict_in_dead() -> u32 {
+    let mut x = 1u32;
+    if true {
+        x = 2u32;
+    } else {
+        let a = &mut x;
+        let b = &x; //~ ERROR E0501
+        *a = 3u32;
+    }
+    return x;
+}
+
+fn main() {}

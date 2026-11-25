@@ -22,6 +22,10 @@
 //! | the runtime fns of [`FD_WAITS`] (a read, write, open, or `flock` that may sleep until another process or thread acts on the file) | `block` |
 //! | a `spawn { }` (it maps a stack and starts a thread) | `alloc io trap` |
 //!
+//! A source in an arm the instance never runs (of an `if` on a constant condition,
+//! [`crate::constcond`], answered once by [`CallGraph::taken`]) does not count: lowering deletes
+//! that arm's instructions, and the call graph makes no edge from it.
+//!
 //! A node's set ([`EffectSets::set`]) is its own effects and the sets of everything it calls or
 //! drops (a drop edge to a glue node, which has no effects of its own, then to the `Drop` impls),
 //! except through a boundary fn. An edge carries the deny clause of a fn-value call's type
@@ -465,15 +469,38 @@ fn item_cx<'p>(prog: &'p Program, item: ItemId, br: &'p mut Option<Brackets>) ->
     ItemCx::new(prog, item, br.as_ref()?)
 }
 
-/// Own effects of a body from its source: per owner (0 the fn, `k + 1` closure `k`), (effect,
-/// op).
-type BodyOps = Vec<(u32, Effects, Op)>;
+/// Own effects of a body from its source.
+#[derive(Default)]
+struct BodyOps {
+    /// (owner (0 the fn, `k + 1` closure `k`), token, effect, op).
+    ops: Vec<(u32, u32, Effects, Op)>,
+    /// The owner of each of the body's constant-condition `if`s ([`TypedBody::const_ifs`]), so
+    /// an instance drops the ops of the arms it never runs.
+    if_owners: Vec<u32>,
+}
+
+impl BodyOps {
+    /// The ops of `owner` in an instance with constant-condition answers `taken`.
+    fn live<'s>(&'s self, b: &TypedBody, taken: &[bool], owner: u32) -> impl Iterator<Item = (Effects, Op)> + 's {
+        let dead = if self.ops.is_empty() {
+            Vec::new()
+        } else {
+            crate::constcond::dead_arms(&b.const_ifs, taken, |t| {
+                b.const_ifs.iter().position(|c| c.tok == t).and_then(|k| self.if_owners.get(k)).copied().unwrap_or(0)
+            })
+        };
+        self.ops
+            .iter()
+            .filter(move |&&(o, tok, ..)| o == owner && !crate::constcond::is_dead(&dead, o, tok))
+            .map(|&(_, _, e, op)| (e, op))
+    }
+}
 
 /// The sources in body `b` itself: `unsafe` blocks and expressions, `scope`, `spawn`, and calls
 /// of intrinsics (not call-graph edges). Nothing is parsed again unless the item has one of
 /// those tokens or an intrinsic call.
 fn body_ops(prog: &Program, b: &TypedBody) -> BodyOps {
-    let mut out = BodyOps::new();
+    let mut out = BodyOps::default();
     let Some(it) = prog.item(b.item) else { return out };
     let Some(f) = prog.file(it.file) else { return out };
     let Some(info) = f.parsed.items.get(it.index as usize) else { return out };
@@ -517,15 +544,16 @@ fn body_ops(prog: &Program, b: &TypedBody) -> BodyOps {
     let user = !builtin(prog, b.decl);
     for t in open..=close {
         if icx.is(t, Term::KwUnsafe) && icx.is(t + 1, Term::LParen) && user {
-            out.push((owner(t), Effects::UNSAFE, Op { kind: OpKind::Unsafe, span: icx.tok_span(t) }));
+            out.ops.push((owner(t), t, Effects::UNSAFE, Op { kind: OpKind::Unsafe, span: icx.tok_span(t) }));
         } else if icx.is(t, Term::KwScope) {
-            out.push((owner(t), Effects::BLOCK, Op { kind: OpKind::Join, span: icx.tok_span(t) }));
+            out.ops.push((owner(t), t, Effects::BLOCK, Op { kind: OpKind::Join, span: icx.tok_span(t) }));
         }
     }
     for &(lo, _, kind) in &closures {
         if kind == ClosureKind::Spawn {
-            out.push((
+            out.ops.push((
                 owner(lo.saturating_sub(1)),
+                lo,
                 SPAWN,
                 Op { kind: OpKind::Spawn, span: icx.tok_span(lo) },
             ));
@@ -533,8 +561,9 @@ fn body_ops(prog: &Program, b: &TypedBody) -> BodyOps {
     }
     for (tok, e, kind) in intrinsics {
         // keyed by the call's `(`: the callee's name is the token before it
-        out.push((owner(tok), e, Op { kind, span: icx.tok_span(tok.saturating_sub(1)) }));
+        out.ops.push((owner(tok), tok, e, Op { kind, span: icx.tok_span(tok.saturating_sub(1)) }));
     }
+    out.if_owners = b.const_ifs.iter().map(|c| owner(c.tok)).collect();
     out
 }
 
@@ -608,7 +637,7 @@ pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[
     let fd_waits: FxHashSet<DeclId> = FD_WAITS.iter().filter_map(|&f| prog.known.decl(f)).collect();
     // source ops per body, once per decl (instances share them)
     let body_ops: Vec<BodyOps> =
-        tc.bodies.par_iter().map(|b| if b.has_error { Vec::new() } else { body_ops(prog, b) }).collect();
+        tc.bodies.par_iter().map(|b| if b.has_error { BodyOps::default() } else { body_ops(prog, b) }).collect();
     let body_of = |d: DeclId| tc.bodies.binary_search_by_key(&d, |b| b.decl).ok();
     let cyclic: Vec<bool> = (0..g.scc_count() as u32).into_par_iter().map(|s| g.is_cycle(s)).collect();
     // per node: own effects, whether it is a boundary fn, the op of each own effect
@@ -645,10 +674,10 @@ pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[
                 add(Effects::BLOCK, Op { kind: OpKind::FdWait, span: node.span }, &mut eff);
             }
             if let Some(bi) = body_of(decl) {
-                for &(o, e, op) in &body_ops[bi] {
-                    if o == owner {
-                        add(e, op, &mut eff);
-                    }
+                // the instance's answers: a closure's are its fn's
+                let taken = g.fn_of(i).map_or(&[][..], |f| g.taken(f));
+                for (e, op) in body_ops[bi].live(&tc.bodies[bi], taken, owner) {
+                    add(e, op, &mut eff);
                 }
             }
             if let Some(x) = ir.and_then(|r| r.get(i as usize)) {

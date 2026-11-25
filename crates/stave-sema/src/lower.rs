@@ -408,6 +408,27 @@ fn lower_in_pool(
         let mut memo = FxHashMap::default();
         tc.glue_features.iter().map(|(&t, &f)| (graph_to_table(&cx, &mut table, &mut memo, t), f)).collect()
     };
+    // the call graph's answers to each instance's constant conditions, keyed in this table
+    let taken: FxHashMap<InstKey, Box<[bool]>> = {
+        use crate::callgraph::NodeKind;
+        let g = &tc.call_graph;
+        let cx = g.types(&tc.types);
+        let mut memo = FxHashMap::default();
+        let mut out = FxHashMap::default();
+        for (n, answers) in &g.taken {
+            let Some(NodeKind::Fn { inst, .. }) = g.nodes.get(*n as usize).map(|x| &x.kind) else { continue };
+            let args = inst
+                .args
+                .iter()
+                .map(|x| match x {
+                    GArg::Type(t) => GArg::Type(graph_to_table(&cx, &mut table, &mut memo, *t)),
+                    c => *c,
+                })
+                .collect();
+            out.insert(InstKey { decl: inst.decl, args }, answers.clone());
+        }
+        out
+    };
     let mut cache: FxHashMap<Job, usize> = jobs.iter().cloned().enumerate().map(|(i, j)| (j, i)).collect();
     // the job that first requested each job (roots: none)
     let mut parent: Vec<Option<usize>> = vec![None; jobs.len()];
@@ -434,6 +455,7 @@ fn lower_in_pool(
                 any_requires,
                 borrows,
                 inherited: &inherited,
+                taken: &taken,
                 drops,
             };
             pending.par_iter().map(|j| lower_job(&g, any_item, j)).collect()
@@ -734,6 +756,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 cx.tb = Some(tb);
                 cx.sched = g.drops.and_then(|m| m.get(&tb.decl));
                 cx.args = k.args.clone();
+                cx.taken = g.taken.get(k).map(|t| &t[..]);
                 cx.cur_n_parent = sig.n_parent;
                 cx.raw_self_ty = if decl.kind == DeclKind::Method {
                     g.sigs.impl_def(decl.parent).map(|i| i.self_ty)

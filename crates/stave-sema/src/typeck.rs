@@ -176,6 +176,9 @@ pub struct TypedBody {
     /// or a reference to one. Decided once on the definition (a generic `T` or `&T` is never a
     /// vector annotation, whatever an instance gives it); every other `for` is an element loop.
     pub chunk_loops: Vec<u32>,
+    /// The `if`s whose condition is a constant condition ([`crate::constcond`]), by node: the one
+    /// classification the call graph answers per instance and lowering and the effect pass read.
+    pub const_ifs: Vec<crate::constcond::ConstIf>,
     /// The pattern bindings that take a value that is not Copy by value: binding nodes, sorted.
     /// Decided on the types of the definition (a type parameter without a `Copy` bound is not
     /// Copy, whatever an instance gives it), so a pattern moves its value in every instance or in
@@ -967,6 +970,7 @@ fn empty_body(j: Job) -> TypedBody {
         implicit: Vec::new(),
         for_kinds: Vec::new(),
         chunk_loops: Vec::new(),
+        const_ifs: Vec::new(),
         moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
@@ -1051,6 +1055,11 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
     }
     for (_, t) in &mut b.drops {
         *t = f(*t);
+    }
+    for c in &mut b.const_ifs {
+        if let crate::constcond::ConstCond::NeedsDrop { ty, .. } = &mut c.cond {
+            *ty = f(*ty);
+        }
     }
 }
 
@@ -2288,6 +2297,7 @@ impl<'a> Ck<'a> {
         let has_error =
             self.has_error || self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
         let stmt_ends = crate::temps::StmtEnds::new(&self.icx, j.node, self.lo, self.contracts.as_deref());
+        let const_ifs = crate::constcond::classify(&self.icx, &self.targets, self.lo, j.node);
         let body = TypedBody {
             decl: j.decl,
             item: j.item,
@@ -2314,6 +2324,7 @@ impl<'a> Ck<'a> {
                 k.sort_unstable();
                 k
             },
+            const_ifs,
             moves,
             drops: std::mem::take(&mut self.drops),
             denied: std::mem::take(&mut self.denied),

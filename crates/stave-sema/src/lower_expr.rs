@@ -539,10 +539,6 @@ impl<'a> FnCx<'a> {
         if t == Term::Bang as u8 {
             let bt = self.t_bool();
             let Some(v) = self.val(c, Some(bt)) else { return E::Never };
-            // a constant stays one, so an `if` on `!needs_drop::<T>()` branches to one arm
-            if let Some(k) = self.kval(v) {
-                return E::V(self.int((k == 0) as i128), bt);
-            }
             return E::V(self.op1(Op::Not, bt, v), bt);
         }
         if t == Term::Tilde as u8 {
@@ -744,12 +740,14 @@ impl<'a> FnCx<'a> {
         let els = self.f.b.create_block();
         let vt = if ty.is_none() || self.is_never(ty) { self.t_unit() } else { ty };
         let j = self.join(n, &[vt]);
-        let bt = self.t_bool();
-        let Some(cv) = self.val(c, Some(bt)) else { return E::Never };
         // a constant condition branches to its arm only, as in `if_stmt`
-        match self.kval(cv) {
-            Some(k) => self.f.b.br(if k != 0 { then } else { els }, &[]),
-            None => self.f.b.cbr(cv, then, &[], els, &[]),
+        match self.const_cond(n) {
+            Some(k) => self.f.b.br(if k { then } else { els }, &[]),
+            None => {
+                let bt = self.t_bool();
+                let Some(cv) = self.val(c, Some(bt)) else { return E::Never };
+                self.f.b.cbr(cv, then, &[], els, &[]);
+            }
         }
         let snap = self.f.env.clone();
         // each branch is a statement of its own: its temporaries end before the join

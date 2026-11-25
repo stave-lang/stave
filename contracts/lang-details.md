@@ -58,12 +58,28 @@ unsized is E0911 `instance-layout` at the generic fn.
   and the borrow checker read for T (`vec.Vec<u8>` and `String` are true, `Option<u32>` false).
 - `needs_drop` is no const-expr (E0904), even of a concrete type: its value is fixed per instance
   of the generic fn it is written in, after monomorphization.
-- An `if` (statement or expression) whose condition is a constant of the instance (such as `true`,
-  `false`, `needs_drop::<T>()`, and `!` of one) branches to the taken arm only: the other arm is
-  type- and borrow-checked as written, but no build emits it, a debug build included. So
-  `if needs_drop::<T>() { while .. { .. } }` leaves no loop in the instance of a T without drop
-  glue: `vec.Vec` frees such a buffer in O(1). `while` conditions and the operands of `&&` / `||`
-  are not folded.
+- **Constant conditions.** The condition of an `if` (statement, `else if`, or value `if`) is a
+  constant condition when it is `true`, `false`, `needs_drop::<T>()` (the built-in, not a
+  declaration of that name), or `!` of a constant condition. Nothing else is: not one in
+  parentheses, a `const` item, a local, `&&` / `||`, a comparison (`1 == 1`,
+  `size_of::<T>() == 4`), or a `static`; a `while` or `match` never is.
+- Its value is decided once per instance of the fn it is written in, after monomorphization, and
+  every stage reads that one answer. The instance runs the taken arm only. The other arm, the
+  dead arm, is type- and borrow-checked as written (its errors are reported; a move in it counts
+  for the code after the `if`), but it is no code of the instance:
+  - no build emits it, a debug build included: `if needs_drop::<T>() { while .. { .. } }` leaves
+    no loop in the instance of a T without drop glue (`vec.Vec<u32>` truncates in O(1));
+  - nothing in it counts as an effect (E1401, `stave effects`): neither an op that can trap, an
+    `unsafe(..)`, a `scope`, or a `spawn`, nor a call (direct, through a fn value, a drop). A
+    call in it is no call-graph edge: no call cycle (E1402), no lock acquired (E1405), no
+    features inherited from its callee (E0704 `inherited`). So
+    `fn f(v: &mut vec.Vec<u32>) without(trap) { v.clear(); }` is accepted (the element loop is
+    dead), and the same with `vec.Vec<String>` is E1401;
+  - a fn it calls is still instantiated and checked as an instance (E0911 `instance-layout`,
+    E0902), and a closure literal in it is checked like any other: code in the closure's body is
+    the closure's own, nothing of the instance reaches it.
+- Any other condition is computed at run time and both arms are code, even where its value is
+  known: `const OFF: bool = false; if OFF { return xs[i]; }` in a `without(trap)` fn is E1401.
 
 ## §2 Type nesting depth
 

@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// The dead arm of an `if` on a constant condition is type-checked as written: in a statement
+// `if`, under `!`, in a value `if`, and in a generic fn whose only instance never runs it.
+fn plain() -> u32 {
+    if false {
+        let a: u32 = true; //~ ERROR E0201
+    }
+    if !true {
+        let b: bool = 2u32; //~ ERROR E0201
+    }
+    let c: u32 = if true then 1u32 else false; //~ ERROR E0201
+    return c;
+}
+
+fn generic<T>() -> u32 {
+    if needs_drop::<T>() {
+        let d: u32 = true; //~ ERROR E0201
+    }
+    return 0;
+}
+
+fn main() {
+    let x = generic::<u32>();
+}
