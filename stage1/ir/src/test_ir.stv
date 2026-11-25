@@ -1,12 +1,16 @@
 // The IR text library: loading (lines, structure, verification), printing, and the faults of
 // untrusted input.
 import bytes;
+import canon;
 import errs;
 import generated.known_items;
 import generated.opt_table;
 import load;
+import model;
 import print;
 import read;
+import test_scramble;
+import verify;
 import std.debug;
 import std.mem;
 import std.vec;
@@ -230,4 +234,168 @@ test fn i128_text() {
     v.clear();
     bytes.quote(&mut v, mem.str_bytes("a\"\\\n\t"));
     debug.assert(v.as_slice().eq(mem.str_bytes("\"a\\\"\\\\\\n\\t\"")), "the escape rule");
+}
+
+// Loads src (it must load), canonicalizes it, and checks that it prints want, and prints want
+// again after a second canonicalization.
+fn canon_prints(src: &[u8], want: &[u8], what: &str) {
+    let mut ld = load.load(src);
+    debug.assert(ld.ok(), what);
+    canon.canon(&mut ld.m);
+    debug.assert(print.print(&ld.m).as_slice().eq(want), what);
+    canon.canon(&mut ld.m);
+    debug.assert(print.print(&ld.m).as_slice().eq(want), "canon is idempotent");
+}
+
+fn types_text() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "decl d0 struct a.S", "decl d1 struct a.Unused", "type t0 slice t2 align 0", "type t1 adt d0 5", "type t2 int u 8", "type t3 adt d0 -3", "type t4 slice t2", "type t5 adt d1", "type t6 ref t3", "type t7 ref t1", "type t8 ref t0", "type t9 ref t4", "shape t1 struct t2", "shape t3 struct t2", "fn @0 a.f(t7, t6) {", "b0(%0: t7, %1: t6):", "  ret", "}", "fn @1 a.g(t8, t9)"];
+    return text(&lines);
+}
+
+test fn types_are_p_then_s_in_canonical_order_and_unused_ones_go() {
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "decl d0 struct a.S", "type t0 ref t2", "type t1 ref t3", "type t2 adt d0 -3", "type t3 adt d0 5", "type t4 int u 8", "type t5 ref t7", "type t6 ref t8", "type t7 slice t4", "type t8 slice t4 align 0", "shape t2 struct t4", "shape t3 struct t4", "fn @0 a.f(t1, t0) {", "b0(%0: t1, %1: t0):", "  ret", "}", "fn @1 a.g(t6, t5)"];
+    canon_prints(types_text().as_slice(), text(&want).as_slice(), "P (the body's), then S (shapes, bodiless fns); -3 before 5; no alignment before `align 0`");
+}
+
+test fn a_canonical_text_is_unchanged() {
+    let src = example();
+    canon_prints(src.as_slice(), src.as_slice(), "the contract example");
+}
+
+fn values_and_pool() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u 64", "type t1 bool", "fn @0 a.g(t0, t0) -> t0 {", "b0(%0: t0, %1: t0):", "  %2 = add.wrap t0 %0 7", "  %3 = lt t1 %2 9", "  cbr %3 b1(%2) b2()", "b1(%4: t0):", "  %5 = add.wrap t0 %4 9", "  ret %5", "b2():", "  ret 7", "}"];
+    return text(&lines);
+}
+
+test fn values_and_the_pool_are_renumbered_in_print_order() {
+    let src = values_and_pool();
+    let mut ld = load.load(src.as_slice());
+    debug.assert(ld.ok() && ld.m.fn_val_n.as_slice()[0] == 6 && ld.m.fn_const_n.as_slice()[0] == 2, "loads: six values, two constants");
+    // values: old v becomes sigma[v], each block's params still a run
+    let sigma = [4u32, 5, 1, 0, 3, 2];
+    {
+        let m = &mut ld.m;
+        let old_ty = [m.val_ty.as_slice()[0], m.val_ty.as_slice()[1], m.val_ty.as_slice()[2], m.val_ty.as_slice()[3], m.val_ty.as_slice()[4], m.val_ty.as_slice()[5]];
+        for v in 0..6usize {
+            m.val_ty.as_mut_slice()[sigma[v] as usize] = old_ty[v];
+        }
+        m.blk_val_lo.as_mut_slice()[0] = sigma[0];
+        m.blk_val_lo.as_mut_slice()[1] = sigma[4];
+        m.blk_val_lo.as_mut_slice()[2] = 0;
+        for i in 0..m.ins_res.len() {
+            let r = m.ins_res.as_slice()[i];
+            m.ins_res.as_mut_slice()[i] = sigma[r as usize];
+        }
+        // the pool: entries swapped, and a second entry for 7 that only `ret 7` names
+        let k0 = m.const_kind.as_slice()[0];
+        let b0 = m.const_bits.as_slice()[0];
+        let k1 = m.const_kind.as_slice()[1];
+        let b1 = m.const_bits.as_slice()[1];
+        m.const_kind.as_mut_slice()[0] = k1;
+        m.const_bits.as_mut_slice()[0] = b1;
+        m.const_kind.as_mut_slice()[1] = k0;
+        m.const_bits.as_mut_slice()[1] = b0;
+        m.const_kind.push(k0);
+        m.const_bits.push(b0);
+        m.fn_const_n.as_mut_slice()[0] = 3;
+        let last = m.opnd_kind.len() - 1;
+        for x in 0..m.opnd_kind.len() {
+            let id = m.opnd_id.as_slice()[x];
+            if m.opnd_kind.as_slice()[x] == model.O_VALUE {
+                m.opnd_id.as_mut_slice()[x] = sigma[id as usize];
+            } else if m.opnd_kind.as_slice()[x] == model.O_CONST {
+                m.opnd_id.as_mut_slice()[x] = if x == last then 2u32 else 1 - id;
+            }
+        }
+    }
+    debug.assert(!print.print(&ld.m).as_slice().eq(src.as_slice()), "the edit shows in the text");
+    canon.canon(&mut ld.m);
+    debug.assert(print.print(&ld.m).as_slice().eq(src.as_slice()), "renumbered as read");
+    let last = ld.m.opnd_kind.len() - 1;
+    debug.assert(ld.m.fn_const_n.as_slice()[0] == 2 && ld.m.opnd_id.as_slice()[last] == 0, "one entry per constant, by first use");
+    let (_, seven) = ld.m.wide.as_u64(ld.m.const_bits.as_slice()[0] as% u32);
+    debug.assert(seven == 7, "7 is used first");
+}
+
+fn intrinsic_text() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u 64", "type t1 int u size", "type t2 bool", "fn @0 a.f(t0) -> t0 {", "b0(%0: t0):", "  %1 = lt t2 %0 3", "  cbr %1 b1() b2()", "b1():", "  ret 3", "b2():", "  %2 = intrinsic.thread_start_addr t1", "  ret %0", "}"];
+    return text(&lines);
+}
+
+test fn an_unreachable_block_goes_with_its_names_and_types() {
+    let mut ld = load.load(intrinsic_text().as_slice());
+    debug.assert(ld.ok() && ld.m.intr.rows() == 1, "loads, one intrinsic name");
+    // b0 now branches to b1 only: b2 is no longer reachable
+    ld.m.blk_tkind.as_mut_slice()[0] = model.TM_BR;
+    ld.m.blk_topnd.as_mut_slice()[0] = model.NONE;
+    ld.m.blk_tgt_n.as_mut_slice()[0] = 1;
+    canon.canon(&mut ld.m);
+    let want = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u 64", "type t1 bool", "fn @0 a.f(t0) -> t0 {", "b0(%0: t0):", "  %1 = lt t1 %0 3", "  br b1()", "b1():", "  ret 3", "}"];
+    debug.assert(print.print(&ld.m).as_slice().eq(text(&want).as_slice()), "b2, its intrinsic name, and `int u size` dropped");
+    debug.assert(ld.m.intr.rows() == 0 && ld.m.fn_blk_n.as_slice()[0] == 2 && ld.m.fn_val_n.as_slice()[0] == 2 && ld.m.fn_const_n.as_slice()[0] == 1, "tables shrunk");
+}
+
+fn loop_text() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u 64", "type t1 bool", "fn @2 app.sum(t0) -> t0 {", "b0(%0: t0):", "  br b1(0, 0)", "b1(%1: t0, %2: t0):", "  %3 = eq t1 %1 %0", "  cbr %3 b3() b4()", "b2(%4: t0):", "  ret %4", "b3():", "  br b2(%2)", "b4():", "  %5 = add t0 %2 %1", "  %6 = add t0 %1 1", "  br b1(%6, %5)", "}"];
+    return text(&lines);
+}
+
+fn switch_text() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 8", "type t1 int u 64", "type t2 int u size", "type t3 int s 32", "type t4 bool", "type t5 str", "type t6 ref t5", "str s0 \"hi\"", "fn @0 main.sel(t1) -> t1 {", "b0(%0: t1):", "  switch %0 0:b1() 1:b2() _:b3()", "b1():", "  ret 10", "b2():", "  ret 20", "b3():", "  ret 30", "}", "fn @1 main.note(t6) {", "b0(%0: t6):", "  %1 = slice.len t2 %0", "  ret", "}", "fn @2 main.ovf(t0) -> t0 {", "b0(%0: t0):", "  %1 = add t0 %0 9", "  ret %1", "}", "fn @3 main.main() -> t3 {", "b0():", "  %0 = call t1 @0 1", "  call () @1 s0", "  %1 = call t0 @2 250", "  %2 = eq t4 %1 0", "  %3 = select t1 1 %0 7", "  cbr %2 b1(%3) b1(%3)", "b1(%4: t1):", "  %5 = cast.wrap t3 %4", "  ret %5", "}"];
+    return text(&lines);
+}
+
+fn slots_text() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 int s 32", "type t2 ref mut t0", "type t3 ref mut t4", "type t4 tuple t0 t0", "site 0 \"src/main.stv\" 1 4 main.h", "site 1 \"src/main.stv\" 6 4 main.g", "site 2 \"src/main.stv\" 8 12 main.g", "site 3 \"src/main.stv\" 11 4 main.main", "site 4 \"src/main.stv\" 13 13 main.main", "site 5 \"src/main.stv\" 14 13 main.main", "main @2", "fn @0 main.h(t0) -> t0 site 0 {", "b0(%0: t0):", "  %1 = slot t2", "  store () %1 %0", "  %2 = load t0 %1", "  %3 = add.wrap t0 %2 1", "  ret %3", "}", "fn @1 main.g(t0) -> t0 site 1 {", "b0(%0: t0):", "  %1 = slot t3", "  %2 = make t4 %0 %0", "  store () %1 %2", "  %3 = addr.field t2 %1 0", "  %4 = load t0 %3", "  %5 = call t0 @0 %4 !2", "  ret %5", "}", "fn @2 main.main() -> t1 site 3 {", "b0():", "  %0 = slot t2", "  store () %0 3", "  %1 = load t0 %0", "  %2 = call t0 @1 %1 !4", "  %3 = call t0 @0 %2 !5", "  %4 = cast.wrap t1 %3", "  ret %4", "}"];
+    return text(&lines);
+}
+
+fn statics_text() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u 32", "type t1 int u size", "type t2 bool", "type t3 str", "type t4 ref t3", "type t5 ptr const t0", "str s0 \"hi\"", "str s1 \"there\"", "site 0 \"src/app.stv\" 1 4 app.get", "site 1 \"src/app.stv\" 4 4 app.note", "site 2 \"src/app.stv\" 8 4 app.main", "site 3 \"src/app.stv\" 9 9 app.main", "site 4 \"src/app.stv\" 11 13 app.main", "static 0 t0 app.COUNT", "data 0 0 x2a", "fn @0 app.get() -> t0 site 0 {", "b0():", "  %0 = intrinsic.static_addr t5 0", "  %1 = load t0 %0", "  ret %1", "}", "fn @1 app.note(t4) -> t1 site 1 {", "b0(%0: t4):", "  %1 = slice.len t1 %0", "  ret %1", "}", "fn @2 app.main(t0) -> t0 site 2 {", "b0(%0: t0):", "  %1 = call t1 @1 s0 !3", "  %2 = call t1 @1 s1 !3", "  br b1(0, %0)", "b1(%3: t0, %4: t0):", "  %5 = call t0 @0 !4", "  %6 = add.wrap t0 %3 %5", "  %7 = sub.wrap t0 %4 1", "  %8 = eq t2 %7 0", "  cbr %8 b2() b1(%6, %7)", "b2():", "  switch %6 0:b3() 7:b3() _:b4()", "b3():", "  ret 0", "b4():", "  ret %6", "}"];
+    return text(&lines);
+}
+
+fn floats_text() -> vec.Vec<u8> {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u 64", "type t1 float 32", "type t2 float 64", "fn @0 app.f(t0, t1, t2) -> t1 {", "b0(%0: t0, %1: t1, %2: t2):", "  %3 = add.wrap t0 %0 0", "  %4 = add t1 %1 0x00000000", "  %5 = add t2 %2 0x0000000000000000", "  %6 = add t1 %4 0x80000000", "  ret %6", "}", "fn @1 app.g(t0) -> t0 {", "b0(%0: t0):", "  %1 = add.wrap t0 %0 1", "  %2 = add.wrap t0 %1 0", "  ret %2", "}"];
+    return text(&lines);
+}
+
+// Whether a and b have equal body columns and intrinsic tables.
+fn same_bodies(a: &model.Module, b: &model.Module) -> bool {
+    let fns = a.fn_blk_lo.as_slice().eq(b.fn_blk_lo.as_slice()) && a.fn_blk_n.as_slice().eq(b.fn_blk_n.as_slice()) && a.fn_val_lo.as_slice().eq(b.fn_val_lo.as_slice()) && a.fn_val_n.as_slice().eq(b.fn_val_n.as_slice()) && a.fn_const_lo.as_slice().eq(b.fn_const_lo.as_slice()) && a.fn_const_n.as_slice().eq(b.fn_const_n.as_slice());
+    let blks = a.blk_val_lo.as_slice().eq(b.blk_val_lo.as_slice()) && a.blk_param_n.as_slice().eq(b.blk_param_n.as_slice()) && a.blk_ins_lo.as_slice().eq(b.blk_ins_lo.as_slice()) && a.blk_ins_n.as_slice().eq(b.blk_ins_n.as_slice()) && a.blk_tkind.as_slice().eq(b.blk_tkind.as_slice()) && a.blk_topnd.as_slice().eq(b.blk_topnd.as_slice()) && a.blk_tgt_lo.as_slice().eq(b.blk_tgt_lo.as_slice()) && a.blk_tgt_n.as_slice().eq(b.blk_tgt_n.as_slice());
+    let ins = a.val_ty.as_slice().eq(b.val_ty.as_slice()) && a.ins_op.as_slice().eq(b.ins_op.as_slice()) && a.ins_intr.as_slice().eq(b.ins_intr.as_slice()) && a.ins_ty.as_slice().eq(b.ins_ty.as_slice()) && a.ins_res.as_slice().eq(b.ins_res.as_slice()) && a.ins_opnd_lo.as_slice().eq(b.ins_opnd_lo.as_slice()) && a.ins_opnd_n.as_slice().eq(b.ins_opnd_n.as_slice()) && a.ins_site.as_slice().eq(b.ins_site.as_slice());
+    let rows = a.opnd_kind.as_slice().eq(b.opnd_kind.as_slice()) && a.opnd_id.as_slice().eq(b.opnd_id.as_slice()) && a.tgt_blk.as_slice().eq(b.tgt_blk.as_slice()) && a.tgt_opnd_lo.as_slice().eq(b.tgt_opnd_lo.as_slice()) && a.tgt_opnd_n.as_slice().eq(b.tgt_opnd_n.as_slice()) && a.tgt_case.as_slice().eq(b.tgt_case.as_slice()) && a.const_kind.as_slice().eq(b.const_kind.as_slice()) && a.const_bits.as_slice().eq(b.const_bits.as_slice());
+    return fns && blks && ins && rows && a.intr.data().eq(b.intr.data()) && a.intr.offsets().eq(b.intr.offsets());
+}
+
+// Every embedded text, scrambled with several seeds, canonicalizes to what it canonicalizes to
+// unscrambled, and the result passes the verifier. Canon keeps a canonical text, and its body
+// columns are then the reader's (it lays a body out in print order); for another text they are
+// those of the unscrambled text canonicalized.
+test fn canon_undoes_every_scramble() {
+    let texts = [example(), values_and_pool(), types_text(), intrinsic_text(), loop_text(), switch_text(), slots_text(), statics_text(), floats_text()];
+    // all but the type table text are canonical (stage0's `ir fmt` prints them back)
+    let is_canonical = [true, true, false, true, true, true, true, true, true];
+    for k in 0..texts.len() {
+        let src = texts[k].as_slice();
+        let mut base = load.load(src);
+        debug.assert(base.ok(), "the text loads");
+        let read_as = print.print(&base.m);
+        canon.canon(&mut base.m);
+        let want = print.print(&base.m);
+        let canonical = is_canonical[k];
+        debug.assert(!canonical || (read_as.as_slice().eq(src) && want.as_slice().eq(src)), "canon keeps a canonical text");
+        let reference = if canonical then load.load(src) else base;
+        for s in 0..12u64 {
+            let mut ld = load.load(src);
+            test_scramble.scramble(&mut ld.m, (k as u64) * 1000 + s);
+            debug.assert(!print.print(&ld.m).as_slice().eq(want.as_slice()), "the scramble shows in the text");
+            canon.canon(&mut ld.m);
+            debug.assert(print.print(&ld.m).as_slice().eq(want.as_slice()), "canon undoes the scramble");
+            debug.assert(same_bodies(&ld.m, &reference.m), "the body rows of the canonical module");
+            verify.verify(&mut ld);
+            debug.assert(ld.ok(), "the verifier accepts the canonical module");
+        }
+    }
 }

@@ -9,6 +9,7 @@
 // Untrusted input: every loop is bounded by the input, no recursion, every index is checked
 // against its section before use.
 import bytes;
+import canon;
 import drive;
 import errs;
 import grammar;
@@ -912,37 +913,7 @@ fn intrinsic_table(m: &mut model.Module, st: &stage.Stage) {
         if st.in_op.as_slice()[i] == ir_text_terminals.IR_T_INTR { ids.push(i as% u32); }
     }
     let n = ids.len();
-    let mut a = ids;
-    let mut b = col.filled(n, 0u32);
-    let mut w: usize = 1;
-    while w < n {
-        {
-            let src = a.as_slice();
-            let dst = b.as_mut_slice();
-            let mut lo: usize = 0;
-            while lo < n {
-                let mid = if n - lo < w then n else lo + w;
-                let hi = if n - mid < w then n else mid + w;
-                let mut x = lo;
-                let mut y = mid;
-                let mut k = lo;
-                while k < hi {
-                    let take_y = y < hi && (x >= mid || grammar.cmp_bytes(st.in_intr.row(src[y] as usize), st.in_intr.row(src[x] as usize)) < 0);
-                    if take_y {
-                        dst[k] = src[y];
-                        y = y + 1;
-                    } else {
-                        dst[k] = src[x];
-                        x = x + 1;
-                    }
-                    k = k + 1;
-                }
-                lo = hi;
-            }
-        }
-        mem.swap(&mut a, &mut b);
-        w = w * 2;
-    }
+    let a = grammar.sort_rows(&st.in_intr, ids);
     for k in 0..n {
         let r = st.in_intr.row(a.as_slice()[k] as usize);
         let rows = m.intr.rows();
@@ -1096,27 +1067,8 @@ impl Bodies {
         }
         if ld.errs.len() != n0 { return; }
         // every block is reachable from b0
-        let fb = ld.m.blk_tkind.len() - (hi - lo);
         let nb = hi - lo;
-        let mut seen = col.filled(nb, false);
-        let mut stack = vec.Vec::<u32>.new();
-        if nb > 0 {
-            seen.as_mut_slice()[0] = true;
-            stack.push(0);
-        }
-        while stack.len() > 0 {
-            let x = stack.as_slice()[stack.len() - 1] as usize;
-            stack.truncate(stack.len() - 1);
-            let tl = ld.m.blk_tgt_lo.as_slice()[fb + x] as usize;
-            let tn = ld.m.blk_tgt_n.as_slice()[fb + x] as usize;
-            for g in tl..tl + tn {
-                let y = ld.m.tgt_blk.as_slice()[g] as usize;
-                if y < nb && !seen.as_slice()[y] {
-                    seen.as_mut_slice()[y] = true;
-                    stack.push(y as% u32);
-                }
-            }
-        }
+        let seen = canon.reached(&ld.m, ld.m.blk_tkind.len() - nb, nb);
         for x in 0..nb {
             if !seen.as_slice()[x] {
                 e.clear();
