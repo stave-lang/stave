@@ -12,7 +12,7 @@ exact ir.grammar.cmp_bytes ir.verify.cmp text.cmp
 exact ir.model.mix ir.types.mix ir.umap.mix prims.hindex.mix traits.mix
 exact ir.print.push_inst ir.read.push_inst
 exact ir.types.memo_get sigs.memo_get tc_traits.memo
-exact ir.vtypes.digits typeck.sig_bits
+exact ir.vtypes.digits tc_rows.sig_bits
 exact ir.vtypes.mul_ok layout.mul_ok
 exact kinds.real layout.real traits.real
 exact kinds.run_of layout.run_of
@@ -24,7 +24,6 @@ exact tc_builtins.lane_bits typeck.lane_bits
 exact tc_chain.first_tok typeck.first_tok
 exact tc_chain.has_const_param tc_method.has_const
 exact tc_chain.member tc_pat.field
-exact test_diag_names.has test_manifest.has
 self diag_reg.Strs.get intern.Cands.text
 self diag_reg.Strs.len intern.Cands.len
 self diag_reg.Strs.new intern.Cands.new
