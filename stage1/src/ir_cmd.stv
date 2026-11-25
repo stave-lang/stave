@@ -1,7 +1,8 @@
 // `stage1 ir check|fmt FILE`: loads IR text (contracts/checked-ir.md "Loading": lines, structure,
-// verification) and, for `fmt`, prints the module's text on stdout. A fault prints
+// verification) and, for `fmt`, prints the canonical module's text on stdout. A fault prints
 // `FILE:LINE:COL: error: MSG` or `FILE:LINE: verify: MSG` on stderr (at most 100) and exits 1;
 // an unreadable FILE or a bad command line exits 2.
+import ir.canon;
 import ir.load;
 import ir.print;
 import text;
@@ -37,13 +38,14 @@ pub fn run() -> i32 {
             return 2;
         }
     }
-    let ld = load.load(src.as_slice());
+    let mut ld = load.load(src.as_slice());
     if !ld.ok() {
         let out = ld.errs.render(file.as_bytes());
         let _ = io.write_all(2, out.as_slice());
         return 1;
     }
     if fmt {
+        canon.canon(&mut ld.m);
         let out = print.print(&ld.m);
         let _ = io.write_all(1, out.as_slice());
     }
