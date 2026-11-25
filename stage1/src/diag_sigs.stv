@@ -370,6 +370,13 @@ pub fn sigs_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &int
             buf.clear();
             display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
             d.arg("found", buf.as_slice());
+        } else if code == sigs.D_E0413 {
+            let g = r.b.as_slice()[k];
+            d.begin(413, if ds.kind.as_slice()[g as usize] == decls.DK_STATIC then "static" else "");
+            d.arg("name", nm.tab.text(ds.name.as_slice()[g as usize] as usize));
+            buf.clear();
+            display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
+            d.arg("type", buf.as_slice());
         } else if code == sigs.D_E0410 {
             d.begin(410, "");
             buf.clear();

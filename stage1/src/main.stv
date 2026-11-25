@@ -309,7 +309,9 @@ fn main() -> i32 {
     let mut tc: Option<tc_rows.Typeck> = Option.None;
     if sg.cx.skip == consteval.CV_NONE {
         let (_, order) = dump.sigs_order(&sg, &ds);
-        kd = Option.Some(kinds.build(&mut sg, &ds, &fl, &md, &nm, order.as_slice()));
+        let k = kinds.build(&mut sg, &ds, &fl, &md, &nm, order.as_slice());
+        diag_kinds.const_drops(&mut d, &k, order.as_slice(), &sg, &ds, &nm, &lx, &set, &toks, &tree);
+        kd = Option.Some(k);
         let x86 = target.alias.as_bytes()[0] == 120;
         let base = sigs.baseline(target.name.as_bytes());
         let c = typeck.build(&mut sg, &ds, &fl, &md, &nm, &set, &toks, &cut, &tree, x86, base);

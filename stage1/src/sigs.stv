@@ -76,6 +76,7 @@ const K_KERNEL_DECL: u8 = node_kinds.KIND_KERNEL_DECL;
 const K_DISP_ARM: u8 = node_kinds.KIND_DISP_ARM;
 const K_FEATURE: u8 = node_kinds.KIND_FEATURE;
 const K_PRIMARY: u8 = node_kinds.KIND_PRIMARY;
+const K_POSTFIX: u8 = node_kinds.KIND_POSTFIX;
 
 // Lowering frame ops.
 const OP_TY: u8 = 0;
@@ -251,6 +252,7 @@ pub fn scalar_ty(tab: &mut types.Table, s: u32) -> u32 {
 // Diagnostic codes signature building raises (code numbers).
 pub const D_E0201: u16 = 201;
 pub const D_E0410: u16 = 410;
+pub const D_E0413: u16 = 413;
 pub const D_E0514: u16 = 514;
 pub const D_E0515: u16 = 515;
 pub const D_E0520: u16 = 520;
@@ -270,6 +272,7 @@ pub const W_RUNTIME: u32 = 5;
 // The diagnostics of signature building, as rows: the code, the item, the first and last global
 // token of the primary span, and by code:
 // - E0201 (case `const-param-type`): a = the const generic param's row, `ty` its type;
+// - E0413: b = the const or static, `ty` its type;
 // - E0410: a = the field's name token (NONE: a tuple payload element, `_`), b = the struct or
 //   enum, `ty` its type;
 // - E0514 E0515: a = the token of the parameter name the message names;
@@ -1195,7 +1198,7 @@ fn decl_row(tree: &ast.Ast, ds: &decls.Decls, d: usize) -> u32 {
 }
 
 // Whether type ty is or holds a reference or view in scope sc (a `T: view` param counts).
-fn is_view_in(cx: &consteval.Cx, ds: &decls.Decls, ty: u32, sc: consteval.Scope) -> bool {
+pub fn is_view_in(cx: &consteval.Cx, ds: &decls.Decls, ty: u32, sc: consteval.Scope) -> bool {
     let mut stack = vec.Vec::<u32>.new();
     let mut seen = vec.Vec::<u32>.new();
     let mut kids = vec.Vec::<u32>.new();
@@ -1909,6 +1912,28 @@ fn deps_done(cx: &consteval.Cx, ds: &decls.Decls, done: &[bool], it: u32) -> boo
     return true;
 }
 
+fn is_ref_str(tab: &types.Table, ty: u32) -> bool {
+    return tab.tag_of(ty) == types.TK_REF && tab.a_of(ty) == 0 && tab.tag_of(tab.b_of(ty)) == types.TK_STR;
+}
+
+// Whether initializer row e is a string literal or a path to a `&str` const (a static string).
+fn static_str(cx: &consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, ds: &decls.Decls, it: u32, base: usize, e: usize) -> bool {
+    let k = kind(tree, e);
+    let mut prim = e;
+    if k == K_PRIMARY {
+        if tk(t, tree.tok.as_slice()[e]) == terminals.T_STR_LIT { return true; }
+    } else if k == K_POSTFIX {
+        let ks = tree.kids.row(e);
+        if ks.len() != 1 { return false; }
+        prim = base + ks[0] as usize;
+    } else {
+        return false;
+    }
+    let (tag, d) = path_res(cx, tree, t, nm, ds, it, base, prim);
+    if tag != R_DECL || ds.kind.as_slice()[d as usize] != decls.DK_CONST { return false; }
+    return is_ref_str(&cx.tab, cx.ty.as_slice()[d as usize]);
+}
+
 // An alias target, or a const's or static's type and a const's value.
 fn alias_or_const(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, d: u32) {
     let du = d as usize;
@@ -1927,8 +1952,13 @@ fn alias_or_const(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Inte
     let ty = if tn == NONE then ERR else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, tn as usize, false, consteval.no_scope());
     sg.cx.ty.as_mut_slice()[du] = ty;
     sg.cx.consts.ty.as_mut_slice()[du] = ty;
-    if k != decls.DK_CONST { return; }
     let e = expr_child(tree, base, g);
+    // E0413: no reference or view, but a `&str` a string literal or such a const gives
+    if ty != ERR && is_view_in(&sg.cx, ds, ty, consteval.no_scope()) && !(is_ref_str(&sg.cx.tab, ty) && e != NONE && static_str(&sg.cx, tree, t, nm, ds, it, base, e as usize)) {
+        let (lo, hi) = span_of(tree, t, cut, tn as usize);
+        sg.rows.add(D_E0413, it, lo, hi, NONE, d, ty, consteval.no_scope());
+    }
+    if k != decls.DK_CONST { return; }
     if e == NONE || ty == ERR {
         sg.cx.consts.state.as_mut_slice()[du] = consteval.CV_FAIL;
         return;
