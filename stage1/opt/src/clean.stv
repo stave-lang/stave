@@ -277,8 +277,7 @@ fn cast_value(m: &model.Module, op: u16, ty: u32, a: arith.I128) -> Option<arith
 
 // The C2 value of `fold` `int` op `op` with result type ty on the n int constants a (and b), or
 // None: undefined (the op would trap), or an op, a type, or an operand outside C2's list.
-// - Compares: on the two mathematical values, read as 64-bit ints signed when both fit, else
-//   unsigned when both are non-negative (a constant of a compare has no type of its own either).
+// - Compares: on the two mathematical values (a constant of a compare has no type of its own).
 // - The others: in the result type (`bool` one bit), whose range holds every operand but a shift
 //   amount (any value: one outside 0 .. bits is the trap or the mask of `arith`).
 fn evaluate(m: &model.Module, op: u16, ty: u32, a: arith.I128, b: arith.I128, n: usize) -> Option<arith.I128> {
@@ -288,9 +287,7 @@ fn evaluate(m: &model.Module, op: u16, ty: u32, a: arith.I128, b: arith.I128, n:
     }
     if is_compare(op) {
         if n != 2 || !vtypes.is_bool(m, ty) { return Option.None; }
-        let s = vtypes.fits(true, 64, a.hi, a.lo) && vtypes.fits(true, 64, b.hi, b.lo);
-        if !s && (a.hi != 0 || b.hi != 0) { return Option.None; }
-        return value_of(arith.IntTy.new(1, false), arith.fold_binary(op, arith.IntTy.new(64, s), a.lo, b));
+        return value_of(arith.IntTy.new(1, false), arith.wide_cmp(op, a, b));
     }
     let c = vtypes.classify(m, ty);
     let mut t = arith.IntTy.new(1, false);

@@ -60,7 +60,9 @@ the type table and decls that `canon` derives from the bodies.
 **P3.** With `--passes=base` (and in stage0) the pipeline is `canon(B(M))`.
 
 **P4.** After each phase, and always on the output, the module satisfies the IR verifier and the
-invariants of section 7. A violation is a compiler bug. A `switch` whose scrutinee is an int
+invariants of section 7. A violation is a compiler bug. `stage1 ir opt` checks it on the module it
+prints (the output, or the module of `--dump-phase`) and, with `--verify-phases`, on the canonical
+module after every phase of every round (cli-stage1.md). A `switch` whose scrutinee is an int
 constant is legal at level `opt` (checked-ir.md "Loading" step 3): X writes one when it
 substitutes a constant argument for a param a callee switches on, and C1 when it substitutes a
 constant for a param. C3 of the same clean-up round turns every such `switch` into a `br`, and
@@ -225,7 +227,7 @@ has a result, else none; its instructions are those of `B` after index `k`; its 
 **X6. Several rows of one block** are expanded left to right: the continuation of one is the
 block the next is split from. The call's own `!s` is deleted with the call. Every copied instruction
 keeps its `!<row>`; types, strings, sites, statics, intrinsic names, and fns are module-wide and
-copied by id.
+copied by id; constants are copied by kind and bits into `f`'s pool (`canon` merges equal ones).
 
 **X7. Slots.** `σ(q1)..σ(qj)` of all accepted rows of `f` go to `f`'s `b0` directly after `f`'s
 own leading slots: rows in `(b, k)` order of the input, each callee's slots in their order in
@@ -271,10 +273,13 @@ type, `bool`, or `char`; `bits` is R's width, 64 for `int s|u size` on every cur
   two's-complement `bits`-wide representations, read back in R.
 - `popcount clz ctz`: the count over the `bits`-wide representation of `x` (`clz` and `ctz` of 0
   are `bits`).
-- `eq ne lt le gt ge`: the comparison of the two mathematical values; the result is 1 or 0.
+- `eq ne lt le gt ge`: the comparison of the two mathematical values; the result is 1 or 0. Two
+  int constants compare as integers: no position gives them a type, and none is needed.
 - `cast` with R an int type or `char`: `x`. `cast.wrap`, `cast.sat` with R an int type: `x`
   reduced modulo 2^bits into R's range; `x` clamped to R's range. Other casts (and these with
-  another R) do not fold.
+  another R) do not fold. The int constant `x` of a cast is its mathematical value (no position
+  gives it a type); the verifier admits one only in -2^63 ..= 2^64 - 1, and for `cast` only one
+  that R holds.
 
 This is checked-ir.md "Ops" applied to constants; stave-ir `arith` computes the same. Floats,
 vectors, masks, aggregates, `mul.wide`, `cast.round`, `cast.try`, and `check.bounds` never fold.

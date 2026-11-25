@@ -19,7 +19,8 @@ text.
 **`stage1 ir opt [--passes=base|full] [--dump=inline] [--dump-phase=inline|clean|base]
 [--verify-phases] [--limit NAME=N]... FILE`** (the stage1 binary's optimizer, run directly; `stave ir opt` stays
 stage0's base passes): loads FILE with stage1's IR library (checked-ir.md "Loading" steps 1-3);
-the header must say `release` and level `checked` (exit 1 otherwise). It runs the release passes
+the header must say `release` and level `checked` (exit 1 otherwise). FILE's module is made
+canonical (checked-ir.md "Canonical module") before the first round. It runs the release passes
 of [opt-passes.md](opt-passes.md), `full` (the default: rule P1) or `base` (rule P3), and prints
 the module at level `opt` on stdout in the file's form: the stack section of an emit-form file is
 printed unchanged, so `stave ir emit --release`, `stage1 ir opt`, `stave ir build` builds with
@@ -31,7 +32,8 @@ the front end's stack bounds.
   last round, at level `opt` and in the file's form: `inline` after the expansion, `clean` after
   the clean-up, `base` after the base passes (the output itself). A phase that `--passes` does not
   run is a usage error.
-- `--verify-phases`: stage1's IR verifier also runs after every phase, not only on the output.
+- `--verify-phases`: stage1's IR verifier also runs on the canonical module after every phase of
+  every round, not only on the module printed (the output, or the `--dump-phase` module).
 - `--limit NAME=N`: for this run, the `[limits]` entry `NAME` of `opt.toml` (`threshold`, `cap`,
   `call_saved`, `slot_callee`, `slot_caller`, `rounds`) is the decimal `N` (opt-passes.md K1);
   for goldens and tuning sweeps. A value that breaks opt-passes.md K3, or `rounds=0`, is a usage
@@ -40,7 +42,8 @@ the front end's stack bounds.
 Faults in FILE print as for `stave ir` and exit 1; an unreadable FILE or a bad command line
 (an unknown flag or value, `--dump` with `--dump-phase`) exits 2. A verifier fault in a phase's
 output is a compiler bug: `FILE: internal error: <phase>: @<inst>: MSG` on stderr (`<phase>` one
-of `inline clean base`), nothing on stdout, exit 3.
+of `inline clean base`; `@<inst>: ` names the fn the fault is in, and is absent for a fault outside
+every fn), nothing on stdout, exit 3.
 
 **Commands that stage1 does not run**: `stave unsafe-report`, `stave lowering`, and `stave explain` always
 run in stage0, whatever `--compiler` says. They compile no program and print no summary line.
