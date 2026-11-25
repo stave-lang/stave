@@ -17,8 +17,9 @@
 #
 # Every root's `sigs.txt` and `kinds.txt` must be stage0's.
 #
-# `types.txt`: T is a rank among every type the checker reached, so one type more or less renumbers
-# the rest. Both files are rewritten by key: each `I N t<T>` line becomes `I N c<C>`, C one id per
+# `types.txt`: T is the rank among the types the dump names, as in `sigs`. A root of which stage1
+# prints no `?` line must be byte-equal to stage0's. For the others, one `?` more or less renumbers
+# the rest, so both files are rewritten by key: each `I N t<T>` line becomes `I N c<C>`, C one id per
 # key text whose components are themselves replaced by their C (shared by the two files), and the
 # lines are compared one by one. stage1 prints `?` as T for an expression node it does not type
 # yet; that line is counted, every other difference fails. Two ratchets, each moved only toward
@@ -53,7 +54,7 @@ S1="$OUT/stage1"
 export STAVE_STD_DIR="$ROOT"
 # Codes of the stages stage1 has so far; add a stage's codes with its dump. E0005 is stage1's only
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
-TYPES_EXACT_MIN=0
+TYPES_EXACT_MIN=839
 TYPES_UNKNOWN_PPM=1103
 S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0410|E0414|E0416|E0419|E0420|E0421|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
 # Messages of the shapes of those codes that later stages raise.
@@ -101,7 +102,11 @@ types_keyed() {
     END {
       print NR, unk + 0, exact > cnt
       if (bad) { print bad > diff; exit 1 }
-    }'
+    }' || return 1
+  if [ "$exact" = 0 ] && ! grep -q ' ?$' "$1/1/types.txt"; then
+    diff "$1/0/types.txt" "$1/1/types.txt" | sed -n 2p > "$1/types.diff"
+    return 1
+  fi
 }
 
 if [ "${1:-}" = "--one" ]; then
