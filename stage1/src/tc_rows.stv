@@ -34,6 +34,9 @@ const ERR: u32 = types.ERR;
 pub const UNK: u32 = tc_builtins.UNK;
 // `LIT | g`: the value of literal group g.
 pub const LIT: u32 = 2147483648;
+// The nesting a body may have: expression nodes, blocks, and patterns nested deeper than this
+// are E0005 case `expr`, an error.
+pub const MAX_DEPTH: u32 = 20000;
 
 pub struct Typeck {
     // per node row: its type, `NONE` (no value), `UNK`, or `LIT | g` while its body is checked
@@ -57,9 +60,11 @@ pub struct Typeck {
     pub chain: vec.Vec<u8>,
     pub pos: vec.Vec<u32>,
     pub pend: vec.Vec<u8>,
-    // the walk: node rows and the next child of each
+    // the walk: node rows and the next child of each; the nesting levels on it (`depth`, counted
+    // as `MAX_DEPTH` counts them)
     pub st_row: vec.Vec<u32>,
     pub st_kid: vec.Vec<u32>,
+    pub depth: u32,
     // the body being checked: item, its first node row, module, scope, `self` binding row, error
     // found
     pub it: u32,
