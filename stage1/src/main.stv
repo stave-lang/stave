@@ -4,7 +4,8 @@
 //
 // Command line (a subset of stage0's): `stage1 build|check [PATH]
 // [--dump=tokens,items,ast,strings,names,sigs,kinds,types,diags --dump-dir DIR] [--diagnostics human|json]
-// [--target T] [-o OUT]`, and `stage1 ir check|fmt FILE` (`ir_cmd`). PATH (default `.`) is a
+// [--target T] [-o OUT]`, `stage1 ir check|fmt FILE`, and
+// `stage1 ir opt --dump=inline [--limit NAME=N]... FILE` (`ir_cmd`). PATH (default `.`) is a
 // `.stv` file or a package directory; the build
 // covers it, its path dependencies, and the shipped `std` and `runtime` from the library
 // directory (`$STAVE_STD_DIR`, else next to the binary as for stage0). It writes the requested dumps as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for

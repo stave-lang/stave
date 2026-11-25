@@ -1,0 +1,190 @@
+// The inlining decision (contracts/opt-passes.md D1-D7) over the facts of one round, and its
+// `inline` dump (section 8).
+//
+// Fns decide by level, ascending: a row's verdict is the first test it fails of E (the callee's)
+// and L (its own), then `size` and `slots` on the callee's closed size and slots, which a callee
+// that passed E has final (it lies in a lower level). The rest are the candidates, sorted by
+// (S(g), b, k) (a stable sort by S(g) of rows already in (b, k) order), and accepted as the
+// prefix the budget cut allows; their sums give the caller's closed size and slots.
+import facts;
+import ir.bytes;
+import ir.generated.opt_table;
+import ir.model;
+import ir.print;
+import prims.col;
+import prims.sort;
+import std.debug;
+import std.mem;
+import std.vec;
+
+// The limits of opt.toml `[limits]` (K1) for one run.
+pub struct Limits {
+    pub threshold: u64,
+    pub cap: u64,
+    pub call_saved: u64,
+    pub slot_callee: u64,
+    pub slot_caller: u64,
+    pub rounds: u64,
+}
+
+impl Limits {
+    pub fn table() -> Limits {
+        return Limits.{ threshold: opt_table.OPT_THRESHOLD as u64, cap: opt_table.OPT_CAP as u64, call_saved: opt_table.OPT_CALL_SAVED as u64, slot_callee: opt_table.OPT_SLOT_CALLEE, slot_caller: opt_table.OPT_SLOT_CALLER, rounds: opt_table.OPT_ROUNDS as u64 };
+    }
+
+    // `--limit NAME=N`: false for a name that is no limit, `rounds` 0, or a `call_saved` above
+    // the weight of `call` (K3).
+    pub fn set(&mut self, name: &[u8], n: u64) -> bool {
+        if name.eq(mem.str_bytes("threshold")) {
+            self.threshold = n;
+        } else if name.eq(mem.str_bytes("cap")) {
+            self.cap = n;
+        } else if name.eq(mem.str_bytes("call_saved")) {
+            if n > facts.op_weight(mem.str_bytes("call")) as u64 { return false; }
+            self.call_saved = n;
+        } else if name.eq(mem.str_bytes("slot_callee")) {
+            self.slot_callee = n;
+        } else if name.eq(mem.str_bytes("slot_caller")) {
+            self.slot_caller = n;
+        } else if name.eq(mem.str_bytes("rounds")) {
+            if n == 0 { return false; }
+            self.rounds = n;
+        } else {
+            return false;
+        }
+        return true;
+    }
+}
+
+pub struct Decision {
+    // S and SB per fn (0 without a body)
+    pub closed: vec.Vec<u64>,
+    pub slots: vec.Vec<u64>,
+    // per site row of the facts: its verdict (`facts.V_*`)
+    pub verdict: vec.Vec<u8>,
+}
+
+// The first of two first-failed tests (`V_INLINE`: none failed).
+fn first(a: u8, b: u8) -> u8 {
+    if a == facts.V_INLINE { return b; }
+    if b == facts.V_INLINE || a < b { return a; }
+    return b;
+}
+
+pub fn decide(m: &model.Module, fx: &facts.Facts, lim: &Limits) -> Decision {
+    let nf = m.fns();
+    let mut d = Decision.{ closed: col.filled(nf, 0u64), slots: col.filled(nf, 0u64), verdict: col.filled(fx.site_f.len(), facts.V_INLINE) };
+    let order = sort.sort_perm(fx.level.as_slice());
+    let mut cand = vec.Vec::<u32>.new();
+    let mut key = vec.Vec::<u64>.new();
+    for j in 0..nf {
+        let f = order.as_slice()[j] as usize;
+        if !m.has_body(f) { continue; }
+        cand.clear();
+        key.clear();
+        let lo = fx.site_off.as_slice()[f] as usize;
+        let hi = fx.site_off.as_slice()[f + 1] as usize;
+        for r in lo..hi {
+            let g = fx.site_g.as_slice()[r] as usize;
+            let mut v = first(fx.callee.as_slice()[g], fx.caller.as_slice()[r]);
+            if v == facts.V_INLINE {
+                debug.assert(fx.level.as_slice()[g] < fx.level.as_slice()[f], "a callee that passes F8 lies in a lower level");
+                if d.closed.as_slice()[g] > lim.threshold {
+                    v = facts.V_SIZE;
+                } else if d.slots.as_slice()[g] > lim.slot_callee {
+                    v = facts.V_SLOTS;
+                } else {
+                    cand.push(r as% u32);
+                    key.push(d.closed.as_slice()[g]);
+                }
+            }
+            d.verdict.as_mut_slice()[r] = v;
+        }
+        let size0 = fx.size0.as_slice()[f];
+        let room = if lim.cap > size0 then lim.cap - size0 else 0;
+        let mut sum_a: u64 = 0;
+        let mut sum_z: u64 = 0;
+        let mut grow: u64 = 0;
+        let mut calls: u64 = 0;
+        let mut sb = fx.slot0.as_slice()[f];
+        let p = sort.sort_perm(key.as_slice());
+        for c in 0..cand.len() {
+            let r = cand.as_slice()[p.as_slice()[c] as usize] as usize;
+            let g = fx.site_g.as_slice()[r] as usize;
+            let s = d.closed.as_slice()[g];
+            let z = d.slots.as_slice()[g];
+            sum_a = sum_a + (if s > lim.call_saved then s - lim.call_saved else 0);
+            sum_z = sum_z + z;
+            if sum_a <= room && sum_z <= lim.slot_caller {
+                d.verdict.as_mut_slice()[r] = facts.V_INLINE;
+                grow = grow + s;
+                calls = calls + 1;
+                sb = sb + z;
+            } else {
+                d.verdict.as_mut_slice()[r] = facts.V_BUDGET;
+            }
+        }
+        let up = size0 + grow;
+        debug.assert(up >= calls * lim.call_saved, "a closed size is never negative (K3)");
+        d.closed.as_mut_slice()[f] = up - calls * lim.call_saved;
+        d.slots.as_mut_slice()[f] = sb;
+    }
+    return d;
+}
+
+fn push_verdict(o: &mut vec.Vec<u8>, v: u8) {
+    let s = if v == facts.V_INLINE then "inline" else if v == facts.V_NOBODY then "nobody" else if v == facts.V_NORET then "noret" else if v == facts.V_CYCLIC then "cyclic" else if v == facts.V_ALTSTACK then "altstack" else if v == facts.V_SYMBOL then "symbol" else if v == facts.V_KNOWN then "known" else if v == facts.V_INDIRECT then "indirect" else if v == facts.V_GPU then "gpu" else if v == facts.V_FEATURES then "features" else if v == facts.V_COLD then "cold" else if v == facts.V_SIZE then "size" else if v == facts.V_SLOTS then "slots" else "budget";
+    bytes.push_str(o, s);
+}
+
+// Appends the `inline` dump of round r: per fn with a body, by instance id, its line, then a
+// line per site row in (b, k) order.
+pub fn dump(m: &model.Module, fx: &facts.Facts, d: &Decision, r: u32, o: &mut vec.Vec<u8>) {
+    bytes.push_str(o, "round ");
+    bytes.push_u32(o, r);
+    o.push(10);
+    for f in 0..m.fns() {
+        if !m.has_body(f) { continue; }
+        bytes.push_str(o, "fn @");
+        print.push_inst(o, m.fn_inst.row(f));
+        bytes.push_str(o, " size ");
+        bytes.push_u64(o, fx.size0.as_slice()[f]);
+        bytes.push_str(o, " closed ");
+        bytes.push_u64(o, d.closed.as_slice()[f]);
+        bytes.push_str(o, " slots ");
+        bytes.push_u64(o, d.slots.as_slice()[f]);
+        bytes.push_str(o, " level ");
+        bytes.push_u32(o, fx.level.as_slice()[f]);
+        if fx.cyc.as_slice()[f] { bytes.push_str(o, " cyclic"); }
+        o.push(10);
+        for row in fx.site_off.as_slice()[f] as usize..fx.site_off.as_slice()[f + 1] as usize {
+            let g = fx.site_g.as_slice()[row] as usize;
+            bytes.push_str(o, "site @");
+            print.push_inst(o, m.fn_inst.row(f));
+            bytes.push_str(o, " b");
+            bytes.push_u32(o, fx.site_b.as_slice()[row]);
+            o.push(32);
+            bytes.push_u32(o, fx.site_k.as_slice()[row]);
+            bytes.push_str(o, " @");
+            print.push_inst(o, m.fn_inst.row(g));
+            o.push(32);
+            if m.has_body(g) {
+                bytes.push_u64(o, d.closed.as_slice()[g]);
+            } else {
+                o.push(45);
+            }
+            o.push(32);
+            push_verdict(o, d.verdict.as_slice()[row]);
+            o.push(10);
+        }
+    }
+}
+
+// The `inline` dump of the decision on m (round 1).
+pub fn inline_dump(m: &model.Module, lim: &Limits) -> vec.Vec<u8> {
+    let fx = facts.build(m);
+    let d = decide(m, &fx, lim);
+    let mut o = vec.Vec::<u8>.new();
+    dump(m, &fx, &d, 1, &mut o);
+    return o;
+}

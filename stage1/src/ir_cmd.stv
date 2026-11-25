@@ -2,42 +2,48 @@
 // verification) and, for `fmt`, prints the canonical module's text on stdout. A fault prints
 // `FILE:LINE:COL: error: MSG` or `FILE:LINE: verify: MSG` on stderr (at most 100) and exits 1;
 // an unreadable FILE or a bad command line exits 2.
+//
+// `stage1 ir opt --dump=inline [--limit NAME=N]... FILE` (contracts/cli-stage1.md): the decision
+// tables of the release passes' one round on a `release checked` FILE. The expansion and the
+// clean-up are not built: every other form of `ir opt` is a usage error.
 import ir.canon;
 import ir.load;
+import ir.model;
 import ir.print;
+import opt.decide;
 import text;
 import std.env;
 import std.io;
+import std.mem;
+import std.num;
 import std.string;
 import std.vec;
 
 pub fn run() -> i32 {
     let n = env.count();
-    if n != 4 {
-        io.eprint("stage1: usage: stage1 ir check|fmt FILE\n");
-        return 2;
-    }
-    let verb = match env.arg(2) {
-        Option.Some(s) => s,
-        Option.None => string.String.new(),
-    };
-    let fmt = text.eq_str(verb.as_bytes(), "fmt");
-    if !fmt && !text.eq_str(verb.as_bytes(), "check") {
-        io.eprint(f"stage1: unknown ir verb `{verb}` (stage1 runs ir check and ir fmt)\n");
-        return 2;
-    }
-    let file = match env.arg(3) {
-        Option.Some(s) => s,
-        Option.None => string.String.new(),
-    };
-    let mut src = vec.Vec::<u8>.new();
-    match io.read_file(file.as_str()) {
-        Result.Ok(b) => { src = b; }
-        Result.Err(e) => {
-            io.eprint(f"stage1: cannot read {file}: {e}\n");
-            return 2;
+    let mut args = vec.Vec::<string.String>.with_capacity(n);
+    for i in 0..n {
+        match env.arg(i) {
+            Option.Some(s) => { args.push(s); }
+            Option.None => { args.push(string.String.new()); }
         }
     }
+    let a = args.as_slice();
+    if n > 2 && text.eq_str(a[2].as_bytes(), "opt") { return opt_run(a); }
+    if n != 4 {
+        io.eprint("stage1: usage: stage1 ir check|fmt FILE, stage1 ir opt --dump=inline [--limit NAME=N]... FILE\n");
+        return 2;
+    }
+    let verb = a[2].as_bytes();
+    let fmt = text.eq_str(verb, "fmt");
+    if !fmt && !text.eq_str(verb, "check") {
+        let v = &a[2];
+        io.eprint(f"stage1: unknown ir verb `{v}` (stage1 runs ir check, ir fmt, and ir opt)\n");
+        return 2;
+    }
+    let file = &a[3];
+    let mut src = vec.Vec::<u8>.new();
+    if !read_into(file, &mut src) { return 2; }
     let mut ld = load.load(src.as_slice());
     if !ld.ok() {
         let out = ld.errs.render(file.as_bytes());
@@ -50,4 +56,76 @@ pub fn run() -> i32 {
         let _ = io.write_all(1, out.as_slice());
     }
     return 0;
+}
+
+fn read_into(file: &string.String, src: &mut vec.Vec<u8>) -> bool {
+    match io.read_file(file.as_str()) {
+        Result.Ok(b) => { *src = b; }
+        Result.Err(e) => {
+            io.eprint(f"stage1: cannot read {file}: {e}\n");
+            return false;
+        }
+    }
+    return true;
+}
+
+fn opt_run(a: &[string.String]) -> i32 {
+    let mut lim = decide.Limits.table();
+    let mut dump = false;
+    let mut k: usize = 3;
+    while k + 1 < a.len() {
+        let f = a[k].as_bytes();
+        if text.eq_str(f, "--dump=inline") {
+            dump = true;
+        } else if text.eq_str(f, "--limit") && k + 2 < a.len() {
+            k = k + 1;
+            if !set_limit(&mut lim, a[k].as_bytes()) {
+                let s = &a[k];
+                io.eprint(f"stage1: ir opt: bad --limit `{s}` (NAME=N, NAME one of threshold cap call_saved slot_callee slot_caller rounds, within opt-passes.md K3)\n");
+                return 2;
+            }
+        } else {
+            let s = &a[k];
+            io.eprint(f"stage1: ir opt: unknown flag `{s}`\n");
+            return 2;
+        }
+        k = k + 1;
+    }
+    if k + 1 != a.len() || text.starts_with(a[k].as_bytes(), mem.str_bytes("--")) {
+        io.eprint("stage1: usage: stage1 ir opt --dump=inline [--limit NAME=N]... FILE\n");
+        return 2;
+    }
+    if !dump || lim.rounds != 1 {
+        io.eprint("stage1: ir opt: only --dump=inline of one round is built (no expansion or clean-up yet)\n");
+        return 2;
+    }
+    let file = &a[k];
+    let mut src = vec.Vec::<u8>.new();
+    if !read_into(file, &mut src) { return 2; }
+    let ld = load.load(src.as_slice());
+    if !ld.ok() {
+        let out = ld.errs.render(file.as_bytes());
+        let _ = io.write_all(2, out.as_slice());
+        return 1;
+    }
+    if ld.m.mode != model.MODE_RELEASE || ld.m.level != model.LEVEL_CHECKED {
+        io.eprint(f"{file}: error: ir opt reads a `release checked` module\n");
+        return 1;
+    }
+    let out = decide.inline_dump(&ld.m, &lim);
+    let _ = io.write_all(1, out.as_slice());
+    return 0;
+}
+
+// `NAME=N` into lim.
+fn set_limit(lim: &mut decide.Limits, b: &[u8]) -> bool {
+    for i in 0..b.len() {
+        if b[i] != 61 { continue; }
+        let v = text.string_of(&b[i + 1..b.len()]);
+        return match num.parse_u64(v.as_str()) {
+            Option.Some(x) => lim.set(&b[0..i], x),
+            Option.None => false,
+        };
+    }
+    return false;
 }

@@ -16,7 +16,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 step="${1:-}"; [ $# -gt 0 ] && shift
 case "$step" in
   fmt)     cargo fmt --all --check ;;
-  stave-fmt) cargo run -q --locked -p stave-cli -- fmt --check std runtime stage1/src stage1/prims stage1/ir ;;
+  stave-fmt) cargo run -q --locked -p stave-cli -- fmt --check std runtime stage1/src stage1/prims stage1/ir stage1/opt ;;
   clippy)  cargo clippy --locked --workspace --all-targets -- -D warnings ;;
   build)   cargo build --locked --workspace "$@" ;;
   test)    cargo test --locked --workspace "$@" ;;
@@ -41,7 +41,7 @@ case "$step" in
   # stage1's IR library against stage0's IR text: round trip of every dumped text, mutant verdicts.
   stage1-ir-gate) sh tools/ci-step/stage1-ir-gate.sh ;;
   # The unit tests of the stage1 library packages and of stage1 itself.
-  stage1-test) cargo run -q --locked -p stave-cli -- test stage1/prims/seq && cargo run -q --locked -p stave-cli -- test stage1/ir && cargo run -q --locked -p stave-cli -- test stage1 ;;
+  stage1-test) cargo run -q --locked -p stave-cli -- test stage1/prims/seq && cargo run -q --locked -p stave-cli -- test stage1/ir && cargo run -q --locked -p stave-cli -- test stage1/opt && cargo run -q --locked -p stave-cli -- test stage1 ;;
   lang-budget)
            cargo run -q --locked -p lang-budget -- LANG.md --limit 15000 ;;
   # No new class of fns with the same code in the shipped trees (stage1 with ir, prims, std, runtime

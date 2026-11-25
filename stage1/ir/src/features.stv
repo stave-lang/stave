@@ -9,7 +9,18 @@ pub const COUNT: usize = 24;
 pub const NAMES: &str = "sse42 avx avx2 fma bmi2 f16c avx512f avx512bw avx512vl avx512dq avx512cd avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16 neon fp16 dotprod bf16 sve sve2 cuda";
 pub const IMPLIES: [u32; 24] = [0, 1, 2, 2, 0, 2, 0x2c, 0x40, 0x40, 0x40, 0x40, 0x80, 0x80, 0x40, 0x80, 0x380, 0x80, 0, 0x20000, 0x20000, 0x20000, 0x40000, 0x20_0000, 0];
 
+// The baseline of each target row of `bytes.TARGETS`, before closure: `sse42`; the `v3` group
+// (avx2 fma bmi2 f16c); the `v4` group (v3 + avx512f avx512bw avx512vl avx512dq avx512cd); `neon`;
+// `sve`; `sve2`; `cuda`.
+const BASELINE: [u64; 7] = [0x1, 0x3c, 0x7fc, 0x2_0000, 0x20_0000, 0x40_0000, 0x80_0000];
+
 const NONE: u32 = idx.NONE;
+
+// The features every program for target row t may assume, closed.
+pub fn baseline(t: u32) -> u64 {
+    let b = BASELINE;
+    return closure(b[t as usize]);
+}
 
 // The closure of feature set `bits` under implication.
 pub fn closure(bits: u64) -> u64 {
