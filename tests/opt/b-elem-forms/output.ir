@@ -29,15 +29,17 @@ b0(%0: t7, %1: t5, %2: t9, %3: t4, %4: t1):
   check.bounds () %4 %11
   %12 = addr.elem t3 %1 %4
   %13 = load t10 %12
-  %14 = slice.ptr t8 %2
-  %15 = addr.elem t6 %14 %4
-  %16 = load t0 %15
-  %17 = slice.len t1 %3
-  check.bounds () %4 %17
-  %18 = slice.ptr t8 %3
-  %19 = addr.elem t2 %18 %4
-  %20 = load t0 %19
-  %21 = add.wrap t0 %8 %16
-  %22 = add.wrap t0 %21 %20
-  ret %22
+  %14 = slice.len t1 %2
+  check.bounds () %4 %14
+  %15 = slice.ptr t8 %2
+  %16 = addr.elem t6 %15 %4
+  %17 = load t0 %16
+  %18 = slice.len t1 %3
+  check.bounds () %4 %18
+  %19 = slice.ptr t8 %3
+  %20 = addr.elem t2 %19 %4
+  %21 = load t0 %20
+  %22 = add.wrap t0 %8 %17
+  %23 = add.wrap t0 %22 %21
+  ret %23
 }
