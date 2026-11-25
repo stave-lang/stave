@@ -172,8 +172,8 @@ const T_LT_LT_PERCENT: u8 = terminals.T_LT_LT_PERCENT as% u8;
 const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
 // Target features owned by one architecture (the `sigs` feature bits): x86-64 0..=16, AArch64
 // 17..=22; `cuda` (23) belongs to both.
-const X86_FEATS: u64 = 131071;
-const A64_FEATS: u64 = 8257536;
+const X86_FEATS: u64 = 0x1ffff;
+const A64_FEATS: u64 = 0x7e_0000;
 
 impl tc_rows.Typeck {
     fn body(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, d: u32) {
@@ -1366,7 +1366,7 @@ fn unescaped_chars(b: &[u8]) -> u32 {
     while i < b.len() {
         let c = b[i];
         if c != 92 {
-            if c & 192 != 128 { n = n + 1; }
+            if c & 0xc0 != 0x80 { n = n + 1; }
             i = i + 1;
             continue;
         }
@@ -1388,11 +1388,11 @@ fn unescaped_chars(b: &[u8]) -> u32 {
             let mut cp: u32 = 0;
             while j < b.len() && b[j] != 125 {
                 let d = hex(b[j]);
-                if d == NONE || cp > 1114111 { return NONE; }
+                if d == NONE || cp > 0x10_ffff { return NONE; }
                 cp = cp * 16 + d;
                 j = j + 1;
             }
-            if j >= b.len() || j == i + 1 || cp > 1114111 || (cp >= 55296 && cp <= 57343) { return NONE; }
+            if j >= b.len() || j == i + 1 || cp > 0x10_ffff || (cp >= 0xd800 && cp <= 0xdfff) { return NONE; }
             n = n + 1;
             i = j + 1;
         } else {

@@ -84,11 +84,11 @@ pub fn utf8_valid_up_to(b: &[u8]) -> (usize, usize) {
             i = i + 1;
             continue;
         }
-        let w: usize = if c >= 194 && c <= 223 then 2 else if c >= 224 && c <= 239 then 3 else if c >= 240 && c <= 244 then 4 else 0;
+        let w: usize = if c >= 0xc2 && c <= 0xdf then 2 else if c >= 0xe0 && c <= 0xef then 3 else if c >= 0xf0 && c <= 0xf4 then 4 else 0;
         if w == 0 { return (i, 1); }
         if i + 1 >= n { return (i, n - i); }
         let c1 = b[i + 1];
-        let ok1 = if w == 2 then c1 >= 128 && c1 <= 191 else if c == 224 then c1 >= 160 && c1 <= 191 else if c == 237 then c1 >= 128 && c1 <= 159 else if c == 240 then c1 >= 144 && c1 <= 191 else if c == 244 then c1 >= 128 && c1 <= 143 else c1 >= 128 && c1 <= 191;
+        let ok1 = if w == 2 then c1 >= 0x80 && c1 <= 0xbf else if c == 0xe0 then c1 >= 0xa0 && c1 <= 0xbf else if c == 0xed then c1 >= 0x80 && c1 <= 0x9f else if c == 0xf0 then c1 >= 0x90 && c1 <= 0xbf else if c == 0xf4 then c1 >= 0x80 && c1 <= 0x8f else c1 >= 0x80 && c1 <= 0xbf;
         if !ok1 { return (i, 1); }
         for k in 2..w {
             if i + k >= n { return (i, n - i); }
@@ -122,13 +122,13 @@ fn white_len(b: &[u8], i: usize) -> usize {
     let c = b[i];
     if (c >= 9 && c <= 13) || c == 32 { return 1; }
     let n = b.len();
-    if c == 194 && i + 1 < n && (b[i + 1] == 133 || b[i + 1] == 160) { return 2; }
+    if c == 0xc2 && i + 1 < n && (b[i + 1] == 0x85 || b[i + 1] == 0xa0) { return 2; }
     if i + 2 >= n { return 0; }
     let (c1, c2) = (b[i + 1], b[i + 2]);
-    if c == 225 && c1 == 154 && c2 == 128 { return 3; }
-    if c == 226 && c1 == 128 && ((c2 >= 128 && c2 <= 138) || c2 == 168 || c2 == 169 || c2 == 175) { return 3; }
-    if c == 226 && c1 == 129 && c2 == 159 { return 3; }
-    if c == 227 && c1 == 128 && c2 == 128 { return 3; }
+    if c == 0xe1 && c1 == 0x9a && c2 == 0x80 { return 3; }
+    if c == 0xe2 && c1 == 0x80 && ((c2 >= 0x80 && c2 <= 0x8a) || c2 == 0xa8 || c2 == 0xa9 || c2 == 0xaf) { return 3; }
+    if c == 0xe2 && c1 == 0x81 && c2 == 0x9f { return 3; }
+    if c == 0xe3 && c1 == 0x80 && c2 == 0x80 { return 3; }
     return 0;
 }
 

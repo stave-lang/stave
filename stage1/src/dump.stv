@@ -138,7 +138,7 @@ fn push_escaped(buf: &mut vec.Vec<u8>, b: &[u8]) {
             buf.push(92);
             buf.push(120);
             buf.push(hex[(c >> 4) as usize]);
-            buf.push(hex[(c & 15) as usize]);
+            buf.push(hex[(c & 0xf) as usize]);
         }
     }
 }
@@ -152,7 +152,7 @@ pub fn strings_txt(tab: &intern.Table) -> vec.Vec<u8> {
         buf.push(32);
         let h = tab.str_hash.as_slice()[s];
         for k in 0..8u32 {
-            buf.push(hex[((h >> ((7 - k) * 4)) & 15) as usize]);
+            buf.push(hex[((h >> ((7 - k) * 4)) & 0xf) as usize]);
         }
         buf.push(32);
         buf.push(34);
@@ -684,7 +684,7 @@ fn decl_line(buf: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, md: &modul
             for j in 0..ro.len() {
                 if j > 0 { push_str(buf, ", "); }
                 if ro[j] >> 8 == 1 { push_str(buf, "copy "); }
-                text.push_u32(buf, ro[j] & 255);
+                text.push_u32(buf, ro[j] & 0xff);
             }
             push_str(buf, "] pfrom[");
             let po = sg.pfrom.row(d);
@@ -693,7 +693,7 @@ fn decl_line(buf: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, md: &modul
                 text.push_u32(buf, po[j] >> 16);
                 buf.push(60);
                 if po[j] & 1 == 1 { push_str(buf, "copy "); }
-                text.push_u32(buf, (po[j] >> 8) & 255);
+                text.push_u32(buf, (po[j] >> 8) & 0xff);
             }
             buf.push(93);
         }

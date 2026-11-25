@@ -35,10 +35,11 @@ import resdiag;
 import source;
 import text;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 
 // Decl kinds, in canonical key order.
 pub const DK_MODULE: u8 = 0;
@@ -729,7 +730,7 @@ fn canonical_order(raw: &Raw, md: &modules.Modules) -> vec.Vec<u32> {
         let t = &mut top;
         for d in 0..n {
             let e = 3 * d + dp[d] as usize - 1;
-            let v = [((xa[e] >> 8) & 4294967295) as% u32, (xa[e] & 255) as% u32, (xb[e] >> 32) as% u32, (xb[e] & 4294967295) as% u32];
+            let v = [((xa[e] >> 8) & 0xffff_ffff) as% u32, (xa[e] & 0xff) as% u32, (xb[e] >> 32) as% u32, (xb[e] & 0xffff_ffff) as% u32];
             for f in 0..4usize {
                 if v[f] != NONE && v[f] > t[f] { t[f] = v[f]; }
             }
@@ -761,10 +762,10 @@ fn canonical_order(raw: &Raw, md: &modules.Modules) -> vec.Vec<u32> {
                     if s < dp[d] as usize {
                         let a = xa[3 * d + s];
                         let b = xb[3 * d + s];
-                        let name = enc(((a >> 8) & 4294967295) as% u32, top[0]);
+                        let name = enc(((a >> 8) & 0xffff_ffff) as% u32, top[0]);
                         let tie = enc((b >> 32) as% u32, top[2]);
-                        let off = enc((b & 4294967295) as% u32, top[3]);
-                        key = (1u64 << (wl - 1)) | (name << (wk + wt + wo)) | ((a & 255) << (wt + wo)) | (tie << wo) | off;
+                        let off = enc((b & 0xffff_ffff) as% u32, top[3]);
+                        key = (1u64 << (wl - 1)) | (name << (wk + wt + wo)) | ((a & 0xff) << (wt + wo)) | (tie << wo) | off;
                     }
                     if s == 0 && mk0 != 0 { key = key | ((k0v[d] as u64) << wl); }
                     ks[k] = key;
@@ -968,7 +969,7 @@ pub fn build(md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &s
                 let (pf, po, pl) = entry_span(&raw, md, lx, set, t, e_class.as_slice()[x], e_decl.as_slice()[x], e_off.as_slice()[x]);
                 let (ff, fo, fln) = entry_span(&raw, md, lx, set, t, e_class.as_slice()[e], e_decl.as_slice()[e], e_off.as_slice()[e]);
                 rows.related(ff, fo, fln);
-                rows.add(resdiag.E0105, pf, po, pl, (key & 4294967295) as% u32, resdiag.SCOPE_MODULE, (key >> 32) as% u32);
+                rows.add(resdiag.E0105, pf, po, pl, (key & 0xffff_ffff) as% u32, resdiag.SCOPE_MODULE, (key >> 32) as% u32);
             }
             j = j + 1;
         }
@@ -991,7 +992,7 @@ pub fn build(md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &s
         let e = err_entry.as_slice()[q] as usize;
         let m = (e_key.as_slice()[e] >> 32) as% u32;
         let late: u64 = if e_class.as_slice()[e] == 2 then 1 else 0;
-        eo.push(((m as u64) << 32) | (late << 31) | (e_ord.as_slice()[e] & 2147483647));
+        eo.push(((m as u64) << 32) | (late << 31) | (e_ord.as_slice()[e] & 0x7fff_ffff));
     }
     let ep = sort.sort_perm(eo.as_slice());
     let mut err_decl = col.filled(err_entry.len(), NONE);
@@ -999,7 +1000,7 @@ pub fn build(md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &s
         let e = err_entry.as_slice()[ep.as_slice()[q] as usize] as usize;
         let key = e_key.as_slice()[e];
         let g = e_off.as_slice()[e];
-        let d = raw.push(DK_ERROR, (key & 4294967295) as% u32, (key >> 32) as% u32, NONE, NONE, NONE, tok_off(t, g), F_PUB, 0);
+        let d = raw.push(DK_ERROR, (key & 0xffff_ffff) as% u32, (key >> 32) as% u32, NONE, NONE, NONE, tok_off(t, g), F_PUB, 0);
         err_decl.as_mut_slice()[ep.as_slice()[q] as usize] = d;
     }
     let mut q: usize = 0;

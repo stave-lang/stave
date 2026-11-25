@@ -26,12 +26,13 @@ import paths;
 import prims.col;
 import prims.scan;
 import text;
+import std.idx;
 import std.io;
 import std.mem;
 import std.string;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 // Deepest directory level walked below a package's source directory.
 const MAX_DIR_DEPTH: usize = 64;

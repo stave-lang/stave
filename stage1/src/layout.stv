@@ -29,15 +29,16 @@ import prims.col;
 import prims.ragged;
 import prims.search;
 import prims.sort;
+import std.idx;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 // A field whose substituted type would be taller than `types.MAX_HEIGHT`.
-pub const TALL: u32 = 4294967293;
+pub const TALL: u32 = 0xffff_fffd;
 
 pub const MAX_DEPTH: u32 = 1000;
-const INF: u32 = 4294967295;
+const INF: u32 = 0xffff_ffff;
 
 // Layout states.
 pub const LS_OK: u8 = 0;
@@ -267,7 +268,7 @@ pub struct Lay {
 }
 
 fn add_ok(a: u64, b: u64) -> (bool, u64) {
-    if a > 18446744073709551615 - b { return (false, 0); }
+    if a > 0xffff_ffff_ffff_ffff - b { return (false, 0); }
     return (true, a + b);
 }
 
@@ -452,7 +453,7 @@ pub fn layouts(tab: &types.Table, sh: &Shapes, pa: &Parts, w: &[u32]) -> Lay {
             let _ = lay_parts(tab, sh, pa, t, &mut ps);
             let mut c = cur.as_slice()[i] as usize;
             let mut h = hm.as_slice()[i];
-            let mut state: u8 = 255;
+            let mut state: u8 = 0xff;
             while c < ps.len() {
                 let p = ps.as_slice()[c];
                 if !real(p) {
@@ -471,14 +472,14 @@ pub fn layouts(tab: &types.Table, sh: &Shapes, pa: &Parts, w: &[u32]) -> Lay {
             }
             cur.as_mut_slice()[i] = c as% u32;
             hm.as_mut_slice()[i] = h;
-            if state == 255 && c < ps.len() {
+            if state == 0xff && c < ps.len() {
                 next.push(t);
                 continue;
             }
             progress = true;
             done.as_mut_slice()[i] = true;
             ly.h.as_mut_slice()[i] = h + 1;
-            if state != 255 {
+            if state != 0xff {
                 ly.st.as_mut_slice()[i] = state;
             } else {
                 let (st, s, a) = combine(tab, sh, pa, &ly, t, ps.as_slice(), &mut ss, &mut als, &mut offs);

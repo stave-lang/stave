@@ -5,8 +5,9 @@ import resdiag;
 import test_kit;
 import text;
 import std.debug;
+import std.idx;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 // Root package `app`, dependency `geo` (a library), built-in `std`; package ranks by name.
 fn graph(main_src: &str, a_src: &str, ab_src: &str) -> test_kit.Out {

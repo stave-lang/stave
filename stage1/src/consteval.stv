@@ -37,10 +37,11 @@ import source;
 import types;
 import prims.col;
 import prims.search;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 
 // Outcome of an evaluation, and the state of a const item's value.
 pub const CV_NONE: u8 = 0;
@@ -298,7 +299,7 @@ pub fn kind(tree: &ast.Ast, g: usize) -> u8 {
 }
 
 pub fn tk(t: &lex.Tokens, tok: u32) -> u8 {
-    if tok as usize >= t.kind.len() { return 255u8; }
+    if tok as usize >= t.kind.len() { return 0xffu8; }
     return t.kind.as_slice()[tok as usize];
 }
 
@@ -330,7 +331,7 @@ pub fn generic_index(cx: &Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, 
         if kind(tree, c) == K_GENERIC_PARAM { idx = idx + 1; }
     }
     let owner = cx.parent.as_slice()[p as usize];
-    let ok = if owner == NONE then 255u8 else kind(tree, owner as usize);
+    let ok = if owner == NONE then 0xffu8 else kind(tree, owner as usize);
     let d = ds.item_decl.as_slice()[it as usize];
     let container = d != NONE && (ds.kind.as_slice()[d as usize] == decls.DK_IMPL || ds.kind.as_slice()[d as usize] == decls.DK_TRAIT);
     let level1 = container && ok != K_IMPL_DECL && ok != K_TRAIT_DECL;
@@ -382,13 +383,13 @@ pub fn parse_int(b: &[u8]) -> (u64, bool, u8) {
         v = s;
         i = i + 1;
     }
-    if !any { return (0, false, 255u8); }
+    if !any { return (0, false, 0xffu8); }
     let suf = &b[i..b.len()];
     if suf.len() == 0 { return (v, big, 0u8); }
     let k = int_suffix(suf);
     if k != 0 { return (v, big, k); }
     if radix == 10 && (suf.eq(std_bytes("f32")) || suf.eq(std_bytes("f64")) || suf.eq(std_bytes("f16")) || suf.eq(std_bytes("bf16"))) { return (v, big, 100u8); }
-    return (v, big, 255u8);
+    return (v, big, 0xffu8);
 }
 
 // The suffix code of an int type name (1 ..= 10, as `suffix_ty`), 0 for none.
@@ -418,7 +419,7 @@ fn range_of(tab: &types.Table, t: u32) -> (bool, u64, u64) {
         let half: u64 = 1u64 << (bits - 1) as u64;
         return (true, half, half - 1);
     }
-    let hi: u64 = if bits == 64 then 18446744073709551615u64 else (1u64 << bits as u64) - 1;
+    let hi: u64 = if bits == 64 then 0xffff_ffff_ffff_ffffu64 else (1u64 << bits as u64) - 1;
     return (false, 0, hi);
 }
 
@@ -477,8 +478,8 @@ struct Ev {
     out: u8,
 }
 
-const NO_TY: u64 = 18446744073709551615;
-const LIT: u64 = 4294967296;
+const NO_TY: u64 = 0xffff_ffff_ffff_ffff;
+const LIT: u64 = 0x1_0000_0000;
 
 impl Ev {
     fn at(&self, g: usize) -> usize {
@@ -495,7 +496,7 @@ impl Ev {
 
     fn resolve(&mut self, t: u64) -> u64 {
         if t & LIT == 0 { return t; }
-        let r = self.find((t & 4294967295) as% u32);
+        let r = self.find((t & 0xffff_ffff) as% u32);
         let f = self.gfix.as_slice()[r as usize];
         if f != NONE { return f as u64; }
         return LIT | (r as u64);
@@ -522,7 +523,7 @@ impl Ev {
             self.fail(CV_FAIL);
             return false;
         }
-        if self.fix(tab, (r & 4294967295) as% u32, want) { return true; }
+        if self.fix(tab, (r & 0xffff_ffff) as% u32, want) { return true; }
         self.fail(CV_FAIL);
         return false;
     }
@@ -536,13 +537,13 @@ impl Ev {
             return NO_TY;
         }
         if x & LIT != 0 && y & LIT != 0 {
-            let g1 = (x & 4294967295) as% u32;
-            let g2 = (y & 4294967295) as% u32;
+            let g1 = (x & 0xffff_ffff) as% u32;
+            let g2 = (y & 0xffff_ffff) as% u32;
             let (l, h) = if g1 < g2 then (g1, g2) else (g2, g1);
             self.gpar.as_mut_slice()[h as usize] = l;
             return LIT | (l as u64);
         }
-        let (g, t) = if x & LIT != 0 then ((x & 4294967295) as% u32, y as% u32) else ((y & 4294967295) as% u32, x as% u32);
+        let (g, t) = if x & LIT != 0 then ((x & 0xffff_ffff) as% u32, y as% u32) else ((y & 0xffff_ffff) as% u32, x as% u32);
         if self.fix(tab, g, t) { return t as u64; }
         self.fail(CV_FAIL);
         return NO_TY;
@@ -713,7 +714,7 @@ fn lone_literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items
     let f = cut.file.as_slice()[it as usize] as usize;
     let (s, e) = lit_text(t, set, cut, it, a);
     let (mag, big, suf) = parse_int(&set.file(f)[s..e]);
-    if suf == 255 || (suf == 100 && want != NONE) { return (CV_FAIL, types.ERR, false, 0); }
+    if suf == 0xff || (suf == 100 && want != NONE) { return (CV_FAIL, types.ERR, false, 0); }
     if suf == 100 { return (CV_UNSUP, types.ERR, false, 0); }
     let ty = if suf != 0 then suffix_ty(&mut cx.tab, suf) else want;
     if ty == NONE || (want != NONE && ty != want) || cx.tab.tag_of(ty) != types.TK_INT { return (CV_FAIL, types.ERR, false, 0); }
@@ -1006,7 +1007,7 @@ fn literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Item
     let f = cut.file.as_slice()[ev.it as usize] as usize;
     let (s, e) = lit_text(t, set, cut, ev.it, tok);
     let (mag, big, suf) = parse_int(&set.file(f)[s..e]);
-    if suf == 255 {
+    if suf == 0xff {
         ev.fail(CV_FAIL);
         return NO_TY;
     }
