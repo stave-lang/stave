@@ -12,7 +12,8 @@
 #
 # Stage0 raises some of those codes in other stages too (a type or trait expected: E0101; a field
 # given twice in a literal or pattern: E0105; a private field or column: E0106; a view argument
-# for a param without `view`: E0414 outside its `drop` case). The shapes with a message of their
+# for a param without `view`: E0414 outside its `drop` case; an operand that is not Copy where an
+# operator uses it: E0422's `operand` cases). The shapes with a message of their
 # own (LATER) are cut from stage0's lines; a private field or method reached by a value has
 # E0106's plain message, so the E0106 lines of stage1 need only be among stage0's. The body
 # checker's codes have shapes of later stages too, cut alike: E0201 for a path that is no value
@@ -61,9 +62,9 @@ export STAVE_STD_DIR="$ROOT"
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
 TYPES_EXACT_MIN=1053
 TYPES_UNKNOWN_PPM=11
-S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0201|E0202|E0203|E0204|E0206|E0413|E0410|E0414|E0416|E0419|E0420|E0421|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
+S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0201|E0202|E0203|E0204|E0206|E0413|E0410|E0414|E0415|E0416|E0419|E0420|E0421|E0422|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0905|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
 # Messages of the shapes of those codes that later stages raise.
-LATER='"code":"E0201".*"message":"`[^"]*` is not a value"|"code":"E0201","severity":"error","message":"mismatched types: expected `[iu](8|16|32|64|size)`, found `[iu](8|16|32|64|size)`".*"description":"write a value of type|"code":"E0203".*"message":"literal `[^`]*([^ `]+ [-+*/%<>|&^]+ |[()])[^`]*` is out of range|"code":"E0203".*"message":"index `|"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)|"code":"E0414".*"message":"[^"]*is a view, (but|and) '
+LATER='"code":"E0201".*"message":"`[^"]*` is not a value"|"code":"E0201","severity":"error","message":"mismatched types: expected `[iu](8|16|32|64|size)`, found `[iu](8|16|32|64|size)`".*"description":"write a value of type|"code":"E0203".*"message":"literal `[^`]*([^ `]+ [-+*/%<>|&^]+ |[()])[^`]*` is out of range|"code":"E0203".*"message":"index `|"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)|"code":"E0414".*"message":"[^"]*is a view, (but|and) |"code":"E0422".*"message":"operator `'
 
 # types_keyed DIR: compares DIR/0/types.txt and DIR/1/types.txt by key (above); writes
 # DIR/types.count (`LINES UNKNOWN EXACT`) and, on a difference, DIR/types.diff (its first line).

@@ -2,20 +2,23 @@
 // D order, E0421 (a param its self type does not bind), E0420 (an impl in neither the package of
 // its trait nor that of its self type's head), E1408 (an impl of `Flat` or `Frozen`), E0810 (an
 // unsafe trait implemented without `unsafe("..")`), E0907 (`pub` on a trait impl method), E0906
-// (a trait method missing, or a method the trait lacks), E0419 (`Drop` for a type of another
+// (a trait method missing, or a method the trait lacks), E0905 (a method whose signature differs
+// from the trait method's), E0419 (`Drop` for a type of another
 // package), E0416 (a `Drop` impl whose head unifies with a `Copy` impl's), E0414 case `drop` (a
 // `Drop` impl that does not cover the view params of its ADT), and E0903 (two impls of one trait
 // whose heads and trait arguments unify, or an operator impl beside a built-in one). An impl that
 // fails E0421, E0420, E1408, or E0419 takes part in no later check, and only the impls that pass
 // every check are met by the overlap check of later ones.
 //
-// Not raised here yet (stage0 raises them in the same pass): E0905 (a method signature that
-// differs from the trait's), E0415 and E0422 (Copy under the impl's own bounds).
+// Then over the impls that reach E0907 (`copy_checks`): E0415 (a Copy impl of a struct or enum
+// with a field that is not Copy) and E0422 (an operator trait implemented for a type that is not
+// Copy), Copy judged under the impl's own bounds by one round of trait questions.
 import ast;
 import consteval;
 import decls;
 import diag;
 import diag_sigs;
+import diag_tc;
 import files;
 import generated.node_kinds;
 import generated.terminals;
@@ -26,6 +29,8 @@ import lex;
 import modules;
 import source;
 import sigs;
+import tc_traits;
+import text;
 import traits;
 import ir.types;
 import prims.col;
@@ -368,6 +373,161 @@ fn gparam_span(sg: &sigs.Sigs, tree: &ast.Ast, lx: &lex.Lexer, set: &source.Sour
     return modules.tok_span(lx, set, t, nt);
 }
 
+// E0905's comparison (stage0's `sig_matches`): method m of impl i against trait method tm, with
+// `Self` the impl's self type, the trait's params its trait arguments (the error type for one not
+// given), and tm's own generics renumbered after the impl's. They match when they have as many
+// own generics, the same params (a type holding the error type matches any) and `self` form,
+// return type, `from` entries, features, and `unsafe`, and per own generic param the same kind,
+// `view`, a const param's type, and the same set of bounds (complete trait refs; a set holding an
+// erroneous argument matches any).
+fn sig_matches(tab: &mut types.Table, sg: &sigs.Sigs, i: u32, tm: u32, m: u32) -> bool {
+    let gl = sg.cx.gens.lo.as_slice();
+    let own_t = (gl[tm as usize + 1] - gl[tm as usize]) as usize;
+    let own_m = (gl[m as usize + 1] - gl[m as usize]) as usize;
+    if own_t != own_m { return false; }
+    let tr_row = sg.trait_ref.as_slice()[i as usize];
+    let tr = sg.b_trait.as_slice()[tr_row as usize];
+    let nt = (gl[tr as usize + 1] - gl[tr as usize]) as usize;
+    let ni = (gl[i as usize + 1] - gl[i as usize]) as usize;
+    let st = sg.cx.ty.as_slice()[i as usize];
+    let mut args = vec.Vec::<u32>.new();
+    let ta = sg.b_args.row(tr_row as usize);
+    for k in 0..nt {
+        if 3 * k + 2 < ta.len() {
+            args.extend_from_slice(&ta[3 * k..3 * k + 3]);
+        } else {
+            args.push(types.GA_TYPE);
+            args.push(ERR);
+            args.push(0);
+        }
+    }
+    let to = gl[tm as usize] as usize;
+    let mo = gl[m as usize] as usize;
+    for j in 0..own_t {
+        let idx = (ni + j) as% u32;
+        if sg.cx.gens.is_const.as_slice()[to + j] {
+            args.push(types.GA_PARAM);
+            args.push(idx);
+            args.push(0);
+        } else {
+            args.push(types.GA_TYPE);
+            args.push(tab.key(types.TK_PARAM, idx, 0));
+            args.push(0);
+        }
+    }
+    let tp = sg.params.row(tm as usize);
+    let mp = sg.params.row(m as usize);
+    let tf = sg.sflags.as_slice()[tm as usize];
+    let mf = sg.sflags.as_slice()[m as usize];
+    if tp.len() != mp.len() || tf & sigs.SF_SELF_MASK != mf & sigs.SF_SELF_MASK { return false; }
+    for k in 0..tp.len() {
+        if !same_or_err(tab, tp[k], mp[k], args.as_slice(), st) { return false; }
+    }
+    if !same_or_err(tab, sg.cx.ty.as_slice()[tm as usize], sg.cx.ty.as_slice()[m as usize], args.as_slice(), st) { return false; }
+    if !sg.rfrom.row(tm as usize).eq(sg.rfrom.row(m as usize)) || !sg.pfrom.row(tm as usize).eq(sg.pfrom.row(m as usize)) { return false; }
+    if sg.feats.as_slice()[tm as usize] != sg.feats.as_slice()[m as usize] || tf & sigs.SF_UNSAFE != mf & sigs.SF_UNSAFE { return false; }
+    let gs = &sg.cx.gens;
+    for j in 0..own_t {
+        let a = to + j;
+        let b = mo + j;
+        if gs.is_const.as_slice()[a] != gs.is_const.as_slice()[b] || gs.is_view.as_slice()[a] != gs.is_view.as_slice()[b] { return false; }
+        if gs.is_const.as_slice()[a] && !same_or_err(tab, gs.cty.as_slice()[a], gs.cty.as_slice()[b], args.as_slice(), st) { return false; }
+        if !same_bounds(tab, sg, a, b, args.as_slice(), st) { return false; }
+    }
+    return true;
+}
+
+// Trait-side type a after `sig_matches`'s substitution against impl-side type b: equal, or either
+// holds the error type.
+fn same_or_err(tab: &mut types.Table, a: u32, b: u32, args: &[u32], st: u32) -> bool {
+    let a2 = sub_sig(tab, a, args, st);
+    return a2 == b || a2 == ERR || b == ERR || a2 == NONE || b == NONE;
+}
+
+// Type t with the generic arguments args, then `Self` replaced by st.
+fn sub_sig(tab: &mut types.Table, t: u32, args: &[u32], st: u32) -> u32 {
+    if t == ERR || t == NONE { return t; }
+    let x = tab.subst(t, args);
+    return tc_traits.subst_self(tab, x, st);
+}
+
+// Whether trait-side generic param row a's bounds, substituted, are the set of impl-side param
+// row b's (each a trait and its arguments), or an argument of either is erroneous.
+fn same_bounds(tab: &mut types.Table, sg: &sigs.Sigs, a: usize, b: usize, args: &[u32], st: u32) -> bool {
+    let mut ta = vec.Vec::<u32>.new();
+    let mut tb = vec.Vec::<u32>.new();
+    let mut bad = false;
+    let ra = sg.gp_bounds.row(a);
+    for k in 0..ra.len() {
+        let r = ra[k] as usize;
+        let xs = sg.b_args.row(r);
+        ta.push(sg.b_trait.as_slice()[r]);
+        ta.push((xs.len() / 3) as% u32);
+        for q in 0..xs.len() / 3 {
+            let kd = xs[3 * q];
+            if kd == types.GA_TYPE {
+                let v = sub_sig(tab, xs[3 * q + 1], args, st);
+                if v == ERR || v == NONE { bad = true; }
+                ta.push(kd);
+                ta.push(v);
+                ta.push(0);
+            } else if kd == types.GA_PARAM && 3 * (xs[3 * q + 1] as usize) + 2 < args.len() && args[3 * xs[3 * q + 1] as usize] != types.GA_TYPE {
+                let p = 3 * xs[3 * q + 1] as usize;
+                ta.extend_from_slice(&args[p..p + 3]);
+            } else {
+                if kd == types.GA_ERROR { bad = true; }
+                ta.extend_from_slice(&xs[3 * q..3 * q + 3]);
+            }
+        }
+    }
+    let rb = sg.gp_bounds.row(b);
+    for k in 0..rb.len() {
+        let r = rb[k] as usize;
+        let xs = sg.b_args.row(r);
+        tb.push(sg.b_trait.as_slice()[r]);
+        tb.push((xs.len() / 3) as% u32);
+        for q in 0..xs.len() / 3 {
+            let kd = xs[3 * q];
+            if (kd == types.GA_TYPE && (xs[3 * q + 1] == ERR || xs[3 * q + 1] == NONE)) || kd == types.GA_ERROR { bad = true; }
+            tb.extend_from_slice(&xs[3 * q..3 * q + 3]);
+        }
+    }
+    if bad { return true; }
+    return refs_in(ta.as_slice(), tb.as_slice()) && refs_in(tb.as_slice(), ta.as_slice());
+}
+
+// Whether every trait ref of list xs (trait, argument count, the arguments' 3 words each) is in
+// list ys.
+fn refs_in(xs: &[u32], ys: &[u32]) -> bool {
+    let mut i: usize = 0;
+    while i < xs.len() {
+        let n = 2 + 3 * xs[i + 1] as usize;
+        let mut j: usize = 0;
+        let mut found = false;
+        while j < ys.len() && !found {
+            let m = 2 + 3 * ys[j + 1] as usize;
+            if m == n && xs[i..i + n].eq(&ys[j..j + m]) { found = true; }
+            j = j + m;
+        }
+        if !found { return false; }
+        i = i + n;
+    }
+    return true;
+}
+
+// The source text of trait method tm's signature: from its first token to the one before its `;`.
+fn trait_sig_text(tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, ds: &decls.Decls, tm: u32) -> &[u8] from set {
+    let it = ds.item.as_slice()[tm as usize];
+    let a = tree.tok.as_slice()[tree.item_node.as_slice()[it as usize] as usize + ds.node.as_slice()[tm as usize] as usize];
+    let mut e = a;
+    while tk(t, e) != terminals.T_SEMI && tk(t, e) != terminals.T_EOF {
+        e = e + 1;
+    }
+    let (f, s, _) = modules.tok_span(lx, set, t, a);
+    let (_, s2, z2) = modules.tok_span(lx, set, t, if e > a then e - 1 else a);
+    return &set.file(f as usize)[s as usize..(s2 + z2) as usize];
+}
+
 // The `pub` token before method m's `fn` (or its `unsafe("..")`), or NONE.
 fn pub_token(tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, m: u32) -> u32 {
     let it = ds.item.as_slice()[m as usize];
@@ -426,11 +586,178 @@ pub fn impl_diags(d: &mut diag.Diags, sg: &mut sigs.Sigs, ds: &decls.Decls, md: 
     }
     t_lo.as_mut_slice()[n] = texts.len() as% u32;
     let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());
-    check(d, &mut tab, sg, ds, md, nm, fl, lx, set, t, tree, texts.as_slice(), t_lo.as_slice());
+    let mut ok = vec.Vec::<u32>.new();
+    check(d, &mut tab, sg, ds, md, nm, fl, lx, set, t, tree, texts.as_slice(), t_lo.as_slice(), &mut ok);
     sg.cx.tab = tab;
+    copy_checks(d, sg, ds, md, nm, fl, lx, set, t, tree, texts.as_slice(), t_lo.as_slice(), ok.as_slice());
 }
 
-fn check(d: &mut diag.Diags, tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, fl: &files.FileList, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, texts: &[u8], t_lo: &[u32]) {
+// The trait operator method names, in `traits` operator order.
+const OP_METHODS: &str = "add wrap_add sat_add sub wrap_sub sat_sub mul wrap_mul sat_mul div rem shl wrap_shl shr bitand bitor bitxor neg not";
+
+// E0415 and E0422 for the impls of list ok (they passed the checks that skip an impl), as stage0
+// raises them: Copy is asked of each field type of a Copy impl's struct or enum (substituted by
+// its self type's arguments; an erroneous one is skipped) and of an operator impl's self type,
+// in the environment of the impl's own generics; the questions are solved in one round.
+fn copy_checks(d: &mut diag.Diags, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, fl: &files.FileList, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, texts: &[u8], t_lo: &[u32], ok: &[u32]) {
+    let mut tq = tc_traits.new(sg, ds, fl, md, nm);
+    let cp = tq.tr.lang.copy_tr;
+    if cp == NONE { return; }
+    // per question: impl, goal, field decl (NONE: the self type; a tuple payload: its variant),
+    // its index in its variant, the type asked
+    let mut q_imp = vec.Vec::<u32>.new();
+    let mut q_goal = vec.Vec::<u32>.new();
+    let mut q_f = vec.Vec::<u32>.new();
+    let mut q_k = vec.Vec::<u32>.new();
+    let mut q_ty = vec.Vec::<u32>.new();
+    let mut args = vec.Vec::<u32>.new();
+    let none = vec.Vec::<u32>.new();
+    let n = ds.decls();
+    for j in 0..ok.len() {
+        let i = ok[j] as usize;
+        let tr = tq.tr.im.trait_of.as_slice()[i];
+        let st = sg.cx.ty.as_slice()[i];
+        if st == ERR || st == NONE { continue; }
+        let lo = sg.cx.gens.lo.as_slice()[i];
+        let hi = sg.cx.gens.lo.as_slice()[i + 1];
+        let e = tq.tr.env_of(sg, lo, lo, lo, hi);
+        if tr == cp && sg.cx.tab.tag_of(st) == types.TK_ADT {
+            let def = sg.cx.tab.a_of(st);
+            args.clear();
+            args.extend_from_slice(sg.cx.tab.x(st));
+            // the struct's fields, or each variant's in order
+            for v in 0..n {
+                let p = ds.parent.as_slice()[v];
+                let vk = ds.kind.as_slice()[v];
+                let own = p == def && (vk == decls.DK_FIELD || vk == decls.DK_VARIANT);
+                if !own { continue; }
+                let fl_v = ds.flags.as_slice()[v];
+                if vk == decls.DK_VARIANT && fl_v & decls.F_TUPLE != 0 {
+                    let ps = sg.params.row(v);
+                    for k in 0..ps.len() {
+                        let ft = sg.cx.tab.subst(ps[k], args.as_slice());
+                        if ft == ERR || ft == NONE { continue; }
+                        q_imp.push(i as% u32);
+                        q_goal.push(tq.tr.goal_env(&sg.cx.tab, e, ft, cp, none.as_slice()));
+                        q_f.push(v as% u32);
+                        q_k.push(k as% u32);
+                        q_ty.push(ft);
+                    }
+                    continue;
+                }
+                // a struct's field, or the fields of a record variant (in its item, after it)
+                let it = ds.item.as_slice()[v];
+                let mut f = v;
+                while f < n && ds.item.as_slice()[f] == it {
+                    let fd = f;
+                    f = f + 1;
+                    let leaf = if vk == decls.DK_FIELD then fd == v else ds.parent.as_slice()[fd] == v as% u32 && ds.kind.as_slice()[fd] == decls.DK_FIELD;
+                    if !leaf { continue; }
+                    let ft = sg.cx.tab.subst(sg.cx.ty.as_slice()[fd], args.as_slice());
+                    if ft == ERR || ft == NONE { continue; }
+                    q_imp.push(i as% u32);
+                    q_goal.push(tq.tr.goal_env(&sg.cx.tab, e, ft, cp, none.as_slice()));
+                    q_f.push(fd as% u32);
+                    q_k.push(NONE);
+                    q_ty.push(ft);
+                    if vk == decls.DK_FIELD { break; }
+                }
+            }
+        }
+        for k in 0..tq.tr.lang.ops.len() {
+            if tq.tr.lang.ops.as_slice()[k] != tr { continue; }
+            q_imp.push(i as% u32);
+            q_goal.push(tq.tr.goal_env(&sg.cx.tab, e, st, cp, none.as_slice()));
+            q_f.push(NONE);
+            q_k.push(k as% u32);
+            q_ty.push(st);
+        }
+    }
+    if q_imp.len() == 0 { return; }
+    tq.solve(sg);
+    let mut buf = vec.Vec::<u8>.new();
+    let mut done = NONE;
+    for x in 0..q_imp.len() {
+        let i = q_imp.as_slice()[x];
+        let g = q_goal.as_slice()[x];
+        if !tq.tr.decided(g) || tq.tr.is(g) { continue; }
+        let f = q_f.as_slice()[x];
+        let self_text = &texts[t_lo[i as usize] as usize..t_lo[i as usize + 1] as usize];
+        let (sf, ss, sz) = span_of(ds, md, lx, set, t, i);
+        if f == NONE {
+            // E0422 with the borrowing method that stands in for the operator
+            let k = q_k.as_slice()[x] as usize;
+            let tr = tq.tr.lang.ops.as_slice()[k];
+            let (a, b) = sigs.word(OP_METHODS, k);
+            let mname = &mem.str_bytes(OP_METHODS)[a..b];
+            let s = modules.lookup(&nm.tab, mname);
+            let key = search.pair(tr, s);
+            let p = search.lower_bound(ds.mem_key.as_slice(), key);
+            let unary = s != NONE && p < ds.mem_key.len() && ds.mem_key.as_slice()[p] == key && sg.params.row(ds.mem_decl.as_slice()[p] as usize).len() == 1;
+            d.begin(422, "");
+            buf.clear();
+            decl_path(&mut buf, ds, md, nm, tr);
+            d.arg("trait", buf.as_slice());
+            d.arg("type", self_text);
+            buf.clear();
+            buf.extend_from_slice(mem.str_bytes("fn "));
+            buf.extend_from_slice(mname);
+            buf.extend_from_slice(mem.str_bytes(if unary then "(&self) -> Self" else "(&self, rhs: &Self) -> Self"));
+            d.arg("sig", buf.as_slice());
+            buf.clear();
+            buf.extend_from_slice(mem.str_bytes("a."));
+            buf.extend_from_slice(mname);
+            buf.extend_from_slice(mem.str_bytes(if unary then "()" else "(&b)"));
+            d.arg("call", buf.as_slice());
+            d.end(sf, ss, sz);
+            continue;
+        }
+        // E0415 for the first field that is not Copy
+        if done == i { continue; }
+        done = i;
+        let k = q_k.as_slice()[x];
+        let lo = sg.cx.gens.lo.as_slice()[i as usize];
+        let hi = sg.cx.gens.lo.as_slice()[i as usize + 1];
+        let sc = [0u32, 0u32, lo, hi];
+        d.begin(415, "");
+        d.arg("type", self_text);
+        buf.clear();
+        if k == NONE {
+            buf.extend_from_slice(name_of(nm, ds, f));
+        } else {
+            text.push_u32(&mut buf, k);
+        }
+        d.arg("field", buf.as_slice());
+        buf.clear();
+        diag_sigs.display(&mut buf, sg, ds, nm, &sc, q_ty.as_slice()[x]);
+        d.arg("field_type", buf.as_slice());
+        if k == NONE {
+            let (ff, fs, fz) = span_of(ds, md, lx, set, t, f);
+            d.role("field", ff, fs, fz);
+        } else {
+            let (pf, ps, pz) = diag_tc.node_span(tree, lx, set, t, payload_type(tree, ds, f, k as usize));
+            d.role("field", pf, ps, pz);
+        }
+        d.end(sf, ss, sz);
+    }
+}
+
+// The node row of the k-th payload type of tuple variant v.
+fn payload_type(tree: &ast.Ast, ds: &decls.Decls, v: u32, k: usize) -> u32 {
+    let base = tree.item_node.as_slice()[ds.item.as_slice()[v as usize] as usize] as usize;
+    let g = base + ds.node.as_slice()[v as usize] as usize;
+    let ks = tree.kids.row(g);
+    let mut j: usize = 0;
+    for x in 0..ks.len() {
+        let c = base + ks[x] as usize;
+        if tree.kind.as_slice()[c] != node_kinds.KIND_TYPE { continue; }
+        if j == k { return c as% u32; }
+        j = j + 1;
+    }
+    return g as% u32;
+}
+
+fn check(d: &mut diag.Diags, tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, fl: &files.FileList, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, texts: &[u8], t_lo: &[u32], ok: &mut vec.Vec<u32>) {
     let n = ds.decls();
     let lang = traits.lang_items(fl, md, ds, nm);
     let im = traits.impls(sg, tab, ds);
@@ -500,6 +827,7 @@ fn check(d: &mut diag.Diags, tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.D
             d.role("trait", rf, rs, rz);
             d.end(f, s, z);
         }
+        ok.push(i);
         members_of(mk.as_slice(), mi.as_slice(), i, decls.DK_METHOD, ds, &mut ms);
         members_of(mk.as_slice(), mi.as_slice(), tr, decls.DK_TRAIT_METHOD, ds, &mut tms);
         // E0907: `pub` on a trait impl method
@@ -516,14 +844,26 @@ fn check(d: &mut diag.Diags, tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.D
             d.role("cut", af, as_, cut);
             d.end(af, as_, az);
         }
-        // E0906: a trait method the impl lacks, a method the trait lacks
+        // E0906: a trait method the impl lacks, a method the trait lacks; E0905: a method whose
+        // signature differs from the trait method's
         for j in 0..tms.len() {
             let tm = tms.as_slice()[j];
-            let mut found = false;
+            let mut found = NONE;
             for q in 0..ms.len() {
-                if ds.name.as_slice()[ms.as_slice()[q] as usize] == ds.name.as_slice()[tm as usize] { found = true; }
+                if found == NONE && ds.name.as_slice()[ms.as_slice()[q] as usize] == ds.name.as_slice()[tm as usize] { found = ms.as_slice()[q]; }
             }
-            if found { continue; }
+            if found != NONE {
+                if !sig_matches(tab, sg, i, tm, found) {
+                    d.begin(905, "");
+                    d.arg("name", name_of(nm, ds, found));
+                    d.arg("signature", trait_sig_text(tree, lx, set, t, ds, tm));
+                    let (rf, rs, rz) = span_of(ds, md, lx, set, t, tm);
+                    d.role("trait", rf, rs, rz);
+                    let (mf, mst, mz) = span_of(ds, md, lx, set, t, found);
+                    d.end(mf, mst, mz);
+                }
+                continue;
+            }
             d.begin(906, "");
             d.arg("name", name_of(nm, ds, tm));
             d.arg("trait", tpath);

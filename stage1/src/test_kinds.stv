@@ -147,3 +147,36 @@ test fn operator_impl_beside_builtin() {
     let out = diag_out.render(&d, rows.as_slice(), &ft, &o.set, true);
     debug.assert(out.as_slice().eq(mem.str_bytes(OP_LINE)), "the JSON line is stage0's");
 }
+
+test fn copy_under_the_impl_bounds() {
+    let o = program("struct C { a: u32 }\nimpl Copy for C {}\nstruct D { x: u8 }\nstruct W { c: C, d: D }\nimpl Copy for W {}\nstruct G<T> { t: T }\nimpl<T> Copy for G<T> {}\nstruct G2<T> { t: T }\nimpl<T: Copy> Copy for G2<T> {}\nimpl Add for D {\n    fn add(self, rhs: Self) -> Self { return rhs; }\n}\nimpl Add for C {\n    fn add(self, rhs: Self) -> Self { return rhs; }\n}\nfn main() -> i32 { return 0; }\n", CORE);
+    let fl = std_files();
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let mut d = diag.Diags.new();
+    diag_kinds.impl_diags(&mut d, &mut sg, &o.ds, &o.md, &o.nm, &fl, &o.lx, &o.set, &o.toks, &o.tree);
+    let mut m = vec.Vec::<u8>.new();
+    for i in 0..d.len() {
+        d.message(i, &mut m);
+        m.push(10);
+    }
+    let ms = m.as_slice();
+    debug.assert(d.len() == 3, "E0415 for `W` and `G<T>`, E0422 for `D`");
+    debug.assert(test_kit.has(ms, "`W` cannot implement `Copy`: field `d` has type `D`, which is not Copy\n"), "the first field that is not Copy");
+    debug.assert(test_kit.has(ms, "`G<T>` cannot implement `Copy`: field `t` has type `T`, which is not Copy\n"), "a param without a Copy bound");
+    debug.assert(test_kit.has(ms, "`D` cannot implement operator trait `std.core.Add`: it is not Copy\n"), "an operator on a type that is not Copy");
+}
+
+test fn method_signature_against_the_trait() {
+    let o = program("trait Conv<T> {\n    fn c(&self) -> T;\n}\ntrait Tr<T> {\n    fn f(&self, x: T) -> Self;\n    fn g<U: Conv<T>>(u: &U) -> u32;\n    fn h(&mut self);\n}\nstruct S {}\nimpl Tr<u8> for S {\n    fn f(&self, x: u8) -> S { return S.{}; }\n    fn g<U: Conv<u8>>(u: &U) -> u32 { return 0; }\n    fn h(&mut self) {}\n}\nstruct B {}\nimpl Tr<u8> for B {\n    fn f(&self, x: u16) -> B { return B.{}; }\n    fn g<U: Conv<u16>>(u: &U) -> u32 { return 0; }\n    fn h(&self) {}\n}\nfn main() -> i32 { return 0; }\n", CORE);
+    let fl = std_files();
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let mut d = diag.Diags.new();
+    diag_kinds.impl_diags(&mut d, &mut sg, &o.ds, &o.md, &o.nm, &fl, &o.lx, &o.set, &o.toks, &o.tree);
+    debug.assert(d.len() == 3, "E0905 for each method of `B`, none for `S` (`Self` and `T` substituted)");
+    let mut m = vec.Vec::<u8>.new();
+    for i in 0..d.len() {
+        d.message(i, &mut m);
+        m.push(10);
+    }
+    debug.assert(test_kit.has(m.as_slice(), "method `g` does not match the trait's signature\n"), "a bound with another trait argument");
+}

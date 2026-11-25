@@ -21,14 +21,14 @@ import std.vec;
 const NONE: u32 = idx.NONE;
 
 // The span (file, start, size) of global tokens lo..=hi of one file.
-fn tok_range(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, lo: u32, hi: u32) -> (u32, u32, u32) {
+pub fn tok_range(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, lo: u32, hi: u32) -> (u32, u32, u32) {
     let (f, s, _) = modules.tok_span(lx, set, t, lo);
     let (_, s2, z2) = modules.tok_span(lx, set, t, hi);
     return (f, s, s2 + z2 - s);
 }
 
 // The span of node row n: its first token through its last.
-fn node_span(tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, n: u32) -> (u32, u32, u32) {
+pub fn node_span(tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, n: u32) -> (u32, u32, u32) {
     let a = tree.tok.as_slice()[n as usize];
     let e = tree.tok_end.as_slice()[n as usize];
     return tok_range(lx, set, t, a, if e > a then e - 1 else a);
