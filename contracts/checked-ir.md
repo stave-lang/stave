@@ -19,7 +19,10 @@ error diagnostics; with errors, its file is not written.
 Each level is printed from the canonical module of that point ("Canonical module"), so ids of
 one level do not correspond to those of another. stage0's own release build also runs the bounds
 audit on the output of its base passes, as a self-check of stage0; that audit is not part of level
-`opt`, and loading an `opt` text does not run it.
+`opt`, and loading an `opt` text does not run it. It checks only the accesses the audit counts
+("Loading" step 5) that are left after the base passes: rule B2 (opt-passes.md) has put every
+element access of a slice of non-array, non-slice elements into pointer form through
+`slice.ptr`, which is not among them.
 
 The **gate form** is what the dumps hold. The **emit form** (`stave ir emit`) is the gate form
 plus the stack section: the `runstack`, `truncated`, `node`, `edge` and `nodes` lines. Rule: the
@@ -66,7 +69,9 @@ Spellings, `<x>` a field, `[..]` present only with its datum, `{..}` repeated ze
 | claim | `claim @<inst> pre[ checked] <a> <= <b> <w>` or `claim @<inst> post <a> <= <b> <w>` |
 
 Operands: `%<v>` a value; a decimal int constant (`bool` as `0`/`1`, `char` as its code point;
-the operand position gives its type); a float constant as `0x` and its IEEE bits in lowercase hex,
+the operand position gives its type; every decimal integer of the text, here, in a `switch`
+case, or a `claim` weight, lies in the range of `i128`, -2^127 to 2^127-1, and one outside it
+is a step 1 error); a float constant as `0x` and its IEEE bits in lowercase hex,
 4 digits for f16, 8 for f32, 16 for f64, and `bf16 0x` with 4 digits for bf16 (the digit count
 and the prefix give the format); `s<S>` the `&str` of string S; `@<inst>` a fn item (a direct
 callee, or a fn value with a null environment); `t<T>` a type operand. Constants are inline
@@ -320,8 +325,11 @@ step stops before the next.
    as errors (E0215, E0217, E0218: not in an instance of a generic fn).
 5. **Audit.** At levels `lowered` and `checked`: the bounds audit of every fn, reading calls by
    the loaded `claim` rows (`checked`) or the computed ones (`lowered`); an unguarded access is
-   reported as in step 3. At level `opt` no audit runs: the release passes inline calls and
-   substitute arguments for params, and the audit takes facts from calls and params.
+   reported as in step 3. The accesses the audit counts: an `addr.elem` whose operand 0 is a
+   `ref` to an array or slice, a `get` or `set` of an array, and a vector memory op whose
+   operand 0 is a `ref` or `ptr` to an array or slice. At level `opt` no audit runs: the release
+   passes inline calls and substitute arguments for params, and the audit takes facts from calls
+   and params.
 
 After steps 3-5 the loaded module is renumbered canonically. At level `lowered` the removal of
 step 4 follows, which keeps the module canonical, and then the IR verifier, as in a build; at the
@@ -330,11 +338,11 @@ other levels the verifier runs on the renumbered module.
 What loading proves depends on the level:
 - Every level: the module is well formed (steps 1-3: types, shapes, statics, signatures,
   `known` items, intrinsics and their arch, SSA and op typing).
-- `lowered`, `checked`: every element access has a `check.bounds` or a proof the audit accepts
-  (step 5).
+- `lowered`, `checked`: every access the audit counts (step 5) has a `check.bounds` or a proof
+  the audit accepts.
 - `lowered`: no `claim` line. Step 4 computes the summaries from the bodies; a check is removed
-  only by a proof the witness checker accepts. This is the one level whose memory safety loading
-  establishes.
+  only by a proof the witness checker accepts. This is the one level at which loading
+  establishes that every access the audit counts is in bounds.
 - `checked`: the `claim` rows are assertions of the text, not facts loading proves; the text
   holds no proof to check them by. The audit trusts them as it trusts computed summaries: a
   `pre` row lets an access of the fn go without a check, a `post` row lets a caller's access go

@@ -502,9 +502,11 @@ pub fn release_passes(m: &Module) -> Result<Module, Failure> {
         return Err(Failure::Internal { stage: Stage::Opt, message });
     }
     prof::mark("opt-canonical");
-    // The optimizer's output is checked like the lowering's: it must be valid IR in which every
-    // element access still has its check or a proof. The audit is stage0's self-check of its
-    // base passes; level `opt` itself does not require it, and loading `opt` text skips it.
+    // The optimizer's output must be valid IR at level `opt`. The audit after it is stage0's
+    // self-check of its base passes; level `opt` itself does not require it, and loading `opt`
+    // text skips it. It sees only the accesses it counts that the passes leave in reference
+    // form: `split_elem_addrs` has put a slice's element accesses behind `slice.ptr`, which it
+    // does not count.
     verified(&c, Stage::Opt, Level::Opt)?;
     prof::mark("opt-verify");
     audited(&c, Stage::Opt)?;

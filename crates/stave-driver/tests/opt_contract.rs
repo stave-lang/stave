@@ -4,11 +4,12 @@
 //! - the worked examples of section 10, one directory per example under `tests/opt/<section>/`:
 //!   `input.ir` (the `checked` input), `inline.ir` (the module after the expansion,
 //!   `--dump-phase=inline`), `output.ir` (the `opt` output), `inline.txt` (the decision dump,
-//!   `--dump=inline`; 10.10 with `--limit cap=20`). Every `.ir` text loads (`stave ir check`) and
-//!   is its own `stave ir fmt`. Where the output is the base passes' result of the clean-up's
-//!   output, `stave ir opt` gives it byte for byte: from `input.ir` for the `--passes=base`
-//!   examples 10.8 and 10.9; from `output.ir` read at level `checked` for 10.1, 10.3, and 10.7,
-//!   whose clean-up output is their output (the text states that `B` changes nothing);
+//!   `--dump=inline`), `limits` (the `--limit` overrides of the case: 10.10's `cap=20`). Every
+//!   `.ir` text loads (`stave ir check`) and is its own `stave ir fmt`. Where the output is the
+//!   base passes' result of the clean-up's output, `stave ir opt` gives it byte for byte: from
+//!   `input.ir` for the `--passes=base` examples 10.8 and 10.9; from `output.ir` read at level
+//!   `checked` for 10.1, 10.2, 10.3, and 10.7, whose clean-up output is their output (the text
+//!   states that `B` changes nothing);
 //! - cases of the base passes beside the examples: the parts of params placed after the slots
 //!   and a part whose anchor is deleted in the same step (B1, B3), dead code whose value has 255
 //!   uses and more (B5);
@@ -91,6 +92,27 @@ fn every_example_text_loads_and_is_canonical() {
     assert_eq!(texts, 20);
 }
 
+/// A case's `limits` file: `NAME=N` lines over the `[limits]` names of opt.toml. Only 10.10, the
+/// budget cut on `CAP`, runs under a limit of its own.
+#[test]
+fn a_case_keeps_its_limit_overrides_in_its_directory() {
+    let names = ["threshold", "cap", "call_saved", "slot_callee", "slot_caller", "rounds"];
+    for k in 1..=10 {
+        let p = examples().join(format!("10.{k}")).join("limits");
+        if !p.is_file() {
+            assert_ne!(k, 10, "10.10: no limits file");
+            continue;
+        }
+        assert_eq!(k, 10, "10.{k}: a limits file");
+        let text = read(&p);
+        for line in text.lines() {
+            let (name, n) = line.split_once('=').unwrap_or_else(|| panic!("10.{k}/limits: `{line}`"));
+            assert!(names.contains(&name) && n.parse::<u64>().is_ok(), "10.{k}/limits: `{line}`");
+        }
+        assert_eq!(text, "cap=20\n");
+    }
+}
+
 #[test]
 fn base_passes_give_the_examples_output() {
     for d in ["10.8", "10.9"] {
@@ -98,7 +120,7 @@ fn base_passes_give_the_examples_output() {
         let got = opt(&format!("{d}/input.ir"), &read(&dir.join("input.ir")));
         assert_eq!(got, read(&dir.join("output.ir")), "{d}: `stave ir opt input.ir`");
     }
-    for d in ["10.1", "10.3", "10.7"] {
+    for d in ["10.1", "10.2", "10.3", "10.7"] {
         let want = read(&examples().join(d).join("output.ir"));
         let got = opt(&format!("{d}/output.ir as checked"), &at_level(&want, "opt", "checked"));
         assert_eq!(got, want, "{d}: the base passes change the clean-up's output");

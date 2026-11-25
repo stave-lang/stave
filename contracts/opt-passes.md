@@ -404,7 +404,9 @@ printed.
   examples of section 10 and at least: a single-block callee; several `ret`s; a callee with a
   loop; slots; nesting three deep; self and mutual recursion; `features` both ways; a cold site;
   a budget cut and its tie-break; constant, string, and `@fn` arguments; a unit call and an unused
-  result; a site in `b0`; two sites in one block; an `@n.u` callee; every reachable verdict.
+  result; a site in `b0`; two sites in one block; an `@n.u` callee; every reachable verdict. A case
+  run under limits other than the table's keeps them beside its texts in a file `limits`, one
+  `NAME=N` per line, each passed as `--limit NAME=N` to every run of the case (10.10: `cap=20`).
 - **Base**: on every `release` cell of the stage1 IR corpus, `stage1 ir opt --passes=base` equals
   `stave ir opt` on the same `checked` text, both in the same form (gate or emit).
 - **Verifiers**: stage1's verifier after every phase (`--verify-phases`) and stage0's
@@ -667,8 +669,8 @@ Clean-up of `main`, round 1: C1 nothing (`b3`, `b6`, `b9` have two edges); C2 fo
 leaving `b0: br b3(15)`, `b3(%2): %4 = add t0 %2 1 !2; br b6(%4)`, `b6(%5): br b9(8)`,
 `b9(%8): %9 = cast.wrap t1 %5; ret %9`; C6 deletes `b9`'s param `%8` (unused) and its argument.
 Round 2: C1 substitutes 15 for `%2` and `%4` for `%5`; C2 folds `add 15 1` = 16, then
-`cast.wrap t1 16` = 16; C5 merges the chain into `b0`. Round 3 changes nothing. Output (`pick`
-unchanged):
+`cast.wrap t1 16` = 16; C5 merges the chain into `b0`. Round 3 changes nothing. `B` changes
+nothing. Output (`pick` unchanged):
 
 ```
 fn @1 main.main() -> t1 site 3 {
