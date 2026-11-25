@@ -33,9 +33,9 @@ import std.vec;
 
 const W: usize = terminals.NTERM;
 const EOF: u32 = terminals.T_EOF as u32;
-const NT_BIT: u32 = 32768;
-const NT_MASK: u32 = 32767;
-const NONE16: u32 = 65535;
+const NT_BIT: u32 = 0x8000;
+const NT_MASK: u32 = 0x7fff;
+const NONE16: u32 = 0xffff;
 
 // Stack entries: the symbol (a terminal id, `NT_BIT | nonterminal`, or `CLOSE`) in bits 0..16,
 // the nonterminal whose production pushed it in bits 16..28, and the cast-tracking flags.

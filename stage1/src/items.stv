@@ -19,6 +19,7 @@ import prims.bracket;
 import prims.scan;
 import prims.select;
 import source;
+import std.idx;
 import std.vec;
 
 pub const ITEM_PRE: u8 = 0;
@@ -33,7 +34,7 @@ pub const FILE_UNBALANCED: u8 = 2;
 pub const FILE_TOO_DEEP: u8 = 3;
 
 pub const MAX_DEPTH: i32 = 10000;
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 
 const T_SEMI: u8 = terminals.T_SEMI as% u8;
 const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;

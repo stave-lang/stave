@@ -6,8 +6,9 @@ import resdiag;
 import resolve;
 import test_kit;
 import std.debug;
+import std.idx;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 // The use at the k-th `pat` in the root file is the local bound at the j-th `bind`.
 fn local_is(o: &test_kit.Out, pat: &str, k: usize, bind: &str, j: usize) -> bool {

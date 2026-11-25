@@ -63,7 +63,7 @@ pub const STOP_NONE: u8 = 0;
 pub const STOP_TOO_LARGE: u8 = 1;
 pub const STOP_INVALID_UTF8: u8 = 2;
 
-const MAX_FILE_LEN: usize = 4294967295;
+const MAX_FILE_LEN: usize = 0xffff_ffff;
 
 // Byte classes.
 const C_IDCONT: u8 = 1;
@@ -327,7 +327,7 @@ impl Lexer {
         let stopped = limit < n;
         // past limit when the shebang line holds the invalid byte: nothing is lexed then
         let mut i = shebang_end(src);
-        if n >= 3 && src[0] == 239 && src[1] == 187 && src[2] == 191 {
+        if n >= 3 && src[0] == 0xef && src[1] == 0xbb && src[2] == 0xbf {
             errs.push(E_BOM, 0, 3);
             i = 3;
         }

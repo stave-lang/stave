@@ -25,7 +25,7 @@ pub const V_OTHER: u8 = 1;
 pub const V_TABLE: u8 = 2;
 
 // "No span" in the spans of `Manifest` and `Dep`.
-pub const NO_SPAN: u32 = 4294967295;
+pub const NO_SPAN: u32 = 0xffff_ffff;
 
 // Nesting bound of arrays and inline tables.
 const MAX_DEPTH: usize = 64;
@@ -371,7 +371,7 @@ impl P {
             v = v * 16 + d;
             self.i = self.i + 1;
         }
-        if v > 1114111 || (v >= 55296 && v <= 57343) { return Result.Err(self.err()); }
+        if v > 0x10_ffff || (v >= 0xd800 && v <= 0xdfff) { return Result.Err(self.err()); }
         push_utf8(out, v);
         return Result.Ok(());
     }
@@ -611,7 +611,7 @@ fn is_int(t: &[u8]) -> bool {
         let dv = digit_value(c) as u64;
         if dv >= (radix as u64) { return false; }
         seen = true;
-        let limit: u64 = if inner_neg then 9223372036854775808 else 9223372036854775807;
+        let limit: u64 = if inner_neg then 0x8000_0000_0000_0000 else 0x7fff_ffff_ffff_ffff;
         if v > (limit - dv) / (radix as u64) { return false; }
         v = v * (radix as u64) + dv;
     }
@@ -653,20 +653,20 @@ fn is_float(t: &[u8]) -> bool {
 }
 
 fn push_utf8(out: &mut vec.Vec<u8>, v: u32) {
-    if v < 128 {
+    if v < 0x80 {
         out.push(v as% u8);
-    } else if v < 2048 {
-        out.push((192 | (v >> 6)) as% u8);
-        out.push((128 | (v & 63)) as% u8);
-    } else if v < 65536 {
-        out.push((224 | (v >> 12)) as% u8);
-        out.push((128 | ((v >> 6) & 63)) as% u8);
-        out.push((128 | (v & 63)) as% u8);
+    } else if v < 0x800 {
+        out.push((0xc0 | (v >> 6)) as% u8);
+        out.push((0x80 | (v & 0x3f)) as% u8);
+    } else if v < 0x10000 {
+        out.push((0xe0 | (v >> 12)) as% u8);
+        out.push((0x80 | ((v >> 6) & 0x3f)) as% u8);
+        out.push((0x80 | (v & 0x3f)) as% u8);
     } else {
-        out.push((240 | (v >> 18)) as% u8);
-        out.push((128 | ((v >> 12) & 63)) as% u8);
-        out.push((128 | ((v >> 6) & 63)) as% u8);
-        out.push((128 | (v & 63)) as% u8);
+        out.push((0xf0 | (v >> 18)) as% u8);
+        out.push((0x80 | ((v >> 12) & 0x3f)) as% u8);
+        out.push((0x80 | ((v >> 6) & 0x3f)) as% u8);
+        out.push((0x80 | (v & 0x3f)) as% u8);
     }
 }
 

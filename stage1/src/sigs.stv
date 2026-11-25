@@ -32,10 +32,11 @@ import types;
 import prims.col;
 import prims.ragged;
 import prims.search;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 
 // Fn signature flags.
@@ -123,7 +124,7 @@ const OP_VECG: u8 = 10;
 // The target features (contracts/simd-ops.md), in their listing order (= bit), each with the
 // features it implies directly.
 const FEATURES: &str = "sse42 avx avx2 fma bmi2 f16c avx512f avx512bw avx512vl avx512dq avx512cd avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16 neon fp16 dotprod bf16 sve sve2 cuda";
-const IMPLIES: [u32; 24] = [0, 1, 2, 2, 0, 2, 44, 64, 64, 64, 64, 128, 128, 64, 128, 896, 128, 0, 131072, 131072, 131072, 262144, 2097152, 0];
+const IMPLIES: [u32; 24] = [0, 1, 2, 2, 0, 2, 0x2c, 0x40, 0x40, 0x40, 0x40, 0x80, 0x80, 0x40, 0x80, 0x380, 0x80, 0, 0x20000, 0x20000, 0x20000, 0x40000, 0x20_0000, 0];
 // `v3`, `v4`: their members.
 const V3: u32 = 60;
 const V4: u32 = 1980;
@@ -766,7 +767,7 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
             lw.vals.push(ERR);
             return;
         }
-        let rpbit: u32 = if rp then 2147483648u32 else 0u32;
+        let rpbit: u32 = if rp then 0x8000_0000u32 else 0u32;
         lw.frame(if dk == decls.DK_TYPE_ALIAS then OP_ALIAS else OP_ADT, g, id, (n as% u32) | rpbit);
         for j in 0..n {
             let ga = base + tree.kids.row(gargs as usize)[n - 1 - j] as usize;
@@ -796,7 +797,7 @@ fn visit_garg(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens
                 return;
             }
             let bits = cx.tab.int_bits(cty);
-            let hi: u64 = if bits == 0 || bits == 64 then (if cx.tab.is_signed(cty) then 9223372036854775807u64 else 18446744073709551615u64) else if cx.tab.is_signed(cty) then (1u64 << (bits - 1) as u64) - 1 else (1u64 << bits as u64) - 1;
+            let hi: u64 = if bits == 0 || bits == 64 then (if cx.tab.is_signed(cty) then 0x7fff_ffff_ffff_ffffu64 else 0xffff_ffff_ffff_ffffu64) else if cx.tab.is_signed(cty) then (1u64 << (bits - 1) as u64) - 1 else (1u64 << bits as u64) - 1;
             if big || v > hi {
                 lw.garg(types.GA_ERROR, 0, 0);
                 return;
@@ -1023,7 +1024,7 @@ fn finish(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm
         return;
     }
     if op == OP_ADT || op == OP_ALIAS {
-        let n = (y & 2147483647) as usize;
+        let n = (y & 0x7fff_ffff) as usize;
         let at_ret = y >> 31 == 1;
         let lo = lw.gas.len() - 3 * n;
         lw.tmp.clear();
@@ -1290,7 +1291,7 @@ fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: u
         if tk(t, if cp then a + 1 else a) == T_KW_SELF {
             for k in 0..ps.len() {
                 if child(tree, base, ps[k] as usize, K_SELF_PARAM) != NONE {
-                    out.push((if k > 255 then 255u32 else k as% u32) | (if cp then 256u32 else 0u32));
+                    out.push((if k > 255 then 255u32 else k as% u32) | (if cp then 0x100u32 else 0u32));
                     at.push(o as% u32);
                     break;
                 }
@@ -1302,7 +1303,7 @@ fn origins(sg: &Sigs, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, f: u
         let b = base + sg.cx.uses.target.as_slice()[lo] as usize;
         let i = param_index(tree, base, ps, b);
         if i != NONE {
-            out.push(i | (if cp then 256u32 else 0u32));
+            out.push(i | (if cp then 0x100u32 else 0u32));
             at.push(o as% u32);
         }
     }
@@ -1504,7 +1505,7 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
     // E0520 E0521: a return `from` entry outside the origin table
     if stave_abi {
         for j in 0..ro.len() {
-            let src = ro.as_slice()[j] & 255;
+            let src = ro.as_slice()[j] & 0xff;
             let cp = ro.as_slice()[j] >> 8 == 1;
             let pt = tys.as_slice()[src as usize];
             if valid(classify(&sg.cx, ds, pt, sc), cp) { continue; }
@@ -1541,7 +1542,7 @@ fn build_fn(sg: &mut Sigs, lw: &mut Lw, fl: &files.FileList, md: &modules.Module
         let fr = child(tree, base, pf as usize, K_FROM);
         origins(sg, tree, t, it, base, if fr == NONE then pf as usize else fr as usize, ps.as_slice(), &mut ent, &mut ent_at);
         for e in 0..ent.len() {
-            let src = ent.as_slice()[e] & 255;
+            let src = ent.as_slice()[e] & 0xff;
             let cp = ent.as_slice()[e] >> 8 == 1;
             let o = ent_at.as_slice()[e] as usize;
             let (lo, hi) = span_of(tree, t, cut, o);

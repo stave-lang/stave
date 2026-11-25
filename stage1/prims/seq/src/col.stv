@@ -29,6 +29,6 @@ pub fn iota(n: usize) -> vec.Vec<u32> {
 
 // n as an id or offset: traps `Assert` unless n <= u32::MAX.
 pub fn ids(n: usize) -> u32 {
-    debug.assert(n <= 4294967295, "length does not fit a u32 id");
+    debug.assert(n <= 0xffff_ffff, "length does not fit a u32 id");
     return n as% u32;
 }
