@@ -16,6 +16,32 @@ FILE or a bad command line exits 2. The stage1 IR gate (`tools/ci-step/run.sh st
 holds `fmt` to stage0's printed text byte for byte and both verbs to stage0's verdict on mutated
 text.
 
+**`stage1 ir opt [--passes=base|full] [--dump=inline] [--dump-phase=inline|clean|base]
+[--verify-phases] [--limit NAME=N]... FILE`** (the stage1 binary's optimizer, run directly; `stave ir opt` stays
+stage0's base passes): loads FILE with stage1's IR library (checked-ir.md "Loading" steps 1-3);
+the header must say `release` and level `checked` (exit 1 otherwise). It runs the release passes
+of [opt-passes.md](opt-passes.md), `full` (the default: rule P1) or `base` (rule P3), and prints
+the module at level `opt` on stdout in the file's form: the stack section of an emit-form file is
+printed unchanged, so `stave ir emit --release`, `stage1 ir opt`, `stave ir build` builds with
+the front end's stack bounds.
+
+- `--dump=inline`: prints the decision tables (opt-passes.md "The `inline` dump") on stdout
+  instead of the module. With `--passes=base` (no decision runs) it is a usage error.
+- `--dump-phase=P`: prints, instead of the output, the canonical module after phase P of the
+  last round, at level `opt` and in the file's form: `inline` after the expansion, `clean` after
+  the clean-up, `base` after the base passes (the output itself). A phase that `--passes` does not
+  run is a usage error.
+- `--verify-phases`: stage1's IR verifier also runs after every phase, not only on the output.
+- `--limit NAME=N`: for this run, the `[limits]` entry `NAME` of `opt.toml` (`threshold`, `cap`,
+  `call_saved`, `slot_callee`, `slot_caller`, `rounds`) is the decimal `N` (opt-passes.md K1);
+  for goldens and tuning sweeps. A value that breaks opt-passes.md K3, or `rounds=0`, is a usage
+  error.
+
+Faults in FILE print as for `stave ir` and exit 1; an unreadable FILE or a bad command line
+(an unknown flag or value, `--dump` with `--dump-phase`) exits 2. A verifier fault in a phase's
+output is a compiler bug: `FILE: internal error: <phase>: @<inst>: MSG` on stderr (`<phase>` one
+of `inline clean base`), nothing on stdout, exit 3.
+
 **Commands that stage1 does not run**: `stave unsafe-report`, `stave lowering`, and `stave explain` always
 run in stage0, whatever `--compiler` says. They compile no program and print no summary line.
 `stave fix` checks in stage0 too (its rounds check edits that are not written yet); it takes no

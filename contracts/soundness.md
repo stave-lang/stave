@@ -67,7 +67,10 @@ callee's `requires` (acceptance is all or nothing for that reason).
 does, the bounds audit trusts the loaded rows as certified: they are not re-derived from the
 callee's IR, so the "summary row not certified" case above is open there, and a forged row can let
 an access without a check pass the audit. The claim holds for such a build only when its rows are
-the ones a compiler printed. Building from source is unaffected.
+the ones a compiler printed. A text at level `opt` is not audited at all (the release passes
+inline the calls and params the audit reads facts from): building from it trusts the text as the
+output of the release passes, whose own gates (opt-passes.md "Gates") are what establish it.
+Building from source is unaffected.
 
 ## Overwritten values: loans are read after the statement
 

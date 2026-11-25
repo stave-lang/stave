@@ -114,6 +114,32 @@ fn slot_outside_entry() {
 }
 
 #[test]
+fn slots_are_a_prefix_of_the_entry() {
+    let mut m = Module::new();
+    let i32t = m.types.i32();
+    let p = m.types.ref_(true, i32t);
+    define(&mut m, &[0], "t.f", &[i32t], None, |b, _| {
+        let x = b.param(0).unwrap();
+        b.slot(p);
+        b.binary(Op::AddWrap, i32t, x, x);
+        b.inst(Op::Slot, Some(p), &[]);
+        b.ret(None);
+    });
+    has(&m, "slot after a non-slot instruction of b0");
+    let mut m = Module::new();
+    let i32t = m.types.i32();
+    let p = m.types.ref_(true, i32t);
+    define(&mut m, &[0], "t.f", &[i32t], None, |b, _| {
+        let x = b.param(0).unwrap();
+        b.slot(p);
+        b.slot(p);
+        b.binary(Op::AddWrap, i32t, x, x);
+        b.ret(None);
+    });
+    assert_eq!(errs(&m), Vec::<String>::new());
+}
+
+#[test]
 fn constant_ranges() {
     let mut m = Module::new();
     let i8t = m.types.i8();

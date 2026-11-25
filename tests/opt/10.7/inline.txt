@@ -1,0 +1,8 @@
+round 1
+fn @0 size 2 closed 2 slots 0 level 0
+fn @1 size 1 closed 1 slots 0 level 0
+fn @2 size 1 closed 1 slots 0 level 0
+fn @3 size 13 closed 8 slots 0 level 1
+site @3 b0 0 @0 2 inline
+site @3 b0 1 @1 1 inline
+site @3 b0 2 @2 1 inline

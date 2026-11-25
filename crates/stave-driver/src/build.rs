@@ -35,6 +35,7 @@ use stave_ir::bounds::{
     findings,
 };
 use stave_ir::canon::Edits;
+use stave_ir::text::Level;
 use stave_ir::witness::FnWitness;
 use stave_ir::witness::check::{Removal, check_module_by, remove, remove_whole};
 use stave_ir::{FuncId, Module};
@@ -165,7 +166,7 @@ pub fn lower_keeping(
     prof::mark("lower");
     let (mut m, mut nodes_of_func) = lowered.map_err(|es| lower_failure(&es))?;
     m.main = main_path(prog).and_then(|p| m.find_func(&p));
-    verified(&m, Stage::Lower)?;
+    verified(&m, Stage::Lower, Level::Lowered)?;
     prof::mark("verify");
     // The removal reads the canonical module, level `lowered`: the proofs read a constant by its
     // pool entry, so they must see the pool the text carries (one entry per distinct constant),
@@ -192,10 +193,11 @@ pub(crate) fn canonical_moving(m: &mut Module, nodes_of_func: Option<&mut Vec<Ve
     prof::mark("canonical");
 }
 
-/// The IR verifier on the module a build or a load hands on (the checked module, or loaded text
-/// of level `checked` or `opt` after its canonical numbering), in every profile of the compiler.
-pub(crate) fn verified_final(m: &Module) -> Result<(), Failure> {
-    verified(m, Stage::Lower)?;
+/// The IR verifier by the rules of `level` on the module a build or a load hands on (the checked
+/// module, or loaded text of level `checked` or `opt` after its canonical numbering), in every
+/// profile of the compiler.
+pub(crate) fn verified_final(m: &Module, level: Level) -> Result<(), Failure> {
+    verified(m, Stage::Lower, level)?;
     prof::mark("checked-verify");
     Ok(())
 }
@@ -218,7 +220,7 @@ pub(crate) fn checked_module(
         stave_ir::canon::is_canonical(m),
         "the removal of proven checks left a module that is not canonical"
     );
-    verified_final(m)?;
+    verified_final(m, Level::Checked)?;
     Ok(r)
 }
 
@@ -252,9 +254,9 @@ pub(crate) fn lower_failure(es: &[stave_sema::LowerError]) -> Failure {
     }
 }
 
-/// The IR verifier on `m`; an error is a compiler bug of `stage`.
-pub(crate) fn verified(m: &Module, stage: Stage) -> Result<(), Failure> {
-    verify(m).map_err(|es| {
+/// The IR verifier on `m` by the rules of `level`; an error is a compiler bug of `stage`.
+pub(crate) fn verified(m: &Module, stage: Stage, level: Level) -> Result<(), Failure> {
+    verify(m, level).map_err(|es| {
         let named: Vec<String> = es
             .iter()
             .map(|e| {
@@ -376,12 +378,13 @@ fn remove_checked(m: &mut Module, proved: Vec<Proved>, whole: bool) -> Result<Ch
     Ok(CheckRemoval { proved, found, calls, removal, remap })
 }
 
-/// [`stave_ir::verify_module`] with the functions verified in parallel (same errors, same order).
-fn verify(m: &Module) -> Result<(), Vec<stave_ir::VerifyError>> {
+/// [`stave_ir::verify_module_at`] with the functions verified in parallel (same errors, same
+/// order).
+fn verify(m: &Module, level: Level) -> Result<(), Vec<stave_ir::VerifyError>> {
     let mut errs = stave_ir::verify::verify_types(m)?;
     let per_fn: Vec<Vec<stave_ir::VerifyError>> = (0..m.funcs.len() as u32)
         .into_par_iter()
-        .map(|f| stave_ir::verify::verify_func_body(m, FuncId(f)))
+        .map(|f| stave_ir::verify::verify_func_body(m, FuncId(f), level))
         .collect();
     errs.extend(per_fn.into_iter().flatten());
     if errs.is_empty() { Ok(()) } else { Err(errs) }
@@ -424,7 +427,7 @@ pub fn codegen_link(
 }
 
 /// [`codegen_link`] of a release build whose module is already the output of the release passes
-/// (level `opt`, verified and audited): the passes do not run again.
+/// (level `opt`, verified): the passes do not run again.
 pub fn codegen_link_optimized(
     m: &Module,
     triple: Triple,
@@ -499,9 +502,12 @@ pub fn release_passes(m: &Module) -> Result<Module, Failure> {
         return Err(Failure::Internal { stage: Stage::Opt, message });
     }
     prof::mark("opt-canonical");
-    // The optimizer's output is checked like the lowering's: it must be valid IR in which every
-    // element access still has its check or a proof.
-    verified(&c, Stage::Opt)?;
+    // The optimizer's output must be valid IR at level `opt`. The audit after it is stage0's
+    // self-check of its base passes; level `opt` itself does not require it, and loading `opt`
+    // text skips it. It sees only the accesses it counts that the passes leave in reference
+    // form: `split_elem_addrs` has put a slice's element accesses behind `slice.ptr`, which it
+    // does not count.
+    verified(&c, Stage::Opt, Level::Opt)?;
     prof::mark("opt-verify");
     audited(&c, Stage::Opt)?;
     prof::mark("opt-audit");
@@ -536,7 +542,7 @@ fn x64(
         image: image.clone(),
         main: Some(main),
         // The driver verified the module after lowering and after the release passes.
-        verify: false,
+        verify: None,
         threads: threads.unwrap_or(0),
         release,
         features: baseline,

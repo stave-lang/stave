@@ -75,8 +75,10 @@ pub fn unify_chunk_bounds(b: &mut Body) -> bool {
 }
 
 /// Makes every group of instructions with one operand value, type, and constant a single
-/// instruction right after the definition of the operand value: the group's first instruction,
-/// moved there. `parts`: (operand value, result type, constant, instruction).
+/// instruction right after the definition of the operand value (for a param, after the slots of
+/// its block): the group's first instruction, moved there. Groups at one place go in ascending
+/// (value, type, constant) order, directly at the place, so before what an earlier call put
+/// there. `parts`: (operand value, result type, constant, instruction).
 fn unify(b: &mut Body, mut parts: Vec<(u32, u32, i128, u32)>) -> bool {
     if parts.is_empty() {
         return false;
@@ -98,7 +100,7 @@ fn unify(b: &mut Body, mut parts: Vec<(u32, u32, i128, u32)>) -> bool {
         k = end;
         let Some(vd) = b.values.get(s as usize) else { continue };
         let (at, def_block) = match vd.def {
-            ValueDef::Param { block, .. } => (At::BlockStart(block.0), block.0),
+            ValueDef::Param { block, .. } => (after_slots(b, block.0), block.0),
             ValueDef::Inst(d) => match block_of.get(d as usize) {
                 Some(&blk) if blk != NONE => (At::After(d), blk),
                 _ => continue,
@@ -132,6 +134,14 @@ fn unify(b: &mut Body, mut parts: Vec<(u32, u32, i128, u32)>) -> bool {
     let changed = !edit.is_empty();
     edit.apply(b);
     changed
+}
+
+/// The place of a part of a param of block `blk`: before the block's first instruction that is
+/// not a `slot`, so that the slots stay a prefix of `b0`.
+fn after_slots(b: &Body, blk: u32) -> At {
+    let Some(bd) = b.blocks.get(blk as usize) else { return At::BlockStart(blk) };
+    let last_slot = bd.insts.indices().take_while(|&i| b.insts.op[i as usize] == Op::Slot).last();
+    last_slot.map_or(At::BlockStart(blk), At::After)
 }
 
 /// Rewrites every `addr.elem s i`, `vec.load s i`, and `vec.store s i v` whose `s` is a reference

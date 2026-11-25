@@ -75,9 +75,7 @@ fn removable(types: &TypeTable, b: &Body, i: usize) -> bool {
 /// Removes the dead instructions of `b`, transitively. Returns whether the body changed.
 pub fn remove_dead(types: &TypeTable, b: &mut Body) -> bool {
     let n = b.insts.len();
-    let mut uses: Vec<u32> = cfg::use_counts(b).into_iter().map(u32::from).collect();
-    // A saturated count stays above zero: such a value is simply kept.
-    let saturated = |c: u32| c >= u32::from(u8::MAX);
+    let mut uses = cfg::use_counts(b);
     let mut def = vec![cfg::NONE; b.values.len()];
     for (i, r) in b.insts.result.iter().enumerate() {
         if let Some(v) = r
@@ -101,7 +99,7 @@ pub fn remove_dead(types: &TypeTable, b: &mut Body) -> bool {
         for &o in b.args(i) {
             let Operand::Value(v) = o else { continue };
             let Some(c) = uses.get_mut(v.index()) else { continue };
-            if *c == 0 || saturated(*c) {
+            if *c == 0 {
                 continue;
             }
             *c -= 1;

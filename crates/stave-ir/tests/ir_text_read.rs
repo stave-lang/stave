@@ -635,6 +635,38 @@ fn panic_ops_and_switch() {
     assert!(b.insts.op.iter().all(|o| matches!(o, Op::Panic(_))));
 }
 
+/// A `switch` whose scrutinee is `scrut`, with cases `cases`, at `level`.
+fn switch_module(level: &str, scrut: &str, cases: &str) -> String {
+    format!(
+        "stave.ir 4 \"x86_64-linux-v2\" release {level}
+type t0 int s 32
+fn @0 app.s() -> t0 {{
+b0():
+  switch {scrut} {cases} _:b1()
+b1():
+  ret 0
+}}
+"
+    )
+}
+
+/// At level `opt` the scrutinee may be an int constant, any integer, whose cases are checked for
+/// duplicates only; below it, and for any other constant, it must be a value.
+#[test]
+fn a_constant_switch_scrutinee_only_at_level_opt() {
+    for k in ["1", "-1", "18446744073709551617"] {
+        load(&switch_module("opt", k, "1:b1() -5:b1() 170141183460469231731687303715884105727:b1()"));
+        for level in ["checked", "lowered"] {
+            rejects(&switch_module(level, k, "1:b1()"), "t.ir:5: verify: switch scrutinee must be a value");
+        }
+    }
+    rejects(&switch_module("opt", "1", "1:b1() 1:b1()"), "t.ir:5: verify: duplicate switch case 1");
+    rejects(
+        &switch_module("opt", "0x3f800000", "1:b1()"),
+        "t.ir:5: verify: switch scrutinee must be a value",
+    );
+}
+
 /// Branch targets with arguments, constants of every kind as operands.
 const TERMS: &str = "stave.ir 4 \"x86_64-linux-v2\" debug checked
 type t0 int s 32
@@ -1219,6 +1251,14 @@ fn claim_rules() {
         &with_head("fn @0 a() {\nb0():\nclaim @0 post zero <= zero 0\n"),
         "t.ir:4:1: error: `claim` line inside the body of fn @0",
     );
+    // a row names a param of its fn, in either term and either kind
+    let g = "type t0 int u size\nfn @0 a(t0) -> t0 {\nb0(%0: t0):\n  ret %0\n}\n";
+    for row in ["post result <= p 0 0", "pre zero <= p 0 3", "pre checked p 0 <= zero 9"] {
+        load(&with_head(&format!("{g}claim @0 {row}\n")));
+    }
+    for row in ["post result <= p 1 0", "pre zero <= lenp 7 0", "pre checked p 4294967295 <= zero 9"] {
+        rejects(&with_head(&format!("{g}claim @0 {row}\n")), "t.ir:3: verify: claim names param ");
+    }
 }
 
 #[test]
@@ -1264,6 +1304,29 @@ b0(%0: t2):
     let es = rejects(&src, "t.ir:8: verify: ");
     assert_eq!(es[0].kind, ErrorKind::Audit);
     assert!(es[0].msg.contains("access without a bounds check or proof"), "{}", es[0].msg);
+}
+
+/// Level `opt` is trusted as the release passes' output: loading it runs no audit. The same
+/// body is refused at the levels below.
+#[test]
+fn level_opt_loads_without_the_audit() {
+    let body = "type t0 int s 32
+type t1 slice t0
+type t2 ref t1
+type t3 ref t0
+fn @0 a(t2) -> t0 {
+b0(%0: t2):
+  %1 = addr.elem t3 %0 5
+  %2 = load t0 %1
+  ret %2
+}
+";
+    let head = |level: &str| format!("stave.ir 4 \"x86_64-linux-v2\" release {level}\n{body}");
+    assert_eq!(load(&head("opt")).header.level, Level::Opt);
+    for level in ["checked", "lowered"] {
+        let es = rejects(&head(level), "t.ir:8: verify: ");
+        assert_eq!(es[0].kind, ErrorKind::Audit, "{level}");
+    }
 }
 
 #[test]

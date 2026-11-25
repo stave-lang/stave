@@ -34,6 +34,7 @@ use crate::ir::{
 use crate::layout::{LayoutError, Layouts, Shape};
 use crate::mem::{Fault, Memory};
 use crate::memcheck::{At, MemReport, TRACE_DEPTH, Trace};
+use crate::text::Level;
 use crate::types::{FloatBits, MAX_TYPE_DEPTH, TypeId, TypeKey};
 use crate::verify::{self, Cls, VerifyError};
 
@@ -139,6 +140,8 @@ pub struct Config {
     /// Borrow tracking ([`crate::borrowtrack`]), on top of `check`: a violation of the dynamic
     /// borrow model ends the run with [`Outcome::BorrowError`].
     pub borrow: bool,
+    /// The IR level of the module: [`Interp::new`] verifies it by that level's rules.
+    pub level: Level,
 }
 
 impl Default for Config {
@@ -150,6 +153,7 @@ impl Default for Config {
             heap_limit: 1 << 30,
             check: false,
             borrow: false,
+            level: Level::Checked,
         }
     }
 }
@@ -601,9 +605,10 @@ fn malformed(s: &'static str) -> InterpError {
 }
 
 impl<'m, H: Host> Interp<'m, H> {
-    /// Verifies `m` and prepares memory (string literals in the read-only data region).
+    /// Verifies `m` by the rules of `cfg.level` and prepares memory (string literals in the
+    /// read-only data region).
     pub fn new(m: &'m Module, host: H, cfg: Config) -> R<Interp<'m, H>> {
-        verify::verify_module(m).map_err(InterpError::Verify)?;
+        verify::verify_module_at(m, cfg.level).map_err(InterpError::Verify)?;
         let n = m.types.len();
         let cls = (0..n).map(|i| verify::classify(&m.types, TypeId(i as u32))).collect();
         let pointee = (0..n).map(|i| verify::pointee(&m.types, TypeId(i as u32))).collect();
@@ -1029,11 +1034,7 @@ impl<'m, H: Host> Interp<'m, H> {
                     }
                     Term::Switch { scrut, cases, default } => {
                         let v = self.ival(body, &fr.regs, scrut)?;
-                        let t = body
-                            .switch_cases(cases)
-                            .iter()
-                            .find(|c| c.value == v)
-                            .map_or(default, |c| c.target);
+                        let t = body.switch_target(cases, default, v);
                         self.jump(body, fr, &t)?;
                     }
                     Term::Ret(o) => {

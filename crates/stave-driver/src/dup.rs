@@ -179,7 +179,7 @@ pub fn report(out: &Output, opts: &Options) -> Result<Report, Failure> {
     let drops = out.borrowck.as_ref().map(|b| &b.schedules);
     let (r, _) = stave_sema::lower_graph_nodes(prog, tc, &nodes, drops);
     let mut gl = r.map_err(|es| build::lower_failure(&es))?;
-    build::verified(&gl.module, Stage::Lower)?;
+    build::verified(&gl.module, Stage::Lower, stave_ir::text::Level::Lowered)?;
     let remap = build::canonical(&mut gl.module);
     stave_ir::canon::permute_by_func(&mut gl.nodes_of_func, &remap);
     let m = &gl.module;

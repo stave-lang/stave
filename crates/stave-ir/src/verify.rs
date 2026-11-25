@@ -18,7 +18,9 @@ use crate::ir::{
     Block, Body, CastKind, Const, Func, FuncId, Module, Op, Operand, Site, Target, Term, Value, ValueDef,
 };
 use crate::known;
+use crate::text::Level;
 use crate::types::{AdtKind, FloatBits, GenericArg, IntBits, TypeId, TypeKey, TypeTable};
+use crate::witness::Term as RowTerm;
 
 /// One verifier finding, located as precisely as known.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,11 +49,17 @@ impl fmt::Display for VerifyError {
     }
 }
 
-/// Verifies the whole module.
+/// Verifies the whole module by the rules of levels `lowered` and `checked`.
 pub fn verify_module(m: &Module) -> Result<(), Vec<VerifyError>> {
+    verify_module_at(m, Level::Checked)
+}
+
+/// Verifies the whole module by the rules of `level` (contracts/checked-ir.md "Loading" step 3:
+/// only level `opt` differs, in the `switch` scrutinee).
+pub fn verify_module_at(m: &Module, level: Level) -> Result<(), Vec<VerifyError>> {
     let mut errs = verify_types(m)?;
     for fi in 0..m.funcs.len() {
-        errs.extend(verify_func_body(m, FuncId(fi as u32)));
+        errs.extend(verify_func_body(m, FuncId(fi as u32), level));
     }
     if errs.is_empty() { Ok(()) } else { Err(errs) }
 }
@@ -231,14 +239,14 @@ fn verify_static_refs(m: &Module) -> Vec<String> {
     errs
 }
 
-/// The per-function part of [`verify_module`]: the errors of function `fid` (none for an unknown
-/// id). The type table must be well formed ([`verify_types`]). Functions are independent, so a
-/// caller may verify them in parallel; [`verify_module`]'s errors are [`verify_types`]'s, then
-/// every function's in id order.
-pub fn verify_func_body(m: &Module, fid: FuncId) -> Vec<VerifyError> {
+/// The per-function part of [`verify_module_at`]: the errors of function `fid` (none for an
+/// unknown id) by the rules of `level`. The type table must be well formed ([`verify_types`]).
+/// Functions are independent, so a caller may verify them in parallel; [`verify_module_at`]'s
+/// errors are [`verify_types`]'s, then every function's in id order.
+pub fn verify_func_body(m: &Module, fid: FuncId, level: Level) -> Vec<VerifyError> {
     let mut errs = Vec::new();
     if let Some(f) = m.func(fid) {
-        FnVerifier { m, f, fid, errs: &mut errs, body: None }.run();
+        FnVerifier { m, f, fid, level, errs: &mut errs, body: None }.run();
     }
     errs
 }
@@ -271,7 +279,7 @@ pub fn verify_target(m: &Module, arch: stave_target::Arch) -> Vec<VerifyError> {
     errs
 }
 
-/// Verifies one function of the module.
+/// Verifies one function of the module by the rules of levels `lowered` and `checked`.
 pub fn verify_func(m: &Module, fid: FuncId) -> Result<(), Vec<VerifyError>> {
     let mut errs = Vec::new();
     if let Err(e) = m.types.check_well_formed() {
@@ -285,7 +293,7 @@ pub fn verify_func(m: &Module, fid: FuncId) -> Result<(), Vec<VerifyError>> {
             inst: None,
             msg: "unknown function".into(),
         }),
-        Some(f) => FnVerifier { m, f, fid, errs: &mut errs, body: None }.run(),
+        Some(f) => FnVerifier { m, f, fid, level: Level::Checked, errs: &mut errs, body: None }.run(),
     }
     if errs.is_empty() { Ok(()) } else { Err(errs) }
 }
@@ -379,6 +387,7 @@ struct FnVerifier<'a> {
     m: &'a Module,
     f: &'a Func,
     fid: FuncId,
+    level: Level,
     errs: &'a mut Vec<VerifyError>,
     body: Option<&'a Body>,
 }
@@ -420,6 +429,7 @@ impl<'a> FnVerifier<'a> {
             self.err(None, None, format!("name site {} out of range", f.name_site.0));
         }
         self.known_signature();
+        self.claim_params();
         let Some(body) = &f.body else { return };
         self.body = Some(body);
         if !self.structure(body) {
@@ -433,6 +443,21 @@ impl<'a> FnVerifier<'a> {
     /// `Site::NONE` or a row of the site table.
     fn site_ok(&self, s: Site) -> bool {
         s == Site::NONE || s.index() < self.m.sites.len()
+    }
+
+    /// Every `p i` and `lenp i` of the fn's summary rows (its `claim` lines) names one of its
+    /// params: the audit reads a row at a call by the call's argument `i`.
+    fn claim_params(&mut self) {
+        let Some(s) = self.m.stated.get(self.fid.0 as usize).and_then(|s| s.as_deref()) else { return };
+        let n = self.f.params.len();
+        let rows = s.pre.iter().map(|p| &p.row).chain(&s.post);
+        let bad = rows.flat_map(|r| [r.a, r.b]).find_map(|t| match t {
+            RowTerm::Param(i) | RowTerm::LenParam(i) if i as usize >= n => Some(i),
+            _ => None,
+        });
+        if let Some(i) = bad {
+            self.err(None, None, format!("claim names param {i} of a fn with {n} params"));
+        }
     }
 
     /// A known item's signature is the one the stages that call it themselves assume
@@ -830,19 +855,30 @@ impl<'a> FnVerifier<'a> {
                 self.check_scalar_operand(b, cond, &TypeKey::Bool).map_err(|e| format!("cbr condition: {e}"))
             }
             Term::Switch { scrut, cases, .. } => {
-                let t = self.operand_ty(b, scrut).ok_or("switch scrutinee must be a value")?;
-                if !matches!(self.cls(t), Cls::Int(_) | Cls::Bool | Cls::Char) {
+                // At level `opt` an int constant may stand here: inlining substitutes arguments
+                // for params, and only the branch folding after it removes such a switch. A
+                // constant has no type, so its cases are checked for duplicates only.
+                let t = match self.operand_ty(b, scrut) {
+                    Some(t) => Some(t),
+                    None if self.level == Level::Opt && b.int_const(scrut).is_some() => None,
+                    None => return Err("switch scrutinee must be a value".into()),
+                };
+                if let Some(t) = t
+                    && !matches!(self.cls(t), Cls::Int(_) | Cls::Bool | Cls::Char)
+                {
                     return Err(format!("switch on {}", self.tname(t)));
                 }
                 let mut seen = rustc_hash::FxHashSet::default();
                 for c in b.switch_cases(cases) {
-                    let ok = match self.cls(t) {
-                        Cls::Int(it) => it.fits(c.value),
-                        Cls::Bool => c.value == 0 || c.value == 1,
-                        _ => (0..=0x10ffff).contains(&c.value),
-                    };
-                    if !ok {
-                        return Err(format!("switch case {} out of range of {}", c.value, self.tname(t)));
+                    if let Some(t) = t {
+                        let ok = match self.cls(t) {
+                            Cls::Int(it) => it.fits(c.value),
+                            Cls::Bool => c.value == 0 || c.value == 1,
+                            _ => (0..=0x10ffff).contains(&c.value),
+                        };
+                        if !ok {
+                            return Err(format!("switch case {} out of range of {}", c.value, self.tname(t)));
+                        }
                     }
                     if !seen.insert(c.value) {
                         return Err(format!("duplicate switch case {}", c.value));
@@ -1105,6 +1141,10 @@ impl<'a> FnVerifier<'a> {
                 let t = res()?;
                 if blk.0 != 0 {
                     return Err("slot outside b0".into());
+                }
+                let first = b.block(blk).map_or(i, |bd| bd.insts.start);
+                if i > first && b.insts.op[i as usize - 1] != Op::Slot {
+                    return Err("slot after a non-slot instruction of b0 (slots are a prefix of b0)".into());
                 }
                 let p = pointee(types, t).ok_or("slot result must be a pointer type")?;
                 if crate::layout::is_unsized_pointee(types, p) {

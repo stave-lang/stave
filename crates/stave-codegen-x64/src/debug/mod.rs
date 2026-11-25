@@ -105,6 +105,7 @@ use std::fmt;
 
 use rustc_hash::FxHashMap;
 use stave_ir::layout::Layouts;
+use stave_ir::text::Level;
 use stave_ir::{Func, FuncId, Known, Module, Operand, Site, VerifyError};
 use stave_obj::{
     FileId, FuncCode, ImageBuilder, Machine, ObjError, ObjectImage, SourceFile, StackUse, SymbolId,
@@ -187,9 +188,11 @@ pub struct Options {
     /// The program's `main` (for `__stave_main`); `None`: no `__stave_main` stub (`main_addr` is
     /// then rejected).
     pub main: Option<FuncId>,
-    /// Run the IR verifier first (codegen assumes verified IR; unverified input still never
-    /// panics but may give a less precise error).
-    pub verify: bool,
+    /// Run the IR verifier first, by the rules of this level (codegen assumes verified IR;
+    /// unverified input still never panics but may give a less precise error). `None`: the
+    /// caller verified the module. The module does not carry its level, so a caller that passes
+    /// an `opt` module names `Level::Opt` (a `switch` on a constant is legal only there).
+    pub verify: Option<Level>,
     /// Worker threads for per-function codegen (0 = available parallelism).
     pub threads: usize,
     /// Release code generation: values used across blocks get registers for their whole life
@@ -211,7 +214,7 @@ impl Default for Options {
             sites: Vec::new(),
             fn_sites: Vec::new(),
             main: None,
-            verify: true,
+            verify: Some(Level::Checked),
             threads: 0,
             release: false,
             features: FeatureSet::of(Feature::Sse42),
@@ -390,8 +393,8 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
     if b.machine() != Machine::X86_64 {
         return Err(unsup("image machine is not x86-64"));
     }
-    if o.verify {
-        stave_ir::verify_module(m).map_err(Error::Verify)?;
+    if let Some(level) = o.verify {
+        stave_ir::verify_module_at(m, level).map_err(Error::Verify)?;
     }
     // Functions with bodies, in canonical instance order (stave_ir::link).
     let order = stave_ir::link::text_order(m);

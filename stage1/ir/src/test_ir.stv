@@ -2,6 +2,8 @@
 // untrusted input.
 import bytes;
 import errs;
+import generated.known_items;
+import generated.opt_table;
 import load;
 import print;
 import read;
@@ -113,6 +115,60 @@ test fn faults_of_verification() {
     debug.assert(first_has(&load.load(text(&f).as_slice()), "component of itself"), "no type cycle");
     let g = [hdr, "type t0 int u 8", "static 0 t0 a.S", "data 0 3 x01"];
     debug.assert(first_has(&load.load(text(&g).as_slice()), "lie past its size"), "data inside its static");
+}
+
+test fn slots_are_a_prefix_of_b0() {
+    let hdr = "stave.ir 4 \"x86_64-linux-v2\" debug checked";
+    let a = [hdr, "type t0 int s 32", "type t1 ref mut t0", "fn @0 a.f(t0) {", "b0(%0: t0):", "  %1 = slot t1", "  %2 = slot t1", "  store () %1 %0", "  ret", "}"];
+    debug.assert(load.load(text(&a).as_slice()).ok(), "slots first");
+    let b = [hdr, "type t0 int s 32", "type t1 ref mut t0", "fn @0 a.f(t0) {", "b0(%0: t0):", "  %1 = slot t1", "  store () %1 %0", "  %2 = slot t1", "  ret", "}"];
+    let lb = load.load(text(&b).as_slice());
+    debug.assert(!lb.ok() && lb.errs.line.as_slice()[0] == 8 && first_has(&lb, "slots are a prefix of b0"), "a slot after a store, at its line");
+}
+
+test fn a_constant_switch_scrutinee_only_at_level_opt() {
+    let body = ["type t0 int s 32", "fn @0 a.f() -> t0 {", "b0():", "  switch 5 5:b1() 18446744073709551621:b2() _:b2()", "b1():", "  ret 1", "b2():", "  ret 2", "}"];
+    let ho = ["stave.ir 4 \"x86_64-linux-v2\" release opt"];
+    let mut at_opt = text(&ho);
+    at_opt.extend_from_slice(text(&body).as_slice());
+    debug.assert(load.load(at_opt.as_slice()).ok(), "an int constant at opt, cases of any value");
+    let hc = ["stave.ir 4 \"x86_64-linux-v2\" release checked"];
+    let mut at_checked = text(&hc);
+    at_checked.extend_from_slice(text(&body).as_slice());
+    debug.assert(first_has(&load.load(at_checked.as_slice()), "scrutinee must be a value"), "a value below opt");
+    let dup = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int s 32", "fn @0 a.f() -> t0 {", "b0():", "  switch 5 5:b1() 5:b2() _:b2()", "b1():", "  ret 1", "b2():", "  ret 2", "}"];
+    debug.assert(first_has(&load.load(text(&dup).as_slice()), "duplicate switch case"), "duplicates refused");
+}
+
+test fn a_claim_names_a_param_of_its_fn() {
+    let ok = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u size", "fn @0 a(t0) -> t0 {", "b0(%0: t0):", "  ret %0", "}", "claim @0 pre zero <= p 0 3", "claim @0 post result <= p 0 0"];
+    debug.assert(load.load(text(&ok).as_slice()).ok(), "rows on param 0");
+    let bad = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u size", "fn @0 a(t0) -> t0 {", "b0(%0: t0):", "  ret %0", "}", "claim @0 pre zero <= lenp 7 0"];
+    let lb = load.load(text(&bad).as_slice());
+    debug.assert(!lb.ok() && lb.errs.kind.as_slice()[0] == errs.K_VERIFY && lb.errs.line.as_slice()[0] == 3 && first_has(&lb, "claim names param 7"), "a row on a param the fn lacks, at the fn line");
+}
+
+test fn the_opt_table_keeps_the_closed_size_rules() {
+    debug.assert(opt_table.OPT_TERM_BR == opt_table.OPT_TERM_RET, "br weighs what ret weighs");
+    debug.assert(opt_table.OPT_ROUNDS >= 1, "at least one round");
+    let off = opt_table.OPT_OP_NAME_OFF;
+    let names = opt_table.OPT_OP_NAME;
+    let mut call = false;
+    for i in 0..opt_table.OPT_OP_N {
+        if names[off[i] as usize..off[i + 1] as usize].eq(mem.str_bytes("call")) {
+            call = true;
+            debug.assert(opt_table.OPT_CALL_SAVED <= opt_table.OPT_OP_WEIGHT[i], "call_saved within the weight of call");
+        }
+    }
+    debug.assert(call, "a row for call");
+    let mut inlined: u32 = 0;
+    for k in 0..known_items.KNOWN_N {
+        if known_items.KNOWN_INLINE[k] {
+            inlined += 1;
+            debug.assert(!known_items.KNOWN_REPORT[k] && known_items.KNOWN_ABI_RET[k] == known_items.ITY_NONE, "an inlined known item has no report and no ABI");
+        }
+    }
+    debug.assert(inlined >= 1, "set_user_site is inlined");
 }
 
 test fn an_intrinsic_is_built_for_the_header_target() {

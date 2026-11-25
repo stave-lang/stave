@@ -9,6 +9,8 @@
 //!
 //! [`known`] and [`intrinsics`]: the compiler-known items and the intrinsic table of stave-ir and
 //! stage1, from `crates/stave-ir/tables/known.toml` and `intrinsics.toml`.
+//!
+//! [`opt`]: the release optimizer's table (`crates/stave-ir/tables/opt.toml`).
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -18,6 +20,7 @@ use serde::Deserialize;
 
 pub mod intrinsics;
 pub mod known;
+pub mod opt;
 
 /// One target architecture: its table, its generated file, its tiers in order.
 pub struct Arch {
@@ -420,8 +423,11 @@ pub fn generate(root: &Path) -> Result<Vec<(&'static str, String)>, String> {
         }
     }
     type Gen = fn(&str) -> Result<Vec<(&'static str, String)>, String>;
-    let tables: [(&str, Gen); 2] =
-        [(known::TABLE, known::generate), (intrinsics::TABLE, intrinsics::generate)];
+    let tables: [(&str, Gen); 3] = [
+        (known::TABLE, known::generate),
+        (intrinsics::TABLE, intrinsics::generate),
+        (opt::TABLE, opt::generate),
+    ];
     for (table, generate) in tables {
         match std::fs::read_to_string(root.join(table)) {
             Ok(t) => match generate(&t) {
