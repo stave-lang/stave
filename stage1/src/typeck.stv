@@ -38,7 +38,7 @@
 // - `tc_traits`: the trait questions a body asks of the one solver, in rounds.
 // - `tc_method`: method lookup on a receiver value.
 // - `tc_ops`: user operators through their operator traits.
-// - `tc_closure`: closure literals.
+// - `tc_closure`: closure literals, and the coercions a node's form decides (`node_coercions`).
 import ast;
 import consteval;
 import decls;
