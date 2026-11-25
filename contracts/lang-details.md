@@ -79,14 +79,17 @@ unsized is E0911 `instance-layout` at the generic fn.
     dead), and the same with `vec.Vec<String>` is E1401;
   - a fn it calls is still instantiated and checked as an instance (E0911 `instance-layout`,
     E0902), and a closure literal in it is checked like any other: code in the closure's body is
-    the closure's own, nothing of the instance reaches it.
+    the closure's own, nothing of the instance reaches it (a `static` named in that body counts
+    for E0211 as in any closure).
 - What reads the instance's code reads the taken arm as if it were written in place of the
   `if`: the proofs that remove bounds and contract checks see only its paths, so
   `if true { if i >= xs.len() { return 0; } } return xs[i];` needs no check (accepted in a
   `without(trap)` fn), per instance under `!needs_drop::<T>()`. What reads the source sees both
   arms: type checking, the borrow checker (a move or a loan in the dead arm counts:
   `if false { take(s); } s.len()` is E0502), and the drop schedule (a value the dead arm may
-  move counts as maybe moved; as the arm never runs, it is dropped once, where it ends).
+  move counts as maybe moved; as the arm never runs, it is dropped once, where it ends), and
+  with the borrow checker the locks a guard may hold (a guard the dead arm stores into an outer
+  binding counts as held after the `if`: a lower-rank lock taken there is E1405).
 - Any other condition is computed at run time and both arms are code, even where its value is
   known: `const OFF: bool = false; if OFF { return xs[i]; }` in a `without(trap)` fn is E1401.
 
