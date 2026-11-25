@@ -1,0 +1,486 @@
+// Shared by the tests and the scramble probe: a scrambler of loaded modules. It rewrites a module
+// into one with the same meaning that only canon's rules make canonical again, so that
+// print(canon(scramble(m, seed))) == print(canon(m)) for every module m that loads.
+//
+// Per seed it:
+// - adds rows nothing live uses: types (an array, a tuple holding it, an `adt` of a new decl
+//   with a shape holding the tuple), that decl, an intrinsic name, and in every pool an int (a
+//   new wide-int row), an f32, and an f64 constant;
+// - reverses the intrinsic table;
+// - stores the fns' segments in a random order;
+// - per body: inserts one to three unreachable blocks at random places after b0, a chain (each
+//   reached only from the one before it, the last branching to b0 and back to the first), each
+//   with an instruction of the unused name and type, a copy of a live instruction on live
+//   values, every second one a param of the unused type; numbers the values, live and dead, in
+//   a random order with gaps (gap values of the unused type); lays the pool out in a random
+//   order followed by copies of some entries, each operand naming either copy;
+// - regroups the instruction rows of the blocks, the target rows of the terminators, and the
+//   operand rows in a random order, with unreferenced rows between the groups.
+import canon;
+import model;
+import types;
+import generated.ir_text_terminals;
+import prims.col;
+import prims.perm;
+import prims.ragged;
+import prims.test_util;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+// The rows `unused_rows` adds.
+struct Unused {
+    ty: u32,
+    name: u32,
+    wide: u32,
+}
+
+pub fn scramble(m: &mut model.Module, seed: u64) {
+    let mut r = test_util.Rng.new(seed);
+    let u = unused_rows(m, &mut r);
+    let mut o = bodies(&*m, &mut r, &u);
+    canon.take_bodies(m, &mut o);
+    regroup_rows(m, &mut r);
+}
+
+// 0..n in a random order.
+fn shuffled(r: &mut test_util.Rng, n: usize) -> vec.Vec<u32> {
+    let mut v = col.iota(n);
+    let mut i = n;
+    while i > 1 {
+        let j = r.below(i as u64) as usize;
+        i = i - 1;
+        v.swap(i, j);
+    }
+    return v;
+}
+
+fn unused_rows(m: &mut model.Module, r: &mut test_util.Rng) -> Unused {
+    if m.types.len() == 0 {
+        m.types.begin();
+        let _ = m.types.push_raw(types.TK_INT, 0, types.W_8);
+    }
+    let elem = r.below(m.types.len() as u64) as% u32;
+    m.types.begin();
+    m.types.push_garg(types.GA_VALUE, 0, 900001 + (r.below(1000) as% u32));
+    let arr = m.types.push_raw(types.TK_ARRAY, elem, 0);
+    m.types.begin();
+    m.types.push(arr);
+    m.types.push(elem);
+    let tup = m.types.push_raw(types.TK_TUPLE, 0, 0);
+    let mut d: u32 = 0;
+    for k in 0..m.decl_id.len() {
+        let x = m.decl_id.as_slice()[k];
+        if x >= d { d = x + 1; }
+    }
+    m.decl_id.push(d);
+    m.decl_kind.push(model.KIND_STRUCT);
+    m.decl_path.push_row(mem.str_bytes("zz.Unused"));
+    m.types.begin();
+    let adt = m.types.push_raw(types.TK_ADT, d, 0);
+    m.shape_ty.push(adt);
+    m.shape_kind.push(model.KIND_STRUCT);
+    let var = [m.var_fields.rows() as% u32];
+    m.shape_vars.push_row(&var);
+    let fields = [tup];
+    m.var_fields.push_row(&fields);
+
+    m.intr.push_row(mem.str_bytes("zz_dead"));
+    let rows = m.intr.rows();
+    let mut rev = ragged.Ragged::<u8>.new();
+    for k in 0..rows {
+        rev.push_row(m.intr.row(rows - 1 - k));
+    }
+    m.intr = rev;
+    let last = (rows - 1) as% u32;
+    for i in 0..m.ins_op.len() {
+        if m.ins_op.as_slice()[i] == ir_text_terminals.IR_T_INTR {
+            let x = m.ins_intr.as_slice()[i];
+            m.ins_intr.as_mut_slice()[i] = last - x;
+        }
+    }
+    let wide = m.wide.intern(0x1234, r.next());
+    return Unused.{ ty: arr, name: 0, wide: wide };
+}
+
+// The body columns of every fn scrambled, the segments in a random fn order.
+fn bodies(m: &model.Module, r: &mut test_util.Rng, u: &Unused) -> model.Module {
+    let nf = m.fns();
+    let mut o = model.Module.new();
+    o.fn_blk_lo = col.filled(nf, 0u32);
+    o.fn_blk_n = col.filled(nf, 0u32);
+    o.fn_val_lo = col.filled(nf, 0u32);
+    o.fn_val_n = col.filled(nf, 0u32);
+    o.fn_const_lo = col.filled(nf, 0u32);
+    o.fn_const_n = col.filled(nf, 0u32);
+    let order = shuffled(r, nf);
+    for k in 0..nf {
+        let f = order.as_slice()[k] as usize;
+        let b0 = o.blk_tkind.len();
+        let v0 = o.val_ty.len();
+        let c0 = o.const_kind.len();
+        if m.has_body(f) && m.fn_blk_n.as_slice()[f] > 0 { body(m, r, u, f, &mut o); }
+        o.fn_blk_lo.as_mut_slice()[f] = b0 as% u32;
+        o.fn_val_lo.as_mut_slice()[f] = v0 as% u32;
+        o.fn_const_lo.as_mut_slice()[f] = c0 as% u32;
+        o.fn_blk_n.as_mut_slice()[f] = (o.blk_tkind.len() - b0) as% u32;
+        o.fn_val_n.as_mut_slice()[f] = (o.val_ty.len() - v0) as% u32;
+        o.fn_const_n.as_mut_slice()[f] = (o.const_kind.len() - c0) as% u32;
+    }
+    return o;
+}
+
+// Per body: where its old values, pool entries, and blocks went. A dead block's values are the
+// old ids past the fn's values.
+struct Maps {
+    vmap: vec.Vec<u32>,
+    cmap: vec.Vec<u32>,
+    cdup: vec.Vec<u32>,
+    bnew: vec.Vec<u32>,
+}
+
+fn body(m: &model.Module, r: &mut test_util.Rng, u: &Unused, f: usize, o: &mut model.Module) {
+    let blo = m.fn_blk_lo.as_slice()[f] as usize;
+    let nb = m.fn_blk_n.as_slice()[f] as usize;
+    let vlo = m.fn_val_lo.as_slice()[f] as usize;
+    let nv = m.fn_val_n.as_slice()[f];
+    let clo = m.fn_const_lo.as_slice()[f] as usize;
+    let nc = m.fn_const_n.as_slice()[f] as usize;
+
+    // the pool
+    let c0 = o.const_kind.len();
+    let cperm = shuffled(r, nc);
+    let mut mp = Maps.{ vmap: vec.Vec::<u32>.new(), cmap: col.filled(nc, NONE), cdup: col.filled(nc, NONE), bnew: vec.Vec::<u32>.new() };
+    for k in 0..nc {
+        let e = cperm.as_slice()[k] as usize;
+        o.const_kind.push(m.const_kind.as_slice()[clo + e]);
+        o.const_bits.push(m.const_bits.as_slice()[clo + e]);
+        mp.cmap.as_mut_slice()[e] = k as% u32;
+    }
+    for e in 0..nc {
+        if r.below(2) == 0 {
+            mp.cdup.as_mut_slice()[e] = (o.const_kind.len() - c0) as% u32;
+            o.const_kind.push(m.const_kind.as_slice()[clo + e]);
+            o.const_bits.push(m.const_bits.as_slice()[clo + e]);
+        }
+    }
+    let dead_const = (o.const_kind.len() - c0) as% u32;
+    o.const_kind.push(model.C_INT);
+    o.const_bits.push(u.wide as u64);
+    o.const_kind.push(model.C_F32);
+    o.const_bits.push(r.next() & 0xffff_ffff);
+    o.const_kind.push(model.C_F64);
+    o.const_bits.push(r.next());
+
+    // the dead blocks: a source instruction, and their values past the fn's
+    let nd = 1 + r.below(3) as usize;
+    let mut dsrc = vec.Vec::<u32>.new();
+    let mut dpar = vec.Vec::<u32>.new();
+    let mut dra = vec.Vec::<u32>.new();
+    let mut drb = vec.Vec::<u32>.new();
+    let mut vty = vec.Vec::<u32>.new();
+    for j in 0..nd {
+        let b = blo + r.below(nb as u64) as usize;
+        let n = m.blk_ins_n.as_slice()[b] as u64;
+        let src = if n > 0 then m.blk_ins_lo.as_slice()[b] + (r.below(n) as% u32) else NONE;
+        dsrc.push(src);
+        if j % 2 == 0 {
+            dpar.push(nv + vty.len() as% u32);
+            vty.push(u.ty);
+        } else {
+            dpar.push(NONE);
+        }
+        dra.push(nv + vty.len() as% u32);
+        vty.push(u.ty);
+        if src != NONE && m.ins_res.as_slice()[src as usize] != NONE {
+            drb.push(nv + vty.len() as% u32);
+            vty.push(m.ins_ty.as_slice()[src as usize]);
+        } else {
+            drb.push(NONE);
+        }
+    }
+
+    // the values: runs (a block's params, a result) in a random order with gaps
+    let mut ulo = vec.Vec::<u32>.new();
+    let mut un = vec.Vec::<u32>.new();
+    for k in 0..nb {
+        let b = blo + k;
+        let pn = m.blk_param_n.as_slice()[b];
+        if pn > 0 {
+            ulo.push(m.blk_val_lo.as_slice()[b]);
+            un.push(pn);
+        }
+        let il = m.blk_ins_lo.as_slice()[b] as usize;
+        for i in il..il + m.blk_ins_n.as_slice()[b] as usize {
+            let res = m.ins_res.as_slice()[i];
+            if res != NONE {
+                ulo.push(res);
+                un.push(1);
+            }
+        }
+    }
+    for j in 0..nd {
+        let x = [dpar.as_slice()[j], dra.as_slice()[j], drb.as_slice()[j]];
+        for k in 0..3usize {
+            if x[k] != NONE {
+                ulo.push(x[k]);
+                un.push(1);
+            }
+        }
+    }
+    mp.vmap = col.filled(nv as usize + vty.len(), NONE);
+    let val0 = o.val_ty.len();
+    let uperm = shuffled(r, ulo.len());
+    for k in 0..uperm.len() {
+        let g = uperm.as_slice()[k] as usize;
+        for _ in 0..r.below(3) {
+            o.val_ty.push(u.ty);
+        }
+        for i in 0..un.as_slice()[g] {
+            let v = ulo.as_slice()[g] + i;
+            mp.vmap.as_mut_slice()[v as usize] = (o.val_ty.len() - val0) as% u32;
+            o.val_ty.push(if v < nv then m.val_ty.as_slice()[vlo + v as usize] else vty.as_slice()[(v - nv) as usize]);
+        }
+    }
+    o.val_ty.push(u.ty);
+
+    // the blocks: the live ones in their order, the dead ones inserted after b0
+    let mut bseq = col.iota(nb);
+    for j in 0..nd {
+        let at = 1 + r.below(bseq.len() as u64) as usize;
+        bseq.push(0);
+        let s = bseq.as_mut_slice();
+        let mut i = s.len() - 1;
+        while i > at {
+            s[i] = s[i - 1];
+            i = i - 1;
+        }
+        s[at] = (nb + j) as% u32;
+    }
+    mp.bnew = col.filled(nb + nd, NONE);
+    for p in 0..bseq.len() {
+        mp.bnew.as_mut_slice()[bseq.as_slice()[p] as usize] = p as% u32;
+    }
+    for p in 0..bseq.len() {
+        let x = bseq.as_slice()[p] as usize;
+        if x < nb {
+            live_block(m, r, &mp, blo + x, o);
+            continue;
+        }
+        let j = x - nb;
+        let par = dpar.as_slice()[j];
+        o.blk_val_lo.push(if par != NONE then mp.vmap.as_slice()[par as usize] else r.below(8) as% u32);
+        o.blk_param_n.push(if par != NONE then 1u32 else 0u32);
+        o.blk_ins_lo.push(o.ins_op.len() as% u32);
+        o.ins_op.push(ir_text_terminals.IR_T_INTR);
+        o.ins_intr.push(u.name);
+        o.ins_ty.push(u.ty);
+        o.ins_res.push(mp.vmap.as_slice()[dra.as_slice()[j] as usize]);
+        o.ins_opnd_lo.push(o.opnd_kind.len() as% u32);
+        o.ins_opnd_n.push(0);
+        o.ins_site.push(NONE);
+        let src = dsrc.as_slice()[j];
+        if src != NONE {
+            let rb = drb.as_slice()[j];
+            instruction(m, r, &mp, src as usize, if rb == NONE then NONE else mp.vmap.as_slice()[rb as usize], o);
+        }
+        o.blk_ins_n.push(if src != NONE then 2u32 else 1u32);
+        let own = mp.vmap.as_slice()[dra.as_slice()[j] as usize];
+        let tglo = o.tgt_blk.len() as% u32;
+        if j + 1 < nd {
+            o.blk_tkind.push(model.TM_BR);
+            o.blk_topnd.push(NONE);
+            let olo = o.opnd_kind.len() as% u32;
+            let next_par = dpar.as_slice()[j + 1] != NONE;
+            if next_par {
+                o.opnd_kind.push(model.O_VALUE);
+                o.opnd_id.push(own);
+            }
+            o.tgt_blk.push(mp.bnew.as_slice()[nb + j + 1]);
+            o.tgt_opnd_lo.push(olo);
+            o.tgt_opnd_n.push(if next_par then 1u32 else 0u32);
+            o.tgt_case.push(NONE);
+        } else {
+            o.blk_tkind.push(model.TM_CBR);
+            o.blk_topnd.push(o.opnd_kind.len() as% u32);
+            o.opnd_kind.push(model.O_VALUE);
+            o.opnd_id.push(own);
+            o.tgt_blk.push(mp.bnew.as_slice()[0]);
+            o.tgt_opnd_lo.push(o.opnd_kind.len() as% u32);
+            o.tgt_opnd_n.push(0);
+            o.tgt_case.push(NONE);
+            o.tgt_blk.push(mp.bnew.as_slice()[nb]);
+            o.tgt_opnd_lo.push(o.opnd_kind.len() as% u32);
+            o.opnd_kind.push(model.O_CONST);
+            o.opnd_id.push(dead_const);
+            o.tgt_opnd_n.push(1);
+            o.tgt_case.push(NONE);
+        }
+        o.blk_tgt_lo.push(tglo);
+        o.blk_tgt_n.push(o.tgt_blk.len() as% u32 - tglo);
+    }
+}
+
+// Appends live block b, its values, pool entries, and targets mapped.
+fn live_block(m: &model.Module, r: &mut test_util.Rng, mp: &Maps, b: usize, o: &mut model.Module) {
+    let pn = m.blk_param_n.as_slice()[b];
+    o.blk_val_lo.push(if pn > 0 then mp.vmap.as_slice()[m.blk_val_lo.as_slice()[b] as usize] else r.below(8) as% u32);
+    o.blk_param_n.push(pn);
+    o.blk_ins_lo.push(o.ins_op.len() as% u32);
+    let il = m.blk_ins_lo.as_slice()[b] as usize;
+    let inn = m.blk_ins_n.as_slice()[b];
+    for i in il..il + inn as usize {
+        let res = m.ins_res.as_slice()[i];
+        instruction(m, r, mp, i, if res == NONE then NONE else mp.vmap.as_slice()[res as usize], o);
+    }
+    o.blk_ins_n.push(inn);
+    o.blk_tkind.push(m.blk_tkind.as_slice()[b]);
+    let top = m.blk_topnd.as_slice()[b];
+    if top == NONE {
+        o.blk_topnd.push(NONE);
+    } else {
+        o.blk_topnd.push(o.opnd_kind.len() as% u32);
+        operand(m, r, mp, top as usize, o);
+    }
+    let tglo = o.tgt_blk.len() as% u32;
+    let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+    for g in tl..tl + m.blk_tgt_n.as_slice()[b] as usize {
+        let olo = o.opnd_kind.len() as% u32;
+        let ol = m.tgt_opnd_lo.as_slice()[g] as usize;
+        let on = m.tgt_opnd_n.as_slice()[g];
+        for x in ol..ol + on as usize {
+            operand(m, r, mp, x, o);
+        }
+        o.tgt_blk.push(mp.bnew.as_slice()[m.tgt_blk.as_slice()[g] as usize]);
+        o.tgt_opnd_lo.push(olo);
+        o.tgt_opnd_n.push(on);
+        o.tgt_case.push(m.tgt_case.as_slice()[g]);
+    }
+    o.blk_tgt_lo.push(tglo);
+    o.blk_tgt_n.push(o.tgt_blk.len() as% u32 - tglo);
+}
+
+// Appends a copy of instruction i with result res, its operands mapped.
+fn instruction(m: &model.Module, r: &mut test_util.Rng, mp: &Maps, i: usize, res: u32, o: &mut model.Module) {
+    let olo = o.opnd_kind.len() as% u32;
+    let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+    let on = m.ins_opnd_n.as_slice()[i];
+    for x in ol..ol + on as usize {
+        operand(m, r, mp, x, o);
+    }
+    o.ins_op.push(m.ins_op.as_slice()[i]);
+    o.ins_intr.push(m.ins_intr.as_slice()[i]);
+    o.ins_ty.push(m.ins_ty.as_slice()[i]);
+    o.ins_res.push(res);
+    o.ins_opnd_lo.push(olo);
+    o.ins_opnd_n.push(on);
+    o.ins_site.push(m.ins_site.as_slice()[i]);
+}
+
+// Appends operand row x: a value by its new id, a pool entry by either copy.
+fn operand(m: &model.Module, r: &mut test_util.Rng, mp: &Maps, x: usize, o: &mut model.Module) {
+    let kind = m.opnd_kind.as_slice()[x];
+    let id = m.opnd_id.as_slice()[x];
+    let mut nid = id;
+    if kind == model.O_VALUE {
+        nid = mp.vmap.as_slice()[id as usize];
+    } else if kind == model.O_CONST {
+        let dup = mp.cdup.as_slice()[id as usize];
+        nid = if dup != NONE && r.below(2) == 0 then dup else mp.cmap.as_slice()[id as usize];
+    }
+    o.opnd_kind.push(kind);
+    o.opnd_id.push(nid);
+}
+
+// Rows in groups (lo[g], n[g]) laid out again in a random group order, an unreferenced copy of
+// row 0 now and then between them: the gather order of the new rows; lo becomes the new starts.
+fn regroup(r: &mut test_util.Rng, lo: &mut vec.Vec<u32>, n: &[u32], rows: usize) -> vec.Vec<u32> {
+    let order = shuffled(r, lo.len());
+    let mut idx = vec.Vec::<u32>.new();
+    for k in 0..order.len() {
+        let g = order.as_slice()[k] as usize;
+        if rows > 0 && r.below(4) == 0 { idx.push(0); }
+        let start = lo.as_slice()[g];
+        lo.as_mut_slice()[g] = idx.len() as% u32;
+        for i in 0..n[g] {
+            idx.push(start + i);
+        }
+    }
+    if rows > 0 { idx.push(0); }
+    return idx;
+}
+
+fn regroup_rows(m: &mut model.Module, r: &mut test_util.Rng) {
+    // instructions per block
+    let mut lo = vec.Vec::<u32>.new();
+    mem.swap(&mut lo, &mut m.blk_ins_lo);
+    let idx = regroup(r, &mut lo, m.blk_ins_n.as_slice(), m.ins_op.len());
+    m.blk_ins_lo = lo;
+    let x = idx.as_slice();
+    let op = perm.gather(m.ins_op.as_slice(), x);
+    let intr = perm.gather(m.ins_intr.as_slice(), x);
+    let ty = perm.gather(m.ins_ty.as_slice(), x);
+    let res = perm.gather(m.ins_res.as_slice(), x);
+    let olo = perm.gather(m.ins_opnd_lo.as_slice(), x);
+    let on = perm.gather(m.ins_opnd_n.as_slice(), x);
+    let site = perm.gather(m.ins_site.as_slice(), x);
+    m.ins_op = op;
+    m.ins_intr = intr;
+    m.ins_ty = ty;
+    m.ins_res = res;
+    m.ins_opnd_lo = olo;
+    m.ins_opnd_n = on;
+    m.ins_site = site;
+
+    // targets per terminator
+    let mut tlo = vec.Vec::<u32>.new();
+    mem.swap(&mut tlo, &mut m.blk_tgt_lo);
+    let tidx = regroup(r, &mut tlo, m.blk_tgt_n.as_slice(), m.tgt_blk.len());
+    m.blk_tgt_lo = tlo;
+    let t = tidx.as_slice();
+    let blk = perm.gather(m.tgt_blk.as_slice(), t);
+    let tolo = perm.gather(m.tgt_opnd_lo.as_slice(), t);
+    let ton = perm.gather(m.tgt_opnd_n.as_slice(), t);
+    let case = perm.gather(m.tgt_case.as_slice(), t);
+    m.tgt_blk = blk;
+    m.tgt_opnd_lo = tolo;
+    m.tgt_opnd_n = ton;
+    m.tgt_case = case;
+
+    // operands: per instruction, per tested or returned operand, per target
+    let ni = m.ins_op.len();
+    let mut glo = vec.Vec::<u32>.new();
+    glo.extend_from_slice(m.ins_opnd_lo.as_slice());
+    let mut gn = vec.Vec::<u32>.new();
+    gn.extend_from_slice(m.ins_opnd_n.as_slice());
+    for b in 0..m.blk_topnd.len() {
+        let top = m.blk_topnd.as_slice()[b];
+        if top != NONE {
+            glo.push(top);
+            gn.push(1);
+        }
+    }
+    glo.extend_from_slice(m.tgt_opnd_lo.as_slice());
+    gn.extend_from_slice(m.tgt_opnd_n.as_slice());
+    let oidx = regroup(r, &mut glo, gn.as_slice(), m.opnd_kind.len());
+    let g = glo.as_slice();
+    for i in 0..ni {
+        m.ins_opnd_lo.as_mut_slice()[i] = g[i];
+    }
+    let mut k = ni;
+    for b in 0..m.blk_topnd.len() {
+        if m.blk_topnd.as_slice()[b] != NONE {
+            m.blk_topnd.as_mut_slice()[b] = g[k];
+            k = k + 1;
+        }
+    }
+    for i in 0..m.tgt_opnd_lo.len() {
+        m.tgt_opnd_lo.as_mut_slice()[i] = g[k + i];
+    }
+    let kind = perm.gather(m.opnd_kind.as_slice(), oidx.as_slice());
+    let id = perm.gather(m.opnd_id.as_slice(), oidx.as_slice());
+    m.opnd_kind = kind;
+    m.opnd_id = id;
+}

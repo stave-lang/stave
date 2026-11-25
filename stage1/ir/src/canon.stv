@@ -18,9 +18,10 @@
 //   same way. No other type is kept and every type id is rewritten. The decls kept are those a
 //   kept `adt` key or `cell` names. A type table that is not well formed is left as it is.
 //
-// Fns keep their ids: the reader ranks them by instance id, and no pass adds or removes one.
-// Strings, sites, statics, claims, and the stack section are canonical as read and are not
-// changed; the model has no borrow side table. Canonicalizing twice changes nothing.
+// The fn order is the reader's (by instance id); canon does not change it, so a pass must not
+// add, remove, or reorder fns. Strings, sites, statics, claims, and the stack section are
+// canonical as read and are not changed; the model has no borrow side table. Canonicalizing
+// twice changes nothing.
 import grammar;
 import model;
 import types;
@@ -132,8 +133,9 @@ fn rebuilt(m: &model.Module, reach: &[bool]) -> model.Module {
     return o;
 }
 
-// Moves the body columns of o into m.
-fn take_bodies(m: &mut model.Module, o: &mut model.Module) {
+// Moves the body columns of o into m (every column a fn's segments index, and the fn columns
+// that hold the segments).
+pub fn take_bodies(m: &mut model.Module, o: &mut model.Module) {
     mem.swap(&mut m.fn_blk_lo, &mut o.fn_blk_lo);
     mem.swap(&mut m.fn_blk_n, &mut o.fn_blk_n);
     mem.swap(&mut m.fn_val_lo, &mut o.fn_val_lo);
