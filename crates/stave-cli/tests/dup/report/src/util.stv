@@ -1,0 +1,109 @@
+// Helpers that other modules copy (crates/stave-cli/tests/dup.rs).
+
+pub const NONE: u32 = 0xFFFF_FFFF;
+pub const LIMIT: u32 = 1000;
+
+// The original of `main.checksum`: other names, the same code.
+pub fn sum_mix(values: &[u32]) -> u32 {
+    let mut acc: u32 = 0;
+    for k in 0..values.len() {
+        acc = acc *% 31u32 +% values[k];
+    }
+    return acc;
+}
+
+// Another literal: not the same code.
+pub fn sum_mix7(values: &[u32]) -> u32 {
+    let mut acc: u32 = 0;
+    for k in 0..values.len() {
+        acc = acc *% 7u32 +% values[k];
+    }
+    return acc;
+}
+
+fn helper_a(x: u32) -> u32 {
+    return x *% 3u32 +% 1u32;
+}
+
+fn helper_b(x: u32) -> u32 {
+    return x *% 5u32 +% 1u32;
+}
+
+// The same code but for the callee, whose code differs: not the same code.
+pub fn scaled_a(x: u32) -> u32 {
+    let y = helper_a(x);
+    return y *% y +% helper_a(y);
+}
+
+pub fn scaled_b(x: u32) -> u32 {
+    let y = helper_b(x);
+    return y *% y +% helper_b(y);
+}
+
+fn dbl_a(x: u32) -> u32 {
+    return x *% 2u32 +% x / 3u32;
+}
+
+fn dbl_b(x: u32) -> u32 {
+    return x *% 2u32 +% x / 3u32;
+}
+
+// Callees with the same code (`dbl_a`, `dbl_b`): the same code.
+pub fn twice_a(x: u32) -> u32 {
+    let y = dbl_a(x);
+    return y *% y +% dbl_a(y);
+}
+
+pub fn twice_b(x: u32) -> u32 {
+    let y = dbl_b(x);
+    return y *% y +% dbl_b(y);
+}
+
+// Independent statements in another order: not the same code.
+pub fn order_a(p: &mut [u32; 2]) {
+    p[0] = 7u32;
+    p[1] = 9u32;
+    p[0] = p[0] +% p[1];
+}
+
+pub fn order_b(p: &mut [u32; 2]) {
+    p[1] = 9u32;
+    p[0] = 7u32;
+    p[0] = p[0] +% p[1];
+}
+
+pub fn first_or<T: Copy>(xs: &[T], d: T) -> T {
+    if xs.len() == 0 {
+        return d;
+    }
+    return xs[xs.len() - 1];
+}
+
+// The layout queries agree at `u32` and differ at `[u8; 3]`: not the same source fn.
+pub fn size_plus<T>() -> usize {
+    return size_of::<T>() * 3 + size_of::<T>() / 2 + 1;
+}
+
+pub fn align_plus<T>() -> usize {
+    return align_of::<T>() * 3 + align_of::<T>() / 2 + 1;
+}
+
+extern "C" fn ex_a(x: i32) -> i32 {
+    return x *% 3i32 +% x / 5i32 +% 11i32;
+}
+
+extern "C" fn ex_b(x: i32) -> i32 {
+    return x *% 3i32 +% x / 5i32 +% 11i32;
+}
+
+test fn t_a() {
+    let v: [u32; 3] = [1u32, 2u32, 3u32];
+    let s = sum_mix(&v);
+    let t = sum_mix7(&v);
+}
+
+test fn t_b() {
+    let v: [u32; 3] = [1u32, 2u32, 3u32];
+    let s = sum_mix(&v);
+    let t = sum_mix7(&v);
+}

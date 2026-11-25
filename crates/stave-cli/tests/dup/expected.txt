@@ -1,0 +1,35 @@
+class 1: up to Self, size 17, 2 fns, saves 17
+  src/geo.stv:39: geo.Feet.grow (pub)
+  src/geo.stv:19: geo.Meters.grow (pub)
+class 2: exact, size 13, 2 fns, saves 13
+  src/main.stv:10: main.checksum
+  src/util.stv:7: util.sum_mix (pub)
+class 3: exact, size 11, 2 fns, saves 11
+  src/main.stv:18: main.last_or<u32> (pub)
+  src/util.stv:75: util.first_or<u32> (pub)
+class 4: up to Self, size 10, 2 fns, saves 10
+  src/geo.stv:66: geo.Feet.score (trait-impl)
+  src/geo.stv:59: geo.Meters.score (trait-impl)
+class 5: exact, size 8, 2 fns, saves 8
+  src/main.stv:26: main.apply_a
+  src/main.stv:31: main.apply_b
+class 6: exact, size 8, 2 fns, saves 8
+  src/main.stv:42: main.fact_a
+  src/main.stv:46: main.fact_b
+class 7: exact, size 5, 2 fns, saves 5
+  src/util.stv:91: util.ex_a (export)
+  src/util.stv:95: util.ex_b (export)
+class 8: exact, size 5, 2 fns, saves 5
+  src/util.stv:52: util.twice_a (pub)
+  src/util.stv:57: util.twice_b (pub)
+const NONE: u32 = 4294967295: 3 modules
+  src/geo.stv:4: geo.NONE
+  src/main.stv:6: main.NONE
+  src/util.stv:3: util.NONE
+const LIMIT: u32 = 1000: 2 modules
+  src/main.stv:7: main.LIMIT
+  src/util.stv:4: util.LIMIT
+alias of util.NONE: 2
+  src/geo.stv:4: geo.NONE
+  src/main.stv:6: main.NONE
+dup: 8 classes (6 exact, 2 up to Self) over 28 fns of size >= 5; 2 const groups, 2 aliases
