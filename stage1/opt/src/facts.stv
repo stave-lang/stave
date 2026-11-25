@@ -92,6 +92,24 @@ pub fn op_row(x: &[u8]) -> u32 {
     return best;
 }
 
+// The `lanes` ops that trap (marked † in checked-ir.md "Vector and mask ops") or access memory:
+// they never go.
+const LANES_KEPT: [u16; 13] = [ir_text_terminals.IR_T_VEC_DOT_DIV_LANES, ir_text_terminals.IR_T_VEC_DOT_DIV_CONST, ir_text_terminals.IR_T_VEC_DOT_SHL, ir_text_terminals.IR_T_VEC_DOT_SHR, ir_text_terminals.IR_T_VEC_DOT_LOAD, ir_text_terminals.IR_T_VEC_DOT_STORE, ir_text_terminals.IR_T_VEC_DOT_LOAD_ALIGNED, ir_text_terminals.IR_T_VEC_DOT_STORE_ALIGNED, ir_text_terminals.IR_T_VEC_DOT_STORE_STREAM, ir_text_terminals.IR_T_VEC_DOT_LOAD_MASKED, ir_text_terminals.IR_T_VEC_DOT_STORE_MASKED, ir_text_terminals.IR_T_VEC_DOT_GATHER, ir_text_terminals.IR_T_VEC_DOT_SCATTER];
+
+// The K2 `removable` class of op `op` whose row in opt.toml is r (`op_row`; NONE: no row, class
+// `no`), a `lanes` row resolved to yes or no.
+pub fn removable_class(r: u32, op: u16) -> u8 {
+    if r == NONE { return opt_table.REMOVABLE_NO; }
+    let rm = opt_table.OPT_OP_REMOVABLE;
+    let c = rm[r as usize];
+    if c != opt_table.REMOVABLE_LANES { return c; }
+    let kept = LANES_KEPT;
+    for k in 0..kept.len() {
+        if kept[k] == op { return opt_table.REMOVABLE_NO; }
+    }
+    return opt_table.REMOVABLE_YES;
+}
+
 // The weight of op name x, or NONE when no row covers it.
 pub fn op_weight(x: &[u8]) -> u32 {
     let r = op_row(x);

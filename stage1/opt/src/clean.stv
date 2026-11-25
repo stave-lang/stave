@@ -32,10 +32,6 @@ const ONES: u64 = 0xffff_ffff_ffff_ffff;
 // `rk` of a value without a replacement.
 const NO_REP: u8 = 255;
 
-// The `lanes` ops that trap (marked † in checked-ir.md "Vector and mask ops") or access memory:
-// they never go.
-const LANES_KEPT: [u16; 13] = [term.IR_T_VEC_DOT_DIV_LANES, term.IR_T_VEC_DOT_DIV_CONST, term.IR_T_VEC_DOT_SHL, term.IR_T_VEC_DOT_SHR, term.IR_T_VEC_DOT_LOAD, term.IR_T_VEC_DOT_STORE, term.IR_T_VEC_DOT_LOAD_ALIGNED, term.IR_T_VEC_DOT_STORE_ALIGNED, term.IR_T_VEC_DOT_STORE_STREAM, term.IR_T_VEC_DOT_LOAD_MASKED, term.IR_T_VEC_DOT_STORE_MASKED, term.IR_T_VEC_DOT_GATHER, term.IR_T_VEC_DOT_SCATTER];
-
 // K2 per op: its `removable` class (a `lanes` row resolved to yes or no) and its `fold` class, by
 // terminal id and by row of the module's intrinsic table.
 struct Classes {
@@ -43,18 +39,6 @@ struct Classes {
     fold: vec.Vec<u8>,
     intr_rm: vec.Vec<u8>,
     intr_fold: vec.Vec<u8>,
-}
-
-fn row_removable(r: u32, op: u16) -> u8 {
-    if r == NONE { return opt_table.REMOVABLE_NO; }
-    let rm = opt_table.OPT_OP_REMOVABLE;
-    let c = rm[r as usize];
-    if c != opt_table.REMOVABLE_LANES { return c; }
-    let kept = LANES_KEPT;
-    for k in 0..kept.len() {
-        if kept[k] == op { return opt_table.REMOVABLE_NO; }
-    }
-    return opt_table.REMOVABLE_YES;
 }
 
 fn row_fold(r: u32) -> u8 {
@@ -68,7 +52,7 @@ fn classes(m: &model.Module) -> Classes {
     let mut c = Classes.{ rm: vec.Vec::<u8>.new(), fold: vec.Vec::<u8>.new(), intr_rm: vec.Vec::<u8>.new(), intr_fold: vec.Vec::<u8>.new() };
     for t in 0..g.nterm() {
         let r = facts.op_row(g.spell(t as% u32));
-        c.rm.push(row_removable(r, t as% u16));
+        c.rm.push(facts.removable_class(r, t as% u16));
         c.fold.push(row_fold(r));
     }
     let mut name = vec.Vec::<u8>.new();
@@ -77,7 +61,7 @@ fn classes(m: &model.Module) -> Classes {
         name.extend_from_slice(mem.str_bytes("intrinsic."));
         name.extend_from_slice(m.intr.row(i));
         let r = facts.op_row(name.as_slice());
-        c.intr_rm.push(row_removable(r, term.IR_T_INTR));
+        c.intr_rm.push(facts.removable_class(r, term.IR_T_INTR));
         c.intr_fold.push(row_fold(r));
     }
     return c;

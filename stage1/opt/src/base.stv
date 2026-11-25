@@ -38,10 +38,6 @@ const PART_CHUNK: u8 = 2;
 // B4's candidate ops.
 const CANDIDATES: [u16; 16] = [term.IR_T_KW_ADD, term.IR_T_KW_SUB, term.IR_T_KW_MUL, term.IR_T_KW_NEG, term.IR_T_ADD_DOT_WRAP, term.IR_T_SUB_DOT_WRAP, term.IR_T_MUL_DOT_WRAP, term.IR_T_SHL_DOT_WRAP, term.IR_T_ADD_DOT_SAT, term.IR_T_SUB_DOT_SAT, term.IR_T_MUL_DOT_SAT, term.IR_T_KW_SHL, term.IR_T_KW_SHR, term.IR_T_KW_AND, term.IR_T_KW_OR, term.IR_T_KW_XOR];
 
-// The ops of a `lanes` row that never go (K2): marked † in checked-ir.md "Vector and mask ops", or
-// a memory op.
-const LANES_NO: [u16; 13] = [term.IR_T_VEC_DOT_DIV_LANES, term.IR_T_VEC_DOT_DIV_CONST, term.IR_T_VEC_DOT_SHL, term.IR_T_VEC_DOT_SHR, term.IR_T_VEC_DOT_LOAD, term.IR_T_VEC_DOT_STORE, term.IR_T_VEC_DOT_LOAD_ALIGNED, term.IR_T_VEC_DOT_STORE_ALIGNED, term.IR_T_VEC_DOT_STORE_STREAM, term.IR_T_VEC_DOT_LOAD_MASKED, term.IR_T_VEC_DOT_STORE_MASKED, term.IR_T_VEC_DOT_GATHER, term.IR_T_VEC_DOT_SCATTER];
-
 const SIGN: u64 = 0x8000_0000_0000_0000;
 
 // Per op of the grammar (by terminal id): whether it is a B4 candidate, and its K2 `removable`
@@ -60,29 +56,20 @@ fn listed(xs: &[u16], op: u16) -> bool {
     return false;
 }
 
-// The `removable` class of op `op` named x.
-fn class_of(x: &[u8], op: u16) -> u8 {
-    let r = facts.op_row(x);
-    if r == NONE { return opt_table.REMOVABLE_NO; }
-    let c = opt_table.OPT_OP_REMOVABLE[r as usize];
-    if c != opt_table.REMOVABLE_LANES { return c; }
-    return if listed(&LANES_NO, op) then opt_table.REMOVABLE_NO else opt_table.REMOVABLE_YES;
-}
-
 pub fn ops(m: &model.Module) -> Ops {
     let g = grammar.Grammar.new();
     let mut o = Ops.{ cand: vec.Vec::<bool>.new(), rm: vec.Vec::<u8>.new(), intr_rm: vec.Vec::<u8>.new() };
     for t in 0..g.nterm() {
         let op = t as% u16;
         o.cand.push(listed(&CANDIDATES, op));
-        o.rm.push(class_of(g.spell(t as% u32), op));
+        o.rm.push(facts.removable_class(facts.op_row(g.spell(t as% u32)), op));
     }
     let mut name = vec.Vec::<u8>.new();
     for i in 0..m.intr.rows() {
         name.clear();
         name.extend_from_slice(mem.str_bytes("intrinsic."));
         name.extend_from_slice(m.intr.row(i));
-        o.intr_rm.push(class_of(name.as_slice(), term.IR_T_INTR));
+        o.intr_rm.push(facts.removable_class(facts.op_row(name.as_slice()), term.IR_T_INTR));
     }
     return o;
 }
