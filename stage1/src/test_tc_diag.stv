@@ -103,6 +103,18 @@ test fn casts_operators_and_patterns() {
     debug.assert(has(ms, "this pattern tests `==`, which is not defined for `&str`\n"), "a string pattern");
 }
 
+test fn literals() {
+    let (d, _) = check("fn main() {\n    let a = 7;\n    let b: u8 = 300;\n    let c: i8 = -129;\n    let e: i8 = -128i8;\n    let f: u64 = 0xffff_ffff_ffff_ffff;\n    let n = Option.None;\n    let m = 12abc;\n}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 5, "one diagnostic per error; `-128i8` and the u64 maximum fit");
+    debug.assert(has(ms, "literal `7` has no type context\n"), "no context");
+    debug.assert(has(ms, "literal `300` is out of range for `u8`\n"), "too big");
+    debug.assert(has(ms, "literal `-129` is out of range for `i8`\n"), "a folded minus");
+    debug.assert(has(ms, "the generic arguments of `Option.None` cannot be inferred\n"), "a generic unit variant without a context");
+    debug.assert(has(ms, "literal `12abc` is malformed\n"), "a bad suffix");
+}
+
 test fn globals_with_views_or_drop_glue() {
     let (d, _) = check(GLOBALS);
     let m = messages(&d);

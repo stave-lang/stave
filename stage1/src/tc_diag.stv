@@ -2,6 +2,9 @@
 // `mismatch_fix`: decided when the body's walk is done, from the expected and the found type of
 // each row, with the conversions the checker itself allows (`coercible`, the cast table
 // `tc_rows.cast_ok`) and the one trait solver (`Copy`).
+import ast;
+import generated.node_kinds;
+import lex;
 import sigs;
 import tc_rows;
 import tc_traits;
@@ -19,6 +22,32 @@ impl tc_rows.Typeck {
             let found = self.dg.b.as_slice()[k];
             let c = self.fix_of(sg, want, found);
             self.dg.case.as_mut_slice()[k] = c;
+        }
+    }
+
+    // The literal of every E0202 row of the current check (its group in `a`): the group's first
+    // number literal by position, or a `-` folded into one.
+    pub fn lit_sites(&mut self, tree: &ast.Ast, t: &lex.Tokens, lo: usize, hi: usize) {
+        for k in 0..self.dg.len() {
+            if self.dg.pass.as_slice()[k] != self.pass || self.dg.code.as_slice()[k] != 202 || self.dg.case.as_slice()[k] == tc_rows.C_INFER { continue; }
+            let r = self.dg.a.as_slice()[k];
+            let mut best = NONE;
+            let mut best_tok = NONE;
+            for n in lo..hi + 1 {
+                let x = self.nty.as_slice()[n];
+                if !tc_rows.is_lit(x) || self.lit_root(x) != r { continue; }
+                let a = tree.tok.as_slice()[n];
+                let kd = tree.kind.as_slice()[n];
+                let lt = t.kind.as_slice()[a as usize];
+                let next = t.kind.as_slice()[a as usize + 1];
+                let num = kd == node_kinds.KIND_PRIMARY && (lt == terminals.T_INT_LIT || lt == terminals.T_FLOAT_LIT);
+                let folded = kd == node_kinds.KIND_UNARY && lt == terminals.T_MINUS && (next == terminals.T_INT_LIT || next == terminals.T_FLOAT_LIT);
+                if (num || folded) && (best == NONE || a < best_tok) {
+                    best = n as% u32;
+                    best_tok = a;
+                }
+            }
+            self.dg.n.as_mut_slice()[k] = best;
         }
     }
 

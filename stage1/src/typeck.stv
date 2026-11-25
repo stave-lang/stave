@@ -161,12 +161,18 @@ impl tc_rows.Typeck {
         }
         self.walk(sg, ds, nm, set, t, cut, tree, g);
         self.fixes(sg);
-        // literal values take their group's type; a group no context fixed is E0202
+        // a group no context fixed is E0202
+        for r in lo..g + 1 {
+            let v = self.nty.as_slice()[r];
+            if is_lit(v) && is_lit(self.resolve(v)) { self.e0202(v); }
+        }
+        self.lit_sites(tree, t, lo, g);
+        self.int_ranges(&sg.cx.tab, sg.cx.parent.as_slice(), set, t, cut, tree, lo, g);
+        // literal values take their group's type
         for r in lo..g + 1 {
             let v = self.nty.as_slice()[r];
             if is_lit(v) {
                 let x = self.resolve(v);
-                if is_lit(x) { self.bad = true; }
                 self.nty.as_mut_slice()[r] = if is_lit(x) then UNK else x;
             }
         }
@@ -174,6 +180,30 @@ impl tc_rows.Typeck {
             for r in lo..g + 1 {
                 if is_expr(kind(tree, r)) { self.nty.as_mut_slice()[r] = UNK; }
             }
+        }
+    }
+
+    // E0203 for each int literal of rows lo..=hi (a number token, or `-` folded into one) whose
+    // type, its suffix's or its group's, cannot hold its value.
+    fn int_ranges(&mut self, tab: &types.Table, parent: &[u32], set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, lo: usize, hi: usize) {
+        for r in lo..hi + 1 {
+            let k = kind(tree, r);
+            let a = first_tok(tree, r);
+            let neg = k == K_UNARY && folded(t, tree, r);
+            let p = parent[r];
+            let inner = p != NONE && kind(tree, p as usize) == K_UNARY && folded(t, tree, p as usize);
+            if !neg && (inner || !(k == K_PRIMARY && tk(t, a) == terminals.T_INT_LIT)) { continue; }
+            let b = tc_rows.tok_text(t, set, cut, self.it, if neg then a + 1 else a, false);
+            let (mag, big, suf) = consteval.parse_int(b);
+            if suf == 255 {
+                self.report(203, tc_rows.C_MALFORMED, r as% u32, NONE, NONE, NONE);
+                continue;
+            }
+            let x = self.resolve_at(r);
+            if x == NONE || x == UNK || x == ERR || is_lit(x) || tab.tag_of(x) != types.TK_INT { continue; }
+            let bits = tab.int_bits(x);
+            let lim: u64 = if tab.a_of(x) == 1 then (if neg then 1u64 << (bits - 1) as u64 else (1u64 << (bits - 1) as u64) - 1) else if neg then 0u64 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1;
+            if big || mag > lim { self.report(203, 0, r as% u32, x, NONE, NONE); }
         }
     }
 
@@ -943,6 +973,8 @@ impl tc_rows.Typeck {
             return UNK;
         }
         if is_lit(lt) && !is_lit(rt) && rt != NONE && tab.tag_of(rt) == types.TK_VECTOR {
+            // E0602: the literal is the error type from then on
+            self.poison(lt);
             self.bad = true;
             return UNK;
         }
@@ -1667,6 +1699,13 @@ fn lane_bits(tab: &types.Table, lane: u32) -> u32 {
     if tab.tag_of(lane) == types.TK_INT { return tab.int_bits(lane); }
     let f = tab.a_of(lane);
     return if f == 1 then 32u32 else if f == 2 then 64u32 else 16u32;
+}
+
+// Whether `Unary` row u is `-` folded into the int literal it negates (its child, row u - 1, a
+// `Primary` at the next token).
+fn folded(t: &lex.Tokens, tree: &ast.Ast, u: usize) -> bool {
+    let a = first_tok(tree, u);
+    return tk(t, a) == terminals.T_MINUS && tk(t, a + 1) == terminals.T_INT_LIT && kind(tree, u - 1) == K_PRIMARY && first_tok(tree, u - 1) == a + 1;
 }
 
 // Whether `break` / `continue` statement row r is inside a `loop`, `while`, or `for` of its own

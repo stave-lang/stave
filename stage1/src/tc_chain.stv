@@ -359,7 +359,7 @@ impl tc_rows.Typeck {
         if self.chain.as_slice()[r] != S_VAR { return self.chain_value(r); }
         let v = self.acc.as_slice()[r];
         let h = self.hint.as_slice()[r];
-        return self.variant_value(sg, ds, v, h);
+        return self.variant_value(sg, ds, v, h, r);
     }
 
     // Fn item d made a value at node r under context type h, as stage0's `fn_item_value`: its
@@ -1299,6 +1299,8 @@ impl tc_rows.Typeck {
     fn arity(&mut self, sg: &sigs.Sigs, tree: &ast.Ast, args: u32, want: usize, got: usize) -> u32 {
         self.bad = true;
         if args == NONE { return UNK; }
+        // the arguments are checked without a context, their literals the error type
+        self.poison_kids(tree, args as usize);
         let paren = tree.tok.as_slice()[args as usize] - 1;
         let p = sg.cx.parent.as_slice()[args as usize];
         self.report_span(201, tc_rows.C_ARITY, paren, paren, NONE, want as% u32, got as% u32, NONE);
@@ -1409,6 +1411,7 @@ impl tc_rows.Typeck {
             return UNK;
         }
         // the waiting arguments, literals last
+        let mut lit_err = false;
         for pass in 0..2usize {
             for j in 0..nargs {
                 let a = self.base + tree.kids.row(args as usize)[j] as usize;
@@ -1417,7 +1420,12 @@ impl tc_rows.Typeck {
                 if lit != (pass == 1) { continue; }
                 let p = self.gen_param(sg, ds, tree, args, callee, sf, j);
                 if self.unresolved(&sg.cx.tab, p, bs, n) {
-                    if lit { return self.err(); }
+                    // E0202 at each literal whose parameter stays unbound
+                    if lit {
+                        let v = self.resolve_at(a);
+                        self.e0202(v);
+                        lit_err = true;
+                    }
                     continue;
                 }
                 let want = self.subst_binds(sg, p, bs, n);
@@ -1425,6 +1433,7 @@ impl tc_rows.Typeck {
                 self.coerce(&sg.cx.tab, a, want, why);
             }
         }
+        if lit_err { return UNK; }
         for i in 0..n {
             if self.binds.as_slice()[bs + i] == NONE { return self.err(); }
         }
@@ -1432,15 +1441,18 @@ impl tc_rows.Typeck {
         return self.known(rt);
     }
 
-    // A unit variant (chain r at variant v) as a value under context type ch.
-    fn variant_value(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, v: u32, ch: u32) -> u32 {
+    // A unit variant (chain r at variant v) as a value under context type ch: a generic enum's
+    // arguments come from a context of that enum, else E0202 case `infer` at the chain.
+    fn variant_value(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, v: u32, ch: u32, r: usize) -> u32 {
         let fl = ds.flags.as_slice()[v as usize];
         if fl & (decls.F_TUPLE | decls.F_RECORD) != 0 { return self.err(); }
         let adt = ds.parent.as_slice()[v as usize];
         if self.call_n(sg, ds, v) == 0 { return self.call_ret(sg, ds, v); }
         if ch == UNK { return UNK; }
         if ch != NONE && sg.cx.tab.tag_of(ch) == types.TK_ADT && sg.cx.tab.a_of(ch) == adt { return ch; }
-        return self.err();
+        self.bad = true;
+        self.report(202, tc_rows.C_INFER, r as% u32, NONE, NONE, NONE);
+        return UNK;
     }
 
     // The context of argument j (child of `Args` row r): its parameter's type. The callee is in

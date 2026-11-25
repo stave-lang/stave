@@ -179,6 +179,12 @@ pub const C_PATTERN: u8 = 2;
 pub const C_PATTERN_STR: u8 = 3;
 // E0206 base case for indexing (`[]`) a value that is no array or slice.
 pub const C_INDEX: u8 = 4;
+// E0202 cases: an int literal (0), a float literal, a generic value whose arguments no context
+// gives (`infer`).
+pub const C_FLOAT: u8 = 1;
+pub const C_INFER: u8 = 2;
+// E0203 case `malformed` (an int literal no int reads).
+pub const C_MALFORMED: u8 = 1;
 // E0201 case `arity`: a = the arguments taken, b = given, x = the call's first token.
 pub const C_ARITY: u8 = 15;
 // An E0201 whose fix is decided at the body's end (`tc_diag.fixes`).
@@ -262,7 +268,11 @@ impl Typeck {
         if f != NONE { return f == ty || f == UNK; }
         let tag = tab.tag_of(ty);
         let ok = if self.lg_float.as_slice()[r as usize] then tag == types.TK_FLOAT else tag == types.TK_INT;
-        if !ok { return false; }
+        if !ok {
+            // as stage0: a group fixed to a type of another kind is the error type from then on
+            self.lg_fixed.as_mut_slice()[r as usize] = UNK;
+            return false;
+        }
         self.lg_fixed.as_mut_slice()[r as usize] = ty;
         return true;
     }
@@ -283,10 +293,21 @@ impl Typeck {
     pub fn force(&mut self, v: u32) -> u32 {
         let r = self.resolve(v);
         if is_lit(r) {
-            self.bad = true;
+            self.e0202(r);
             return UNK;
         }
         return r;
+    }
+
+    // E0202 for pending group v, once (the group is then unknown); its literal is found when
+    // the body's walk is done (`tc_diag.lit_sites`).
+    pub fn e0202(&mut self, v: u32) {
+        self.bad = true;
+        let r = self.find(v & (LIT - 1));
+        if self.lg_fixed.as_slice()[r as usize] != NONE { return; }
+        self.lg_fixed.as_mut_slice()[r as usize] = UNK;
+        let float = self.lg_float.as_slice()[r as usize];
+        self.report(202, if float then C_FLOAT else 0u8, NONE, r, NONE, NONE);
     }
 
     pub fn resolve_at(&mut self, r: usize) -> u32 {
@@ -353,6 +374,11 @@ impl Typeck {
         g.sc.push(self.sc.par_hi);
         g.sc.push(self.sc.own_lo);
         g.sc.push(self.sc.own_hi);
+    }
+
+    // The root of literal group value v.
+    pub fn lit_root(&mut self, v: u32) -> u32 {
+        return self.find(v & (LIT - 1));
     }
 
     // `LIT_INT` or `LIT_FLOAT`: the kind of pending group v.
@@ -495,6 +521,8 @@ impl Typeck {
             if self.unite(lt, rt) { return self.resolve(lt); }
             let a = self.lit_kind(lt);
             let b = self.lit_kind(rt);
+            self.poison(lt);
+            self.poison(rt);
             self.bad = true;
             self.report(201, C_NO_CAST, rn, a, b, NONE);
             return UNK;
@@ -503,6 +531,8 @@ impl Typeck {
         let ty = if ll then rt else lt;
         if ty == self.t_never { return g; }
         if tab.tag_of(ty) == types.TK_VECTOR || ty == ERR {
+            // E0602 (or an error reported where ty was made): the literal is the error type
+            self.poison(g);
             self.bad = true;
             return UNK;
         }
