@@ -24,7 +24,7 @@ import modules;
 import source;
 import sigs;
 import traits;
-import types;
+import ir.types;
 import prims.col;
 import prims.search;
 import prims.sort;

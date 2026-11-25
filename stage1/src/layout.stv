@@ -24,7 +24,7 @@
 // - `reach`: the types from which a marked type is reachable over given edges, as breadth-first
 //   rounds over the reversed edges (drop glue, held locks).
 import decls;
-import types;
+import ir.types;
 import prims.col;
 import prims.ragged;
 import prims.search;

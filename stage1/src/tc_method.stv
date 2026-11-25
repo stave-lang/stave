@@ -20,7 +20,7 @@ import decls;
 import sigs;
 import tc_rows;
 import tc_traits;
-import types;
+import ir.types;
 import prims.search;
 import std.vec;
 

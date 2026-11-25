@@ -2,7 +2,7 @@
 // vector, mask, int, pointer, and slice types, as stage0's table gives them.
 import intern;
 import tc_builtins;
-import types;
+import ir.types;
 import std.debug;
 import std.idx;
 import std.mem;

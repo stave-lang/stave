@@ -34,7 +34,7 @@ import items;
 import lex;
 import resolve;
 import source;
-import types;
+import ir.types;
 import prims.col;
 import prims.search;
 import std.idx;

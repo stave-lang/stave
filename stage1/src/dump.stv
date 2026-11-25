@@ -41,7 +41,7 @@ import sigs;
 import source;
 import tc_rows;
 import text;
-import types;
+import ir.types;
 import std.mem;
 import std.vec;
 

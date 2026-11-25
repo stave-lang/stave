@@ -316,7 +316,7 @@ pub const IR_TEXT: Profile = Profile {
     grammar: "contracts/ir-text.ebnf",
     config: Config::ir_text(),
     rust_dir: "crates/stave-ir/src/generated",
-    stave_dir: "stage1/src/generated",
+    stave_dir: "stage1/ir/src/generated",
     file_prefix: "ir_text_",
     symbol_prefix: "IR_",
     order_note: "",

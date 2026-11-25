@@ -4,7 +4,8 @@
 //
 // Command line (a subset of stage0's): `stage1 build|check [PATH]
 // [--dump=tokens,items,ast,strings,names,sigs,kinds,types,diags --dump-dir DIR] [--diagnostics human|json]
-// [--target T] [-o OUT]`. PATH (default `.`) is a `.stv` file or a package directory; the build
+// [--target T] [-o OUT]`, and `stage1 ir check|fmt FILE` (`ir_cmd`). PATH (default `.`) is a
+// `.stv` file or a package directory; the build
 // covers it, its path dependencies, and the shipped `std` and `runtime` from the library
 // directory (`$STAVE_STD_DIR`, else next to the binary as for stage0). It writes the requested dumps as `DIR/STAGE.txt` (contracts/stage-gates.md), byte for
 // byte stage0's for the stages stage1 has, and prints its diagnostics to stderr in stage0's text
@@ -25,6 +26,7 @@ import diag_syn;
 import dump;
 import files;
 import intern;
+import ir_cmd;
 import items;
 import kinds;
 import lex;
@@ -251,6 +253,7 @@ fn root_dir(root: &str) -> string.String {
 }
 
 fn main() -> i32 {
+    if env.count() > 1 && text.eq_str(arg(1).as_bytes(), "ir") { return ir_cmd.run(); }
     let mut cli = Cli.{ root: string.String.from_str("."), dump: string.String.new(), dump_dir: string.String.new(), target: string.String.from_str("x86_64-linux"), json: false, want_tokens: false, want_items: false, want_ast: false, want_strings: false, want_names: false, want_sigs: false, want_kinds: false, want_types: false, want_diags: false };
     match parse_args(&mut cli) {
         Result.Ok(_) => {}

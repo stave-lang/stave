@@ -7,6 +7,15 @@
 | `stave daemon status\|stop\|evict [PKG_DIR]` | Show or stop the resident stage1 daemon, or drop its sessions for one package root ([resident-protocol.md](resident-protocol.md)). Run `stave daemon stop` before GPU benchmarks: an idle daemon still holds device memory |
 | `--timings` | Adds `compiler: gpu (stage1, <device>)` or `compiler: cpu (stage0)`, and per stage `ms`, `items`, `rounds`, `fallbacks`. Fallbacks are the number of times a stage left its parallel path for a slower one, always on the device (dense lexer rerun, chunk-local error re-parse, forward-backward SCC, warp worklist, match-task split) |
 
+**`stage1 ir check|fmt FILE`** (the stage1 binary's IR text verbs, run directly; `stave ir` stays
+stage0's): load FILE as `stave ir` does (checked-ir.md "Loading" steps 1-3: lines, structure,
+verification; not the removal of proven checks or the bounds audit) with stage1's IR library
+(`stage1/ir`), and for `fmt` print the module's text on stdout. Faults print as for `stave ir`
+(`FILE:LINE:COL: error: MSG`, `FILE:LINE: verify: MSG`, at most 100) and exit 1; an unreadable
+FILE or a bad command line exits 2. The stage1 IR gate (`tools/ci-step/run.sh stage1-ir-gate`)
+holds `fmt` to stage0's printed text byte for byte and both verbs to stage0's verdict on mutated
+text.
+
 **Commands that stage1 does not run**: `stave unsafe-report`, `stave lowering`, and `stave explain` always
 run in stage0, whatever `--compiler` says. They compile no program and print no summary line.
 `stave fix` checks in stage0 too (its rounds check edits that are not written yet); it takes no

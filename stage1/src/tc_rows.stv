@@ -24,7 +24,7 @@ import sigs;
 import source;
 import tc_builtins;
 import tc_traits;
-import types;
+import ir.types;
 import prims.sort;
 import std.idx;
 import std.vec;

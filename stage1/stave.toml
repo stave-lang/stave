@@ -4,6 +4,8 @@ name = "stage1"
 kind = "bin"
 
 # The bulk operations of every pass (module map: `prims`); a data-parallel package replaces this
-# one under the same name.
+# one under the same name. `ir`: the type table and the checked IR (model, text, verifier), a
+# package of its own so the back end and the prover import it without the front end.
 [dependencies]
+ir = { path = "ir" }
 prims = { path = "prims/seq" }

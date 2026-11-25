@@ -21,7 +21,7 @@ import intern;
 import lex;
 import sigs;
 import tc_rows;
-import types;
+import ir.types;
 import prims.search;
 
 const NONE: u32 = tc_rows.NONE;

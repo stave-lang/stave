@@ -59,7 +59,7 @@ import tc_ops;
 import tc_pat;
 import tc_rows;
 import tc_traits;
-import types;
+import ir.types;
 import prims.col;
 import std.mem;
 import std.vec;

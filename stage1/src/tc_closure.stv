@@ -22,7 +22,7 @@ import lex;
 import sigs;
 import source;
 import tc_rows;
-import types;
+import ir.types;
 import std.vec;
 
 const NONE: u32 = tc_rows.NONE;

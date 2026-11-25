@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod forge;
+pub mod mutate;
 
 use stave_ir::interp::{self, Config, Outcome, Val};
 use stave_ir::{BufferHost, FuncBuilder, FuncId, InstanceId, Module, SyscallAbi, TypeId};

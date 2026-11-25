@@ -8,7 +8,7 @@ import generated.terminals;
 import sigs;
 import tc_rows;
 import tc_traits;
-import types;
+import ir.types;
 
 const NONE: u32 = tc_rows.NONE;
 const UNK: u32 = tc_rows.UNK;

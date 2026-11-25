@@ -28,7 +28,9 @@ import lex;
 import modules;
 import resolve;
 import source;
-import types;
+import ir.features;
+import ir.known;
+import ir.types;
 import prims.col;
 import prims.ragged;
 import prims.search;
@@ -88,10 +90,6 @@ const OP_GARG_T: u8 = 8;
 const OP_GARG_ARR: u8 = 9;
 const OP_VECG: u8 = 10;
 
-// The target features (contracts/simd-ops.md), in their listing order (= bit), each with the
-// features it implies directly.
-const FEATURES: &str = "sse42 avx avx2 fma bmi2 f16c avx512f avx512bw avx512vl avx512dq avx512cd avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16 neon fp16 dotprod bf16 sve sve2 cuda";
-const IMPLIES: [u32; 24] = [0, 1, 2, 2, 0, 2, 0x2c, 0x40, 0x40, 0x40, 0x40, 0x80, 0x80, 0x40, 0x80, 0x380, 0x80, 0, 0x20000, 0x20000, 0x20000, 0x40000, 0x20_0000, 0];
 // `v3`, `v4`: their members.
 const V3: u32 = 60;
 const V4: u32 = 1980;
@@ -101,29 +99,12 @@ const PARK: u8 = 128;
 
 // The closure of feature set `bits` under implication.
 pub fn feature_closure(bits: u64) -> u64 {
-    let mut s = bits;
-    loop {
-        let mut next = s;
-        for f in 0..24usize {
-            if (s >> f as u64) & 1 == 1 { next = next | (IMPLIES[f] as u64); }
-        }
-        if next == s { return s; }
-        s = next;
-    }
+    return features.closure(bits);
 }
 
 // The features of set `bits` no other one of the set implies directly: what `needs` prints.
 pub fn feature_maximal(bits: u64) -> u64 {
-    let mut out: u64 = 0;
-    for f in 0..24usize {
-        if (bits >> f as u64) & 1 == 0 { continue; }
-        let mut implied = false;
-        for g in 0..24usize {
-            if g != f && (bits >> g as u64) & 1 == 1 && (IMPLIES[g] >> f as% u32) & 1 == 1 { implied = true; }
-        }
-        if !implied { out = out | (1u64 << f as u64); }
-    }
-    return out;
+    return features.maximal(bits);
 }
 
 // The k-th space-separated word of `words`: (start, end) in its bytes.
@@ -158,8 +139,7 @@ fn word_index(words: &str, b: &[u8]) -> u32 {
 
 // Appends feature f's name.
 pub fn push_feature(buf: &mut vec.Vec<u8>, f: usize) {
-    let (a, b) = word(FEATURES, f);
-    buf.extend_from_slice(&mem.str_bytes(FEATURES)[a..b]);
+    features.push_name(buf, f);
 }
 
 // Appends effect e's name.
@@ -170,7 +150,7 @@ pub fn push_effect(buf: &mut vec.Vec<u8>, e: usize) {
 
 // The feature set a `needs` name stands for (closed), or none.
 fn feature_of(b: &[u8]) -> (bool, u64) {
-    let f = word_index(FEATURES, b);
+    let f = features.index(b);
     if f != NONE { return (true, feature_closure(1u64 << f as u64)); }
     if b.eq(mem.str_bytes("v3")) { return (true, feature_closure(V3 as u64)); }
     if b.eq(mem.str_bytes("v4")) { return (true, feature_closure((V3 | V4) as u64)); }
@@ -1354,11 +1334,6 @@ fn needs_forbidden(sg: &Sigs, fl: &files.FileList, md: &modules.Modules, ds: &de
     return NONE;
 }
 
-// The fns and methods the compiler knows by path (stave-ir `Known`, contracts/intrinsics.md
-// "Paths fixed by the compiler"): `module name method` (`-`: a fn), `;` between entries. An
-// entry names an item of a module of a built-in package; a user item spelled the same is none.
-const KNOWN_FNS: &str = "std.string String new;std.string String push_str;std.string String as_str;std.cell UnsafeCell new;std.atomic U32 new;std.atomic U64 new;std.atomic Usize new;std.atomic Bool new;std.sync Mutex new;std.sync Mutex lock;std.sync Once new;std.sync Once get_or_init;std.sync lock_pair -;std.mem forget -;std.slice copy_raw -;std.thread join -;std.thread par_for -;std.thread par_for_mut -;runtime.start entry -;runtime.panic trap -;runtime.panic trap_msg -;runtime.panic trap_err -;runtime.panic abort -;runtime.panic on_signal -;runtime.panic begin -;runtime.panic requires_failed -;runtime.panic ensures_failed -;runtime.panic set_user_site -;runtime.panic test_input -;runtime.panic test_skip -;runtime.errtrace push -;runtime.errtrace restart -;runtime.errtrace save -;runtime.errtrace restore -;runtime.thread entry -;runtime.thread start -;runtime.thread join -;runtime.thread scope_spawn -;runtime.thread scope_join -;runtime.thread run_queued -;runtime.cpu features -;runtime.cpu init -;runtime.cpu trace -;runtime.alloc alloc -;runtime.alloc try_alloc -;runtime.alloc free -;runtime.alloc realloc -;runtime.alloc try_realloc -;runtime.atomic lock -;runtime.atomic try_lock -;runtime.atomic unlock -;runtime.os futex -;runtime.os read -;runtime.os write -;runtime.os pread64 -;runtime.os pwrite64 -;runtime.os openat -;runtime.os flock -";
-
 // The module of a built-in package whose path text is b, or NONE.
 pub fn builtin_module(fl: &files.FileList, md: &modules.Modules, b: &[u8]) -> u32 {
     for m in 0..md.modules() {
@@ -1368,32 +1343,19 @@ pub fn builtin_module(fl: &files.FileList, md: &modules.Modules, b: &[u8]) -> u3
     return NONE;
 }
 
-// Whether fn or method d is one of `KNOWN_FNS` (a method: the first inherent one of that name).
+// Whether fn or method d is a compiler-known item (`ir.known`, the table stave-ir's `Known` comes
+// from; a method: the first inherent one of that name). Items that are no fn (types, traits,
+// statics) are never a fn decl d.
 fn is_known_fn(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, d: u32) -> bool {
-    let w = mem.str_bytes(KNOWN_FNS);
-    let mut at: usize = 0;
-    while at < w.len() {
-        let mut e = at;
-        while e < w.len() && w[e] != 59 {
-            e = e + 1;
-        }
-        // three words: module, name, method
-        let mut sp = [0usize; 2];
-        let mut k: usize = 0;
-        for i in at..e {
-            if w[i] == 32 && k < 2 {
-                sp[k] = i;
-                k = k + 1;
-            }
-        }
-        let m = builtin_module(fl, md, &w[at..sp[0]]);
-        let name = modules.lookup(&nm.tab, &w[sp[0] + 1..sp[1]]);
-        let meth = &w[sp[1] + 1..e];
-        at = e + 1;
+    let kt = known.Table.new();
+    for k in 0..kt.len() {
+        let m = builtin_module(fl, md, kt.part(k, 0));
+        let name = modules.lookup(&nm.tab, kt.part(k, 1));
         if m == NONE || name == NONE { continue; }
         let item = ds.module_item(m, name);
         if item == NONE { continue; }
-        if meth.eq(mem.str_bytes("-")) {
+        let meth = kt.part(k, 2);
+        if meth.len() == 0 {
             if item == d { return true; }
             continue;
         }
