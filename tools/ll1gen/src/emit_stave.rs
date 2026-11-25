@@ -58,10 +58,10 @@ fn terminals_stave(t: &Tables, names: &Names, header: &str) -> String {
     let n = t.nterm();
     let mut o = format!("// {header}\n");
     o += "// Terminals in sorted spelling order (byte order), which is the E0004 expected-set order.\n";
-    o += "// T_* are the terminal ids of ll1_table.stv.\n\n";
+    o += "// T_* are the terminal ids of ll1_table.stv, as u8 like every token-kind column.\n\n";
     let _ = writeln!(o, "pub const NTERM: usize = {n};\n");
     let consts: Vec<(String, String)> = (names.term_const.iter().zip(&t.terms).enumerate())
-        .map(|(i, (c, s))| (format!("pub const T_{c}: u16 = {i};"), s.clone()))
+        .map(|(i, (c, s))| (format!("pub const T_{c}: u8 = {i};"), s.clone()))
         .collect();
     commented(&mut o, &consts);
     o.push('\n');
