@@ -1140,9 +1140,10 @@ pub fn lower_gargs(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.T
     return true;
 }
 
-// The generic arguments at `GenericArgs` row ga, each for a type param (a callee with no decl:
-// a built-in fn), into out as `lower_gargs` writes them.
-pub fn lower_type_args(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, sc: consteval.Scope, out: &mut vec.Vec<u32>) {
+// The generic arguments at `GenericArgs` row ga of a callee with no decl, into out as
+// `lower_gargs` writes them: each for a type param (a built-in fn), or by shape (a built-in
+// method): one without a type path or array type is a constant of type `usize`.
+pub fn lower_type_args(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: u32, sc: consteval.Scope, by_shape: bool, out: &mut vec.Vec<u32>) {
     out.clear();
     let base = tree.item_node.as_slice()[it as usize] as usize;
     let n = tree.kids.row(ga as usize).len();
@@ -1150,7 +1151,8 @@ pub fn lower_type_args(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &l
     let g0 = lw.gas.len();
     for j in 0..n {
         let a = base + tree.kids.row(ga as usize)[n - 1 - j] as usize;
-        lw.frame(OP_GARG, a, NONE, 0);
+        let c = by_shape && child(tree, base, a, K_TYPE_BASE) == NONE && child(tree, base, a, K_ARR_OR_IDX) == NONE;
+        lw.frame(OP_GARG, a, NONE, if c then 1u32 else 0u32);
     }
     run(cx, lw, tree, t, nm, set, cut, ds, it, f0, sc);
     out.extend_from_slice(&lw.gas.as_slice()[g0..lw.gas.len()]);

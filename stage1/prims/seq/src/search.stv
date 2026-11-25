@@ -36,6 +36,12 @@ pub fn upper_bound<T: word.Word + Copy>(xs: &[T], x: T) -> usize {
     return lo;
 }
 
+// Whether x is an element of xs.
+pub fn contains<T: word.Word + Copy>(xs: &[T], x: T) -> bool {
+    let k = lower_bound(xs, x);
+    return k < xs.len() && xs[k].same(x);
+}
+
 // lower_bound of every query, in query order. Positions must fit a u32 (`Assert`).
 pub fn lower_bounds<T: word.Word + Copy>(xs: &[T], queries: &[T]) -> vec.Vec<u32> {
     let mut out = vec.Vec::<u32>.with_capacity(queries.len());

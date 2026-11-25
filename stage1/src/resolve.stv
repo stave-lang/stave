@@ -1338,7 +1338,7 @@ fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &
             st = ST_VALUE;
             continue;
         }
-        if !ambiguous && !ds.is_poisoned(ds.name.as_slice()[sid as usize]) { rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE); }
+        if !ambiguous && !search.contains(ds.poisoned.as_slice(), ds.name.as_slice()[sid as usize]) { rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE); }
         break;
     }
 }
