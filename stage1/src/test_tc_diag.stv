@@ -1,0 +1,71 @@
+// The body checker's type errors as diagnostics (`tc_rows.report`, `tc_diag`, `diag_tc`): the
+// mismatch sites (annotation, operator, return, argument), the fix each E0201 names, the arity
+// of a call, and `break` outside of a loop.
+import diag;
+import diag_tc;
+import dump;
+import files;
+import kinds;
+import sigs;
+import tc_rows;
+import test_kit;
+import typeck;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const CORE: &str = "pub enum Option<T> { Some(T), None }\npub enum Result<T, E> { Ok(T), Err(E) }\npub trait Copy {}\n";
+
+const MAIN: &str = "fn one(x: u16) -> u16 { return x; }\nfn f(a: u32, b: u64) -> u32 {\n    let c: u16 = a;\n    let d = a + b;\n    let e = one(1u16, 2u16);\n    return;\n}\nfn g() {\n    break;\n}\nfn h(o: Option<u32>) -> u32 {\n    return o;\n}\nfn k(x: u32) -> Option<u32> {\n    return x;\n}\nfn ok(n: u32) -> u32 {\n    let m: u32 = n + 1;\n    return m;\n}\nfn main() {}\n";
+
+fn has(hay: &[u8], needle: &str) -> bool {
+    let n = mem.str_bytes(needle);
+    if n.len() > hay.len() { return false; }
+    for i in 0..hay.len() - n.len() + 1 {
+        if hay[i..i + n.len()].eq(n) { return true; }
+    }
+    return false;
+}
+
+test fn mismatches_and_their_fixes() {
+    let mut k = test_kit.kit();
+    let m = k.package("main", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(m, "std", s);
+    k.file(m, "main", MAIN);
+    k.file(s, "core", CORE);
+    let o = k.run();
+    let mut fl = files.FileList.empty();
+    fl.pkg_builtin.push(false);
+    fl.pkg_builtin.push(true);
+    fl.pkg_root.push(true);
+    fl.pkg_root.push(false);
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let (_, order) = dump.sigs_order(&sg, &o.ds);
+    let _ = kinds.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, order.as_slice());
+    let tc = typeck.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, true, sigs.baseline(mem.str_bytes("x86_64-linux")));
+    let mut d = diag.Diags.new();
+    diag_tc.typeck_diags(&mut d, &tc, &sg, &o.ds, &o.md, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
+    debug.assert(!d.bad.get(), "every row builds from its template");
+    let mut out = vec.Vec::<u8>.new();
+    for i in 0..d.len() {
+        d.message(i, &mut out);
+        out.push(10);
+    }
+    let ms = out.as_slice();
+    debug.assert(d.len() == 7, "one diagnostic per error, none in `ok`");
+    debug.assert(has(ms, "mismatched types: expected `u16`, found `u32`\n"), "an annotation");
+    debug.assert(has(ms, "mismatched types: expected `u32`, found `u64`\n"), "the right operand");
+    debug.assert(has(ms, "`one` takes 1 arguments, found 2\n"), "arity");
+    debug.assert(has(ms, "mismatched types: expected `u32`, found `()`\n"), "`return;` in a fn with a value");
+    debug.assert(has(ms, "`break` outside of a loop\n"), "`break` outside of a loop");
+    debug.assert(has(ms, "mismatched types: expected `u32`, found `Option<u32>`\n"), "a return value");
+    debug.assert(has(ms, "mismatched types: expected `Option<u32>`, found `u32`\n"), "a return value to wrap");
+    let mut fixes: u32 = 0;
+    for r in 0..tc.dg.len() {
+        let c = tc.dg.case.as_slice()[r];
+        if c == tc_rows.C_UNWRAP_OPTION || c == tc_rows.C_SOME || c == tc_rows.C_AS_PERCENT { fixes = fixes + 1; }
+        debug.assert(c != tc_rows.C_PENDING, "every fix is decided");
+    }
+    debug.assert(fixes == 4, "`as%` for u32 to u16 and u64 to u32, unwrap for `Option<u32>` to u32, `Some` for u32 to `Option<u32>`");
+}

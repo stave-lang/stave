@@ -364,6 +364,12 @@ pub fn sigs_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &int
                 display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
                 d.arg("type", buf.as_slice());
             }
+        } else if code == sigs.D_E0201 {
+            d.begin(201, "const-param-type");
+            d.arg("operand", nm.tab.text(sg.cx.gens.name.as_slice()[a as usize] as usize));
+            buf.clear();
+            display(&mut buf, sg, ds, nm, sc, r.ty.as_slice()[k]);
+            d.arg("found", buf.as_slice());
         } else if code == sigs.D_E0410 {
             d.begin(410, "");
             buf.clear();

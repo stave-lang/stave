@@ -41,6 +41,10 @@ const K_RANGE: u8 = node_kinds.KIND_RANGE_EXPR;
 const K_GENERIC_PARAM: u8 = node_kinds.KIND_GENERIC_PARAM;
 const K_ARGS: u8 = node_kinds.KIND_ARGS;
 const K_STRUCT_LIT: u8 = node_kinds.KIND_STRUCT_LIT;
+const K_PARAM: u8 = node_kinds.KIND_PARAM;
+const K_PARAMS: u8 = node_kinds.KIND_PARAMS;
+const K_SELF_PARAM: u8 = node_kinds.KIND_SELF_PARAM;
+const K_TYPE: u8 = node_kinds.KIND_TYPE;
 // Postfix chain states: a value (in `acc`), a fn (its decl in `acc`; in `blo` the bindings row of
 // its written generic arguments, NONE: none written), a module, a path state or value not checked
 // yet, a type named by a path head (its type in `acc`: a built-in type, an impl's `Self`).
@@ -694,7 +698,7 @@ impl tc_rows.Typeck {
         if p == P_INDEX {
             let base = self.acc.as_slice()[r];
             let want = self.hint.as_slice()[c];
-            self.coerce(&sg.cx.tab, c, want);
+            self.coerce(&sg.cx.tab, c, want, NONE);
             let v = self.index_value(&mut sg.cx.tab, tree, base, c);
             self.set_chain(r, S_VAL, v);
             return;
@@ -938,26 +942,32 @@ impl tc_rows.Typeck {
         if callee == FN_VALUE {
             let np = sg.cx.tab.a_of(inst) as usize;
             let n = if args == NONE then 0usize else tree.kids.row(args as usize).len();
-            if n != np { return self.err(); }
+            if n != np { return self.arity(sg, tree, args, np, n); }
             for j in 0..n {
                 let a = self.base + tree.kids.row(args as usize)[j] as usize;
                 let p = sg.cx.tab.x(inst)[j];
-                self.coerce(&sg.cx.tab, a, p);
+                self.coerce(&sg.cx.tab, a, p, NONE);
             }
             return sg.cx.tab.x(inst)[np];
         }
-        if tc_builtins.is_builtin(callee) { return self.bi_call(&mut sg.cx.tab, tree, callee, inst, args); }
+        if tc_builtins.is_builtin(callee) {
+            let np = self.bt.params(callee, inst);
+            let n = if args == NONE then 0usize else tree.kids.row(args as usize).len();
+            if np != UNK && n != np as usize { return self.arity(sg, tree, args, np as usize, n); }
+            return self.bi_call(&mut sg.cx.tab, tree, callee, inst, args);
+        }
         let skip: usize = if ds.kind.as_slice()[callee as usize] == decls.DK_METHOD then 1 else 0;
         let ps_len = sg.params.row(callee as usize).len() - skip;
         let variadic = sg.sflags.as_slice()[callee as usize] & sigs.SF_VARIADIC != 0;
         let n = if args == NONE then 0usize else tree.kids.row(args as usize).len();
-        if n < ps_len || (n > ps_len && !variadic) { return self.err(); }
+        if n < ps_len || (n > ps_len && !variadic) { return self.arity(sg, tree, args, ps_len, n); }
         for j in 0..n {
             let a = self.base + tree.kids.row(args as usize)[j] as usize;
             if j < ps_len {
                 let p = self.param_of(sg, callee, inst, j + skip);
                 if p == ERR || p == NONE { return self.err(); }
-                self.coerce(&sg.cx.tab, a, p);
+                let why = param_why(tree, ds, callee, j + skip);
+                self.coerce(&sg.cx.tab, a, p, why);
             } else {
                 let _ = self.force_at(a);
             }
@@ -1268,6 +1278,35 @@ impl tc_rows.Typeck {
         return self.self_in(sg, ds, callee, sf, p);
     }
 
+    // What requires the type of argument j of a generic call of callee at row r (r, sf as in
+    // `gen_arity`): the field a struct literal's expression names, else the parameter's written
+    // type (`self`: its param); `NONE` for a built-in, a fn value, or a variant.
+    fn arg_why(&self, sg: &sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, r: u32, callee: u32, sf: u32, j: usize) -> u32 {
+        if callee == NONE || callee == FN_VALUE || tc_builtins.is_builtin(callee) { return NONE; }
+        if r != NONE && kind(tree, r as usize) == K_STRUCT_LIT {
+            let n = self.call_n(sg, ds, callee);
+            return tc_rows.WHY_DECL | self.binds.as_slice()[self.blo.as_slice()[r as usize] as usize + n + j];
+        }
+        let k = ds.kind.as_slice()[callee as usize];
+        if k != decls.DK_FN && k != decls.DK_METHOD && k != decls.DK_TRAIT_METHOD { return NONE; }
+        let skip: usize = if sf == NONE || sf == SELF_VAR then 0 else 1;
+        return param_why(tree, ds, callee, j + skip);
+    }
+
+    // E0201 case `arity`: the call at `Args` row args (NONE: `()`) passes got arguments where
+    // want are taken (an `Args` row starts at its first argument); the operand is the chain up
+    // to the `(`.
+    fn arity(&mut self, sg: &sigs.Sigs, tree: &ast.Ast, args: u32, want: usize, got: usize) -> u32 {
+        self.bad = true;
+        if args == NONE { return UNK; }
+        let paren = tree.tok.as_slice()[args as usize] - 1;
+        let p = sg.cx.parent.as_slice()[args as usize];
+        self.report_span(201, tc_rows.C_ARITY, paren, paren, NONE, want as% u32, got as% u32, NONE);
+        let k = self.dg.x.len() - 1;
+        self.dg.x.as_mut_slice()[k] = tree.tok.as_slice()[p as usize];
+        return UNK;
+    }
+
     // Type ty of callee's signature with a trait method's `Self` replaced by sf.
     fn self_in(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, callee: u32, sf: u32, ty: u32) -> u32 {
         if sf == NONE || ds.kind.as_slice()[callee as usize] != decls.DK_TRAIT_METHOD { return ty; }
@@ -1295,7 +1334,8 @@ impl tc_rows.Typeck {
         }
         if !self.unresolved(&sg.cx.tab, p, b, n) {
             let want = self.subst_binds(sg, p, b, n);
-            self.coerce(&sg.cx.tab, a, want);
+            let why = self.arg_why(sg, ds, tree, r as% u32, callee, sf, j);
+            self.coerce(&sg.cx.tab, a, want, why);
             return;
         }
         self.waits.as_mut_slice()[a] = true;
@@ -1381,7 +1421,8 @@ impl tc_rows.Typeck {
                     continue;
                 }
                 let want = self.subst_binds(sg, p, bs, n);
-                self.coerce(&sg.cx.tab, a, want);
+                let why = self.arg_why(sg, ds, tree, args, callee, sf, j);
+                self.coerce(&sg.cx.tab, a, want, why);
             }
         }
         for i in 0..n {
@@ -1555,6 +1596,27 @@ pub fn headless_names(ds: &decls.Decls) -> vec.Vec<u32> {
 
 fn is_idcont(b: u8) -> bool {
     return (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+}
+
+// The node row whose span is parameter i of fn or method d as written: its type, or its `self`.
+fn param_why(tree: &ast.Ast, ds: &decls.Decls, d: u32, i: usize) -> u32 {
+    let base = tree.item_node.as_slice()[ds.item.as_slice()[d as usize] as usize] as usize;
+    let g = base + ds.node.as_slice()[d as usize] as usize;
+    let pn = consteval.child(tree, base, g, K_PARAMS);
+    if pn == NONE { return NONE; }
+    let ks = tree.kids.row(pn as usize);
+    let mut k: usize = 0;
+    for j in 0..ks.len() {
+        let p = base + ks[j] as usize;
+        if kind(tree, p) != K_PARAM { continue; }
+        if k == i {
+            let sp = consteval.child(tree, base, p, K_SELF_PARAM);
+            if sp != NONE { return sp; }
+            return consteval.child(tree, base, p, K_TYPE);
+        }
+        k = k + 1;
+    }
+    return NONE;
 }
 
 // A type with its references peeled.
