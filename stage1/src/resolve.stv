@@ -45,32 +45,6 @@ pub const NONE: u32 = idx.NONE;
 pub const TAG_DECL: u8 = 0;
 pub const TAG_LOCAL: u8 = 1;
 
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_DOT: u8 = terminals.T_DOT as% u8;
-const T_COLON: u8 = terminals.T_COLON as% u8;
-const T_COLON_COLON: u8 = terminals.T_COLON_COLON as% u8;
-const T_LT: u8 = terminals.T_LT as% u8;
-const T_GT: u8 = terminals.T_GT as% u8;
-const T_GT_GT: u8 = terminals.T_GT_GT as% u8;
-const T_GT_EQ: u8 = terminals.T_GT_EQ as% u8;
-const T_GT_GT_EQ: u8 = terminals.T_GT_GT_EQ as% u8;
-const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
-const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
-const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
-const T_R_BRACKET: u8 = terminals.T_R_BRACKET as% u8;
-const T_L_BRACE: u8 = terminals.T_L_BRACE as% u8;
-const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;
-const T_DOT_L_BRACE: u8 = terminals.T_DOT_L_BRACE as% u8;
-const T_EOF: u8 = terminals.T_EOF as% u8;
-const T_FMT: u8 = terminals.T_FMT_LIT as% u8;
-const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
-const T_KW_SELF_TYPE: u8 = terminals.T_KW_SELF_TYPE as% u8;
-const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
-const T_KW_LET: u8 = terminals.T_KW_LET as% u8;
-const T_KW_MUT: u8 = terminals.T_KW_MUT as% u8;
-const T_KW_CONST: u8 = terminals.T_KW_CONST as% u8;
-const T_KW_COPY: u8 = terminals.T_KW_COPY as% u8;
-
 const B_DQUOTE: u8 = 34;
 const B_DOT: u8 = 46;
 const B_BACKSLASH: u8 = 92;
@@ -218,7 +192,7 @@ view struct Cols {
 impl Cols {
     // The kind of global token g (`Eof` past the end).
     fn tk(&self, g: usize) -> u8 {
-        return if g < self.tkind.len() then self.tkind[g] else T_EOF;
+        return if g < self.tkind.len() then self.tkind[g] else terminals.T_EOF;
     }
 
     // The first child of row g (item base `base`) as a row, or NONE.
@@ -387,7 +361,7 @@ impl SelfUses {
 }
 
 fn kind_at(t: &lex.Tokens, g: usize) -> u8 {
-    return if g < t.kind.len() then t.kind.as_slice()[g] else T_EOF;
+    return if g < t.kind.len() then t.kind.as_slice()[g] else terminals.T_EOF;
 }
 
 // Kinds whose children stage0's walk never visits.
@@ -445,7 +419,7 @@ fn child_state(c: &Cols, parent: &[u32], clo: &[u32], flag: &[u8], base: usize, 
     }
     let first = fch & F_FIRST != 0;
     if rule == K_STMT {
-        if c.tk(c.tok[p] as usize) != T_KW_LET { return S_YES; }
+        if c.tk(c.tok[p] as usize) != terminals.T_KW_LET { return S_YES; }
         return if first then S_NO else S_YES;
     }
     if rule == K_FOR {
@@ -522,7 +496,7 @@ fn context(c: &Cols, rules: &[u8], base: usize, end: usize, cx: &mut Ctx) {
         let k = kind[g];
         if k == node_kinds.KIND_FN_DECL || k == node_kinds.KIND_KERNEL_DECL || k == node_kinds.KIND_DISPATCH_DECL || k == node_kinds.KIND_EXTERN_FN || k == node_kinds.KIND_TRAIT_FN || (k == node_kinds.KIND_EXTERN_ITEM && fl[r] & G_BLOCK != 0) {
             fnl = g as% u32;
-        } else if k == node_kinds.KIND_PRIMARY && c.tk(c.tok[g] as usize) == T_KW_FN {
+        } else if k == node_kinds.KIND_PRIMARY && c.tk(c.tok[g] as usize) == terminals.T_KW_FN {
             clo = g as% u32;
         } else if k == node_kinds.KIND_REQUIRES || k == node_kinds.KIND_ENSURES {
             cla = g as% u32;
@@ -547,27 +521,27 @@ fn angle_end(c: &Cols, lt: usize) -> (usize, bool) {
     let n = tks.len();
     while i < n {
         let k = tks[i];
-        if k == T_EOF { return (i, false); }
-        if k == T_L_PAREN || k == T_L_BRACKET || k == T_L_BRACE || k == T_DOT_L_BRACE {
+        if k == terminals.T_EOF { return (i, false); }
+        if k == terminals.T_L_PAREN || k == terminals.T_L_BRACKET || k == terminals.T_L_BRACE || k == terminals.T_DOT_L_BRACE {
             bracket = bracket + 1;
-        } else if k == T_R_PAREN || k == T_R_BRACKET || k == T_R_BRACE {
+        } else if k == terminals.T_R_PAREN || k == terminals.T_R_BRACKET || k == terminals.T_R_BRACE {
             bracket = bracket - 1;
             if bracket < 0 { return (i, false); }
         } else if bracket == 0 {
             let mut delta: i64 = 0;
             let mut whole: i64 = 0;
-            if k == T_LT {
+            if k == terminals.T_LT {
                 delta = 1;
-            } else if k == T_GT {
+            } else if k == terminals.T_GT {
                 delta = -1;
                 whole = 1;
-            } else if k == T_GT_GT {
+            } else if k == terminals.T_GT_GT {
                 delta = -2;
                 whole = 2;
-            } else if k == T_GT_EQ {
+            } else if k == terminals.T_GT_EQ {
                 delta = -1;
                 whole = 2;
-            } else if k == T_GT_GT_EQ {
+            } else if k == terminals.T_GT_GT_EQ {
                 delta = -2;
                 whole = 3;
             }
@@ -622,19 +596,19 @@ fn primary(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, t: &le
         let fe = if f == NONE then NONE else c.child(it.base, f as usize, node_kinds.KIND_ENSURES);
         if fe != NONE { rc = fe; }
     }
-    if k == T_KW_SELF {
+    if k == terminals.T_KW_SELF {
         su.add(it.i, n, c.tstart[a]);
         return;
     }
-    if k == T_FMT {
+    if k == terminals.T_FMT_LIT {
         fmt(u, su, it, c, t, nm, set, a, n, rc, ens);
         return;
     }
-    let self_head = k == T_KW_SELF_TYPE;
-    if k != T_IDENT && !self_head { return; }
-    let call = c.tk(a + 1) == T_L_PAREN;
+    let self_head = k == terminals.T_KW_SELF_TYPE;
+    if k != terminals.T_IDENT && !self_head { return; }
+    let call = c.tk(a + 1) == terminals.T_L_PAREN;
     let mut pos = a + 1;
-    if k == T_IDENT && c.tk(a + 1) == T_COLON_COLON {
+    if k == terminals.T_IDENT && c.tk(a + 1) == terminals.T_COLON_COLON {
         let (e, partial) = angle_end(c, a + 2);
         if partial {
             tok_seg(u, c, a);
@@ -655,10 +629,10 @@ fn primary(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, t: &le
     } else {
         tok_seg(u, c, a);
     }
-    while c.tk(pos) == T_DOT && c.tk(pos + 1) == T_IDENT {
+    while c.tk(pos) == terminals.T_DOT && c.tk(pos + 1) == terminals.T_IDENT {
         tok_seg(u, c, pos + 1);
         pos = pos + 2;
-        if c.tk(pos) == T_COLON_COLON {
+        if c.tk(pos) == terminals.T_COLON_COLON {
             let (e, partial) = angle_end(c, pos + 1);
             if partial { break; }
             pos = e;
@@ -676,7 +650,7 @@ fn fmt(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, t: &lex.Tokens, nm: 
     let start = c.tstart[a] as usize;
     let hole_str = nm.hole_str.as_slice();
     let mut h = search.lower_bound(nm.hole_tok.as_slice(), a as% u32);
-    let call = c.tk(a + 1) == T_L_PAREN;
+    let call = c.tk(a + 1) == terminals.T_L_PAREN;
     let len = src.len();
     let mut j = start + 2;
     let mut segs = vec.Vec::<u32>.new();
@@ -748,7 +722,7 @@ fn is_idcont(b: u8) -> bool {
 // An identifier chain at row g keyed there.
 fn path_use(u: &mut Uses, it: Item, c: &Cols, g: usize, ns: u8, chain: &mut vec.Vec<u32>) {
     let a = c.tok[g] as usize;
-    if c.tk(a) != T_IDENT { return; }
+    if c.tk(a) != terminals.T_IDENT { return; }
     modules.ident_chain(c.tkind, a, chain);
     let ch = chain.as_slice();
     for k in 0..ch.len() {
@@ -791,7 +765,7 @@ fn fn_name(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, f: u32, file_en
     let mut name_tok = a + 1;
     let mut j = a;
     while j < a + 8 && j < file_end {
-        if kind_at(t, j) == T_KW_FN {
+        if kind_at(t, j) == terminals.T_KW_FN {
             name_tok = j + 1;
             break;
         }
@@ -811,13 +785,13 @@ fn pattern(u: &mut Uses, b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, roo
         let mut name_tok = NONE;
         if k == node_kinds.KIND_PATTERN {
             let ak = c.tk(a);
-            if ak == T_KW_MUT {
-                if c.tk(a + 1) == T_IDENT { name_tok = (a + 1) as% u32; }
-            } else if ak == T_IDENT {
+            if ak == terminals.T_KW_MUT {
+                if c.tk(a + 1) == terminals.T_IDENT { name_tok = (a + 1) as% u32; }
+            } else if ak == terminals.T_IDENT {
                 modules.ident_chain(c.tkind, a, chain);
                 let ch = chain.as_slice();
                 let e = ch[ch.len() - 1] as usize + 1;
-                let suffix = c.tk(e) == T_L_PAREN || c.tk(e) == T_DOT_L_BRACE;
+                let suffix = c.tk(e) == terminals.T_L_PAREN || c.tk(e) == terminals.T_DOT_L_BRACE;
                 if ch.len() == 1 && !suffix {
                     name_tok = a as% u32;
                 } else {
@@ -829,7 +803,7 @@ fn pattern(u: &mut Uses, b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, roo
                 }
             }
         } else if k == node_kinds.KIND_FIELD_PAT {
-            if c.tk(a) == T_IDENT && c.tk(a + 1) != T_COLON { name_tok = a as% u32; }
+            if c.tk(a) == terminals.T_IDENT && c.tk(a + 1) != terminals.T_COLON { name_tok = a as% u32; }
         }
         if name_tok == NONE { continue; }
         let s = c.tstr[name_tok as usize];
@@ -879,7 +853,7 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
                 primary(u, su, it, c, x, t, nm, set, g, rows, file);
             } else if k == node_kinds.KIND_TYPE_BASE {
                 let a = c.tok[g] as usize;
-                if c.tk(a) == T_KW_SELF_TYPE {
+                if c.tk(a) == terminals.T_KW_SELF_TYPE {
                     if x.con(g) == NONE { rows.add(resdiag.E0101, file, c.tstart[a], 4, NONE, 2, NONE); }
                 } else {
                     path_use(u, it, c, g, NS_TYPE, &mut chain);
@@ -895,7 +869,7 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
                     let ch = base + c.kids[j] as usize;
                     if c.kind[ch] != node_kinds.KIND_GENERIC_PARAM { continue; }
                     let a = c.tok[ch] as usize;
-                    let nt = if c.tk(a) == T_KW_CONST then a + 1 else a;
+                    let nt = if c.tk(a) == terminals.T_KW_CONST then a + 1 else a;
                     let s = c.tstr[nt];
                     let owner = x.parent(g) as usize;
                     b.add(it.i, C_GENERIC, s, sub_lo(c, it, g), rel(it, owner) - 1, rel(it, ch));
@@ -906,10 +880,10 @@ fn collect(u: &mut Uses, su: &mut SelfUses, b: &mut Binds, dups: &mut Dups, c: &
                     let ch = base + c.kids[j] as usize;
                     if c.kind[ch] != node_kinds.KIND_TAIL_BIND { continue; }
                     let a = c.tok[ch] as usize;
-                    if c.tk(a) != T_IDENT { continue; }
+                    if c.tk(a) != terminals.T_IDENT { continue; }
                     b.add(it.i, C_LOCAL, c.tstr[a], sub_lo(c, it, g), rel(it, g), rel(it, ch));
                 }
-            } else if k == node_kinds.KIND_STMT && c.tk(c.tok[g] as usize) == T_KW_LET {
+            } else if k == node_kinds.KIND_STMT && c.tk(c.tok[g] as usize) == terminals.T_KW_LET {
                 let p = c.first_kid(base, g);
                 if p != NONE {
                     let blk = x.parent(g) as usize;
@@ -953,7 +927,7 @@ fn param(b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, x: &CtxV, g: usize)
         return;
     }
     let a = c.tok[g] as usize;
-    if c.tk(a) != T_IDENT || owner == NONE { return; }
+    if c.tk(a) != terminals.T_IDENT || owner == NONE { return; }
     let s = c.tstr[a];
     b.add(it.i, C_LOCAL, s, rel(it, g) + 1, rel(it, owner as usize) - 1, rel(it, g));
     dups.add(rel(it, owner as usize), s, rel(it, g), c.tstart[a], c.str_len(s), it.i, x.fnl(g));
@@ -963,7 +937,7 @@ fn param(b: &mut Binds, dups: &mut Dups, it: Item, c: &Cols, x: &CtxV, g: usize)
 // parameter list's.
 fn origin(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, g: usize) {
     let a = c.tok[g] as usize;
-    let tk = if c.tk(a) == T_KW_COPY then a + 1 else a;
+    let tk = if c.tk(a) == terminals.T_KW_COPY then a + 1 else a;
     let mut pos = rel(it, g);
     let mut p = x.parent(g);
     while p != NONE && c.kind[p as usize] == node_kinds.KIND_FROM {
@@ -973,11 +947,11 @@ fn origin(u: &mut Uses, su: &mut SelfUses, it: Item, c: &Cols, x: &CtxV, g: usiz
         let q = x.parent(p as usize);
         pos = rel(it, x.parent(q as usize) as usize);
     }
-    if c.tk(tk) == T_KW_SELF {
+    if c.tk(tk) == terminals.T_KW_SELF {
         su.add(it.i, pos, c.tstart[tk]);
         return;
     }
-    if c.tk(tk) != T_IDENT { return; }
+    if c.tk(tk) != terminals.T_IDENT { return; }
     tok_seg(u, c, tk);
     u.end(it.i, rel(it, g), pos, NS_ORIGIN, 0, NONE);
 }
@@ -1290,7 +1264,7 @@ fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &
         if r == R_NONE && ns != NS_GLOBAL && v.generic[k] != NONE {
             id = bnode[v.generic[k] as usize];
             let ga = c.tok[base + id as usize] as usize;
-            r = if c.tk(ga) == T_KW_CONST then R_CONST_GENERIC else R_GENERIC;
+            r = if c.tk(ga) == terminals.T_KW_CONST then R_CONST_GENERIC else R_GENERIC;
         }
         if r == R_NONE {
             let (tag, gid) = ds.global(md, m, hs);
