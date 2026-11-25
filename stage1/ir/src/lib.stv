@@ -15,6 +15,7 @@
 //   verify     step 3: the verifier of untrusted modules (`vtypes`: what it knows of types)
 //   load       steps 1 to 3
 //   print      the printer
+//   canon      the canonical form: intrinsic names, blocks, values, pools, and types renumbered
 //   known      the compiler-known items (`generated.known_items`)
 //   generated.opt_table  the release optimizer's limits, weights, and op rows (opt.toml)
 //   errs       the faults of an input and their rendering

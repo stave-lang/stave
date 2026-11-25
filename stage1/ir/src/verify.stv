@@ -201,55 +201,10 @@ pub fn verify(ld: &mut read.Loaded) {
 }
 
 // The first type that is a component of itself or nests deeper than `MAX_DEPTH` (true), or
-// NONE: an iterative depth-first walk over key components.
+// NONE.
 fn well_formed(m: &model.Module) -> (u32, bool) {
-    let n = m.types.len();
-    let mut state = vec.Vec::<u8>.with_capacity(n);
-    let mut height = vec.Vec::<u32>.with_capacity(n);
-    for _ in 0..n {
-        state.push(0);
-        height.push(0);
-    }
-    let mut stk = vec.Vec::<u32>.new();
-    let mut idx = vec.Vec::<u32>.new();
-    let mut kids = vec.Vec::<u32>.new();
-    for root in 0..n {
-        if state.as_slice()[root] != 0 { continue; }
-        stk.push(root as% u32);
-        idx.push(0);
-        state.as_mut_slice()[root] = 1;
-        while stk.len() > 0 {
-            let top = stk.len() - 1;
-            let node = stk.as_slice()[top];
-            m.types.kids(node, &mut kids);
-            let k = idx.as_slice()[top] as usize;
-            if k < kids.len() {
-                idx.as_mut_slice()[top] = (k + 1) as% u32;
-                let c = kids.as_slice()[k];
-                let s = state.as_slice()[c as usize];
-                if s == 0 {
-                    state.as_mut_slice()[c as usize] = 1;
-                    stk.push(c);
-                    idx.push(0);
-                } else if s == 1 {
-                    return (c, false);
-                }
-            } else {
-                let mut h: u32 = 0;
-                for j in 0..kids.len() {
-                    let x = height.as_slice()[kids.as_slice()[j] as usize];
-                    if x > h { h = x; }
-                }
-                h = h + 1;
-                if h > vtypes.MAX_DEPTH { return (node, true); }
-                height.as_mut_slice()[node as usize] = h;
-                state.as_mut_slice()[node as usize] = 2;
-                stk.truncate(top);
-                idx.truncate(top);
-            }
-        }
-    }
-    return (NONE, false);
+    let mut height = vec.Vec::<u32>.new();
+    return m.types.heights(vtypes.MAX_DEPTH, &mut height);
 }
 
 // The address words of every static: ascending, non-overlapping, 8-aligned words inside zero

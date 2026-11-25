@@ -518,9 +518,60 @@ impl Table {
         return memo_get(mk.as_slice(), hs.as_slice(), ty);
     }
 
+    // The height of every type into `out` (one above its tallest component; 1 without
+    // components) and NONE, or the first type that is a component of itself (false) or nests
+    // deeper than max (true): an iterative depth-first walk over key components, which must
+    // name rows of the table.
+    pub fn heights(&self, max: u32, out: &mut vec.Vec<u32>) -> (u32, bool) {
+        let n = self.len();
+        let mut state = col.filled(n, 0u8);
+        *out = col.filled(n, 0u32);
+        let mut stk = vec.Vec::<u32>.new();
+        let mut idx = vec.Vec::<u32>.new();
+        let mut kids = vec.Vec::<u32>.new();
+        for root in 0..n {
+            if state.as_slice()[root] != 0 { continue; }
+            stk.push(root as% u32);
+            idx.push(0);
+            state.as_mut_slice()[root] = 1;
+            while stk.len() > 0 {
+                let top = stk.len() - 1;
+                let node = stk.as_slice()[top];
+                self.kids(node, &mut kids);
+                let k = idx.as_slice()[top] as usize;
+                if k < kids.len() {
+                    idx.as_mut_slice()[top] = (k + 1) as% u32;
+                    let c = kids.as_slice()[k];
+                    let s = state.as_slice()[c as usize];
+                    if s == 0 {
+                        state.as_mut_slice()[c as usize] = 1;
+                        stk.push(c);
+                        idx.push(0);
+                    } else if s == 1 {
+                        return (c, false);
+                    }
+                } else {
+                    let mut h: u32 = 0;
+                    for j in 0..kids.len() {
+                        let x = out.as_slice()[kids.as_slice()[j] as usize];
+                        if x > h { h = x; }
+                    }
+                    h = h + 1;
+                    if h > max { return (node, true); }
+                    out.as_mut_slice()[node as usize] = h;
+                    state.as_mut_slice()[node as usize] = 2;
+                    stk.truncate(top);
+                    idx.truncate(top);
+                }
+            }
+        }
+        return (NONE, false);
+    }
+
     // Canonical order of keys x and y whose components are ranked by `rank`: negative, 0, or
-    // positive.
-    pub fn cmp(&self, x: u32, y: u32, rank: &[u32]) -> i32 {
+    // positive. A const argument is an i128: a value (hi, lo words of a u64) or a row of the
+    // wide-int pool (wh, wl).
+    pub fn cmp(&self, x: u32, y: u32, rank: &[u32], wh: &[u64], wl: &[u64]) -> i32 {
         if x == y { return 0; }
         let tx = self.tag.as_slice()[x as usize];
         let ty = self.tag.as_slice()[y as usize];
@@ -544,12 +595,15 @@ impl Table {
         if tx == TK_ARRAY {
             let c = cmp_u32(rank[ax as usize], rank[ay as usize]);
             if c != 0 { return c; }
-            return cmp_args(xs, ys, rank);
+            return cmp_args(xs, ys, rank, wh, wl);
         }
         if tx == TK_SLICE || tx == TK_VECTOR || tx == TK_RANGE {
             let c = cmp_u32(rank[ax as usize], rank[ay as usize]);
             if c != 0 { return c; }
-            return cmp_u32(bx, by);
+            let d = cmp_u32(bx, by);
+            if d != 0 { return d; }
+            // a slice without alignment before `align 0` (one extra word)
+            return cmp_u32(xs.len() as% u32, ys.len() as% u32);
         }
         if tx == TK_TUPLE {
             return cmp_list(xs, ys, rank);
@@ -557,7 +611,7 @@ impl Table {
         if tx == TK_ADT {
             let c = cmp_u32(ax, ay);
             if c != 0 { return c; }
-            return cmp_args(xs, ys, rank);
+            return cmp_args(xs, ys, rank, wh, wl);
         }
         if tx == TK_FN {
             let c = cmp_list(&xs[0..ax as usize], &ys[0..ay as usize], rank);
@@ -580,6 +634,13 @@ impl Table {
     // by height: a round sorts the keys of its height (their components are ranked by the
     // earlier rounds) and merges them into the order so far.
     pub fn rank(&self, roots: &[u32]) -> (vec.Vec<u32>, vec.Vec<u32>) {
+        let no = vec.Vec::<u64>.new();
+        return self.rank_wide(roots, no.as_slice(), no.as_slice());
+    }
+
+    // `rank` of a table whose `adt` keys may hold const arguments outside u64: rows of the
+    // wide-int pool (wh, wl).
+    pub fn rank_wide(&self, roots: &[u32], wh: &[u64], wl: &[u64]) -> (vec.Vec<u32>, vec.Vec<u32>) {
         let n = self.len();
         let mut used = col.filled(n, false);
         let mut stack = vec.Vec::<u32>.new();
@@ -635,14 +696,14 @@ impl Table {
             if lo == hi { continue; }
             let mut round = vec.Vec::<u32>.new();
             round.extend_from_slice(&by_h.as_slice()[lo..hi]);
-            self.sort_ids(&mut round, num.as_slice(), &mut tmp);
+            self.sort_ids(&mut round, num.as_slice(), &mut tmp, wh, wl);
             merged.clear();
             let o = order.as_slice();
             let r = round.as_slice();
             let mut i: usize = 0;
             let mut j: usize = 0;
             while i < o.len() || j < r.len() {
-                if j == r.len() || (i < o.len() && self.cmp(o[i], r[j], num.as_slice()) <= 0) {
+                if j == r.len() || (i < o.len() && self.cmp(o[i], r[j], num.as_slice(), wh, wl) <= 0) {
                     merged.push(o[i]);
                     i = i + 1;
                 } else {
@@ -660,7 +721,7 @@ impl Table {
     }
 
     // Sorts ids by the canonical order (components ranked by `rank`): a bottom-up merge sort.
-    fn sort_ids(&self, ids: &mut vec.Vec<u32>, rank: &[u32], tmp: &mut vec.Vec<u32>) {
+    fn sort_ids(&self, ids: &mut vec.Vec<u32>, rank: &[u32], tmp: &mut vec.Vec<u32>, wh: &[u64], wl: &[u64]) {
         let n = ids.len();
         tmp.clear();
         tmp.extend_from_slice(ids.as_slice());
@@ -668,9 +729,9 @@ impl Table {
         let mut in_ids = true;
         while width < n {
             if in_ids {
-                self.merge_pass(ids.as_slice(), tmp.as_mut_slice(), width, rank);
+                self.merge_pass(ids.as_slice(), tmp.as_mut_slice(), width, rank, wh, wl);
             } else {
-                self.merge_pass(tmp.as_slice(), ids.as_mut_slice(), width, rank);
+                self.merge_pass(tmp.as_slice(), ids.as_mut_slice(), width, rank, wh, wl);
             }
             in_ids = !in_ids;
             width = width * 2;
@@ -682,7 +743,7 @@ impl Table {
     }
 
     // One pass of the merge sort: runs of `width` in src merged pairwise into dst.
-    fn merge_pass(&self, src: &[u32], dst: &mut [u32], width: usize, rank: &[u32]) {
+    fn merge_pass(&self, src: &[u32], dst: &mut [u32], width: usize, rank: &[u32], wh: &[u64], wl: &[u64]) {
         let n = src.len();
         let mut lo: usize = 0;
         while lo < n {
@@ -692,7 +753,7 @@ impl Table {
             let mut j = mid;
             let mut k = lo;
             while k < hi {
-                if j == hi || (i < mid && self.cmp(src[i], src[j], rank) <= 0) {
+                if j == hi || (i < mid && self.cmp(src[i], src[j], rank, wh, wl) <= 0) {
                     dst[k] = src[i];
                     i = i + 1;
                 } else {
@@ -754,10 +815,19 @@ fn cmp_list(xs: &[u32], ys: &[u32], rank: &[u32]) -> i32 {
     return cmp_u32(xs.len() as% u32, ys.len() as% u32);
 }
 
-// Generic argument lists (3 words each): kind, then a type by rank or a value by its words.
-fn cmp_args(xs: &[u32], ys: &[u32], rank: &[u32]) -> i32 {
+// Generic argument lists (3 words each): kind, then a type by rank or a value by its words; two
+// const arguments by their i128 values.
+fn cmp_args(xs: &[u32], ys: &[u32], rank: &[u32], wh: &[u64], wl: &[u64]) -> i32 {
     let mut k: usize = 0;
     while k + 2 < xs.len() && k + 2 < ys.len() {
+        let (cx, hx, lx) = const_arg(xs, k, wh, wl);
+        let (cy, hy, ly) = const_arg(ys, k, wh, wl);
+        if cx && cy {
+            if hx != hy { return if (hx as% i64) < (hy as% i64) then -1 else 1; }
+            if lx != ly { return if lx < ly then -1 else 1; }
+            k = k + 3;
+            continue;
+        }
         let c = cmp_u32(xs[k], ys[k]);
         if c != 0 { return c; }
         if xs[k] == GA_TYPE {
@@ -772,6 +842,15 @@ fn cmp_args(xs: &[u32], ys: &[u32], rank: &[u32]) -> i32 {
         k = k + 3;
     }
     return cmp_u32(xs.len() as% u32, ys.len() as% u32);
+}
+
+// Argument k of xs as an i128 (hi, lo) when it is a const value: a u64 value, or a row of the
+// wide-int pool (wh, wl).
+fn const_arg(xs: &[u32], k: usize, wh: &[u64], wl: &[u64]) -> (bool, u64, u64) {
+    if xs[k] == GA_VALUE { return (true, 0, ((xs[k + 1] as u64) << 32) | (xs[k + 2] as u64)); }
+    let w = xs[k + 1] as usize;
+    if xs[k] == GA_WIDE && w < wh.len() && w < wl.len() { return (true, wh[w], wl[w]); }
+    return (false, 0, 0);
 }
 
 // The value of key u in the pairs (ks, vs), or NONE.

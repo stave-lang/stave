@@ -4,7 +4,10 @@
 // these.
 import generated.ir_text_ll1_table;
 import generated.ir_text_terminals;
+import prims.col;
+import prims.ragged;
 import std.idx;
+import std.mem;
 import std.vec;
 
 const NONE: u32 = idx.NONE;
@@ -93,4 +96,42 @@ pub fn cmp_bytes(a: &[u8], b: &[u8]) -> i32 {
     }
     if a.len() == b.len() { return 0; }
     return if a.len() < b.len() then -1 else 1;
+}
+
+// The row ids `ids` of `rows` ordered by the rows' bytes, equal rows in the order of `ids`: a
+// bottom-up merge sort.
+pub fn sort_rows(rows: &ragged.Ragged<u8>, ids: vec.Vec<u32>) -> vec.Vec<u32> {
+    let n = ids.len();
+    let mut a = ids;
+    let mut b = col.filled(n, 0u32);
+    let mut w: usize = 1;
+    while w < n {
+        {
+            let src = a.as_slice();
+            let dst = b.as_mut_slice();
+            let mut lo: usize = 0;
+            while lo < n {
+                let mid = if n - lo < w then n else lo + w;
+                let hi = if n - mid < w then n else mid + w;
+                let mut x = lo;
+                let mut y = mid;
+                let mut k = lo;
+                while k < hi {
+                    let take_y = y < hi && (x >= mid || cmp_bytes(rows.row(src[y] as usize), rows.row(src[x] as usize)) < 0);
+                    if take_y {
+                        dst[k] = src[y];
+                        y = y + 1;
+                    } else {
+                        dst[k] = src[x];
+                        x = x + 1;
+                    }
+                    k = k + 1;
+                }
+                lo = hi;
+            }
+        }
+        mem.swap(&mut a, &mut b);
+        w = w * 2;
+    }
+    return a;
 }

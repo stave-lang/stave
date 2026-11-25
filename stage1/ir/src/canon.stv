@@ -1,0 +1,547 @@
+// The canonical form of a module (contracts/checked-ir.md "Canonical module"): ids and row orders
+// decided by a stated rule, not by the order in which the reader or a pass built the rows.
+//
+// - Intrinsic names: those the kept instructions use, each once, sorted by bytes.
+// - Blocks of a body: those reachable from b0, in stored order, numbered densely from 0. The
+//   others and their instructions are dropped.
+// - Values: dense from 0 in block order, per block its params, then its instruction results. A
+//   value no kept block defines but one uses (malformed input only) is numbered after the
+//   defined ones, in order of first use.
+// - Rows in print order: per block its instructions; per instruction its operands, then the
+//   terminator's tested or returned operand, then each target's operands (cases, then the
+//   default). Each body's constant pool holds one entry per distinct constant (kind and bits),
+//   numbered by its first operand in that order.
+// - Types: the P set (the closure over key components of the types the fns with a body use:
+//   their signatures and type arguments, values, instruction results, type operands) ranked in
+//   the canonical key order, then the S set (the other types that the shapes of kept types, the
+//   statics, and the bodiless fns' signatures reach over components and shapes) ranked the
+//   same way. No other type is kept and every type id is rewritten. The decls kept are those a
+//   kept `adt` key or `cell` names. A type table that is not well formed is left as it is.
+//
+// Fns keep their ids: the reader ranks them by instance id, and no pass adds or removes one.
+// Strings, sites, statics, claims, and the stack section are canonical as read and are not
+// changed; the model has no borrow side table. Canonicalizing twice changes nothing.
+import grammar;
+import model;
+import types;
+import umap;
+import vtypes;
+import generated.ir_text_terminals;
+import prims.col;
+import prims.perm;
+import prims.ragged;
+import prims.select;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+pub fn canon(m: &mut model.Module) {
+    let mut reach = col.filled(m.blk_tkind.len(), false);
+    for f in 0..m.fns() {
+        if !m.has_body(f) { continue; }
+        let lo = m.fn_blk_lo.as_slice()[f] as usize;
+        let seen = reached(&*m, lo, m.fn_blk_n.as_slice()[f] as usize);
+        for k in 0..seen.len() {
+            reach.as_mut_slice()[lo + k] = seen.as_slice()[k];
+        }
+    }
+    intrinsics(m, reach.as_slice());
+    let mut o = rebuilt(&*m, reach.as_slice());
+    take_bodies(m, &mut o);
+    type_table(m);
+}
+
+// Per block of the body whose blocks are lo..lo + nb: whether it is reachable from the first.
+// A target outside the body leads nowhere.
+pub fn reached(m: &model.Module, lo: usize, nb: usize) -> vec.Vec<bool> {
+    let mut seen = col.filled(nb, false);
+    let mut stack = vec.Vec::<u32>.new();
+    if nb > 0 {
+        seen.as_mut_slice()[0] = true;
+        stack.push(0);
+    }
+    while stack.len() > 0 {
+        let x = stack.as_slice()[stack.len() - 1] as usize;
+        stack.truncate(stack.len() - 1);
+        let tl = m.blk_tgt_lo.as_slice()[lo + x] as usize;
+        let tn = m.blk_tgt_n.as_slice()[lo + x] as usize;
+        for g in tl..tl + tn {
+            let y = m.tgt_blk.as_slice()[g] as usize;
+            if y < nb && !seen.as_slice()[y] {
+                seen.as_mut_slice()[y] = true;
+                stack.push(y as% u32);
+            }
+        }
+    }
+    return seen;
+}
+
+// The intrinsic table of the names the kept instructions use, and their `ins_intr` rewritten.
+fn intrinsics(m: &mut model.Module, reach: &[bool]) {
+    let rows = m.intr.rows();
+    let intr = ir_text_terminals.IR_T_INTR;
+    let mut used = col.filled(rows, false);
+    for b in 0..reach.len() {
+        if !reach[b] { continue; }
+        let il = m.blk_ins_lo.as_slice()[b] as usize;
+        for i in il..il + m.blk_ins_n.as_slice()[b] as usize {
+            let x = m.ins_intr.as_slice()[i] as usize;
+            if m.ins_op.as_slice()[i] == intr && x < rows { used.as_mut_slice()[x] = true; }
+        }
+    }
+    let mut ids = vec.Vec::<u32>.new();
+    for r in 0..rows {
+        if used.as_slice()[r] { ids.push(r as% u32); }
+    }
+    let order = grammar.sort_rows(&m.intr, ids);
+    let mut to = col.filled(rows, NONE);
+    let mut names = ragged.Ragged::<u8>.new();
+    for k in 0..order.len() {
+        let r = order.as_slice()[k] as usize;
+        let n = names.rows();
+        if n == 0 || !names.row(n - 1).eq(m.intr.row(r)) { names.push_row(m.intr.row(r)); }
+        to.as_mut_slice()[r] = (names.rows() - 1) as% u32;
+    }
+    m.intr = names;
+    for i in 0..m.ins_op.len() {
+        if m.ins_op.as_slice()[i] != intr { continue; }
+        let x = m.ins_intr.as_slice()[i] as usize;
+        m.ins_intr.as_mut_slice()[i] = if x < rows then to.as_slice()[x] else NONE;
+    }
+}
+
+// The body columns of every fn rewritten by the block, value, and row rules, in FuncId order,
+// in the columns of a module that holds nothing else.
+fn rebuilt(m: &model.Module, reach: &[bool]) -> model.Module {
+    let mut o = model.Module.new();
+    let mut rw = Rewrite.{ block_num: vec.Vec::<u32>.new(), value_num: vec.Vec::<u32>.new(), pool: umap.Map.new(), pool64: umap.Map.new(), vlo: 0, nv: 0, val0: 0, clo: 0, nc: 0, c0: 0 };
+    for f in 0..m.fns() {
+        let blk0 = o.blk_tkind.len();
+        let val0 = o.val_ty.len();
+        let c0 = o.const_kind.len();
+        o.fn_blk_lo.push(blk0 as% u32);
+        o.fn_val_lo.push(val0 as% u32);
+        o.fn_const_lo.push(c0 as% u32);
+        if m.has_body(f) { rw.body(m, reach, f, &mut o); }
+        o.fn_blk_n.push((o.blk_tkind.len() - blk0) as% u32);
+        o.fn_val_n.push((o.val_ty.len() - val0) as% u32);
+        o.fn_const_n.push((o.const_kind.len() - c0) as% u32);
+    }
+    return o;
+}
+
+// Moves the body columns of o into m.
+fn take_bodies(m: &mut model.Module, o: &mut model.Module) {
+    mem.swap(&mut m.fn_blk_lo, &mut o.fn_blk_lo);
+    mem.swap(&mut m.fn_blk_n, &mut o.fn_blk_n);
+    mem.swap(&mut m.fn_val_lo, &mut o.fn_val_lo);
+    mem.swap(&mut m.fn_val_n, &mut o.fn_val_n);
+    mem.swap(&mut m.fn_const_lo, &mut o.fn_const_lo);
+    mem.swap(&mut m.fn_const_n, &mut o.fn_const_n);
+    mem.swap(&mut m.blk_val_lo, &mut o.blk_val_lo);
+    mem.swap(&mut m.blk_param_n, &mut o.blk_param_n);
+    mem.swap(&mut m.blk_ins_lo, &mut o.blk_ins_lo);
+    mem.swap(&mut m.blk_ins_n, &mut o.blk_ins_n);
+    mem.swap(&mut m.blk_tkind, &mut o.blk_tkind);
+    mem.swap(&mut m.blk_topnd, &mut o.blk_topnd);
+    mem.swap(&mut m.blk_tgt_lo, &mut o.blk_tgt_lo);
+    mem.swap(&mut m.blk_tgt_n, &mut o.blk_tgt_n);
+    mem.swap(&mut m.val_ty, &mut o.val_ty);
+    mem.swap(&mut m.ins_op, &mut o.ins_op);
+    mem.swap(&mut m.ins_intr, &mut o.ins_intr);
+    mem.swap(&mut m.ins_ty, &mut o.ins_ty);
+    mem.swap(&mut m.ins_res, &mut o.ins_res);
+    mem.swap(&mut m.ins_opnd_lo, &mut o.ins_opnd_lo);
+    mem.swap(&mut m.ins_opnd_n, &mut o.ins_opnd_n);
+    mem.swap(&mut m.ins_site, &mut o.ins_site);
+    mem.swap(&mut m.opnd_kind, &mut o.opnd_kind);
+    mem.swap(&mut m.opnd_id, &mut o.opnd_id);
+    mem.swap(&mut m.tgt_blk, &mut o.tgt_blk);
+    mem.swap(&mut m.tgt_opnd_lo, &mut o.tgt_opnd_lo);
+    mem.swap(&mut m.tgt_opnd_n, &mut o.tgt_opnd_n);
+    mem.swap(&mut m.tgt_case, &mut o.tgt_case);
+    mem.swap(&mut m.const_kind, &mut o.const_kind);
+    mem.swap(&mut m.const_bits, &mut o.const_bits);
+}
+
+// The rewrite of one body: its block and value maps, its constant pool by (kind, bits) (f64
+// bits apart: they fill the key), and where its rows start in the old and the new columns.
+struct Rewrite {
+    block_num: vec.Vec<u32>,
+    value_num: vec.Vec<u32>,
+    pool: umap.Map,
+    pool64: umap.Map,
+    vlo: usize,
+    nv: u32,
+    val0: usize,
+    clo: usize,
+    nc: u32,
+    c0: usize,
+}
+
+impl Rewrite {
+    // Appends the canonical body of fn f to o.
+    fn body(&mut self, m: &model.Module, reach: &[bool], f: usize, o: &mut model.Module) {
+        let blo = m.fn_blk_lo.as_slice()[f] as usize;
+        let nb = m.fn_blk_n.as_slice()[f] as usize;
+        self.vlo = m.fn_val_lo.as_slice()[f] as usize;
+        self.nv = m.fn_val_n.as_slice()[f];
+        self.clo = m.fn_const_lo.as_slice()[f] as usize;
+        self.nc = m.fn_const_n.as_slice()[f];
+        self.val0 = o.val_ty.len();
+        self.c0 = o.const_kind.len();
+        self.pool.reset();
+        self.pool64.reset();
+        self.block_num = col.filled(nb, NONE);
+        let mut kept: u32 = 0;
+        for k in 0..nb {
+            if reach[blo + k] {
+                self.block_num.as_mut_slice()[k] = kept;
+                kept = kept + 1;
+            }
+        }
+        // values defined by kept blocks, in print order
+        self.value_num = col.filled(self.nv as usize, NONE);
+        let mut first = vec.Vec::<u32>.new();
+        for k in 0..nb {
+            let b = blo + k;
+            if !reach[b] { continue; }
+            first.push((o.val_ty.len() - self.val0) as% u32);
+            let pv = m.blk_val_lo.as_slice()[b];
+            for j in 0..m.blk_param_n.as_slice()[b] {
+                self.define(m, o, pv + j);
+            }
+            let il = m.blk_ins_lo.as_slice()[b] as usize;
+            for i in il..il + m.blk_ins_n.as_slice()[b] as usize {
+                let r = m.ins_res.as_slice()[i];
+                if r != NONE { self.define(m, o, r); }
+            }
+        }
+        let mut kb: usize = 0;
+        for k in 0..nb {
+            let b = blo + k;
+            if !reach[b] { continue; }
+            o.blk_val_lo.push(first.as_slice()[kb]);
+            kb = kb + 1;
+            o.blk_param_n.push(m.blk_param_n.as_slice()[b]);
+            o.blk_ins_lo.push(o.ins_op.len() as% u32);
+            let il = m.blk_ins_lo.as_slice()[b] as usize;
+            let inn = m.blk_ins_n.as_slice()[b];
+            for i in il..il + inn as usize {
+                let olo = o.opnd_kind.len() as% u32;
+                let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+                let on = m.ins_opnd_n.as_slice()[i];
+                for x in ol..ol + on as usize {
+                    self.operand(m, o, x);
+                }
+                let r = m.ins_res.as_slice()[i];
+                let res = if r == NONE then NONE else self.value(m, o, r);
+                o.ins_op.push(m.ins_op.as_slice()[i]);
+                o.ins_intr.push(m.ins_intr.as_slice()[i]);
+                o.ins_ty.push(m.ins_ty.as_slice()[i]);
+                o.ins_res.push(res);
+                o.ins_opnd_lo.push(olo);
+                o.ins_opnd_n.push(on);
+                o.ins_site.push(m.ins_site.as_slice()[i]);
+            }
+            o.blk_ins_n.push(inn);
+            o.blk_tkind.push(m.blk_tkind.as_slice()[b]);
+            let top = m.blk_topnd.as_slice()[b];
+            if top == NONE {
+                o.blk_topnd.push(NONE);
+            } else {
+                o.blk_topnd.push(o.opnd_kind.len() as% u32);
+                self.operand(m, o, top as usize);
+            }
+            let tglo = o.tgt_blk.len() as% u32;
+            let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+            for g in tl..tl + m.blk_tgt_n.as_slice()[b] as usize {
+                let olo = o.opnd_kind.len() as% u32;
+                let ol = m.tgt_opnd_lo.as_slice()[g] as usize;
+                let on = m.tgt_opnd_n.as_slice()[g];
+                for x in ol..ol + on as usize {
+                    self.operand(m, o, x);
+                }
+                let y = m.tgt_blk.as_slice()[g] as usize;
+                o.tgt_blk.push(if y < nb then self.block_num.as_slice()[y] else NONE);
+                o.tgt_opnd_lo.push(olo);
+                o.tgt_opnd_n.push(on);
+                o.tgt_case.push(m.tgt_case.as_slice()[g]);
+            }
+            o.blk_tgt_lo.push(tglo);
+            o.blk_tgt_n.push(o.tgt_blk.len() as% u32 - tglo);
+        }
+    }
+
+    // Numbers old value v at its first definition; a value past the fn's values is numbered
+    // where it is used.
+    fn define(&mut self, m: &model.Module, o: &mut model.Module, v: u32) {
+        if v < self.nv && self.value_num.as_slice()[v as usize] == NONE {
+            self.value_num.as_mut_slice()[v as usize] = (o.val_ty.len() - self.val0) as% u32;
+            o.val_ty.push(m.val_ty.as_slice()[self.vlo + v as usize]);
+        }
+    }
+
+    // The new number of old value v: a value no kept block defines gets the next one, once per
+    // value of the fn, at each use past them (without a type).
+    fn value(&mut self, m: &model.Module, o: &mut model.Module, v: u32) -> u32 {
+        if v < self.nv {
+            let n = self.value_num.as_slice()[v as usize];
+            if n != NONE { return n; }
+        }
+        let n = (o.val_ty.len() - self.val0) as% u32;
+        if v < self.nv {
+            self.value_num.as_mut_slice()[v as usize] = n;
+            o.val_ty.push(m.val_ty.as_slice()[self.vlo + v as usize]);
+        } else {
+            o.val_ty.push(NONE);
+        }
+        return n;
+    }
+
+    // Appends old operand row x, its value or pool entry renumbered.
+    fn operand(&mut self, m: &model.Module, o: &mut model.Module, x: usize) {
+        let kind = m.opnd_kind.as_slice()[x];
+        let id = m.opnd_id.as_slice()[x];
+        let mut nid = id;
+        if kind == model.O_VALUE {
+            nid = self.value(m, o, id);
+        } else if kind == model.O_CONST {
+            nid = NONE;
+            if id < self.nc {
+                let c = self.clo + id as usize;
+                let ck = m.const_kind.as_slice()[c];
+                let bits = m.const_bits.as_slice()[c];
+                let next = (o.const_kind.len() - self.c0) as% u32;
+                nid = if ck == model.C_F64 then self.pool64.insert(bits, next) else self.pool.insert(((ck as u64) << 32) | bits, next);
+                if nid == next {
+                    o.const_kind.push(ck);
+                    o.const_bits.push(bits);
+                }
+            }
+        }
+        o.opnd_kind.push(kind);
+        o.opnd_id.push(nid);
+    }
+}
+
+// The type rule: P, then S, each in the canonical key order; then the decls the kept keys name.
+fn type_table(m: &mut model.Module) {
+    let n = m.types.len();
+    let mut kids = vec.Vec::<u32>.new();
+    for t in 0..n {
+        m.types.kids(t as% u32, &mut kids);
+        for k in 0..kids.len() {
+            if kids.as_slice()[k] as usize >= n { return; }
+        }
+    }
+    let mut height = vec.Vec::<u32>.new();
+    let (bad, _) = m.types.heights(vtypes.MAX_DEPTH, &mut height);
+    if bad != NONE { return; }
+    let mut shape_of = col.filled(n, NONE);
+    for s in 0..m.shape_ty.len() {
+        let t = m.shape_ty.as_slice()[s] as usize;
+        if t < n { shape_of.as_mut_slice()[t] = s as% u32; }
+    }
+
+    let mut seeds = vec.Vec::<u32>.new();
+    for f in 0..m.fns() {
+        if m.has_body(f) { signature(&*m, f, &mut seeds); }
+    }
+    seeds.extend_from_slice(m.val_ty.as_slice());
+    seeds.extend_from_slice(m.ins_ty.as_slice());
+    for x in 0..m.opnd_kind.len() {
+        if m.opnd_kind.as_slice()[x] == model.O_TYPE { seeds.push(m.opnd_id.as_slice()[x]); }
+    }
+    let mut in_p = col.filled(n, false);
+    close(&*m, &mut seeds, in_p.as_mut_slice(), shape_of.as_slice(), false);
+    for t in 0..n {
+        if in_p.as_slice()[t] { seeds.push(t as% u32); }
+    }
+    seeds.extend_from_slice(m.st_ty.as_slice());
+    for f in 0..m.fns() {
+        if !m.has_body(f) { signature(&*m, f, &mut seeds); }
+    }
+    let mut in_all = col.filled(n, false);
+    close(&*m, &mut seeds, in_all.as_mut_slice(), shape_of.as_slice(), true);
+
+    m.types.height = height;
+    let mut roots = vec.Vec::<u32>.new();
+    for t in 0..n {
+        if in_all.as_slice()[t] { roots.push(t as% u32); }
+    }
+    let (_, ranked) = m.types.rank_wide(roots.as_slice(), m.wide.hi.as_slice(), m.wide.lo.as_slice());
+    let mut order = vec.Vec::<u32>.with_capacity(ranked.len());
+    for k in 0..ranked.len() {
+        let t = ranked.as_slice()[k];
+        if in_p.as_slice()[t as usize] { order.push(t); }
+    }
+    for k in 0..ranked.len() {
+        let t = ranked.as_slice()[k];
+        if !in_p.as_slice()[t as usize] { order.push(t); }
+    }
+    let mut same = order.len() == n;
+    for k in 0..order.len() {
+        if order.as_slice()[k] as usize != k { same = false; }
+    }
+    if !same { renumber(m, order.as_slice(), shape_of.as_slice()); }
+
+    let mut named = umap.Map.new();
+    if m.cell != NONE { let _ = named.insert(m.cell as u64, 0); }
+    for t in 0..m.types.len() {
+        let id = t as% u32;
+        if m.types.tag_of(id) == types.TK_ADT { let _ = named.insert(m.types.a_of(id) as u64, 0); }
+    }
+    let mut keep = col.filled(m.decl_id.len(), false);
+    let mut all = true;
+    for d in 0..m.decl_id.len() {
+        let k = named.get(m.decl_id.as_slice()[d] as u64) != NONE;
+        keep.as_mut_slice()[d] = k;
+        if !k { all = false; }
+    }
+    if all { return; }
+    let mut path = ragged.Ragged::<u8>.new();
+    for d in 0..m.decl_id.len() {
+        if keep.as_slice()[d] { path.push_row(m.decl_path.row(d)); }
+    }
+    let decl_id = select.select(m.decl_id.as_slice(), keep.as_slice());
+    let decl_kind = select.select(m.decl_kind.as_slice(), keep.as_slice());
+    m.decl_id = decl_id;
+    m.decl_kind = decl_kind;
+    m.decl_path = path;
+}
+
+// The type ids of fn f's signature: type arguments, params, result.
+fn signature(m: &model.Module, f: usize, out: &mut vec.Vec<u32>) {
+    let ta = m.fn_targ.row(f);
+    let mut k: usize = 0;
+    while k + 1 < ta.len() {
+        if ta[k] == model.GARG_TYPE { out.push(ta[k + 1]); }
+        k = k + 2;
+    }
+    out.extend_from_slice(m.fn_params.row(f));
+    out.push(m.fn_ret.as_slice()[f]);
+}
+
+// Marks in `set` every type the seeds reach over key components, and with `shapes` over the
+// fields of their shapes too; empties `seeds`. Ids past the table (NONE: no type) are ignored.
+fn close(m: &model.Module, seeds: &mut vec.Vec<u32>, set: &mut [bool], shape_of: &[u32], shapes: bool) {
+    let mut kids = vec.Vec::<u32>.new();
+    while seeds.len() > 0 {
+        let t = seeds.as_slice()[seeds.len() - 1];
+        seeds.truncate(seeds.len() - 1);
+        if t as usize >= set.len() || set[t as usize] { continue; }
+        set[t as usize] = true;
+        m.types.kids(t, &mut kids);
+        seeds.extend_from_slice(kids.as_slice());
+        let s = shape_of[t as usize];
+        if shapes && s != NONE {
+            let vars = m.shape_vars.row(s as usize);
+            for v in 0..vars.len() {
+                seeds.extend_from_slice(m.var_fields.row(vars[v] as usize));
+            }
+        }
+    }
+}
+
+// Keeps the types `order` lists, `order[k]` becoming `t<k>`, and rewrites every type id of the
+// module; shapes follow their types (ascending by the new id).
+fn renumber(m: &mut model.Module, order: &[u32], shape_of: &[u32]) {
+    let n = m.types.len();
+    let mut map = col.filled(n, NONE);
+    for k in 0..order.len() {
+        map.as_mut_slice()[order[k] as usize] = k as% u32;
+    }
+    let mp = map.as_slice();
+    let mut tab = types.Table.new();
+    for k in 0..order.len() {
+        let t = order[k];
+        let tag = m.types.tag_of(t);
+        let mut a = m.types.a_of(t);
+        let mut b = m.types.b_of(t);
+        let xs = m.types.x(t);
+        tab.begin();
+        if tag == types.TK_REF || tag == types.TK_PTR {
+            b = map_ty(mp, b);
+        } else if tag == types.TK_ARRAY || tag == types.TK_SLICE || tag == types.TK_VECTOR || tag == types.TK_RANGE {
+            a = map_ty(mp, a);
+        }
+        let comps = if tag == types.TK_TUPLE then xs.len() else if tag == types.TK_FN then a as usize + 1 else 0usize;
+        for j in 0..xs.len() {
+            let adt_type = tag == types.TK_ADT && j % 3 == 1 && xs[j - 1] == types.GA_TYPE;
+            tab.push(if j < comps || adt_type then map_ty(mp, xs[j]) else xs[j]);
+        }
+        let _ = tab.push_raw(tag, a, b);
+    }
+    tab.height = perm.gather(m.types.height.as_slice(), order);
+    let _ = tab.first_equal();
+    m.types = tab;
+
+    let mut targ = ragged.Ragged::<u32>.new();
+    for f in 0..m.fns() {
+        let ta = m.fn_targ.row(f);
+        for k in 0..ta.len() {
+            let ty = k % 2 == 1 && ta[k - 1] == model.GARG_TYPE;
+            targ.push(if ty then map_ty(mp, ta[k]) else ta[k]);
+        }
+        targ.end_row();
+    }
+    m.fn_targ = targ;
+    let mut params = ragged.Ragged::<u32>.new();
+    for f in 0..m.fns() {
+        let ps = m.fn_params.row(f);
+        for k in 0..ps.len() {
+            params.push(map_ty(mp, ps[k]));
+        }
+        params.end_row();
+    }
+    m.fn_params = params;
+    map_all(mp, m.fn_ret.as_mut_slice());
+    map_all(mp, m.val_ty.as_mut_slice());
+    map_all(mp, m.ins_ty.as_mut_slice());
+    map_all(mp, m.st_ty.as_mut_slice());
+    for x in 0..m.opnd_kind.len() {
+        if m.opnd_kind.as_slice()[x] == model.O_TYPE {
+            let t = m.opnd_id.as_slice()[x];
+            m.opnd_id.as_mut_slice()[x] = map_ty(mp, t);
+        }
+    }
+
+    let mut shape_ty = vec.Vec::<u32>.new();
+    let mut shape_kind = vec.Vec::<u8>.new();
+    let mut shape_vars = ragged.Ragged::<u32>.new();
+    let mut var_fields = ragged.Ragged::<u32>.new();
+    for k in 0..order.len() {
+        let s = shape_of[order[k] as usize];
+        if s == NONE { continue; }
+        shape_ty.push(k as% u32);
+        shape_kind.push(m.shape_kind.as_slice()[s as usize]);
+        let vars = m.shape_vars.row(s as usize);
+        for v in 0..vars.len() {
+            shape_vars.push(var_fields.rows() as% u32);
+            let fs = m.var_fields.row(vars[v] as usize);
+            for j in 0..fs.len() {
+                var_fields.push(map_ty(mp, fs[j]));
+            }
+            var_fields.end_row();
+        }
+        shape_vars.end_row();
+    }
+    m.shape_ty = shape_ty;
+    m.shape_kind = shape_kind;
+    m.shape_vars = shape_vars;
+    m.var_fields = var_fields;
+}
+
+// Type t through map; an id past it (NONE: no type) maps to NONE.
+fn map_ty(map: &[u32], t: u32) -> u32 {
+    return if (t as usize) < map.len() then map[t as usize] else NONE;
+}
+
+fn map_all(map: &[u32], ts: &mut [u32]) {
+    for i in 0..ts.len() {
+        ts[i] = map_ty(map, ts[i]);
+    }
+}
