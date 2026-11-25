@@ -36,15 +36,16 @@ import prims.col;
 import prims.ragged;
 import prims.search;
 import prims.sort;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 
 pub const H_NONE: u64 = 0;
-const H_ADT: u64 = 4611686018427387904;
-const H_PRIM: u64 = 9223372036854775808;
+const H_ADT: u64 = 0x4000_0000_0000_0000;
+const H_PRIM: u64 = 0x8000_0000_0000_0000;
 
 // The operator traits of `std.core`, in a fixed order (`builtin_op`).
 const OPS: &str = "Add WrapAdd SatAdd Sub WrapSub SatSub Mul WrapMul SatMul Div Rem Shl WrapShl Shr BitAnd BitOr BitXor Neg Not";
@@ -172,10 +173,10 @@ pub fn head_text(tab: &types.Table, h: u64, buf: &mut vec.Vec<u8>) {
     }
     if h & H_PRIM == 0 {
         buf.push(100);
-        push_u32(buf, (h & 4294967295) as% u32);
+        push_u32(buf, (h & 0xffff_ffff) as% u32);
         return;
     }
-    let t = (h & 4294967295) as% u32;
+    let t = (h & 0xffff_ffff) as% u32;
     let tag = tab.tag_of(t);
     if tag == types.TK_VECTOR {
         scalar_name(tab, tab.a_of(t), buf);

@@ -1,11 +1,11 @@
 // xxHash32 (Yann Collet's reference algorithm, little-endian reads): the same 32 bits as
 // `XXH32(data, len, seed)` for every input. Names and literals are interned by this hash.
 
-const P1: u32 = 2654435761;
-const P2: u32 = 2246822519;
-const P3: u32 = 3266489917;
-const P4: u32 = 668265263;
-const P5: u32 = 374761393;
+const P1: u32 = 0x9e37_79b1;
+const P2: u32 = 0x85eb_ca77;
+const P3: u32 = 0xc2b2_ae3d;
+const P4: u32 = 0x27d4_eb2f;
+const P5: u32 = 0x1656_67b1;
 
 // Rotate left by r, 0 < r < 32.
 fn rotl(x: u32, r: u32) -> u32 {

@@ -26,17 +26,18 @@ import tc_builtins;
 import tc_traits;
 import types;
 import prims.sort;
+import std.idx;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 // A node, hint, or binding not decided by this stage.
 pub const UNK: u32 = tc_builtins.UNK;
 // `LIT | g`: the value of literal group g.
-pub const LIT: u32 = 2147483648;
+pub const LIT: u32 = 0x8000_0000;
 // The `Self` of a call of a trait method named through its trait or a generic param (`Tr.m(..)`,
 // `T.m(..)`): a binding of the call after the method's generics, and every argument is passed.
-pub const SELF_VAR: u32 = 4294967038;
+pub const SELF_VAR: u32 = 0xffff_fefe;
 // The nesting a body may have: expression nodes, blocks, and patterns nested deeper than this
 // are E0005 case `expr`, an error.
 pub const MAX_DEPTH: u32 = 20000;

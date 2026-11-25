@@ -68,7 +68,7 @@ const SELF_VAR: u32 = tc_rows.SELF_VAR;
 
 // The callee of a call through a fn value (on its `Args` row: the fn type in `pos`); no decl or
 // built-in has this id.
-const FN_VALUE: u32 = 4294967039;
+const FN_VALUE: u32 = 0xffff_feff;
 
 // The chain step waiting for the child being checked: none, generic arguments, a call's arguments,
 // an index, a struct literal.
