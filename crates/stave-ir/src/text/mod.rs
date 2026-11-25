@@ -3,14 +3,16 @@
 //!
 //! - [`print`]: [`print_module`] prints a module as the gate form of the text, or as the emit
 //!   form when it is given the stack section; [`print_checked`] prints a bare module, for callers
-//!   that have no target, mode, or stack section (tests, debugging). [`spell`]: what the printer
-//!   refuses, a module whose text would not load.
+//!   that have no target, mode, or stack section (tests, debugging); `body_text` prints one
+//!   body with the names a caller chooses (the duplicate form, [`crate::form`]). [`spell`]: what
+//!   the printer refuses, a module whose text would not load.
 //! - [`lex`]: one line to tokens (bytes, any input).
 //! - [`line`]: one line parsed on the generated LL(1) table and typed; no line looks at another,
 //!   so lines can be parsed in parallel.
 //! - [`build`]: the structure pass over the parsed lines and the module build.
-//! - [`read`]: lines, structure, then verification (type table, statics, every fn) and the
-//!   bounds audit. A module that fails any step is never returned.
+//! - [`read`]: lines, structure, then verification (type table, statics, every fn) and, at
+//!   levels `lowered` and `checked`, the bounds audit. A module that fails any step is never
+//!   returned.
 
 mod build;
 mod lex;
@@ -20,6 +22,7 @@ mod spell;
 
 use std::fmt;
 
+pub(crate) use print::{BodyNames, body_text};
 pub use print::{print_checked, print_module};
 use stave_target::Triple;
 
@@ -213,7 +216,8 @@ impl fmt::Display for ReadError {
 }
 
 /// Reads IR text: every step of contracts/checked-ir.md "Loading" the reader owns (lines,
-/// structure, verification, audit), each only when the one before had no error.
+/// structure, verification, the audit at levels `lowered` and `checked`), each only when the one
+/// before had no error.
 pub fn read(src: &[u8]) -> Result<Loaded, Vec<ReadError>> {
     let mut errs = Vec::new();
     let mut lines = Vec::new();
@@ -236,7 +240,11 @@ pub fn read(src: &[u8]) -> Result<Loaded, Vec<ReadError>> {
     let built = build::structure(lines)?;
     let loaded = lay_out_statics(built)?;
     verify(&loaded)?;
-    audit(&loaded)?;
+    // The release passes inline calls and substitute arguments for params, and the audit takes
+    // its facts from calls and params: level `opt` is trusted as their output, not audited.
+    if loaded.header.level != Level::Opt {
+        audit(&loaded)?;
+    }
     Ok(loaded)
 }
 
@@ -314,7 +322,7 @@ fn verify(l: &Loaded) -> Result<(), Vec<ReadError>> {
         Err(es) => return Err(es.iter().map(|e| locate(l, e)).take(MAX_ERRORS).collect()),
     };
     for f in 0..m.funcs.len() {
-        errs.extend(verify_func_body(m, FuncId(f as u32)));
+        errs.extend(verify_func_body(m, FuncId(f as u32), l.header.level));
         if errs.len() >= MAX_ERRORS {
             break;
         }
@@ -325,8 +333,8 @@ fn verify(l: &Loaded) -> Result<(), Vec<ReadError>> {
     if errs.is_empty() { Ok(()) } else { Err(errs.iter().map(|e| locate(l, e)).take(MAX_ERRORS).collect()) }
 }
 
-/// Step 5: the bounds audit of every fn, reading calls by the loaded `claim` rows (levels
-/// `checked` and `opt`) or by the summaries computed from the bodies (`lowered`).
+/// Step 5: the bounds audit of every fn, reading calls by the loaded `claim` rows (level
+/// `checked`) or by the summaries computed from the bodies (`lowered`).
 fn audit(l: &Loaded) -> Result<(), Vec<ReadError>> {
     let m = &l.module;
     let mut errs = Vec::new();

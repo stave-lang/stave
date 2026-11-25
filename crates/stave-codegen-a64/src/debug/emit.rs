@@ -1407,6 +1407,13 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.jump(els.block)
             }
             Term::Switch { scrut, cases, default } => {
+                // a constant picks by its mathematical value, not by its low 64 bits
+                if let Some(k) = self.b.int_const(scrut) {
+                    let t = self.b.switch_target(cases, default, k);
+                    self.flush_live_out()?;
+                    self.edge(&t)?;
+                    return self.jump(t.block);
+                }
                 let rs = self.use_g(scrut)?;
                 self.flush_live_out()?;
                 let mut pending = Vec::new();

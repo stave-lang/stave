@@ -20,12 +20,14 @@
 // suffix under it is unknown (stage0 may have given it that context's type).
 //
 // A body in which this stage finds a type error prints `?` for all its nodes: stage0's types
-// after an error are not modeled.
+// after an error are not modeled. The errors stage0 reports in its words are rows (`report`),
+// rendered after the walk (`diag_tc`); the rows of a body checked again in a later round are its
+// last check's.
 //
 // `NONE` (printed `-`): a node that denotes no value (the head of a path naming a module, type,
 // or fn), or that the checker never visits (types, patterns, nodes outside any body).
 //
-// The checker is nine modules, each owning one concern:
+// The checker is ten modules, each owning one concern:
 // - `typeck` (this one): the walk, statements, primaries, operators, casts, `for` loops, array
 //   literals; the entry point `build` and its rounds.
 // - `tc_rows`: the state (`Typeck`: the node rows and the body's literal groups) and what every
@@ -39,6 +41,7 @@
 // - `tc_method`: method lookup on a receiver value.
 // - `tc_ops`: user operators through their operator traits.
 // - `tc_closure`: closure literals, and the coercions a node's form decides (`node_coercions`).
+// - `tc_diag`: the fix each E0201 row names (`fixes`).
 import ast;
 import consteval;
 import decls;
@@ -55,6 +58,7 @@ import source;
 import tc_builtins;
 import tc_chain;
 import tc_closure;
+import tc_diag;
 import tc_ops;
 import tc_pat;
 import tc_rows;
@@ -99,6 +103,7 @@ const K_SHIFT: u8 = node_kinds.KIND_SHIFT;
 const K_STATIC_DECL: u8 = node_kinds.KIND_STATIC_DECL;
 const K_STMT: u8 = node_kinds.KIND_STMT;
 const K_TYPE: u8 = node_kinds.KIND_TYPE;
+const K_RET_CLAUSE: u8 = node_kinds.KIND_RET_CLAUSE;
 const K_UNARY: u8 = node_kinds.KIND_UNARY;
 const K_GENERIC_PARAM: u8 = node_kinds.KIND_GENERIC_PARAM;
 const K_ARGS: u8 = node_kinds.KIND_ARGS;
@@ -128,10 +133,15 @@ impl tc_rows.Typeck {
         self.lg_float.clear();
         self.binds.clear();
         self.rets.clear();
+        self.ret_why.clear();
         let k = ds.kind.as_slice()[d as usize];
         self.proven = self.base_feats;
         self.fc_node.clear();
         self.fc_want.clear();
+        self.fc_why.clear();
+        self.cur_d = d;
+        self.pass = self.pass + 1;
+        self.last_pass.as_mut_slice()[d as usize] = self.pass;
         if k == decls.DK_FN || k == decls.DK_METHOD {
             self.proven = self.base_feats | sg.feats.as_slice()[d as usize];
             let st = sigs.self_of(&mut sg.cx, ds, d);
@@ -139,6 +149,9 @@ impl tc_rows.Typeck {
             let ret = sg.cx.ty.as_slice()[d as usize];
             let rk = self.known(ret);
             self.rets.push(rk);
+            // the written return type: in the `-> T` clause, or (an `extern` fn) the fn's own child
+            let rc = consteval.child(tree, base, g, K_RET_CLAUSE);
+            self.ret_why.push(consteval.child(tree, base, if rc == NONE then g else rc as usize, K_TYPE));
             self.bind_params(sg, tree, d, g);
         } else {
             self.sc = consteval.no_scope();
@@ -147,12 +160,19 @@ impl tc_rows.Typeck {
             self.acc.as_mut_slice()[g] = tk0;
         }
         self.walk(sg, ds, nm, set, t, cut, tree, g);
-        // literal values take their group's type; a group no context fixed is E0202
+        self.fixes(sg);
+        // a group no context fixed is E0202
+        for r in lo..g + 1 {
+            let v = self.nty.as_slice()[r];
+            if is_lit(v) && is_lit(self.resolve(v)) { self.e0202(v); }
+        }
+        self.lit_sites(tree, t, lo, g);
+        self.int_ranges(&sg.cx.tab, sg.cx.parent.as_slice(), set, t, cut, tree, lo, g);
+        // literal values take their group's type
         for r in lo..g + 1 {
             let v = self.nty.as_slice()[r];
             if is_lit(v) {
                 let x = self.resolve(v);
-                if is_lit(x) { self.bad = true; }
                 self.nty.as_mut_slice()[r] = if is_lit(x) then UNK else x;
             }
         }
@@ -160,6 +180,30 @@ impl tc_rows.Typeck {
             for r in lo..g + 1 {
                 if is_expr(kind(tree, r)) { self.nty.as_mut_slice()[r] = UNK; }
             }
+        }
+    }
+
+    // E0203 for each int literal of rows lo..=hi (a number token, or `-` folded into one) whose
+    // type, its suffix's or its group's, cannot hold its value.
+    fn int_ranges(&mut self, tab: &types.Table, parent: &[u32], set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, lo: usize, hi: usize) {
+        for r in lo..hi + 1 {
+            let k = kind(tree, r);
+            let a = first_tok(tree, r);
+            let neg = k == K_UNARY && folded(t, tree, r);
+            let p = parent[r];
+            let inner = p != NONE && kind(tree, p as usize) == K_UNARY && folded(t, tree, p as usize);
+            if !neg && (inner || !(k == K_PRIMARY && tk(t, a) == terminals.T_INT_LIT)) { continue; }
+            let b = tc_rows.tok_text(t, set, cut, self.it, if neg then a + 1 else a, false);
+            let (mag, big, suf) = consteval.parse_int(b);
+            if suf == 255 {
+                self.report(203, tc_rows.C_MALFORMED, r as% u32, NONE, NONE, NONE);
+                continue;
+            }
+            let x = self.resolve_at(r);
+            if x == NONE || x == UNK || x == ERR || is_lit(x) || tab.tag_of(x) != types.TK_INT { continue; }
+            let bits = tab.int_bits(x);
+            let lim: u64 = if tab.a_of(x) == 1 then (if neg then 1u64 << (bits - 1) as u64 else (1u64 << (bits - 1) as u64) - 1) else if neg then 0u64 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1;
+            if big || mag > lim { self.report(203, 0, r as% u32, x, NONE, NONE); }
         }
     }
 
@@ -358,7 +402,10 @@ impl tc_rows.Typeck {
         // unknown context; types, patterns, and parameter lists hold no checked node
         if ck == K_TYPE || ck == K_PATTERN || ck == node_kinds.KIND_ARM_PATTERN || ck == K_PARAMS || ck == node_kinds.KIND_GENERIC_ARGS || ck == node_kinds.KIND_RET_CLAUSE || ck == node_kinds.KIND_TAIL_BIND { return false; }
         self.set_hint(c, UNK);
-        if ck == K_BLOCK && pk == K_PRIMARY { self.rets.push(UNK); }
+        if ck == K_BLOCK && pk == K_PRIMARY {
+            self.rets.push(UNK);
+            self.ret_why.push(NONE);
+        }
         return true;
     }
 
@@ -401,7 +448,10 @@ impl tc_rows.Typeck {
             return true;
         }
         if a == terminals.T_KW_SPAWN {
-            if ck == K_BLOCK { self.rets.push(self.t_unit); }
+            if ck == K_BLOCK {
+                self.rets.push(self.t_unit);
+                self.ret_why.push(NONE);
+            }
             return ck == K_BLOCK;
         }
         if a == terminals.T_KW_IF || a == terminals.T_KW_LOOP || a == terminals.T_KW_UNSAFE || a == terminals.T_KW_SCOPE || a == terminals.T_KW_STRICT || a == terminals.T_KW_EMULATE || a == terminals.T_L_BRACE {
@@ -435,7 +485,10 @@ impl tc_rows.Typeck {
         }
         if ck == K_TYPE || ck == K_PATTERN || ck == K_PARAMS || ck == node_kinds.KIND_GENERIC_ARGS || ck == node_kinds.KIND_RET_CLAUSE { return false; }
         self.set_hint(c, UNK);
-        if ck == K_BLOCK { self.rets.push(UNK); }
+        if ck == K_BLOCK {
+            self.rets.push(UNK);
+            self.ret_why.push(NONE);
+        }
         return true;
     }
 
@@ -490,14 +543,14 @@ impl tc_rows.Typeck {
                     self.poison(v);
                     et = UNK;
                 } else if eh != NONE {
-                    self.coerce(&sg.cx.tab, e, eh);
+                    self.coerce(&sg.cx.tab, e, eh, NONE);
                     et = eh;
                 } else {
                     et = self.force(v);
                 }
             }
             let us = sg.cx.tab.usize_t();
-            self.coerce(&sg.cx.tab, cnt, us);
+            self.coerce(&sg.cx.tab, cnt, us, NONE);
             // a count stage1 does not evaluate, or one stage0 rejects, is not modeled
             let (gk, gx, gy) = consteval.eval_u64(&mut sg.cx, tree, t, nm, set, cut, ds, self.it, cnt, us, self.sc);
             if et == NONE { return self.err(); }
@@ -512,13 +565,13 @@ impl tc_rows.Typeck {
             let mut u = self.resolve_at(self.base + ks[0] as usize);
             for j in 1..n {
                 let v = self.resolve_at(self.base + ks[j] as usize);
-                u = self.unify(&sg.cx.tab, u, v);
+                u = self.unify(&sg.cx.tab, u, v, self.base as% u32 + ks[j]);
             }
             elem = self.force(u);
             if elem == UNK { return self.unknown(tree, r); }
         }
         for j in 0..n {
-            self.coerce(&sg.cx.tab, self.base + ks[j] as usize, elem);
+            self.coerce(&sg.cx.tab, self.base + ks[j] as usize, elem, NONE);
         }
         let len = n as u64;
         return array_ty(&mut sg.cx.tab, elem, types.GA_VALUE, (len >> 32) as% u32, len as% u32);
@@ -564,7 +617,7 @@ impl tc_rows.Typeck {
         }
         if k == K_CONST_DECL || k == K_STATIC_DECL {
             let e = self.expr_kid(tree, r);
-            if e != NONE { self.coerce_acc(&sg.cx.tab, e as usize, r); }
+            if e != NONE { self.coerce_acc(&sg.cx.tab, e as usize, r, consteval.child(tree, self.base, r, K_TYPE)); }
             return;
         }
         if k == K_STMT {
@@ -577,9 +630,9 @@ impl tc_rows.Typeck {
             if ks.len() >= 3 {
                 let rhs = self.base + ks[2] as usize;
                 let op = tk(t, first_tok(tree, self.base + ks[1] as usize));
-                self.coerce_acc(&sg.cx.tab, rhs, r);
+                self.coerce_acc(&sg.cx.tab, rhs, r, lhs as% u32);
                 let lt = self.acc.as_slice()[r];
-                if op != terminals.T_EQ { self.compound(sg, op, lt); }
+                if op != terminals.T_EQ { self.compound(sg, op, lt, first_tok(tree, self.base + ks[1] as usize)); }
             } else {
                 let _ = self.force_at(lhs);
             }
@@ -605,7 +658,7 @@ impl tc_rows.Typeck {
             let mut ty = UNK;
             if typed {
                 ty = self.acc.as_slice()[r];
-                if init != NONE { self.coerce(&sg.cx.tab, init as usize, ty); }
+                if init != NONE { self.coerce(&sg.cx.tab, init as usize, ty, consteval.child(tree, self.base, r, K_TYPE)); }
             } else if init != NONE {
                 ty = self.force_at(init as usize);
             }
@@ -619,19 +672,36 @@ impl tc_rows.Typeck {
         if a == terminals.T_KW_RETURN {
             let ret = self.rets.as_slice()[self.rets.len() - 1];
             let e = self.expr_kid(tree, r);
-            if e == NONE { return; }
+            let why = self.ret_why.as_slice()[self.ret_why.len() - 1];
+            if e == NONE {
+                // `return;` in a fn that returns a value: E0201 at the `return`, `()` found
+                if ret != self.t_unit && ret != UNK && ret != self.t_never {
+                    self.bad = true;
+                    let rt = first_tok(tree, r);
+                    let u = self.t_unit;
+                    self.report_span(201, tc_rows.C_NO_CAST, rt, rt, NONE, ret, u, why);
+                }
+                return;
+            }
             if ret == self.t_never {
                 self.poison_at(e as usize);
                 return;
             }
-            self.coerce(&sg.cx.tab, e as usize, ret);
+            self.coerce(&sg.cx.tab, e as usize, ret, why);
             return;
         }
         if a == terminals.T_KW_SPAWN {
             self.rets.truncate(self.rets.len() - 1);
+            self.ret_why.truncate(self.ret_why.len() - 1);
             return;
         }
         if a == terminals.T_KW_MATCH { return; }
+        if (a == terminals.T_KW_BREAK || a == terminals.T_KW_CONTINUE) && !in_loop(sg, t, tree, r) {
+            self.bad = true;
+            let at = first_tok(tree, r);
+            self.report_span(201, tc_rows.C_NOT_IN_LOOP, at, at, NONE, NONE, NONE, NONE);
+            return;
+        }
         if a == terminals.T_KW_IF || a == terminals.T_KW_LOOP || a == terminals.T_KW_UNSAFE || a == terminals.T_KW_SCOPE || a == terminals.T_KW_STRICT || a == terminals.T_KW_EMULATE || a == terminals.T_L_BRACE || a == terminals.T_KW_BREAK || a == terminals.T_KW_CONTINUE { return; }
         if ks.len() == 1 && kind(tree, self.base + ks[0] as usize) == K_EXPR_STMT { return; }
         self.poison_kids(tree, r);
@@ -763,7 +833,7 @@ impl tc_rows.Typeck {
                 let eh = tab.x(h)[j];
                 let v = self.resolve_at(c);
                 if is_lit(v) {
-                    self.coerce(tab, c, eh);
+                    self.coerce(tab, c, eh, NONE);
                     e = eh;
                 } else {
                     e = v;
@@ -867,10 +937,7 @@ impl tc_rows.Typeck {
             return UNK;
         }
         if is_lit(ct) {
-            if op == terminals.T_TILDE && self.lg_float.as_slice()[(ct & (LIT - 1)) as usize] {
-                self.bad = true;
-                return UNK;
-            }
+            if op == terminals.T_TILDE && self.lit_kind(ct) == tc_rows.LIT_FLOAT { return self.e0206(tab, a, tc_rows.LIT_FLOAT); }
             return ct;
         }
         let tag = tab.tag_of(ct);
@@ -878,26 +945,18 @@ impl tc_rows.Typeck {
             if tag == types.TK_FLOAT || (tag == types.TK_INT && tab.a_of(ct) == 1) { return ct; }
             if tag == types.TK_VECTOR {
                 if tab.tag_of(tab.a_of(ct)) == types.TK_FLOAT { return ct; }
-                self.bad = true;
-                return UNK;
+                return self.e0206(tab, a, ct);
             }
-            if tag == types.TK_INT || tag == types.TK_BOOL || tag == types.TK_CHAR {
-                self.bad = true;
-                return UNK;
-            }
-            return self.user_op(sg, tc_ops.OP_NEG, ct);
+            if tag == types.TK_INT || tag == types.TK_BOOL || tag == types.TK_CHAR { return self.e0206(tab, a, ct); }
+            return self.user_op(sg, tc_ops.OP_NEG, ct, a);
         }
         if tag == types.TK_INT || tag == types.TK_MASK { return ct; }
         if tag == types.TK_VECTOR {
             if tab.tag_of(tab.a_of(ct)) == types.TK_INT { return ct; }
-            self.bad = true;
-            return UNK;
+            return self.e0206(tab, a, ct);
         }
-        if tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR {
-            self.bad = true;
-            return UNK;
-        }
-        return self.user_op(sg, tc_ops.OP_NOT, ct);
+        if tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR { return self.e0206(tab, a, ct); }
+        return self.user_op(sg, tc_ops.OP_NOT, ct, a);
     }
 
     // The value of `l op r` in a chain: the operator is the token before child row c, the left
@@ -914,6 +973,8 @@ impl tc_rows.Typeck {
             return UNK;
         }
         if is_lit(lt) && !is_lit(rt) && rt != NONE && tab.tag_of(rt) == types.TK_VECTOR {
+            // E0602: the literal is the error type from then on
+            self.poison(lt);
             self.bad = true;
             return UNK;
         }
@@ -922,57 +983,65 @@ impl tc_rows.Typeck {
                 self.bad = true;
                 return UNK;
             }
-            return self.op_on(tab, op, lt);
+            return self.op_on(tab, op, lt, optok);
         }
-        let u = self.unify(tab, lt, rt);
+        let u = self.unify(tab, lt, rt, c as% u32);
         if u == UNK { return UNK; }
         if is_lit(u) {
-            let float = self.lg_float.as_slice()[(u & (LIT - 1)) as usize];
-            if float && !is_shift(op) && (is_wrap_sat(op) || is_bit(op)) {
-                self.bad = true;
-                return UNK;
-            }
+            let float = self.lit_kind(u) == tc_rows.LIT_FLOAT;
+            if float && !is_shift(op) && (is_wrap_sat(op) || is_bit(op)) { return self.e0206(tab, optok, tc_rows.LIT_FLOAT); }
             return u;
         }
-        if tc_ops.user_ty(tab, u) { return self.user_op(sg, tc_ops.binop_trait(op), u); }
-        return self.op_on(tab, op, u);
+        if tc_ops.user_ty(tab, u) { return self.user_op(sg, tc_ops.binop_trait(op), u, optok); }
+        return self.op_on(tab, op, u, optok);
     }
 
     // `a op= b` with a of type lt, b checked against it (stage0 `compound_assign`): the binary
-    // operator's rule on two operands of type lt.
-    fn compound(&mut self, sg: &mut sigs.Sigs, op: u8, lt: u32) {
+    // operator's rule on two operands of type lt; the operator token optok.
+    fn compound(&mut self, sg: &mut sigs.Sigs, op: u8, lt: u32, optok: u32) {
         if lt == UNK || lt == NONE { return; }
         let bin = compound_op(op);
         if tc_ops.user_ty(&sg.cx.tab, lt) {
-            let _ = self.user_op(sg, tc_ops.binop_trait(bin), lt);
+            let _ = self.user_op(sg, tc_ops.binop_trait(bin), lt, optok);
             return;
         }
-        let _ = self.op_on(&sg.cx.tab, bin, lt);
+        let _ = self.op_on(&sg.cx.tab, bin, lt, optok);
     }
 
-    // stage0's `op_on`: the type of a binary operator on two operands of type ty.
-    fn op_on(&mut self, tab: &types.Table, op: u8, ty: u32) -> u32 {
+    // stage0's `op_on`: the type of a binary operator (token optok) on two operands of type ty.
+    fn op_on(&mut self, tab: &types.Table, op: u8, ty: u32, optok: u32) -> u32 {
         if ty == self.t_never { return ty; }
         let tag = tab.tag_of(ty);
         if tag == types.TK_INT { return ty; }
         if tag == types.TK_FLOAT {
-            if is_wrap_sat(op) || is_bit(op) || is_shift(op) { return self.err(); }
+            if is_wrap_sat(op) || is_bit(op) || is_shift(op) { return self.e0206(tab, optok, ty); }
             return ty;
         }
         if tag == types.TK_BOOL || tag == types.TK_MASK {
             if is_bit(op) { return ty; }
-            return self.err();
+            return self.e0206(tab, optok, ty);
         }
         if tag == types.TK_VECTOR {
             let int_lane = tab.tag_of(tab.a_of(ty)) == types.TK_INT;
             if int_lane {
-                if is_plain(op) || op == terminals.T_SLASH || op == terminals.T_PERCENT { return self.err(); }
+                // E0604, E0607
+                if is_plain(op) || op == terminals.T_SLASH { return self.err(); }
+                if op == terminals.T_PERCENT { return self.e0206(tab, optok, ty); }
                 return ty;
             }
-            if is_wrap_sat(op) || is_bit(op) || is_shift(op) || op == terminals.T_PERCENT { return self.err(); }
+            if is_wrap_sat(op) || is_bit(op) || is_shift(op) || op == terminals.T_PERCENT { return self.e0206(tab, optok, ty); }
             return ty;
         }
         // a user type: its operator trait (not checked yet)
+        return UNK;
+    }
+
+    // E0206: operator token tok on a value of type ty (`LIT_FLOAT`: a float literal), which has
+    // no such operator; on a reference the fix names the value behind it.
+    fn e0206(&mut self, tab: &types.Table, tok: u32, ty: u32) -> u32 {
+        self.bad = true;
+        let r = ty != tc_rows.LIT_FLOAT && tab.tag_of(ty) == types.TK_REF;
+        self.report_span(206, if r then tc_rows.C_REF_OPERAND else 0u8, tok, tok, NONE, ty, NONE, NONE);
         return UNK;
     }
 
@@ -983,7 +1052,7 @@ impl tc_rows.Typeck {
         self.coerce_bool(&sg.cx.tab, self.base + ks[0] as usize);
         let a = self.nty.as_slice()[self.base + ks[1] as usize];
         let b = self.nty.as_slice()[self.base + ks[2] as usize];
-        return self.arms_join(sg, a, b, h);
+        return self.arms_join(sg, a, b, h, self.base as% u32 + ks[1], self.base + ks[2] as usize);
     }
 
     // Before child c (the k-th) of a `match` (value or statement) row r: the scrutinee without a
@@ -1028,6 +1097,22 @@ impl tc_rows.Typeck {
         return true;
     }
 
+    // The value row of the first value arm of `match` row m before arm row r whose value has
+    // type v (stage0's arm that made the arms' type so far), or NONE.
+    fn first_arm_of(&mut self, tree: &ast.Ast, m: usize, r: usize, v: u32) -> u32 {
+        let want = self.resolve(v);
+        let ks = tree.kids.row(m);
+        for j in 0..ks.len() {
+            let x = self.base + ks[j] as usize;
+            if x == r { break; }
+            if kind(tree, x) != K_EXPR_ARM { continue; }
+            let xs = tree.kids.row(x);
+            let e = self.base + xs[xs.len() - 1] as usize;
+            if self.resolve_at(e) == want { return e as% u32; }
+        }
+        return NONE;
+    }
+
     // An arm finished: its guard is `bool`; a value arm's value joins the arms' type so far.
     fn finish_arm(&mut self, sg: &mut sigs.Sigs, tree: &ast.Ast, r: usize) {
         let ks = tree.kids.row(r);
@@ -1041,12 +1126,14 @@ impl tc_rows.Typeck {
             return;
         }
         let h = self.hint.as_slice()[m];
-        let j = self.arms_join(sg, so_far, v, h);
+        let an = self.first_arm_of(tree, m, r, so_far);
+        let j = self.arms_join(sg, so_far, v, h, an, self.base + ks[ks.len() - 1] as usize);
         self.arm.as_mut_slice()[m] = j;
     }
 
-    // stage0's `arms_unify`: the type of two arms' values a and b under context type h.
-    fn arms_join(&mut self, sg: &mut sigs.Sigs, a: u32, b: u32, h: u32) -> u32 {
+    // stage0's `arms_unify`: the type of two arms' values a and b (of node rows an, NONE for
+    // none, and bn) under context type h.
+    fn arms_join(&mut self, sg: &mut sigs.Sigs, a: u32, b: u32, h: u32, an: u32, bn: usize) -> u32 {
         let at = self.resolve(a);
         let bt = self.resolve(b);
         if at == UNK || bt == UNK {
@@ -1062,7 +1149,47 @@ impl tc_rows.Typeck {
             let tab = &sg.cx.tab;
             if (at == h || self.coercible(tab, at, h)) && (bt == h || self.coercible(tab, bt, h)) { return h; }
         }
-        return self.unify(&sg.cx.tab, at, bt);
+        let tab = &sg.cx.tab;
+        if both && tab.tag_of(at) == types.TK_FN && tab.tag_of(bt) == types.TK_FN && tc_rows.fn_same(tab, at, bt) {
+            self.fn_arms(&mut sg.cx.tab, at, bt, h, an, bn);
+            return UNK;
+        }
+        return self.unify(&sg.cx.tab, at, bt, bn as% u32);
+    }
+
+    // E0201 for value arms of fn types x (arm row an, NONE: none) and y (arm row bn) that differ
+    // only in `needs` or `without`: with a wanted fn type h of that shape, case `fn-arms-wanted`
+    // at the arm not usable as h alone (E0707 when it needs features neither h nor the body
+    // has); else case `fn-arms` with the fn type both convert to.
+    fn fn_arms(&mut self, tab: &mut types.Table, x: u32, y: u32, h: u32, an: u32, bn: usize) {
+        self.bad = true;
+        let n = tab.a_of(x) as usize;
+        if h != NONE && tab.tag_of(h) == types.TK_FN && tc_rows.fn_same(tab, h, x) {
+            let y_ok = y == h || self.coercible(tab, y, h);
+            let row = if y_ok && an != NONE then an else bn as% u32;
+            let ty = if y_ok then x else y;
+            let ft = (tab.x(ty)[n + 1] as u64) << 32 | tab.x(ty)[n + 2] as u64;
+            let fh = (tab.x(h)[n + 1] as u64) << 32 | tab.x(h)[n + 2] as u64;
+            if ft & ~(fh | self.proven) != 0 { return; }
+            self.report(201, tc_rows.C_FN_ARMS_WANTED, row, h, ty, NONE);
+            return;
+        }
+        let fx = (tab.x(x)[n + 1] as u64) << 32 | tab.x(x)[n + 2] as u64;
+        let fy = (tab.x(y)[n + 1] as u64) << 32 | tab.x(y)[n + 2] as u64;
+        let deny = tab.x(x)[n + 3] & tab.x(y)[n + 3];
+        let f = fx | fy;
+        tab.begin();
+        for i in 0..n + 1 {
+            let p = tab.x(x)[i];
+            tab.push(p);
+        }
+        tab.push((f >> 32) as% u32);
+        tab.push(f as% u32);
+        tab.push(deny);
+        let common = tab.intern(types.TK_FN, n as% u32, 0);
+        self.report(201, tc_rows.C_FN_ARMS, bn as% u32, x, y, NONE);
+        let k = self.dg.x.len() - 1;
+        self.dg.x.as_mut_slice()[k] = common;
     }
 
     fn compare(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
@@ -1074,7 +1201,7 @@ impl tc_rows.Typeck {
         let tab = &mut sg.cx.tab;
         let lt = self.resolve_at(l);
         let rt = self.resolve_at(rr);
-        let u = self.unify(tab, lt, rt);
+        let u = self.unify(tab, lt, rt, rr as% u32);
         if u == UNK { return UNK; }
         if is_lit(u) { return self.t_bool; }
         let eq_only = op == terminals.T_EQ_EQ || op == terminals.T_BANG_EQ;
@@ -1087,7 +1214,7 @@ impl tc_rows.Typeck {
             return tab.key(types.TK_MASK, w, tab.b_of(u));
         }
         if tag == types.TK_MASK && eq_only { return u; }
-        return self.err();
+        return self.e0206(tab, first_tok(tree, opn), u);
     }
 
     fn range(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
@@ -1098,7 +1225,7 @@ impl tc_rows.Typeck {
         let tab = &mut sg.cx.tab;
         let lt = self.resolve_at(l);
         let rt = self.resolve_at(rr);
-        let u = self.unify(tab, lt, rt);
+        let u = self.unify(tab, lt, rt, rr as% u32);
         if u == UNK { return UNK; }
         let e = self.force(u);
         if e == UNK { return UNK; }
@@ -1118,7 +1245,13 @@ impl tc_rows.Typeck {
             if to == ERR || to == NONE { return self.err(); }
             if acc == UNK || acc == NONE { return UNK; }
             if op != terminals.T_KW_AS && op != terminals.T_AS_PERCENT && op != terminals.T_AS_PIPE && op != terminals.T_AS_TILDE && op != terminals.T_AS_QUESTION { return UNK; }
-            if !cast_ok(&sg.cx.tab, op, acc, to) { return self.err(); }
+            if !tc_rows.cast_ok(&sg.cx.tab, op, acc, to) {
+                // E0204 from the operator through the type
+                self.bad = true;
+                let e = tree.tok_end.as_slice()[tn];
+                self.report_span(204, 0, first_tok(tree, tn) - 1, e - 1, NONE, acc, to, NONE);
+                return UNK;
+            }
             acc = if op == terminals.T_AS_QUESTION then self.option_of(&mut sg.cx.tab, to) else to;
             if acc == UNK { return UNK; }
         }
@@ -1485,6 +1618,7 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         lg_fixed: vec.Vec::<u32>.new(),
         lg_float: vec.Vec::<bool>.new(),
         rets: vec.Vec::<u32>.new(),
+        ret_why: vec.Vec::<u32>.new(),
         chain: col.filled(n, tc_chain.S_ERR),
         pos: col.filled(n, NONE),
         pend: col.filled(n, tc_chain.P_NONE),
@@ -1531,6 +1665,11 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         fn_item: col.filled(n, false),
         fc_node: vec.Vec::<u32>.new(),
         fc_want: vec.Vec::<u32>.new(),
+        fc_why: vec.Vec::<u32>.new(),
+        dg: tc_rows.rows(),
+        cur_d: NONE,
+        pass: 0,
+        last_pass: col.filled(ds.decls(), 0u32),
     };
     // rounds (`tc_traits`): the bodies that asked a trait question without an answer are checked
     // again after the questions are solved
@@ -1562,76 +1701,23 @@ fn lane_bits(tab: &types.Table, lane: u32) -> u32 {
     return if f == 1 then 32u32 else if f == 2 then 64u32 else 16u32;
 }
 
-// The significand bits of a float type (format a).
-fn sig_bits(f: u32) -> u32 {
-    return if f == 0 then 11u32 else if f == 3 then 8u32 else if f == 1 then 24u32 else 53u32;
+// Whether `Unary` row u is `-` folded into the int literal it negates (its child, row u - 1, a
+// `Primary` at the next token).
+fn folded(t: &lex.Tokens, tree: &ast.Ast, u: usize) -> bool {
+    let a = first_tok(tree, u);
+    return tk(t, a) == terminals.T_MINUS && tk(t, a + 1) == terminals.T_INT_LIT && kind(tree, u - 1) == K_PRIMARY && first_tok(tree, u - 1) == a + 1;
 }
 
-fn is_64(tab: &types.Table, ty: u32) -> bool {
-    return tab.tag_of(ty) == types.TK_INT && tab.b_of(ty) >= types.W_64;
-}
-
-// stage0's cast table for `as`, `as%`, `as|`, `as~`, `as?`: whether `src op dst` is allowed; the
-// result type is `dst` (`Option<dst>` for `as?`).
-fn cast_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
-    let fk = tab.tag_of(src);
-    let tk2 = tab.tag_of(dst);
-    let plain = op == terminals.T_KW_AS;
-    let identity = src == dst && (fk == types.TK_INT || fk == types.TK_FLOAT || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_VECTOR || fk == types.TK_MASK || fk == types.TK_REF || fk == types.TK_PTR);
-    if identity { return true; }
-    if fk == types.TK_VECTOR && tk2 == types.TK_VECTOR {
-        if tab.b_of(src) != tab.b_of(dst) { return false; }
-        return scalar_ok(tab, op, tab.a_of(src), tab.a_of(dst));
-    }
-    if fk == types.TK_REF {
-        if tk2 == types.TK_PTR && plain && tab.b_of(dst) == tab.b_of(src) && (tab.a_of(src) == 1 || tab.a_of(dst) == 0) { return true; }
-        return false;
-    }
-    return scalar_ok(tab, op, src, dst);
-}
-
-fn scalar_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
-    let fk = tab.tag_of(src);
-    let tk2 = tab.tag_of(dst);
-    let fint = fk == types.TK_INT;
-    let tint = tk2 == types.TK_INT;
-    let ffloat = fk == types.TK_FLOAT;
-    let tfloat = tk2 == types.TK_FLOAT;
-    if op == terminals.T_KW_AS {
-        if fint && tint {
-            let fs = tab.a_of(src) == 1;
-            let ts = tab.a_of(dst) == 1;
-            let fb = tab.int_bits(src);
-            let tb = tab.int_bits(dst);
-            return (fs == ts && tb >= fb) || (!fs && ts && tb > fb);
-        }
-        if fk == types.TK_BOOL && tint { return true; }
-        if fk == types.TK_CHAR {
-            if !tint { return false; }
-            let w = tab.b_of(dst);
-            if tab.a_of(dst) == 0 { return w == types.W_32 || w == types.W_64 || w == types.W_SIZE; }
-            return w == types.W_64 || w == types.W_SIZE;
-        }
-        if fint && tab.a_of(src) == 0 && tab.b_of(src) == types.W_8 && tk2 == types.TK_CHAR { return true; }
-        if fint && tfloat {
-            let fb = tab.int_bits(src);
-            let need = if tab.a_of(src) == 1 then fb - 1 else fb;
-            return need <= sig_bits(tab.a_of(dst));
-        }
-        if ffloat && tfloat {
-            let f = tab.a_of(src);
-            let g = tab.a_of(dst);
-            return ((f == 0 || f == 3) && (g == 1 || g == 2)) || (f == 1 && g == 2);
-        }
-        if fk == types.TK_PTR && tk2 == types.TK_PTR { return true; }
-        return (fk == types.TK_PTR && is_64(tab, dst)) || (is_64(tab, src) && tk2 == types.TK_PTR);
-    }
-    if op == terminals.T_AS_PERCENT { return tint && (fint || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_PTR); }
-    if op == terminals.T_AS_PIPE { return tint && (fint || ffloat || fk == types.TK_CHAR); }
-    if op == terminals.T_AS_TILDE { return tfloat && (fint || ffloat); }
-    if op == terminals.T_AS_QUESTION {
-        if tint { return fint || ffloat || fk == types.TK_CHAR; }
-        if tk2 == types.TK_CHAR || tfloat { return fint || (ffloat && tfloat); }
+// Whether `break` / `continue` statement row r is inside a `loop`, `while`, or `for` of its own
+// fn, closure, or `spawn` body.
+fn in_loop(sg: &sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> bool {
+    let mut p = sg.cx.parent.as_slice()[r];
+    while p != NONE {
+        let k = kind(tree, p as usize);
+        let a = tk(t, first_tok(tree, p as usize));
+        if k == K_FOR_STMT || (k == K_STMT && (a == terminals.T_KW_WHILE || a == terminals.T_KW_LOOP)) { return true; }
+        if (k == K_STMT && a == terminals.T_KW_SPAWN) || (k == K_PRIMARY && a == terminals.T_KW_FN) || k == K_FN_DECL || k == K_CONST_DECL || k == K_STATIC_DECL { return false; }
+        p = sg.cx.parent.as_slice()[p as usize];
     }
     return false;
 }

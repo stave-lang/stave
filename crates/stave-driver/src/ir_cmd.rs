@@ -2,8 +2,8 @@
 //! runs, as glue over [`stave_ir::text::read`], [`build`] and [`interp`].
 //!
 //! - [`load`]: contracts/checked-ir.md "Loading": the reader (lines, structure, verification,
-//!   audit), then the canonical numbering ([`build::canonical_moving`]); at level `lowered` the
-//!   removal of proven checks (step 4) and the verifier by the build's own
+//!   the audit below level `opt`), then the canonical numbering ([`build::canonical_moving`]);
+//!   at level `lowered` the removal of proven checks (step 4) and the verifier by the build's own
 //!   [`build::checked_module`], at the other levels the verifier ([`build::verified_final`]).
 //! - [`fmt`], [`opt`]: the canonical text of the loaded module, or of the release passes' output.
 //! - [`build`]: the image, as `stave build` makes it from the same module.
@@ -88,7 +88,7 @@ pub fn load(file: &str, src: &[u8]) -> Result<LoadedIr, IrError> {
     let read = module.clone();
     let read_stack = stack.clone();
     if header.level != Level::Lowered {
-        build::verified_final(&module).map_err(IrError::failure)?;
+        build::verified_final(&module, header.level).map_err(IrError::failure)?;
         return Ok(LoadedIr { file: file.to_string(), header, read, module, read_stack, stack });
     }
     let mut m = module;
@@ -133,8 +133,10 @@ pub fn fmt(l: &LoadedIr) -> Result<String, IrError> {
     print(&l.read, &l.header, l.read_stack.as_ref())
 }
 
-/// `opt`: the release passes on the loaded module, their verifier and audit, printed at level
-/// `opt`. Only a `release` file at level `lowered` or `checked`.
+/// `opt`: the release passes on the loaded module, their verifier and stage0's self-audit,
+/// printed at level `opt` in the file's form: with the stack section of the module the passes
+/// read, which for a `checked` file is the file's own. Only a `release` file at level `lowered`
+/// or `checked`.
 pub fn opt(l: &LoadedIr) -> Result<String, IrError> {
     if l.header.mode != Mode::Release || l.header.level == Level::Opt {
         return Err(IrError::Input(vec![format!(
@@ -143,11 +145,11 @@ pub fn opt(l: &LoadedIr) -> Result<String, IrError> {
         )]));
     }
     let m = build::release_passes(&l.module).map_err(IrError::failure)?;
-    print(&m, &Header { level: Level::Opt, ..l.header }, None)
+    print(&m, &Header { level: Level::Opt, ..l.header }, l.stack.as_ref())
 }
 
 /// `build`: the image for the header's target, as `stave build` makes it: a `release` file at
-/// level `opt` skips the release passes (the loader verified and audited it). The stack table
+/// level `opt` skips the release passes (the loader verified it). The stack table
 /// comes from the stack section, empty without one.
 pub fn build(l: &LoadedIr, threads: Option<usize>) -> Result<Built, IrError> {
     if l.module.main.is_none() {
@@ -173,7 +175,7 @@ pub fn run(l: &LoadedIr, args: &[&[u8]]) -> Result<Interpreted, IrError> {
             l.file
         )]));
     };
-    let limits = Limits { borrow: false, ..Limits::default() };
+    let limits = Limits { borrow: false, level: l.header.level, ..Limits::default() };
     interp::run(&l.module, &main.path.clone(), l.header.target, args, &[], limits).map_err(IrError::Run)
 }
 

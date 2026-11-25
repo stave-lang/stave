@@ -101,6 +101,23 @@ pub fn abi_signature(k: Known) -> Option<(&'static [ITy], ITy)> {
     abi_table(k)
 }
 
+/// Whether the release optimizer inlines the known item like an ordinary fn (contracts/
+/// opt-passes.md rule F8); it never inlines any other known item. None of them has an ABI
+/// signature or is a panic report entry (the table generator refuses that).
+pub fn inlined(k: Known) -> bool {
+    INLINED.contains(&k)
+}
+
+/// The param of a known item that lowering passes a site row in, as an int constant
+/// (contracts/intrinsics.md "Paths fixed by the compiler"): the user-site store, the error-trace
+/// hooks, and the failed `ensures` report. `None` for the others.
+pub fn site_param(k: Known) -> Option<usize> {
+    match k {
+        Known::SetUserSite | Known::ErrtracePush | Known::ErrtraceRestart | Known::EnsuresFailed => Some(0),
+        _ => None,
+    }
+}
+
 /// Whether `f` is the fn a failed `requires` check calls.
 pub fn is_requires_failed(f: &crate::Func) -> bool {
     f.known == Some(Known::RequiresFailed)
@@ -114,5 +131,20 @@ pub fn is_contract_failed(f: &crate::Func) -> bool {
 impl std::fmt::Display for Known {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.path())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inlined_items_have_no_abi_and_no_report() {
+        for &k in Known::ALL.iter().filter(|&&k| inlined(k)) {
+            assert!(abi_signature(k).is_none(), "{k:?}");
+            assert!(!reports_on_alt_stack(k), "{k:?}");
+        }
+        assert!(inlined(Known::SetUserSite));
+        assert!(!inlined(Known::Trap));
     }
 }

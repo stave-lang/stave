@@ -32,15 +32,15 @@ pub(crate) fn term_operand(t: &Term) -> Option<Operand> {
     }
 }
 
-/// Uses per value, saturating at 255: the operands of every instruction and terminator (the
-/// operand pool may hold entries no instruction owns any more, which do not count).
-pub(crate) fn use_counts(b: &Body) -> Vec<u8> {
-    let mut n = vec![0u8; b.values.len()];
+/// Uses per value, exact: the operands of every instruction and terminator (the operand pool may
+/// hold entries no instruction owns any more, which do not count).
+pub(crate) fn use_counts(b: &Body) -> Vec<u32> {
+    let mut n = vec![0u32; b.values.len()];
     let mut add = |o: Operand| {
         if let Operand::Value(v) = o
             && let Some(c) = n.get_mut(v.index())
         {
-            *c = c.saturating_add(1);
+            *c += 1;
         }
     };
     for bd in &b.blocks {

@@ -200,8 +200,9 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
 - `lir`, `ir`, `opt`: the gate form of the IR text (checked-ir.md "Levels and forms"): the emit
   form with the stack-section lines filtered out. Each file is absent (not written) when the build has error diagnostics; `opt.txt`
   is written only by a `--release` build (cli.md). `lir` gates the lowering alone, `ir` adds the
-  bounds prover and the witness checker, `opt` the release passes. `opt` also gates the Stave
-  optimizer: from the same `ir` text, its `opt` text equals stave-opt's.
+  bounds prover and the witness checker, `opt` the release passes stage0 has: from the same
+  `ir` text, stage1's `ir opt --passes=base` text equals stage0's `opt` text. The full pipeline,
+  inlining included, is gated by the gates of [opt-passes.md](opt-passes.md).
 - `stats` `peak_bytes`: the stage's device-memory high-water mark from stage1's own arena counters.
   stage0 writes `-`.
 

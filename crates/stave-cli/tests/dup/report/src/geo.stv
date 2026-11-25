@@ -1,0 +1,70 @@
+// Two types with the same methods: the same code up to `Self` (crates/stave-cli/tests/dup.rs).
+import util;
+
+const NONE: u32 = util.NONE;
+
+pub struct Meters {
+    pub v: u32,
+}
+
+pub struct Feet {
+    pub v: u32,
+}
+
+pub trait Score {
+    fn score(&self) -> u32;
+}
+
+impl Meters {
+    pub fn grow(&mut self, by: u32) -> u32 {
+        if by > 100u32 {
+            self.v = self.v +% 100u32;
+        } else {
+            self.v = self.v +% by;
+        }
+        return self.v;
+    }
+
+    // Below the size threshold: a getter.
+    pub fn get(&self) -> u32 {
+        return self.v;
+    }
+
+    pub fn bumped(&mut self) -> u32 {
+        return self.grow(1u32) +% self.grow(2u32);
+    }
+}
+
+impl Feet {
+    pub fn grow(&mut self, by: u32) -> u32 {
+        if by > 100u32 {
+            self.v = self.v +% 100u32;
+        } else {
+            self.v = self.v +% by;
+        }
+        return self.v;
+    }
+
+    pub fn get(&self) -> u32 {
+        return self.v;
+    }
+
+    pub fn bumped(&mut self) -> u32 {
+        return self.grow(1u32) +% self.grow(2u32);
+    }
+}
+
+// Trait impls must exist once per type: reported, and marked.
+impl Score for Meters {
+    fn score(&self) -> u32 {
+        let w = self.v *% 3u32;
+        return if w > 50u32 then w -% 50u32 else w +% 1u32;
+    }
+}
+
+impl Score for Feet {
+    fn score(&self) -> u32 {
+        let w = self.v *% 3u32;
+        return if w > 50u32 then w -% 50u32 else w +% 1u32;
+    }
+}

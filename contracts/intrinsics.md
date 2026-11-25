@@ -226,7 +226,7 @@ truth):
 - **PC table** `__stave_pc_table`: `u64 count`, then `count` rows of 16 bytes sorted by `pc_lo`
   ascending, one per emitted fn: `+0 pc_lo: u64` (address of the fn's first instruction),
   `+8 site: u32` (site-table row of the fn's name token), `+12 pad: u32 = 0`. A PC belongs to the
-  last row with `pc_lo <= pc`.
+  last row with `pc_lo <= pc`. A PC inside inlined code belongs to the fn whose code holds it.
 - **stack table** `__stave_stack_table`: `+0 default: u64` (`[run] stack` in bytes; 0: not set,
   the runtime's 8 MiB default), `+8 main: u64` (bytes of main's stack; 0: no bound), `+16 count:
   u64`, then `count` rows of 16 bytes: `+0 code: u64` (the code address a fn value holds, as

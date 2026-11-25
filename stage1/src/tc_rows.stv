@@ -10,7 +10,9 @@
 //
 // Entry points: `resolve`, `force`, `poison`, `fix`, `unite` (literal groups); `coerce` (a
 // coercion site), `coercible`, `unify` (stage0's `unify_operands`); `set_hint`; `known` (a type
-// from the signatures); `err` (a type error: the body prints `?`); `poison_kids`, `unknown` (a
+// from the signatures); `err` (a type error: the body prints `?`); `report`, `report_span`,
+// `mismatch` (a type error stage0 reports: a row of `dg`); `cast_ok` (the cast table);
+// `poison_kids`, `unknown` (a
 // form not checked yet); `expr_kid`; `tok_text`, `is_lit`; the calls of the built-ins of
 // `tc_builtins` (`bi_call`, `bi_hint`, `bi_targs`); the methods of impls with no struct or enum
 // head (`headless_impls`, looked up by `tc_method.headless_method`).
@@ -58,6 +60,8 @@ pub struct Typeck {
     pub lg_float: vec.Vec<bool>,
     // the return types of the enclosing fn, spawn bodies, and closures
     pub rets: vec.Vec<u32>,
+    // per entry of `rets`: the node row of the return type written (`NONE`: none)
+    pub ret_why: vec.Vec<u32>,
     // per `Postfix` row: the chain's state (`S_*`, its value or decl in `acc`), the next token of
     // the chain, the step waiting for the child being checked (`P_*`); per `Args` row: the callee
     // in `acc` (NONE: not checked yet), the type whose generic arguments instantiate it in `pos`
@@ -129,6 +133,88 @@ pub struct Typeck {
     // form): node, wanted type
     pub fc_node: vec.Vec<u32>,
     pub fc_want: vec.Vec<u32>,
+    pub fc_why: vec.Vec<u32>,
+    // the type errors found (`report`), one row each: code, case (`C_*` of the code), the decl
+    // whose body found it and the check of that body (`pass`: a body checked again in a later
+    // round keeps only its last check's rows), the primary span (first and last global token),
+    // two types by code (`LIT_INT`, `LIT_FLOAT`: a literal group of that kind), the operand's
+    // node row, what requires the expected type (`why`: a node row, `WHY_DECL | d` the name of
+    // decl d, `NONE`), a third value by code (`x`: E0201 `fn-arms` the common fn type), and the
+    // scope naming generic params (4 words: par_lo, par_hi, own_lo,
+    // own_hi)
+    pub dg: Rows,
+    // the body being checked: its decl and its check's number; per decl its last check's number
+    pub cur_d: u32,
+    pub pass: u32,
+    pub last_pass: vec.Vec<u32>,
+}
+
+pub const LIT_INT: u32 = 0xffff_fff0;
+pub const LIT_FLOAT: u32 = 0xffff_fff1;
+pub const WHY_DECL: u32 = 0x8000_0000;
+
+// E0201 cases: the fix the diagnostic names (stage0's `mismatch_fix`).
+pub const C_CAST: u8 = 0;
+pub const C_AS_PERCENT: u8 = 1;
+pub const C_AS_PIPE: u8 = 2;
+pub const C_AS_TILDE: u8 = 3;
+pub const C_SOME: u8 = 4;
+pub const C_OK: u8 = 5;
+pub const C_UNWRAP_OPTION: u8 = 6;
+pub const C_UNWRAP_RESULT: u8 = 7;
+pub const C_BORROW: u8 = 8;
+pub const C_BORROW_MUT: u8 = 9;
+pub const C_DEREF: u8 = 10;
+pub const C_NO_CAST: u8 = 11;
+// E0201 case `not-in-loop`: a `break` or `continue` outside of a loop (no types).
+pub const C_NOT_IN_LOOP: u8 = 12;
+// E0201 cases `fn-arms` (a, b the arms' fn types, x their common type) and `fn-arms-wanted` (a
+// the wanted fn type, b the arm's).
+pub const C_FN_ARMS: u8 = 13;
+pub const C_FN_ARMS_WANTED: u8 = 14;
+// E0206 cases: `ref-operand` (an operator on a reference), `pattern`, `pattern-str` (a pattern
+// that tests `==` on a type without it, a string's).
+pub const C_REF_OPERAND: u8 = 1;
+pub const C_PATTERN: u8 = 2;
+pub const C_PATTERN_STR: u8 = 3;
+// E0206 base case for indexing (`[]`) a value that is no array or slice.
+pub const C_INDEX: u8 = 4;
+// E0202 cases: an int literal (0), a float literal, a generic value whose arguments no context
+// gives (`infer`).
+pub const C_FLOAT: u8 = 1;
+pub const C_INFER: u8 = 2;
+// E0203 case `malformed` (an int literal no int reads).
+pub const C_MALFORMED: u8 = 1;
+// E0201 case `arity`: a = the arguments taken, b = given, x = the call's first token.
+pub const C_ARITY: u8 = 15;
+// E0201 case `type-args`: a = the generic arguments taken, b = given; the span is the list.
+pub const C_TYPE_ARGS: u8 = 16;
+// An E0201 whose fix is decided at the body's end (`tc_diag.fixes`).
+pub const C_PENDING: u8 = 255;
+
+pub struct Rows {
+    pub code: vec.Vec<u16>,
+    pub case: vec.Vec<u8>,
+    pub d: vec.Vec<u32>,
+    pub pass: vec.Vec<u32>,
+    pub lo: vec.Vec<u32>,
+    pub hi: vec.Vec<u32>,
+    pub a: vec.Vec<u32>,
+    pub b: vec.Vec<u32>,
+    pub n: vec.Vec<u32>,
+    pub why: vec.Vec<u32>,
+    pub x: vec.Vec<u32>,
+    pub sc: vec.Vec<u32>,
+}
+
+pub fn rows() -> Rows {
+    return Rows.{ code: vec.Vec::<u16>.new(), case: vec.Vec::<u8>.new(), d: vec.Vec::<u32>.new(), pass: vec.Vec::<u32>.new(), lo: vec.Vec::<u32>.new(), hi: vec.Vec::<u32>.new(), a: vec.Vec::<u32>.new(), b: vec.Vec::<u32>.new(), n: vec.Vec::<u32>.new(), why: vec.Vec::<u32>.new(), x: vec.Vec::<u32>.new(), sc: vec.Vec::<u32>.new() };
+}
+
+impl Rows {
+    pub fn len(&self) -> usize {
+        return self.code.len();
+    }
 }
 
 // Whether value v is a literal group's.
@@ -184,7 +270,11 @@ impl Typeck {
         if f != NONE { return f == ty || f == UNK; }
         let tag = tab.tag_of(ty);
         let ok = if self.lg_float.as_slice()[r as usize] then tag == types.TK_FLOAT else tag == types.TK_INT;
-        if !ok { return false; }
+        if !ok {
+            // as stage0: a group fixed to a type of another kind is the error type from then on
+            self.lg_fixed.as_mut_slice()[r as usize] = UNK;
+            return false;
+        }
         self.lg_fixed.as_mut_slice()[r as usize] = ty;
         return true;
     }
@@ -205,10 +295,21 @@ impl Typeck {
     pub fn force(&mut self, v: u32) -> u32 {
         let r = self.resolve(v);
         if is_lit(r) {
-            self.bad = true;
+            self.e0202(r);
             return UNK;
         }
         return r;
+    }
+
+    // E0202 for pending group v, once (the group is then unknown); its literal is found when
+    // the body's walk is done (`tc_diag.lit_sites`).
+    pub fn e0202(&mut self, v: u32) {
+        self.bad = true;
+        let r = self.find(v & (LIT - 1));
+        if self.lg_fixed.as_slice()[r as usize] != NONE { return; }
+        self.lg_fixed.as_mut_slice()[r as usize] = UNK;
+        let float = self.lg_float.as_slice()[r as usize];
+        self.report(202, if float then C_FLOAT else 0u8, NONE, r, NONE, NONE);
     }
 
     pub fn resolve_at(&mut self, r: usize) -> u32 {
@@ -243,12 +344,57 @@ impl Typeck {
 
     pub fn coerce_bool(&mut self, tab: &types.Table, e: usize) {
         let b = self.t_bool;
-        self.coerce(tab, e, b);
+        self.coerce(tab, e, b, NONE);
     }
 
-    pub fn coerce_acc(&mut self, tab: &types.Table, e: usize, r: usize) {
+    pub fn coerce_acc(&mut self, tab: &types.Table, e: usize, r: usize, why: u32) {
         let v = self.acc.as_slice()[r];
-        self.coerce(tab, e, v);
+        self.coerce(tab, e, v, why);
+    }
+
+    // A type error (`code`, its case) at node row n's span, with types a and b and `why` by code.
+    pub fn report(&mut self, code: u16, case: u8, n: u32, a: u32, b: u32, why: u32) {
+        self.report_span(code, case, NONE, NONE, n, a, b, why);
+    }
+
+    // A type error whose primary span is global tokens lo..=hi (`NONE`: node row n's span).
+    // The caller decides whether the body's types after it are modeled (`bad`).
+    pub fn report_span(&mut self, code: u16, case: u8, lo: u32, hi: u32, n: u32, a: u32, b: u32, why: u32) {
+        let g = &mut self.dg;
+        g.code.push(code);
+        g.case.push(case);
+        g.d.push(self.cur_d);
+        g.pass.push(self.pass);
+        g.lo.push(lo);
+        g.hi.push(hi);
+        g.a.push(a);
+        g.b.push(b);
+        g.n.push(n);
+        g.why.push(why);
+        g.x.push(NONE);
+        g.sc.push(self.sc.par_lo);
+        g.sc.push(self.sc.par_hi);
+        g.sc.push(self.sc.own_lo);
+        g.sc.push(self.sc.own_hi);
+    }
+
+    // The root of literal group value v.
+    pub fn lit_root(&mut self, v: u32) -> u32 {
+        return self.find(v & (LIT - 1));
+    }
+
+    // `LIT_INT` or `LIT_FLOAT`: the kind of pending group v.
+    pub fn lit_kind(&mut self, v: u32) -> u32 {
+        let r = self.find(v & (LIT - 1));
+        return if self.lg_float.as_slice()[r as usize] then LIT_FLOAT else LIT_INT;
+    }
+
+    // E0201 at node row e: value v (a type or a literal group) where want is required; its fix
+    // is decided at the body's end.
+    pub fn mismatch(&mut self, e: usize, v: u32, want: u32, why: u32) {
+        let found = if is_lit(v) then self.lit_kind(v) else v;
+        self.bad = true;
+        self.report(201, C_PENDING, e as% u32, want, found, why);
     }
 
     // A type read from the signatures: the error type is not modeled after an error.
@@ -291,7 +437,7 @@ impl Typeck {
 
     // Checks node e's value against type want at a coercion site (annotation, parameter, return,
     // assignment): a pending group takes want.
-    pub fn coerce(&mut self, tab: &types.Table, e: usize, want: u32) {
+    pub fn coerce(&mut self, tab: &types.Table, e: usize, want: u32, why: u32) {
         let v = self.resolve_at(e);
         if want == UNK {
             self.poison(v);
@@ -299,7 +445,7 @@ impl Typeck {
         }
         if v == UNK { return; }
         if is_lit(v) {
-            if !self.fix(tab, v, want) { self.bad = true; }
+            if !self.fix(tab, v, want) { self.mismatch(e, v, want, why); }
             return;
         }
         if v == want || v == self.t_never { return; }
@@ -311,9 +457,15 @@ impl Typeck {
             // `&str`: an f-string's
             self.fc_node.push(e as% u32);
             self.fc_want.push(want);
+            self.fc_why.push(why);
             return;
         }
-        self.bad = true;
+        // a node without a value (a module, type, or fn path) is no mismatch
+        if v == NONE || v == ERR {
+            self.bad = true;
+            return;
+        }
+        self.mismatch(e, v, want, why);
     }
 
     // stage0's implicit coercions: `&mut T` to `&T`, `&[T; N]` and `&[T align A]` to `&[T]`
@@ -326,10 +478,13 @@ impl Typeck {
             return shape && widened == 0;
         }
         if tab.tag_of(v) != types.TK_REF || tab.tag_of(want) != types.TK_REF { return false; }
-        let vm = tab.a_of(v) == 1;
+        return self.ref_coercible(tab, tab.a_of(v) == 1, tab.b_of(v), want);
+    }
+
+    // `coercible` of the reference `&vi` (`&mut vi` if vm) to reference type want.
+    pub fn ref_coercible(&self, tab: &types.Table, vm: bool, vi: u32, want: u32) -> bool {
         let wm = tab.a_of(want) == 1;
         if wm && !vm { return false; }
-        let vi = tab.b_of(v);
         let wi = tab.b_of(want);
         if !wm && vm && vi == wi { return true; }
         if !wm && tab.tag_of(wi) == types.TK_STR && self.string != NONE && tab.tag_of(vi) == types.TK_ADT && tab.a_of(vi) == self.string { return true; }
@@ -339,8 +494,9 @@ impl Typeck {
         return vt == types.TK_SLICE && tab.b_of(vi) != 0 && tab.a_of(vi) == tab.a_of(wi);
     }
 
-    // stage0's `unify_operands` on resolved values.
-    pub fn unify(&mut self, tab: &types.Table, lt: u32, rt: u32) -> u32 {
+    // stage0's `unify_operands` on resolved values; a mismatch is E0201 at node row rn (the
+    // right operand, the later arm or element).
+    pub fn unify(&mut self, tab: &types.Table, lt: u32, rt: u32, rn: u32) -> u32 {
         if lt == UNK || rt == UNK {
             self.poison(lt);
             self.poison(rt);
@@ -355,19 +511,41 @@ impl Typeck {
         if !ll && !rl {
             if lt == rt || rt == self.t_never { return lt; }
             if lt == self.t_never { return rt; }
-            self.bad = true;
+            // vectors: E0602 / E0603
+            if tab.tag_of(lt) == types.TK_VECTOR || tab.tag_of(rt) == types.TK_VECTOR || lt == ERR || rt == ERR {
+                self.bad = true;
+                return UNK;
+            }
+            self.mismatch(rn as usize, rt, lt, NONE);
             return UNK;
         }
         if ll && rl {
             if self.unite(lt, rt) { return self.resolve(lt); }
+            let a = self.lit_kind(lt);
+            let b = self.lit_kind(rt);
+            self.poison(lt);
+            self.poison(rt);
             self.bad = true;
+            self.report(201, C_NO_CAST, rn, a, b, NONE);
             return UNK;
         }
         let g = if ll then lt else rt;
         let ty = if ll then rt else lt;
         if ty == self.t_never { return g; }
-        if tab.tag_of(ty) == types.TK_VECTOR || !self.fix(tab, g, ty) {
+        if tab.tag_of(ty) == types.TK_VECTOR || ty == ERR {
+            // E0602 (or an error reported where ty was made): the literal is the error type
+            self.poison(g);
             self.bad = true;
+            return UNK;
+        }
+        if !self.fix(tab, g, ty) {
+            // a pending left operand against a typed right one: the expected type is the error
+            // type, no diagnostic
+            if ll {
+                self.bad = true;
+            } else {
+                self.mismatch(rn as usize, rt, lt, NONE);
+            }
             return UNK;
         }
         return ty;
@@ -379,13 +557,19 @@ impl Typeck {
     }
 }
 
+// Whether fn types v and want have the same params and return.
+pub fn fn_same(tab: &types.Table, v: u32, want: u32) -> bool {
+    let n = tab.a_of(v) as usize;
+    return tab.a_of(want) as usize == n && tab.x(v)[0..n + 1].eq(&tab.x(want)[0..n + 1]);
+}
+
 // Fn type v against fn type want: (same params and return, and v needs no feature beyond want's
 // and proven; the effects want denies beyond v's).
 pub fn fn_conv(tab: &types.Table, v: u32, want: u32, proven: u64) -> (bool, u32) {
+    if !fn_same(tab, v, want) { return (false, 0); }
     let n = tab.a_of(v) as usize;
     let vx = tab.x(v);
     let wx = tab.x(want);
-    if tab.a_of(want) as usize != n || !vx[0..n + 1].eq(&wx[0..n + 1]) { return (false, 0); }
     let vf = (vx[n + 1] as u64) << 32 | vx[n + 2] as u64;
     let wf = (wx[n + 1] as u64) << 32 | wx[n + 2] as u64;
     return (vf & ~(wf | proven) == 0, wx[n + 3] & ~vx[n + 3]);
@@ -422,9 +606,15 @@ impl Typeck {
                 let v = self.force_at(a);
                 if v == UNK || index_ok(tab, v, want) { continue; }
             }
-            self.coerce(tab, a, want);
+            // a mask of another shape where a mask is wanted: E0605
+            let v = self.resolve_at(a);
+            if tab.tag_of(want) == types.TK_MASK && v != want && v != UNK && v != NONE && !is_lit(v) && tab.tag_of(v) == types.TK_MASK {
+                self.bad = true;
+                continue;
+            }
+            self.coerce(tab, a, want, NONE);
         }
-        if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_SEL { return self.unify(tab, x, y); }
+        if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_SEL { return self.unify(tab, x, y, self.base as% u32 + tree.kids.row(args as usize)[1]); }
         if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_FREE {
             if x == UNK || y == UNK { return UNK; }
             let r = self.bt.select_ret(tab, c, x, y);
@@ -549,4 +739,78 @@ fn kind(tree: &ast.Ast, g: usize) -> u8 {
 
 fn is_expr(k: u8) -> bool {
     return consteval.is_expr_kind(k);
+}
+
+// The significand bits of a float type (format a).
+fn sig_bits(f: u32) -> u32 {
+    return if f == 0 then 11u32 else if f == 3 then 8u32 else if f == 1 then 24u32 else 53u32;
+}
+
+fn is_64(tab: &types.Table, ty: u32) -> bool {
+    return tab.tag_of(ty) == types.TK_INT && tab.b_of(ty) >= types.W_64;
+}
+
+// stage0's cast table for `as`, `as%`, `as|`, `as~`, `as?`: whether `src op dst` is allowed; the
+// result type is `dst` (`Option<dst>` for `as?`).
+pub fn cast_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
+    let fk = tab.tag_of(src);
+    let tk2 = tab.tag_of(dst);
+    let plain = op == terminals.T_KW_AS;
+    let identity = src == dst && (fk == types.TK_INT || fk == types.TK_FLOAT || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_VECTOR || fk == types.TK_MASK || fk == types.TK_REF || fk == types.TK_PTR);
+    if identity { return true; }
+    if fk == types.TK_VECTOR && tk2 == types.TK_VECTOR {
+        if tab.b_of(src) != tab.b_of(dst) { return false; }
+        return scalar_ok(tab, op, tab.a_of(src), tab.a_of(dst));
+    }
+    if fk == types.TK_REF {
+        if tk2 == types.TK_PTR && plain && tab.b_of(dst) == tab.b_of(src) && (tab.a_of(src) == 1 || tab.a_of(dst) == 0) { return true; }
+        return false;
+    }
+    return scalar_ok(tab, op, src, dst);
+}
+
+fn scalar_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
+    let fk = tab.tag_of(src);
+    let tk2 = tab.tag_of(dst);
+    let fint = fk == types.TK_INT;
+    let tint = tk2 == types.TK_INT;
+    let ffloat = fk == types.TK_FLOAT;
+    let tfloat = tk2 == types.TK_FLOAT;
+    if op == terminals.T_KW_AS {
+        if fint && tint {
+            let fs = tab.a_of(src) == 1;
+            let ts = tab.a_of(dst) == 1;
+            let fb = tab.int_bits(src);
+            let tb = tab.int_bits(dst);
+            return (fs == ts && tb >= fb) || (!fs && ts && tb > fb);
+        }
+        if fk == types.TK_BOOL && tint { return true; }
+        if fk == types.TK_CHAR {
+            if !tint { return false; }
+            let w = tab.b_of(dst);
+            if tab.a_of(dst) == 0 { return w == types.W_32 || w == types.W_64 || w == types.W_SIZE; }
+            return w == types.W_64 || w == types.W_SIZE;
+        }
+        if fint && tab.a_of(src) == 0 && tab.b_of(src) == types.W_8 && tk2 == types.TK_CHAR { return true; }
+        if fint && tfloat {
+            let fb = tab.int_bits(src);
+            let need = if tab.a_of(src) == 1 then fb - 1 else fb;
+            return need <= sig_bits(tab.a_of(dst));
+        }
+        if ffloat && tfloat {
+            let f = tab.a_of(src);
+            let g = tab.a_of(dst);
+            return ((f == 0 || f == 3) && (g == 1 || g == 2)) || (f == 1 && g == 2);
+        }
+        if fk == types.TK_PTR && tk2 == types.TK_PTR { return true; }
+        return (fk == types.TK_PTR && is_64(tab, dst)) || (is_64(tab, src) && tk2 == types.TK_PTR);
+    }
+    if op == terminals.T_AS_PERCENT { return tint && (fint || fk == types.TK_BOOL || fk == types.TK_CHAR || fk == types.TK_PTR); }
+    if op == terminals.T_AS_PIPE { return tint && (fint || ffloat || fk == types.TK_CHAR); }
+    if op == terminals.T_AS_TILDE { return tfloat && (fint || ffloat); }
+    if op == terminals.T_AS_QUESTION {
+        if tint { return fint || ffloat || fk == types.TK_CHAR; }
+        if tk2 == types.TK_CHAR || tfloat { return fint || (ffloat && tfloat); }
+    }
+    return false;
 }

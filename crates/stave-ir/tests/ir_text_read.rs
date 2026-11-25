@@ -635,6 +635,38 @@ fn panic_ops_and_switch() {
     assert!(b.insts.op.iter().all(|o| matches!(o, Op::Panic(_))));
 }
 
+/// A `switch` whose scrutinee is `scrut`, with cases `cases`, at `level`.
+fn switch_module(level: &str, scrut: &str, cases: &str) -> String {
+    format!(
+        "stave.ir 4 \"x86_64-linux-v2\" release {level}
+type t0 int s 32
+fn @0 app.s() -> t0 {{
+b0():
+  switch {scrut} {cases} _:b1()
+b1():
+  ret 0
+}}
+"
+    )
+}
+
+/// At level `opt` the scrutinee may be an int constant, any integer, whose cases are checked for
+/// duplicates only; below it, and for any other constant, it must be a value.
+#[test]
+fn a_constant_switch_scrutinee_only_at_level_opt() {
+    for k in ["1", "-1", "18446744073709551617"] {
+        load(&switch_module("opt", k, "1:b1() -5:b1() 170141183460469231731687303715884105727:b1()"));
+        for level in ["checked", "lowered"] {
+            rejects(&switch_module(level, k, "1:b1()"), "t.ir:5: verify: switch scrutinee must be a value");
+        }
+    }
+    rejects(&switch_module("opt", "1", "1:b1() 1:b1()"), "t.ir:5: verify: duplicate switch case 1");
+    rejects(
+        &switch_module("opt", "0x3f800000", "1:b1()"),
+        "t.ir:5: verify: switch scrutinee must be a value",
+    );
+}
+
 /// Branch targets with arguments, constants of every kind as operands.
 const TERMS: &str = "stave.ir 4 \"x86_64-linux-v2\" debug checked
 type t0 int s 32
@@ -1219,6 +1251,14 @@ fn claim_rules() {
         &with_head("fn @0 a() {\nb0():\nclaim @0 post zero <= zero 0\n"),
         "t.ir:4:1: error: `claim` line inside the body of fn @0",
     );
+    // a row names a param of its fn, in either term and either kind
+    let g = "type t0 int u size\nfn @0 a(t0) -> t0 {\nb0(%0: t0):\n  ret %0\n}\n";
+    for row in ["post result <= p 0 0", "pre zero <= p 0 3", "pre checked p 0 <= zero 9"] {
+        load(&with_head(&format!("{g}claim @0 {row}\n")));
+    }
+    for row in ["post result <= p 1 0", "pre zero <= lenp 7 0", "pre checked p 4294967295 <= zero 9"] {
+        rejects(&with_head(&format!("{g}claim @0 {row}\n")), "t.ir:3: verify: claim names param ");
+    }
 }
 
 #[test]
@@ -1283,10 +1323,13 @@ type t5 ref t1
 
 const LEVELS: [&str; 3] = ["lowered", "checked", "opt"];
 
+/// The levels at which loading runs the audit; at `opt` a body it refuses loads.
+const AUDITED: [&str; 2] = ["lowered", "checked"];
+
 const ELEM_PTR_MISUSE: &str = "ElemPtr access: a slice.ptr result must point to the slice's element type";
 
 /// An element access through a slice's element pointer (`slice.ptr`) is an access of the slice:
-/// without a check it is refused at every level, with one it loads.
+/// without a check it is refused where the audit runs, with one it loads at every level.
 #[test]
 fn an_access_through_a_slice_element_pointer_needs_a_check() {
     let unchecked = "fn @0 main.get(t3, t0) -> t1 {
@@ -1326,19 +1369,23 @@ b0(%0: t3, %1: t0):
   ret %5
 }
 ";
-    for level in LEVELS {
+    for level in AUDITED {
         let es = rejects(
             &elem_ptr_module(level, unchecked),
             "t.ir:11: verify: Elem access without a bounds check or proof",
         );
         assert_eq!(es[0].kind, ErrorKind::Audit);
-        load(&elem_ptr_module(level, checked));
         rejects(
             &elem_ptr_module(level, vec_unchecked),
             "t.ir:12: verify: Vector access without a bounds check or proof",
         );
+    }
+    for level in LEVELS {
+        load(&elem_ptr_module(level, checked));
         load(&elem_ptr_module(level, vec_checked));
     }
+    load(&elem_ptr_module("opt", unchecked));
+    load(&elem_ptr_module("opt", vec_unchecked));
 }
 
 /// A slice's element pointer goes nowhere the audit cannot follow it: every use other than an
@@ -1479,12 +1526,13 @@ b0(%0: t8, %1: t0):
         ),
     ];
     for (what, body) in cases {
-        for level in LEVELS {
+        for level in AUDITED {
             let src = elem_ptr_module(level, body);
             let line = src.lines().position(|l| l.contains("= slice.ptr")).unwrap() + 1;
             let es = rejects(&src, &format!("t.ir:{line}: verify: {ELEM_PTR_MISUSE}"));
             assert_eq!(es[0].kind, ErrorKind::Audit, "{what} at {level}");
         }
+        load(&elem_ptr_module("opt", body));
     }
     let field = "stave.ir 4 \"x86_64-linux-v2\" release lowered
 type t0 int u 64
@@ -1561,11 +1609,36 @@ fn loads_everywhere(body: &str) {
     }
 }
 
-/// `body` is refused at every level by the audit at the first line containing `at`, with `msg`.
-fn refused_everywhere(body: &str, at: &str, msg: &str) {
-    for level in LEVELS {
+/// `body` is refused by the audit at the first line containing `at`, with `msg`, at every level
+/// that runs it, and loads at `opt`.
+fn refused_where_audited(body: &str, at: &str, msg: &str) {
+    for level in AUDITED {
         let src = elem_ptr_module(level, body);
         let es = rejects(&src, &format!("t.ir:{}: verify: {msg}", line_of(&src, at)));
+        assert_eq!(es[0].kind, ErrorKind::Audit, "{level}");
+    }
+    load(&elem_ptr_module("opt", body));
+}
+
+/// Level `opt` is trusted as the release passes' output: loading it runs no audit. The same
+/// body is refused at the levels below.
+#[test]
+fn level_opt_loads_without_the_audit() {
+    let body = "type t0 int s 32
+type t1 slice t0
+type t2 ref t1
+type t3 ref t0
+fn @0 a(t2) -> t0 {
+b0(%0: t2):
+  %1 = addr.elem t3 %0 5
+  %2 = load t0 %1
+  ret %2
+}
+";
+    let head = |level: &str| format!("stave.ir 4 \"x86_64-linux-v2\" release {level}\n{body}");
+    assert_eq!(load(&head("opt")).header.level, Level::Opt);
+    for level in ["checked", "lowered"] {
+        let es = rejects(&head(level), "t.ir:8: verify: ");
         assert_eq!(es[0].kind, ErrorKind::Audit, "{level}");
     }
 }
@@ -1584,7 +1657,7 @@ type t9 ptr mut t6
 type t10 ref t6
 type t11 vec t1 4
 ";
-    refused_everywhere(
+    refused_where_audited(
         &format!(
             "{types}fn @0 main.get(t8) -> t1 {{
 b0(%0: t8):
@@ -1598,7 +1671,7 @@ b0(%0: t8):
         "addr.elem",
         ELEM_UNGUARDED,
     );
-    refused_everywhere(
+    refused_where_audited(
         &format!(
             "{types}fn @0 main.get(t8, t0) -> t1 {{
 b0(%0: t8, %1: t0):
@@ -1613,7 +1686,7 @@ b0(%0: t8, %1: t0):
         "addr.elem",
         ELEM_UNGUARDED,
     );
-    refused_everywhere(
+    refused_where_audited(
         &format!(
             "{types}fn @0 main.get(t8) -> t11 {{
 b0(%0: t8):
@@ -1704,7 +1777,7 @@ b1(%3: t4):
     ];
     for body in refused {
         let at = body.lines().find(|l| l.contains("addr.elem t5")).unwrap().trim();
-        refused_everywhere(body, at, ELEM_UNGUARDED);
+        refused_where_audited(body, at, ELEM_UNGUARDED);
     }
     let unsafe_arith = [
         // read from memory
@@ -1810,7 +1883,8 @@ b0(%0: t4):
         align_to("16", "%9", "%8"),
     ];
     for body in &refused {
-        for level in LEVELS {
+        load(&module("opt", body));
+        for level in AUDITED {
             let src = module(level, body);
             // the `slice.ptr` the `slice.make` reads
             let line = line_of(

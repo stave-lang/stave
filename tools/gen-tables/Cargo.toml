@@ -1,6 +1,6 @@
 [package]
 name = "gen-tables"
-description = "Generates the SIMD lowering tables of stave-target from crates/stave-target/tables/*.toml"
+description = "Generates the SIMD lowering tables of stave-target and the optimizer table of stave-ir from their TOML sources"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 
 use super::{Header, StackInput, VERSION};
 use crate::canon;
-use crate::ir::{Body, Const, DataTarget, Func, Module, Op, Operand, Site, Target, Term};
+use crate::ir::{Body, Const, DataTarget, Func, FuncId, Module, Op, Operand, Site, Target, Term};
 use crate::types::{GenericArg, TypeId, feature_generators};
 use crate::verify::VerifyError;
 use crate::witness::{NO_BLOCK, Row, Summary, Term as RowTerm};
@@ -55,15 +55,48 @@ pub fn print_checked(m: &Module) -> Result<String, Vec<VerifyError>> {
     print_module(m, &header, None)
 }
 
+/// How [`body_text`] spells what a body names outside its own values and blocks. The module
+/// printer spells a function `@<instance>` and a type `t<N>`.
+pub(crate) trait BodyNames {
+    fn func(&self, out: &mut String, f: FuncId);
+    fn ty(&self, out: &mut String, t: TypeId);
+}
+
+/// The lines of body `b` of a function of `m` as the module printer writes them (block headers,
+/// instructions, terminators), with functions and types spelled by `names`, without the `!row`
+/// site suffixes, and with each site row passed as an argument ([`crate::known::site_param`])
+/// spelled `site`.
+pub(crate) fn body_text(m: &Module, b: &Body, names: &dyn BodyNames) -> String {
+    let header = Header {
+        target: stave_target::Triple::X86_64(stave_target::X86Level::V2),
+        mode: super::Mode::Debug,
+        level: super::Level::Checked,
+    };
+    let mut p = Printer { m, header: &header, out: String::new(), names: Some(names) };
+    p.body(b);
+    p.out
+}
+
 struct Printer<'a> {
     m: &'a Module,
     header: &'a Header,
     out: String,
+    /// Set: the body form of [`body_text`].
+    names: Option<&'a dyn BodyNames>,
 }
 
 impl<'a> Printer<'a> {
     fn new(m: &'a Module, header: &'a Header) -> Printer<'a> {
-        Printer { m, header, out: String::new() }
+        Printer { m, header, out: String::new(), names: None }
+    }
+
+    fn tref(&mut self, t: TypeId) {
+        match self.names {
+            Some(n) => n.ty(&mut self.out, t),
+            None => {
+                let _ = write!(self.out, "t{}", t.0);
+            }
+        }
     }
 
     fn print(mut self, stack: Option<&StackInput>) -> String {
@@ -285,6 +318,11 @@ impl<'a> Printer<'a> {
             return;
         };
         self.out.push_str(" {\n");
+        self.body(b);
+        self.out.push_str("}\n");
+    }
+
+    fn body(&mut self, b: &Body) {
         for (bi, bd) in b.blocks.iter().enumerate() {
             let _ = write!(self.out, "b{bi}(");
             for (i, v) in bd.params.of(&b.block_params).iter().enumerate() {
@@ -293,7 +331,8 @@ impl<'a> Printer<'a> {
                 }
                 match b.value_ty(*v) {
                     Some(t) => {
-                        let _ = write!(self.out, "%{}: t{}", v.0, t.0);
+                        let _ = write!(self.out, "%{}: ", v.0);
+                        self.tref(t);
                     }
                     None => {
                         let _ = write!(self.out, "%{}: ?", v.0);
@@ -308,7 +347,6 @@ impl<'a> Printer<'a> {
             self.term(b, bd.term);
             self.out.push('\n');
         }
-        self.out.push_str("}\n");
     }
 
     fn inst(&mut self, b: &Body, i: usize) {
@@ -325,15 +363,28 @@ impl<'a> Printer<'a> {
         }
         match b.insts.ty.get(i).copied().flatten() {
             Some(t) => {
-                let _ = write!(self.out, " t{}", t.0);
+                self.out.push(' ');
+                self.tref(t);
             }
             None => self.out.push_str(" ()"),
         }
-        for o in b.args(i as u32) {
+        let args = b.args(i as u32);
+        // The body form spells a site row passed as an argument `site`, as it drops `!row`.
+        let site_param = match (self.names, b.insts.op.get(i), args.first()) {
+            (Some(_), Some(Op::Call), Some(Operand::Func(f))) => {
+                self.m.func(*f).and_then(|g| g.known).and_then(crate::known::site_param)
+            }
+            _ => None,
+        };
+        for (j, o) in args.iter().enumerate() {
             self.out.push(' ');
+            if matches!(o, Operand::Const(_)) && site_param.is_some_and(|p| j == p + 1) {
+                self.out.push_str("site");
+                continue;
+            }
             self.operand(b, *o);
         }
-        if let Some(s) = b.insts.site.get(i).filter(|s| **s != Site::NONE) {
+        if let Some(s) = b.insts.site.get(i).filter(|s| **s != Site::NONE && self.names.is_none()) {
             let _ = write!(self.out, " !{}", s.0);
         }
         self.out.push('\n');
@@ -414,15 +465,14 @@ impl<'a> Printer<'a> {
             Operand::Str(s) => {
                 let _ = write!(self.out, "s{}", s.0);
             }
-            Operand::Func(f) => match self.m.func(f) {
-                Some(g) => {
+            Operand::Func(f) => match (self.m.func(f), self.names) {
+                (Some(_), Some(n)) => n.func(&mut self.out, f),
+                (Some(g), None) => {
                     let _ = write!(self.out, "@{}", g.instance);
                 }
-                None => self.out.push_str("@?"),
+                (None, _) => self.out.push_str("@?"),
             },
-            Operand::Type(t) => {
-                let _ = write!(self.out, "t{}", t.0);
-            }
+            Operand::Type(t) => self.tref(t),
         }
     }
 

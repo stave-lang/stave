@@ -15,6 +15,7 @@
 //! - [`interp`]: runs a lowered program in the stave-ir reference interpreter (the oracle).
 //! - [`ir_cmd`]: `stave ir VERB FILE`: loading IR text, then fmt, opt, build, run.
 //! - [`dump`]: `--dump=STAGE --dump-dir DIR` printers.
+//! - [`dup`]: `stave dup`: the classes of fns with the same code, and the gate baseline.
 //! - [`conformance`]: the `stave test` runner and its stage0 compiler.
 //! - [`select`]: `--compiler auto|cpu|gpu` and the stage1 probe (contracts/cli.md).
 //! - [`prof`]: the `STAVE_PROFILE` step profile (wall time and allocations per pipeline step).
@@ -23,6 +24,7 @@
 pub mod build;
 pub mod conformance;
 pub mod dump;
+pub mod dup;
 pub mod effects;
 pub mod exec;
 pub mod harness;

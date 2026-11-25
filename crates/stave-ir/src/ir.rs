@@ -578,6 +578,12 @@ impl Body {
         cases.of(&self.cases)
     }
 
+    /// The target a `switch` takes for the scrutinee value `k` (its mathematical value): the
+    /// first case whose value is `k`, else the default.
+    pub fn switch_target(&self, cases: Span, default: Target, k: i128) -> Target {
+        self.switch_cases(cases).iter().find(|c| c.value == k).map_or(default, |c| c.target)
+    }
+
     pub fn value_ty(&self, v: Value) -> Option<TypeId> {
         self.values.get(v.index()).map(|d| d.ty)
     }
