@@ -302,7 +302,9 @@ pub(crate) struct CheckRemoval {
 /// their callee's `requires`. Then the witness checker, which shares no code with the proof
 /// search, validates every witness, and only the checks it accepted are deleted and only the
 /// calls it accepted are retargeted. `whole`: `m` is the whole program of a build, not the part
-/// of it the effect pass lowers; only then may a function lose its checked entry.
+/// of it the effect pass lowers; only then may a function lose its checked entry. When `whole`,
+/// `m` must be canonical on entry (the removal renumbers only what it edited); it is canonical on
+/// return.
 pub(crate) fn remove_proven_checks(m: &mut Module, whole: bool) -> Result<CheckRemoval, Failure> {
     let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
     let stated = Claims::from_rows(
@@ -328,9 +330,16 @@ pub(crate) fn remove_proven_checks(m: &mut Module, whole: bool) -> Result<CheckR
 /// Has the witness checker validate every proof (functions in parallel, each reading the
 /// summaries of all; it accepts all or nothing), then deletes the checks and retargets the calls
 /// it accepted. A witness it refuses is a compiler bug, and then nothing is changed. The contract
-/// checks proved or refuted and the calls refuted are read before the removal.
+/// checks proved or refuted and the calls refuted are read before the removal. When `whole`, `m`
+/// must be canonical on entry, as for [`remove_proven_checks`].
 fn remove_checked(m: &mut Module, proved: Vec<Proved>, whole: bool) -> Result<CheckRemoval, Failure> {
     let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
+    if cfg!(debug_assertions) && whole {
+        assert!(
+            stave_ir::canon::is_canonical(m),
+            "the removal of proven checks of a whole program needs a canonical module on entry"
+        );
+    }
     let witnesses: Vec<&FnWitness> = proved.iter().map(|p| &p.witness).collect();
     let checked = {
         let m: &Module = m;
@@ -651,6 +660,7 @@ mod tests {
         let s = b.binary(Op::AddWrap, u32t, x, y);
         b.ret(Some(s.into()));
         m.define(f, b.finish().unwrap());
+        canonical(&mut m);
         (m, f)
     }
 
