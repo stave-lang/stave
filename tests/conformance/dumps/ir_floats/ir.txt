@@ -1,9 +1,14 @@
+stave.ir 4 "x86_64-linux-v2" debug checked
 type t0 int u 32
 type t1 int s 32
 type t2 float 32
 type t3 float 64
 type t4 bool
-fn @0 main.mix {
+site 0 "src/main.stv" 4 4 main.mix
+site 1 "src/main.stv" 13 4 main.main
+site 2 "src/main.stv" 14 13 main.main
+main @1
+fn @0 main.mix(t3, t2) -> t3 site 0 {
 b0(%0: t3, %1: t2):
   %2 = mul t3 %0 0x3fb999999999999a
   %3 = add t3 %2 0xc004000000000000
@@ -23,9 +28,9 @@ b3(%7: t3):
   %12 = add t3 %9 %11
   ret %12
 }
-fn @1 main.main {
+fn @1 main.main() -> t1 site 1 {
 b0():
-  %0 = call t3 @0 0x3ff0000000000000 0x3f000000
+  %0 = call t3 @0 0x3ff0000000000000 0x3f000000 !2
   %1 = gt t4 %0 0x0000000000000000
   cbr %1 b1() b2()
 b1():

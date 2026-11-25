@@ -539,6 +539,11 @@ impl Cx {
             return *o;
         }
         self.decl += 1;
+        self.p.m.record_decl(
+            DeclId(self.decl),
+            stave_ir::types::AdtKind::Enum,
+            format!("t.Opt{}", self.decl),
+        );
         let o = self.p.m.types.adt(DeclId(self.decl), vec![], AdtShape::enumeration(vec![vec![], vec![t]]));
         self.opts.insert(t, o);
         o

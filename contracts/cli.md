@@ -19,6 +19,7 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 | `stave branch-report [PKG_DIR] [--target T] [--json]` | Planned: branches in loops whose condition depends on loaded data, with a suggested fix |
 | `stave fix [PKG_DIR] [--dry-run] [--target T] [--diagnostics human\|json]` | Apply the `exact` fixes of the diagnostics, re-check, repeat |
 | `stave fmt [PKG_DIR \| FILE...] [--check]` | Rewrite sources in the one canonical layout |
+| `stave ir check\|fmt\|opt\|run\|build FILE ...`, `stave ir emit [PKG_DIR] ...` | Load, check, reprint, optimize, interpret, or build IR text ([checked-ir.md](checked-ir.md)); print a program's IR text with its stack section |
 | `stave grammar [--format ebnf\|lark\|gbnf]` | Planned: print the grammar for constrained decoding |
 | `stave lowering --target T [--op OP]` | Print the lowering-class table |
 | `stave explain EXXXX` | Long-form text for a diagnostic code (registry: `diagnostic-codes.md` ∪ `gpu-diagnostics.md` ∪ `gpu-program-diagnostics.md`) |
@@ -171,6 +172,36 @@ Outputs and statuses of the code-generating commands:
   files are still formatted. `--check` writes nothing, prints the path of each file that would
   change on stdout, one per line, and exits 1 if there is one. A path that cannot be read or
   written is exit 2.
+- `stave ir VERB FILE`: works on IR text ([checked-ir.md](checked-ir.md), syntax
+  [ir-text.ebnf](ir-text.ebnf)). The target, mode, and level come from the file's header, so
+  these verbs take no `--target`, `--release`, or `--features`. Every verb first loads FILE
+  (checked-ir.md "Loading": lines, structure, verification, at level `lowered` the removal of
+  proven checks, the bounds audit). An error prints `FILE:LINE:COL: error: MSG` (lines and
+  structure, at most 100) or `FILE:LINE: verify: MSG` (verification, removal, audit) on stderr
+  and exits 1: the text is input, so a rejected file is never exit 3. The one exit 3 is a witness
+  the witness checker refuses at level `lowered` (a compiler bug). A FILE that cannot be read
+  is exit 2. No verb prints a summary line, a stack line, or an `emulated:` line, and every verb
+  runs stage0.
+  - `check`: loads, prints nothing, exits 0.
+  - `fmt`: prints the canonical text of the loaded module on stdout, at the file's level (a
+    file a compiler printed comes back unchanged).
+  - `opt`: runs the release passes on the loaded module, then the IR verifier and the bounds
+    audit on their output, and prints the module at level `opt` on stdout. The header must say
+    `release` and a level other than `opt` (exit 1 otherwise).
+  - `run [-- ARGS...]`: runs the loaded module's `main` in the stave-ir interpreter with `ARGS`
+    and the inherited stdio, and exits with the program's status, as `stave run`. A file without
+    a `main` line is exit 1. `STAVE_INTERP_CHECK` works as below, except that borrow tracking is
+    never on: the text has no borrow side table.
+  - `build [-o OUT]`: builds the static executable for the header's target, as `stave build`
+    does from the loaded module: a `release` file at level `lowered` or `checked` goes through
+    the release passes, their IR verifier and bounds audit; at level `opt` it skips the passes and
+    still runs the verifier and the audit. The stack table comes from the stack section; without
+    one it is empty (every stack gets the `[run] stack` default). Default OUT: `./<file stem>`,
+    refused as for `stave build`. A file without a `main` line is exit 1.
+- `stave ir emit [PKG_DIR] [--release] [--target T] [-o FILE]`: compiles the
+  program as `stave build` does, through the removal of proven checks, and prints its IR text at
+  level `checked` in the emit form (the gate form plus the stack-section lines) to FILE, default
+  stdout. Diagnostics, their exit codes, and the summary line are those of `stave build`.
 
 Planned commands (exit codes as above):
 
@@ -233,10 +264,11 @@ Common flags come after the subcommand (`stave build --release`, not `stave --re
   several would apply, E1303 (step 1) comes before E1304 (step 1a), and both before E1302. The
   memory estimate (cli-stage1.md, E1301) runs after a passing probe.
 - `--dump=STAGE[,STAGE...] --dump-dir DIR`: writes `DIR/STAGE.txt` per stage (`tokens items ast
-  strings names sigs kinds types borrow ir diags stats`). `--dump` without `--dump-dir`, or `--dump-dir`
-  without `--dump`, is a usage error (exit 2). Formats and order:
-  [stage-gates.md](stage-gates.md); `ir` is
-  [checked-ir.md](checked-ir.md). stage0 implements every stage.
+  strings names sigs kinds types borrow lir ir opt diags stats`). `--dump` without `--dump-dir`,
+  or `--dump-dir` without `--dump`, is a usage error (exit 2), and so is `--dump=opt` without
+  `--release`. Formats and order: [stage-gates.md](stage-gates.md); `lir`, `ir`, and `opt` are the
+  IR text at the levels `lowered`, `checked`, and `opt` of [checked-ir.md](checked-ir.md). stage0
+  implements every stage.
 - `--diagnostics human|json`: JSON emits one object per line, following
   `diagnostics.schema.json`.
 - `--timings`: per-stage wall time and throughput on stderr, in execution order, by the
@@ -283,16 +315,16 @@ of the binary's directory that holds a `Cargo.toml` and is a library directory (
 root, for `target/<profile>/stave`). None found: usage error (exit 2) naming the places tried.
 Every dump covers the whole program, `std` and `runtime` included.
 
-**Interpreter checking mode**: no `stave` command runs the stave-ir reference interpreter; the
-test harness does (`stave_driver::interp::run`: the interpreter legs of the run, SIMD, dispatch,
-and differential suites). `STAVE_INTERP_CHECK=1` in the environment of that process turns on its
-checking mode for every run that takes the default limits (`Limits::check` in code). A memory
-error then ends the run as a failure whose text starts `interp: memory error [<class>]`, class one
-of `use-after-free double-free uninit-read out-of-bounds invalid-free free-size-mismatch
-copy-overlap` (a `copy_bytes` whose ranges share a byte, intrinsics.md "Untyped copy"), then
-the access, the allocation (id, kind `heap stack host`, size, state), and the access, allocation,
-and free traces (fn, instruction index, `file:line:col`, `near` for an instruction without a
-site of its own). Off, the interpreter behaves as without the switch.
+**Interpreter checking mode**: of the `stave` commands only `stave ir run` runs the stave-ir
+reference interpreter; the test harness does too (`stave_driver::interp::run`: the interpreter legs
+of the run, SIMD, dispatch, and differential suites). `STAVE_INTERP_CHECK=1` in the environment of
+that process turns on its checking mode for every run that takes the default limits (`Limits::check`
+in code). A memory error then ends the run as a failure whose text starts `interp: memory error
+[<class>]`, class one of `use-after-free double-free uninit-read out-of-bounds invalid-free
+free-size-mismatch copy-overlap` (a `copy_bytes` whose ranges share a byte, intrinsics.md "Untyped
+copy"), then the access, the allocation (id, kind `heap stack host`, size, state), and the access,
+allocation, and free traces (fn, instruction index, `file:line:col`, `near` for an instruction
+without a site of its own). Off, the interpreter behaves as without the switch.
 
 **Borrow tracking** (`borrow-model.md`) is a further mode of the same interpreter, on top of the
 checking mode: `Limits::borrow` in code, on a module lowered with the borrow side table ("Side

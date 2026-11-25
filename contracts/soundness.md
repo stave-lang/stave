@@ -62,6 +62,13 @@ certified against the callee's own IR; a fact taken from a point that does not d
 check; an unchecked entry reached by a call whose proof covered only some conjuncts of the
 callee's `requires` (acceptance is all or nothing for that reason).
 
+**Built from IR text.** A module loaded from IR text (`stave ir build`, `run`, `opt`; checked-ir.md
+"Loading") carries its summaries as `claim` rows, and the text holds no witness section. Until it
+does, the bounds audit trusts the loaded rows as certified: they are not re-derived from the
+callee's IR, so the "summary row not certified" case above is open there, and a forged row can let
+an access without a check pass the audit. The claim holds for such a build only when its rows are
+the ones a compiler printed. Building from source is unaffected.
+
 ## Overwritten values: loans are read after the statement
 
 **Claim.** When a statement ends the value of a place and reports no live loan of it, no

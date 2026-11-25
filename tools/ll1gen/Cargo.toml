@@ -1,6 +1,6 @@
 [package]
 name = "ll1gen"
-description = "LL(1) checker and parse-table generator for contracts/grammar.ebnf"
+description = "LL(1) checker and parse-table generator for the contract grammars (language, IR text)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,4 +15,5 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
+stave-ir = { workspace = true }
 stave-syntax = { workspace = true }

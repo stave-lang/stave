@@ -20,6 +20,20 @@ pub enum IArch {
     Ptx,
 }
 
+impl IArch {
+    /// Whether an intrinsic of this arch is built for a program of `arch`. The PTX set has no
+    /// lowering and no checked signature, so it is built for none.
+    pub fn builds_for(self, arch: stave_target::Arch) -> bool {
+        use stave_target::Arch;
+        match self {
+            IArch::Both => true,
+            IArch::X86 => arch == Arch::X86_64,
+            IArch::A64 => arch == Arch::Aarch64,
+            IArch::Ptx => false,
+        }
+    }
+}
+
 /// A parameter or result type of an intrinsic signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ITy {

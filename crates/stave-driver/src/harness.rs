@@ -261,8 +261,9 @@ pub fn run(
     for (k, (name, f, decl)) in tests {
         let domain = domain_of(decl);
         let Some(domain) = domain else {
+            module.main = Some(f);
             let built = pool
-                .install(|| build::codegen_link(&module, f, triple, opts.release, opts.threads, None))
+                .install(|| build::codegen_link(&module, triple, opts.release, opts.threads, None))
                 .map_err(HarnessError::Failure)?;
             let outcome = if !runnable {
                 TestFnOutcome::NotRun
@@ -310,8 +311,9 @@ pub fn run(
         let caller = add_caller(&mut module, f, domain, &picked, k).map_err(|message| {
             HarnessError::Failure(Failure::Internal { stage: pipeline::Stage::Lower, message })
         })?;
+        module.main = Some(caller);
         let built = pool
-            .install(|| build::codegen_link(&module, caller, triple, opts.release, opts.threads, None))
+            .install(|| build::codegen_link(&module, triple, opts.release, opts.threads, None))
             .map_err(HarnessError::Failure)?;
         if !runnable {
             report.results.push(TestFnResult { name, outcome: TestFnOutcome::NotRun, inputs: None });

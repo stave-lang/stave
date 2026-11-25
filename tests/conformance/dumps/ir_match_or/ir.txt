@@ -1,3 +1,5 @@
+stave.ir 4 "x86_64-linux-v2" debug checked
+decl d26 enum main.Tok
 type t0 int u 8
 type t1 int u 32
 type t2 int s 32
@@ -5,7 +7,24 @@ type t3 bool
 type t4 ref t1
 type t5 ref mut t1
 type t6 adt d26
-fn @0 main.over {
+shape t6 enum | | | t1 | t1 t1 |
+site 0 "src/main.stv" 26 4 main.over
+site 1 "src/main.stv" 42 4 main.slot
+site 2 "src/main.stv" 34 4 main.linear
+site 3 "src/main.stv" 8 4 main.prec
+site 4 "src/main.stv" 16 4 main.class
+site 5 "src/main.stv" 52 4 main.main
+site 6 "src/main.stv" 53 13 main.main
+site 7 "src/main.stv" 54 13 main.main
+site 8 "src/main.stv" 55 13 main.main
+site 9 "src/main.stv" 56 13 main.main
+site 10 "src/main.stv" 57 13 main.main
+site 11 "src/main.stv" 58 17 main.main
+site 12 "src/main.stv" 58 21 main.main
+site 13 "src/main.stv" 58 25 main.main
+site 14 "src/main.stv" 58 29 main.main
+main @5
+fn @0 main.over(t6, t1) -> t1 site 0 {
 b0(%0: t6, %1: t1):
   br b1()
 b1():
@@ -55,7 +74,7 @@ b15():
 b16():
   br b7()
 }
-fn @1 main.slot {
+fn @1 main.slot(t6) -> t1 site 1 {
 b0(%0: t6):
   %1 = slot t5
   %2 = enum.tag t1 %0
@@ -77,7 +96,7 @@ b4():
 b5():
   ret 0
 }
-fn @2 main.linear {
+fn @2 main.linear(t6, t3) -> t1 site 2 {
 b0(%0: t6, %1: t3):
   br b1()
 b1():
@@ -111,7 +130,7 @@ b11():
 b12():
   br b6()
 }
-fn @3 main.prec {
+fn @3 main.prec(t6) -> t1 site 3 {
 b0(%0: t6):
   %1 = enum.tag t1 %0
   switch %1 0:b1() 1:b2() 2:b4() 3:b5() _:b7()
@@ -136,7 +155,7 @@ b8():
 b9(%5: t1):
   ret %5
 }
-fn @4 main.class {
+fn @4 main.class(t0) -> t1 site 4 {
 b0(%0: t0):
   br b1()
 b1():
@@ -174,21 +193,21 @@ b12():
 b13():
   br b6()
 }
-fn @5 main.main {
+fn @5 main.main() -> t2 site 5 {
 b0():
   %0 = enum.make t6 3 2 3
-  %1 = call t1 @3 %0
-  %2 = call t1 @4 50
+  %1 = call t1 @3 %0 !6
+  %2 = call t1 @4 50 !7
   %3 = enum.make t6 2 9
-  %4 = call t1 @0 %3 5
+  %4 = call t1 @0 %3 5 !8
   %5 = enum.make t6 1
-  %6 = call t1 @2 %5 1
+  %6 = call t1 @2 %5 1 !9
   %7 = enum.make t6 2 4
-  %8 = call t1 @1 %7
-  %9 = add t1 %1 %2
-  %10 = add t1 %9 %4
-  %11 = add t1 %10 %6
-  %12 = add t1 %11 %8
+  %8 = call t1 @1 %7 !10
+  %9 = add t1 %1 %2 !11
+  %10 = add t1 %9 %4 !12
+  %11 = add t1 %10 %6 !13
+  %12 = add t1 %11 %8 !14
   %13 = eq t3 %12 18
   cbr %13 b1() b2()
 b1():

@@ -1,0 +1,98 @@
+stave.ir 4 "x86_64-linux-v2" debug lowered
+type t0 int u 8
+type t1 int u 32
+type t2 int u 64
+type t3 int u size
+type t4 int s 32
+type t5 float 32
+type t6 bool
+type t7 ref t14
+type t8 ref mut t5
+type t9 ref mut t15
+type t10 ref mut t16
+type t11 ptr const t0
+type t12 ptr const t1
+type t13 ptr mut t2
+type t14 slice t0
+type t15 slice t5
+type t16 slice t5 align 16
+type t17 vec t5 4
+site 0 "src/main.stv" 3 4 main.observe
+site 1 "src/main.stv" 28 4 main.explicit
+site 2 "src/main.stv" 7 4 main.fill
+site 3 "src/main.stv" 10 13 main.fill
+site 4 "src/main.stv" 11 11 main.fill
+site 5 "src/main.stv" 13 19 main.fill
+site 6 "src/main.stv" 18 15 main.fill
+site 7 "src/main.stv" 23 4 main.two
+site 8 "src/main.stv" 24 7 main.two
+site 9 "src/main.stv" 25 7 main.two
+site 10 "src/main.stv" 35 4 main.hints
+site 11 "src/main.stv" 40 4 main.main
+main @5
+fn @0 main.observe(t5) -> t5 site 0 {
+b0(%0: t5):
+  ret %0
+}
+fn @1 main.explicit(t13, t2) site 1 {
+b0(%0: t13, %1: t2):
+  mem.store_stream () %0 %1
+  mem.fence_stream ()
+  ret
+}
+fn @2 main.fill(t10, t17, t5) -> t5 site 2 {
+b0(%0: t10, %1: t17, %2: t5):
+  br b1(0, 0x00000000)
+b1(%3: t3, %4: t5):
+  %5 = add t3 %3 4 !3
+  %6 = slice.len t3 %0
+  %7 = le t6 %5 %6
+  cbr %7 b2() b3(%4)
+b2():
+  %8 = slice.len t3 %0
+  %9 = sub.sat t3 %8 3
+  check.bounds () %3 %9 !4
+  vec.store_stream () %0 %3 %1 !4
+  %10 = eq t6 %3 8
+  cbr %10 b4() b5(%4)
+b3(%11: t5):
+  mem.fence_stream ()
+  ret %11
+b4():
+  mem.fence_stream ()
+  %12 = call t5 @0 %2 !5
+  br b5(%12)
+b5(%13: t5):
+  %14 = gt t6 %13 0x42c80000
+  cbr %14 b6() b7()
+b6():
+  mem.fence_stream ()
+  ret %13
+b7():
+  %15 = add t3 %3 4 !6
+  br b1(%15, %13)
+}
+fn @3 main.two(t9, t5) site 7 {
+b0(%0: t9, %1: t5):
+  %2 = slice.len t3 %0
+  check.bounds () 0 %2 !8
+  %3 = addr.elem t8 %0 0
+  mem.store_stream () %3 %1
+  %4 = slice.len t3 %0
+  check.bounds () 1 %4 !9
+  %5 = addr.elem t8 %0 1
+  mem.store_stream () %5 %1
+  mem.fence_stream ()
+  ret
+}
+fn @4 main.hints(t7, t12) site 10 {
+b0(%0: t7, %1: t12):
+  %2 = slice.ptr t11 %0
+  mem.prefetch_read_l1 () %2 64
+  mem.prefetch_write_nta () %1 0
+  ret
+}
+fn @5 main.main() -> t4 site 11 {
+b0():
+  ret 0
+}

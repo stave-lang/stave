@@ -3483,13 +3483,7 @@ impl<'a> Ck<'a> {
     fn intrinsic_arch(&mut self, at: Span, decl: DeclId) {
         let name = self.prog.decl(decl).map_or("", |d| self.prog.strings.get(d.name));
         let Some(builtins::Intrinsic { arch, .. }) = builtins::intrinsic(name) else { return };
-        let ok = match arch {
-            builtins::IArch::Both => true,
-            builtins::IArch::X86 => self.prog.target.arch() == stave_target::Arch::X86_64,
-            builtins::IArch::A64 => self.prog.target.arch() == stave_target::Arch::Aarch64,
-            builtins::IArch::Ptx => false,
-        };
-        if !ok {
+        if !arch.builds_for(self.prog.target.arch()) {
             let path = self.prog.decl_path(decl);
             let f = match arch {
                 builtins::IArch::X86 => "x86_64",

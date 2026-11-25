@@ -251,6 +251,7 @@ fn struct_slot_field_addr() {
     let i32t = m.types.i32();
     let f64t = m.types.f64();
     let s = m.types.adt(DeclId(3), vec![], AdtShape::structure(vec![i32t, f64t, i32t]));
+    record_decl(&mut m, DeclId(3), stave_ir::types::AdtKind::Struct, "t.S");
     let ps = m.types.ref_(true, s);
     let pi = m.types.ref_(true, i32t);
     let f = define(&mut m, &[0], "t.f", &[], Some(s), |b, _| {
@@ -284,6 +285,7 @@ fn enum_in_memory() {
     let u8t = m.types.u8();
     let u64t = m.types.u64();
     let e = m.types.adt(DeclId(4), vec![], AdtShape::enumeration(vec![vec![], vec![u8t, u64t]]));
+    record_decl(&mut m, DeclId(4), stave_ir::types::AdtKind::Enum, "t.E");
     let pe = m.types.ref_(true, e);
     let pu = m.types.ref_(false, u64t);
     let u32t = m.types.u32();

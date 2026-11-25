@@ -210,6 +210,28 @@ fn feature_of(b: &[u8]) -> (bool, u64) {
     return (false, 0);
 }
 
+// The features every program built for target `name` may assume (closed): `sse42` on x86-64 v2,
+// the `v3` and `v4` groups, `neon` on AArch64, `sve` and `sve2` with those extensions.
+pub fn baseline(name: &[u8]) -> u64 {
+    let n = name.len();
+    let lo = if n >= 4 then n - 4 else 0;
+    let end4 = &name[lo..n];
+    let mut f = "neon";
+    if end4.eq(mem.str_bytes("sve2")) {
+        f = "sve2";
+    } else if end4.eq(mem.str_bytes("+sve")) {
+        f = "sve";
+    } else if end4.eq(mem.str_bytes("x-v3")) {
+        f = "v3";
+    } else if end4.eq(mem.str_bytes("x-v4")) {
+        f = "v4";
+    } else if n > 0 && name[0] == 120 {
+        f = "sse42";
+    }
+    let (_, bits) = feature_of(mem.str_bytes(f));
+    return bits;
+}
+
 // The deny bits a `without` name stands for (`block` also denies `park`).
 fn effect_of(b: &[u8]) -> (bool, u8) {
     let e = word_index(EFFECTS, b);

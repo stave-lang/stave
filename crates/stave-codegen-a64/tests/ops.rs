@@ -559,6 +559,11 @@ fn casts() {
                     continue;
                 }
                 let opt = if kind == CastKind::Try {
+                    p.m.record_decl(
+                        stave_ir::DeclId(10_000 + n),
+                        stave_ir::types::AdtKind::Enum,
+                        format!("t.Opt{n}"),
+                    );
                     Some(p.m.types.adt(
                         stave_ir::DeclId(10_000 + n),
                         vec![],

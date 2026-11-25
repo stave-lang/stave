@@ -76,7 +76,7 @@ fn build(p: &Path, target: Triple, release: bool) -> Output {
     let out = pipeline::run(p, &Library::in_dir(&repo()), &o).unwrap();
     assert!(!out.has_errors(), "{}: diagnostics {:?}", p.display(), out.diagnostics);
     assert!(out.failure.is_none(), "{} ({target}): {}", p.display(), out.failure.as_ref().unwrap());
-    assert!(out.image.is_some() && out.module.is_some() && out.main.is_some());
+    assert!(out.image.is_some() && out.module.as_ref().is_some_and(|m| m.main.is_some()));
     out
 }
 
@@ -154,7 +154,7 @@ fn native_equals_interpreter_on_both_arches() {
             let out = build(p, target, false);
             let (m, img) = (out.module.as_ref().unwrap(), out.image.as_ref().unwrap());
             assert_static(img.bytes(), target, &name);
-            let main_path = m.func(out.main.unwrap()).unwrap().path.clone();
+            let main_path = m.func(m.main.unwrap()).unwrap().path.clone();
             let lim = Limits::default();
             let want =
                 match interp::run(out.for_interp().unwrap(), &main_path, target, &[], &data_files(p), lim) {
