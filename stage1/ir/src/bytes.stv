@@ -1,5 +1,6 @@
 // Byte text of the IR: decimal and hex numbers, i128 values, quoted strings (the `strings` dump
 // escape rule, stage-gates.md), paths, and the target names of the header.
+import std.idx;
 import std.mem;
 import std.vec;
 
@@ -7,7 +8,7 @@ import std.vec;
 pub const TARGETS: &str = "x86_64-linux-v2 x86_64-linux-v3 x86_64-linux-v4 aarch64-linux aarch64-linux+sve aarch64-linux+sve2 gpu-sm86";
 pub const N_TARGETS: u32 = 7;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 pub fn push_str(buf: &mut vec.Vec<u8>, s: &str) {
     buf.extend_from_slice(mem.str_bytes(s));
@@ -173,17 +174,17 @@ pub fn utf8_ok(b: &[u8]) -> bool {
     let mut i: usize = 0;
     while i < n {
         let c = b[i];
-        if c < 128 {
+        if c < 0x80 {
             i = i + 1;
             continue;
         }
-        let w: usize = if c >= 194 && c <= 223 then 2 else if c >= 224 && c <= 239 then 3 else if c >= 240 && c <= 244 then 4 else 0;
+        let w: usize = if c >= 0xc2 && c <= 0xdf then 2 else if c >= 0xe0 && c <= 0xef then 3 else if c >= 0xf0 && c <= 0xf4 then 4 else 0;
         if w == 0 || i + w > n { return false; }
         let c1 = b[i + 1];
-        let ok1 = if w == 2 then c1 >= 128 && c1 <= 191 else if c == 224 then c1 >= 160 && c1 <= 191 else if c == 237 then c1 >= 128 && c1 <= 159 else if c == 240 then c1 >= 144 && c1 <= 191 else if c == 244 then c1 >= 128 && c1 <= 143 else c1 >= 128 && c1 <= 191;
+        let ok1 = if w == 2 then c1 >= 0x80 && c1 <= 0xbf else if c == 0xe0 then c1 >= 0xa0 && c1 <= 0xbf else if c == 0xed then c1 >= 0x80 && c1 <= 0x9f else if c == 0xf0 then c1 >= 0x90 && c1 <= 0xbf else if c == 0xf4 then c1 >= 0x80 && c1 <= 0x8f else c1 >= 0x80 && c1 <= 0xbf;
         if !ok1 { return false; }
         for k in 2..w {
-            if b[i + k] < 128 || b[i + k] > 191 { return false; }
+            if b[i + k] < 0x80 || b[i + k] > 0xbf { return false; }
         }
         i = i + w;
     }

@@ -4,9 +4,10 @@
 // these.
 import generated.ir_text_ll1_table;
 import generated.ir_text_terminals;
+import std.idx;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 pub struct Grammar {
     pub text_off: vec.Vec<u32>,

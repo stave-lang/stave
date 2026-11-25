@@ -21,10 +21,11 @@ import umap;
 import generated.ir_text_terminals;
 import prims.col;
 import prims.ragged;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 // Body states of a fn during the structure pass.
 const BS_BODILESS: u8 = 0;

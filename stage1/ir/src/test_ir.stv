@@ -138,7 +138,7 @@ test fn a_deep_type_chain_is_a_fault_not_a_deep_stack() {
 }
 
 test fn any_bytes_load_or_fault() {
-    let mut x: u64 = 88172645463325252;
+    let mut x: u64 = 0x139_408d_cbbf_7a44;
     let base = example();
     for _ in 0..300u32 {
         let mut v = vec.Vec::<u8>.new();
@@ -163,13 +163,13 @@ test fn any_bytes_load_or_fault() {
 
 test fn i128_text() {
     let mut v = vec.Vec::<u8>.new();
-    bytes.push_i128(&mut v, 9223372036854775808, 0);
+    bytes.push_i128(&mut v, 0x8000_0000_0000_0000, 0);
     debug.assert(v.as_slice().eq(mem.str_bytes("-170141183460469231731687303715884105728")), "i128 min");
     v.clear();
-    bytes.push_i128(&mut v, 9223372036854775807, 18446744073709551615);
+    bytes.push_i128(&mut v, 0x7fff_ffff_ffff_ffff, 0xffff_ffff_ffff_ffff);
     debug.assert(v.as_slice().eq(mem.str_bytes("170141183460469231731687303715884105727")), "i128 max");
     v.clear();
-    bytes.push_i128(&mut v, 18446744073709551615, 18446744073709551615);
+    bytes.push_i128(&mut v, 0xffff_ffff_ffff_ffff, 0xffff_ffff_ffff_ffff);
     debug.assert(v.as_slice().eq(mem.str_bytes("-1")), "-1");
     v.clear();
     bytes.quote(&mut v, mem.str_bytes("a\"\\\n\t"));

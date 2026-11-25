@@ -7,11 +7,12 @@ import lexer;
 import generated.ir_text_ll1_table;
 import generated.ir_text_node_kinds;
 import generated.ir_text_terminals;
+import std.idx;
 import std.vec;
 
-const NT_BIT: u32 = 32768;
-const END: u32 = 4294967295;
-const NONE: u32 = 4294967295;
+const NT_BIT: u32 = 0x8000;
+const END: u32 = 0xffff_ffff;
+const NONE: u32 = idx.NONE;
 
 pub struct Driver {
     stack: vec.Vec<u32>,
@@ -61,7 +62,7 @@ impl Driver {
                 }
                 i = i + 1;
             } else {
-                let nt = top & 32767;
+                let nt = top & 0x7fff;
                 let p = g.action(nt, tok);
                 if p < 0 {
                     self.error(g, src, lx, i, nt, true);
@@ -163,7 +164,7 @@ impl Driver {
         for k in 0..take {
             let s = rhs[k] as u32;
             if s & NT_BIT != 0 {
-                if g.named.as_slice()[(s & 32767) as usize] {
+                if g.named.as_slice()[(s & 0x7fff) as usize] {
                     count = count + 1;
                 } else {
                     return (false, 0);

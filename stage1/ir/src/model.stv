@@ -20,9 +20,10 @@
 import types;
 import prims.col;
 import prims.ragged;
+import std.idx;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 
 pub const MODE_DEBUG: u8 = 0;
 pub const MODE_RELEASE: u8 = 1;
@@ -86,7 +87,7 @@ pub const RT_RESULT: u8 = 3;
 pub const RT_LENRESULT: u8 = 4;
 
 // The last part of an unchecked entry's instance id (printed `u`).
-pub const UNCHECKED_ENTRY: u32 = 4294967295;
+pub const UNCHECKED_ENTRY: u32 = 0xffff_ffff;
 
 // i128 values, one row per distinct value.
 pub struct Wide {

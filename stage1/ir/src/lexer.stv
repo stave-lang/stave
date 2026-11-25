@@ -5,10 +5,11 @@
 import bytes;
 import grammar;
 import generated.ir_text_terminals;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 pub struct Lexed {
     pub term: vec.Vec<u16>,

@@ -3,9 +3,10 @@
 // `layout`, `simd`, `arith`). Every function takes any type id and any key, in range or not.
 import model;
 import types;
+import std.idx;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = idx.NONE;
 
 // Classes of a type.
 pub const K_INT: u8 = 0;
@@ -236,17 +237,17 @@ pub fn fits(signed: bool, bits: u32, hi: u64, lo: u64) -> bool {
     }
     let half: u64 = 1u64 << ((bits - 1) as u64);
     if hi == 0 { return lo <= half - 1; }
-    if hi == 18446744073709551615 { return lo >= (0u64 -% half); }
+    if hi == 0xffff_ffff_ffff_ffff { return lo >= (0u64 -% half); }
     return false;
 }
 
 // Within i64::MIN ..= u64::MAX: a constant one 64-bit word holds.
 pub fn fits_word(hi: u64, lo: u64) -> bool {
-    return hi == 0 || (hi == 18446744073709551615 && is_neg(lo));
+    return hi == 0 || (hi == 0xffff_ffff_ffff_ffff && is_neg(lo));
 }
 
 pub fn is_char(hi: u64, lo: u64) -> bool {
-    return hi == 0 && lo <= 1114111 && !(lo >= 55296 && lo <= 57343);
+    return hi == 0 && lo <= 0x10_ffff && !(lo >= 0xd800 && lo <= 0xdfff);
 }
 
 // --- casts (stave-ir `arith::cast_allowed`) ---

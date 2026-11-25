@@ -11,10 +11,11 @@ import model;
 import types;
 import generated.ir_text_terminals;
 import prims.ragged;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 // Line kinds, in section order (the stack section's kinds in their listed order).
 pub const LK_HEADER: u8 = 0;
@@ -383,7 +384,7 @@ impl Stage {
         } else if t0 == t_(ir_text_terminals.IR_T_KW_RUNSTACK) {
             kind = LK_RUNSTACK;
             row = self.rs_val.len() as% u32;
-            let (o, v) = self.uint(src, lx, c.at(1), 18446744073709551615, "a stack size");
+            let (o, v) = self.uint(src, lx, c.at(1), 0xffff_ffff_ffff_ffff, "a stack size");
             ok = o;
             if ok { self.rs_val.push(v); }
         } else if t0 == t_(ir_text_terminals.IR_T_KW_TRUNCATED) {
@@ -391,7 +392,7 @@ impl Stage {
         } else if t0 == t_(ir_text_terminals.IR_T_KW_NODE) {
             kind = LK_NODE;
             row = self.nd_n.len() as% u32;
-            let (o, v) = self.uint(src, lx, c.at(1), 4294967295, "a node number");
+            let (o, v) = self.uint(src, lx, c.at(1), 0xffff_ffff, "a node number");
             ok = o;
             if ok {
                 self.nd_n.push(v as% u32);
@@ -458,7 +459,7 @@ impl Stage {
         let mut v: u64 = 0;
         for i in 1..b.len() {
             v = v * 10 + ((b[i] - 48) as u64);
-            if v > 4294967295 { return (self.fail_id(lx.start.as_slice()[k] + 1, b), 0); }
+            if v > 0xffff_ffff { return (self.fail_id(lx.start.as_slice()[k] + 1, b), 0); }
         }
         return (true, v as% u32);
     }
@@ -487,12 +488,12 @@ impl Stage {
                 let mut v: u64 = 0;
                 for x in i..j {
                     v = v * 10 + ((b[x] - 48) as u64);
-                    if v > 4294967295 {
+                    if v > 0xffff_ffff {
                         self.iref.end_row();
                         return (self.fail_id(col, b), 0);
                     }
                 }
-                if part > 0 && v == 4294967295 {
+                if part > 0 && v == 0xffff_ffff {
                     self.iref.end_row();
                     self.col = col;
                     self.msg.clear();
@@ -699,7 +700,7 @@ impl Stage {
         if kw == ir_text_terminals.IR_T_KW_ARRAY {
             let (ok, elem) = self.reference(src, lx, c.next(), R_TYPE);
             if !ok { return false; }
-            let (ok2, len) = self.uint(src, lx, c.next(), 18446744073709551615, "an array length");
+            let (ok2, len) = self.uint(src, lx, c.next(), 0xffff_ffff_ffff_ffff, "an array length");
             if !ok2 { return false; }
             m.types.begin();
             m.types.push_garg(types.GA_VALUE, (len >> 32) as% u32, len as% u32);
@@ -713,7 +714,7 @@ impl Stage {
             let mut zero = false;
             if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_ALIGN {
                 c.k = c.k + 1;
-                let (ok2, a) = self.uint(src, lx, c.next(), 4294967295, "an alignment");
+                let (ok2, a) = self.uint(src, lx, c.next(), 0xffff_ffff, "an alignment");
                 if !ok2 { return false; }
                 al = a as% u32;
                 zero = a == 0;
@@ -852,13 +853,13 @@ impl Stage {
     }
 
     fn site(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
-        let (o, r) = self.uint(src, lx, 1, 4294967295, "a site row");
+        let (o, r) = self.uint(src, lx, 1, 0xffff_ffff, "a site row");
         if !o { return false; }
         let mut file = vec.Vec::<u8>.new();
         if !self.utf8(src, lx, 2, "a site file", &mut file) { return false; }
-        let (o2, line) = self.uint(src, lx, 3, 4294967295, "a line");
+        let (o2, line) = self.uint(src, lx, 3, 0xffff_ffff, "a line");
         if !o2 { return false; }
-        let (o3, col) = self.uint(src, lx, 4, 4294967295, "a column");
+        let (o3, col) = self.uint(src, lx, 4, 0xffff_ffff, "a column");
         if !o3 { return false; }
         let mut p = vec.Vec::<u8>.new();
         if !self.path(src, lx, 5, &mut p) { return false; }
@@ -872,7 +873,7 @@ impl Stage {
     }
 
     fn static_line(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
-        let (o, idx) = self.uint(src, lx, 1, 4294967295, "a static index");
+        let (o, idx) = self.uint(src, lx, 1, 0xffff_ffff, "a static index");
         if !o { return false; }
         let (o2, ty) = self.reference(src, lx, 2, R_TYPE);
         if !o2 { return false; }
@@ -886,9 +887,9 @@ impl Stage {
     }
 
     fn data(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
-        let (o, idx) = self.uint(src, lx, 1, 4294967295, "a static index");
+        let (o, idx) = self.uint(src, lx, 1, 0xffff_ffff, "a static index");
         if !o { return false; }
-        let (o2, off) = self.uint(src, lx, 2, 4294967295, "an offset");
+        let (o2, off) = self.uint(src, lx, 2, 0xffff_ffff, "an offset");
         if !o2 { return false; }
         let hex = text(src, lx, 3);
         self.tmp.clear();
@@ -909,9 +910,9 @@ impl Stage {
     }
 
     fn ref_line(&mut self, src: &[u8], lx: &lexer.Lexed, c: &mut Cur) -> bool {
-        let (o, idx) = self.uint(src, lx, 1, 4294967295, "a static index");
+        let (o, idx) = self.uint(src, lx, 1, 0xffff_ffff, "a static index");
         if !o { return false; }
-        let (o2, off) = self.uint(src, lx, 2, 4294967295, "an offset");
+        let (o2, off) = self.uint(src, lx, 2, 0xffff_ffff, "an offset");
         if !o2 { return false; }
         let mut kind = model.REF_STR;
         let mut to: u32 = 0;
@@ -923,13 +924,13 @@ impl Stage {
             k = 4;
         } else {
             kind = model.REF_STATIC;
-            let (o3, j) = self.uint(src, lx, 4, 4294967295, "a static index");
+            let (o3, j) = self.uint(src, lx, 4, 0xffff_ffff, "a static index");
             if !o3 { return false; }
             to = j as% u32;
             self.add_ref(R_STATIC, to, lx.start.as_slice()[4] + 1);
             k = 5;
         }
-        let (o4, add) = self.uint(src, lx, k, 4294967295, "an addend");
+        let (o4, add) = self.uint(src, lx, k, 0xffff_ffff, "an addend");
         if !o4 { return false; }
         c.k = k + 1;
         self.rf_idx.push(idx as% u32);
@@ -941,10 +942,10 @@ impl Stage {
     }
 
     fn edge(&mut self, src: &[u8], lx: &lexer.Lexed) -> bool {
-        let (o, fr) = self.uint(src, lx, 1, 4294967295, "a node number");
+        let (o, fr) = self.uint(src, lx, 1, 0xffff_ffff, "a node number");
         if !o { return false; }
         self.add_ref(R_NODE, fr as% u32, lx.start.as_slice()[1] + 1);
-        let (o2, to) = self.uint(src, lx, 2, 4294967295, "a node number");
+        let (o2, to) = self.uint(src, lx, 2, 0xffff_ffff, "a node number");
         if !o2 { return false; }
         self.add_ref(R_NODE, to as% u32, lx.start.as_slice()[2] + 1);
         let kt = lx.term.as_slice()[3];
@@ -959,7 +960,7 @@ impl Stage {
         if !o { return false; }
         let mut ns = vec.Vec::<u32>.new();
         for k in 2..lx.len() {
-            let (o2, v) = self.uint(src, lx, k, 4294967295, "a node number");
+            let (o2, v) = self.uint(src, lx, k, 0xffff_ffff, "a node number");
             if !o2 { return false; }
             let n = v as% u32;
             if ns.len() > 0 && ns.as_slice()[ns.len() - 1] >= n { return self.fail(lx.start.as_slice()[k] + 1, "the nodes of a fn are listed ascending, without repeats"); }
@@ -1056,7 +1057,7 @@ impl Stage {
         }
         let mut site = NONE;
         if c.k < c.n && lx.term.as_slice()[c.k] == ir_text_terminals.IR_T_KW_SITE {
-            let (o2, v) = self.uint(src, lx, c.k + 1, 4294967295, "a site row");
+            let (o2, v) = self.uint(src, lx, c.k + 1, 0xffff_ffff, "a site row");
             if !o2 { return false; }
             site = v as% u32;
             self.add_ref(R_SITE, site, lx.start.as_slice()[c.k + 1] + 1);
@@ -1084,7 +1085,7 @@ impl Stage {
         if t == ir_text_terminals.IR_T_KW_ZERO { return (true, model.RT_ZERO, 0); }
         if t == ir_text_terminals.IR_T_KW_RESULT { return (true, model.RT_RESULT, 0); }
         if t == ir_text_terminals.IR_T_KW_LENRESULT { return (true, model.RT_LENRESULT, 0); }
-        let (o, v) = self.uint(src, lx, c.next(), 4294967295, "a param index");
+        let (o, v) = self.uint(src, lx, c.next(), 0xffff_ffff, "a param index");
         return (o, if t == ir_text_terminals.IR_T_KW_P then model.RT_PARAM else model.RT_LENPARAM, v as% u32);
     }
 
@@ -1226,7 +1227,7 @@ impl Stage {
         }
         let mut site = NONE;
         if c.k < c.n {
-            let (o, v) = self.uint(src, lx, c.k + 1, 4294967295, "a site row");
+            let (o, v) = self.uint(src, lx, c.k + 1, 0xffff_ffff, "a site row");
             if !o { return false; }
             site = v as% u32;
             self.add_ref(R_SITE, site, lx.start.as_slice()[c.k + 1] + 1);
@@ -1350,7 +1351,7 @@ pub fn parse_i128(b: &[u8]) -> (bool, u64, u64) {
     let start: usize = if neg then 1 else 0;
     let mut hi: u64 = 0;
     let mut lo: u64 = 0;
-    let top: u64 = 9223372036854775808;
+    let top: u64 = 0x8000_0000_0000_0000;
     for k in start..b.len() {
         let d = (b[k] - 48) as u64;
         let (lh, ll) = lo.mul_wide(10);

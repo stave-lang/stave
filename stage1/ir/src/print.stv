@@ -8,9 +8,10 @@ import grammar;
 import model;
 import types;
 import generated.ir_text_terminals;
+import std.idx;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 pub fn print(m: &model.Module) -> vec.Vec<u8> {
     let g = grammar.Grammar.new();

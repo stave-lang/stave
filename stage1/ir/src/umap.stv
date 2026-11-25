@@ -1,9 +1,10 @@
 // A map from u64 keys to u32 values, open addressing, grown by doubling; `reset` empties it for
 // the next fn. Lookups only: no order of its slots reaches an id.
 import prims.col;
+import std.idx;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 fn mix(k: u64) -> u64 {
     let mut x = k;

@@ -18,10 +18,11 @@ import vtypes;
 import generated.intrinsic_table;
 import generated.ir_text_terminals;
 import generated.known_items;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 const MAX_STATIC_BYTES: u64 = 1073741824;
 
 // Verifier state of one module: its shape rows, layouts, tables, and the message of the last

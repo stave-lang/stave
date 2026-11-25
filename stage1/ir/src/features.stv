@@ -1,14 +1,15 @@
 // The target features (contracts/simd-ops.md §Features), in their listing order (= bit), each
 // with the features it implies directly. The front end's `needs` sets and the IR's `needs(..)`
 // and `fntype` lists read this one table.
+import std.idx;
 import std.mem;
 import std.vec;
 
 pub const COUNT: usize = 24;
 pub const NAMES: &str = "sse42 avx avx2 fma bmi2 f16c avx512f avx512bw avx512vl avx512dq avx512cd avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16 neon fp16 dotprod bf16 sve sve2 cuda";
-pub const IMPLIES: [u32; 24] = [0, 1, 2, 2, 0, 2, 44, 64, 64, 64, 64, 128, 128, 64, 128, 896, 128, 0, 131072, 131072, 131072, 262144, 2097152, 0];
+pub const IMPLIES: [u32; 24] = [0, 1, 2, 2, 0, 2, 0x2c, 0x40, 0x40, 0x40, 0x40, 0x80, 0x80, 0x40, 0x80, 0x380, 0x80, 0, 0x20000, 0x20000, 0x20000, 0x40000, 0x20_0000, 0];
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 // The closure of feature set `bits` under implication.
 pub fn closure(bits: u64) -> u64 {

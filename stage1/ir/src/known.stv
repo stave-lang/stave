@@ -1,9 +1,10 @@
 // The compiler-known items (`generated.known_items`, from crates/stave-ir/tables/known.toml, the
 // table stage0's `Known` comes from): a fn marked `known` is the item whose path is its path.
 import generated.known_items;
+import std.idx;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = idx.NONE;
 
 pub struct Table {
     path_off: vec.Vec<u32>,
