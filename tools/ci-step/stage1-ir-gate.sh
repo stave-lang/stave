@@ -20,8 +20,9 @@
 # and on its `stage1 ir fmt` text, both byte-equal to the expected file: `--dump=inline` against
 # `inline.txt`; `--dump-phase=inline --verify-phases` against `inline.ir`; and on every case without
 # a `passes` file `--dump-phase=clean --verify-phases` against `clean.ir`, else `output.ir` (a
-# decision-only case has neither: its module is verified, and the two runs must agree). stage0's
-# `stave ir check` loads every module after a phase. No case is skipped.
+# decision-only case has neither: its module is verified, and the two runs must agree). On the same
+# cases the plain run (all passes, no phase flag) equals `output.ir` the same way. stage0's
+# `stave ir check` loads every module after a phase and every output. No case is skipped.
 #
 # Corpus: the roots of the stage1 gate (every package and other `.stv` file below
 # tests/conformance), the bench programs, and the stage1 package itself (the largest text: its
@@ -137,6 +138,36 @@ for c in "$ROOT"/tests/opt/*/; do
 done
 echo "stage1-ir-gate: opt modules after X $xsame / $xcases equal, verified, loaded by stage0"
 echo "stage1-ir-gate: opt modules after C* $csame / $((ccases - cver)) equal, $cver of $ccases without an expected text verified, all loaded by stage0"
+
+# plain_ok CASE: the plain output (every pass, rule P1), verified by stage1, on the input and on its
+# fmt text, equals output.ir (none: the two runs agree); stage0 loads it.
+plain_ok() {
+  lims=$(lims_of "$1")
+  o="$OUT/opt-$(basename "$1").plain"
+  exp="$o.ir"
+  [ -f "$1/output.ir" ] && exp="$1/output.ir"
+  # shellcheck disable=SC2086
+  "$S1" ir opt $lims "$1/input.ir" > "$o.ir" 2> "$o.err" &&
+    "$S1" ir fmt "$1/input.ir" > "$o.fmt" &&
+    "$S1" ir opt $lims "$o.fmt" > "$o.fmt.ir" 2>> "$o.err" &&
+    cmp -s "$exp" "$o.ir" && cmp -s "$exp" "$o.fmt.ir" &&
+    "$S0" ir check "$o.ir" 2>> "$o.err"
+}
+pcases=0
+psame=0
+pnone=0
+for c in "$ROOT"/tests/opt/*/; do
+  [ -f "$c/passes" ] && continue
+  pcases=$((pcases + 1))
+  if plain_ok "$c"; then
+    if [ -f "$c/output.ir" ]; then psame=$((psame + 1)); else pnone=$((pnone + 1)); fi
+  else
+    o="$OUT/opt-$(basename "$c").plain"
+    echo "OPT plain DIFF $(basename "$c") ($(diff "$c/output.ir" "$o.ir" 2>&1 | head -3 | tr '\n' ' ')$(head -c 200 "$o.err"))"
+    fail=1
+  fi
+done
+echo "stage1-ir-gate: opt plain outputs $psame / $((pcases - pnone)) equal output.ir, $pnone of $pcases without one verified, all loaded by stage0"
 
 LIST="$OUT/roots.txt"
 CONF="$ROOT/tests/conformance"
