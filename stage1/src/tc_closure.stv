@@ -63,6 +63,7 @@ impl tc_rows.Typeck {
         if ck == K_BLOCK {
             let a = self.acc.as_slice()[r];
             self.rets.push(if a == NONE then self.t_unit else a);
+            self.ret_why.push(consteval.child(tree, self.base, r, K_TYPE));
             self.set_hint(c, UNK);
             return true;
         }
@@ -72,6 +73,7 @@ impl tc_rows.Typeck {
     // The value of closure Primary r, its body checked: its fn type.
     pub fn closure_value(&mut self, sg: &mut sigs.Sigs, tree: &ast.Ast, r: usize) -> u32 {
         self.rets.truncate(self.rets.len() - 1);
+        self.ret_why.truncate(self.ret_why.len() - 1);
         let a = self.acc.as_slice()[r];
         let ret = if a == NONE then self.t_unit else a;
         if ret == UNK { return self.err(); }
@@ -110,8 +112,12 @@ impl tc_rows.Typeck {
         for i in 0..self.fc_node.len() {
             let e = self.fc_node.as_slice()[i] as usize;
             let want = self.fc_want.as_slice()[i];
+            let why = self.fc_why.as_slice()[i];
             if tab.tag_of(want) != types.TK_FN {
-                if !fstring_node(t, tree, self.base, e) { self.bad = true; }
+                if !fstring_node(t, tree, self.base, e) {
+                    let v = self.resolve_at(e);
+                    self.mismatch(e, v, want, why);
+                }
                 continue;
             }
             value_arms(t, tree, self.base, e, &mut arms);
@@ -120,15 +126,20 @@ impl tc_rows.Typeck {
                 let v = self.resolve_at(a);
                 if v == NONE || v == UNK || v == want || v == self.t_never { continue; }
                 if self.coercible(tab, v, want) { continue; }
-                if !is_lit(v) && tab.tag_of(v) == types.TK_FN {
+                if !is_lit(v) && tab.tag_of(v) == types.TK_FN && tc_rows.fn_same(tab, v, want) {
+                    // the same params and return: E0707 or E1403 unless a fn value made here
+                    // gains the clauses
                     let (shape, widened) = tc_rows.fn_conv(tab, v, want, self.proven);
                     if shape && widened != 0 && self.made_fn_value(t, tree, a) { continue; }
+                    self.bad = true;
+                    continue;
                 }
-                self.bad = true;
+                self.mismatch(a, v, want, why);
             }
         }
         self.fc_node.clear();
         self.fc_want.clear();
+        self.fc_why.clear();
     }
 
     // Whether node n's value is a fn value made right there: n or a node it wraps (stage0

@@ -1,0 +1,185 @@
+// The body checker's type errors (`tc_rows.Rows`) as rows of `diag.Diags`: each row of the last
+// check of its body, with its holes rebuilt as stage0 writes them. A type is its Stave spelling
+// (`diag_sigs.display`), a literal group `{integer}` or `{float}`; a node's span runs from its
+// first token to its last (`ast` `tok_end`); an operand is its node's source text.
+import ast;
+import decls;
+import diag;
+import diag_sigs;
+import intern;
+import lex;
+import modules;
+import sigs;
+import source;
+import tc_rows;
+import text;
+import std.debug;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+// The span (file, start, size) of global tokens lo..=hi of one file.
+fn tok_range(lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, lo: u32, hi: u32) -> (u32, u32, u32) {
+    let (f, s, _) = modules.tok_span(lx, set, t, lo);
+    let (_, s2, z2) = modules.tok_span(lx, set, t, hi);
+    return (f, s, s2 + z2 - s);
+}
+
+// The span of node row n: its first token through its last.
+fn node_span(tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, n: u32) -> (u32, u32, u32) {
+    let a = tree.tok.as_slice()[n as usize];
+    let e = tree.tok_end.as_slice()[n as usize];
+    return tok_range(lx, set, t, a, if e > a then e - 1 else a);
+}
+
+// The span of a `why`: a node row's, or a decl's name (`WHY_DECL | d`).
+fn why_span(tree: &ast.Ast, ds: &decls.Decls, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, w: u32) -> (u32, u32, u32) {
+    if w & tc_rows.WHY_DECL != 0 { return decls.span(ds, md, lx, set, t, w & ~tc_rows.WHY_DECL); }
+    return node_span(tree, lx, set, t, w);
+}
+
+fn ty_text(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, sc: &[u32], ty: u32) {
+    out.clear();
+    if ty == tc_rows.LIT_INT {
+        out.extend_from_slice(mem.str_bytes("{integer}"));
+    } else if ty == tc_rows.LIT_FLOAT {
+        out.extend_from_slice(mem.str_bytes("{float}"));
+    } else {
+        diag_sigs.display(out, sg, ds, nm, sc, ty);
+    }
+}
+
+// Hole `hole` of the open diagnostic: decimal v.
+fn num_arg(d: &mut diag.Diags, buf: &mut vec.Vec<u8>, hole: &str, v: u32) {
+    buf.clear();
+    text.push_u32(buf, v);
+    d.arg(hole, buf.as_slice());
+}
+
+// The registry case of an E0201 fix, and the marked cast it names ("" for none).
+fn fix_case(c: u8) -> (&str, &str) {
+    if c == tc_rows.C_CAST { return ("", ""); }
+    if c == tc_rows.C_AS_PERCENT { return ("cast-marked", "as%"); }
+    if c == tc_rows.C_AS_PIPE { return ("cast-marked", "as|"); }
+    if c == tc_rows.C_AS_TILDE { return ("cast-marked", "as~"); }
+    if c == tc_rows.C_SOME { return ("some", ""); }
+    if c == tc_rows.C_OK { return ("ok", ""); }
+    if c == tc_rows.C_UNWRAP_OPTION { return ("unwrap-option", ""); }
+    if c == tc_rows.C_UNWRAP_RESULT { return ("unwrap-result", ""); }
+    if c == tc_rows.C_BORROW { return ("borrow", ""); }
+    if c == tc_rows.C_BORROW_MUT { return ("borrow-mut", ""); }
+    if c == tc_rows.C_DEREF { return ("deref", ""); }
+    debug.assert(c == tc_rows.C_NO_CAST, "an E0201 row whose fix was never decided");
+    return ("no-cast", "");
+}
+
+// Each row of the body checker's last check of its body as a diagnostic.
+pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast) {
+    let g = &tc.dg;
+    let mut buf = vec.Vec::<u8>.new();
+    for k in 0..g.len() {
+        let dd = g.d.as_slice()[k];
+        if g.pass.as_slice()[k] != tc.last_pass.as_slice()[dd as usize] { continue; }
+        let code = g.code.as_slice()[k];
+        let sc = &g.sc.as_slice()[4 * k..4 * k + 4];
+        let n = g.n.as_slice()[k];
+        let lo = g.lo.as_slice()[k];
+        if lo == NONE && n == NONE {
+            // an E0202 group with no literal of its own (a generic param's): stage0 reports none
+            debug.assert(code == 202, "a type error row without a span");
+            continue;
+        }
+        let (f, s, z) = if lo == NONE then node_span(tree, lx, set, t, n) else tok_range(lx, set, t, lo, g.hi.as_slice()[k]);
+        let case = g.case.as_slice()[k];
+        if code == 201 && case == tc_rows.C_NOT_IN_LOOP {
+            d.begin(201, "not-in-loop");
+            d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+        } else if code == 201 && case == tc_rows.C_TYPE_ARGS {
+            d.begin(201, "type-args");
+            d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            num_arg(d, &mut buf, "count", g.a.as_slice()[k]);
+            num_arg(d, &mut buf, "given", g.b.as_slice()[k]);
+        } else if code == 201 && case == tc_rows.C_ARITY {
+            d.begin(201, "arity");
+            let (_, s0, z0) = tok_range(lx, set, t, g.x.as_slice()[k], lo - 1);
+            d.arg("operand", &set.file(f as usize)[s0 as usize..(s0 + z0) as usize]);
+            num_arg(d, &mut buf, "count", g.a.as_slice()[k]);
+            num_arg(d, &mut buf, "given", g.b.as_slice()[k]);
+        } else if code == 201 && (case == tc_rows.C_FN_ARMS || case == tc_rows.C_FN_ARMS_WANTED) {
+            d.begin(201, if case == tc_rows.C_FN_ARMS then "fn-arms" else "fn-arms-wanted");
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("expected", buf.as_slice());
+            ty_text(&mut buf, sg, ds, nm, sc, g.b.as_slice()[k]);
+            d.arg("found", buf.as_slice());
+            if case == tc_rows.C_FN_ARMS {
+                ty_text(&mut buf, sg, ds, nm, sc, g.x.as_slice()[k]);
+                d.arg("common", buf.as_slice());
+            } else {
+                d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            }
+        } else if code == 201 {
+            let (case, cast) = fix_case(g.case.as_slice()[k]);
+            d.begin(201, case);
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("expected", buf.as_slice());
+            ty_text(&mut buf, sg, ds, nm, sc, g.b.as_slice()[k]);
+            d.arg("found", buf.as_slice());
+            d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            if cast.len() > 0 { d.arg("cast", mem.str_bytes(cast)); }
+            let w = g.why.as_slice()[k];
+            if w != NONE {
+                let (wf, ws, wz) = why_span(tree, ds, md, lx, set, t, w);
+                d.role("expected", wf, ws, wz);
+            }
+        } else if code == 206 {
+            let pat = case == tc_rows.C_PATTERN || case == tc_rows.C_PATTERN_STR;
+            d.begin(206, if case == tc_rows.C_REF_OPERAND then "ref-operand" else if case == tc_rows.C_PATTERN then "pattern" else if case == tc_rows.C_PATTERN_STR then "pattern-str" else "");
+            if pat {
+                d.arg("op", mem.str_bytes("=="));
+            } else if case == tc_rows.C_INDEX {
+                d.arg("op", mem.str_bytes("[]"));
+            } else {
+                d.arg("op", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            }
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("type", buf.as_slice());
+        } else if code == 202 {
+            d.begin(202, if case == tc_rows.C_FLOAT then "float" else if case == tc_rows.C_INFER then "infer" else "");
+            d.arg("literal", &set.file(f as usize)[s as usize..(s + z) as usize]);
+        } else if code == 203 && case == tc_rows.C_MALFORMED {
+            d.begin(203, "malformed");
+            d.arg("literal", &set.file(f as usize)[s as usize..(s + z) as usize]);
+        } else if code == 203 {
+            d.begin(203, "");
+            d.arg("literal", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            let x = g.a.as_slice()[k];
+            ty_text(&mut buf, sg, ds, nm, sc, x);
+            d.arg("type", buf.as_slice());
+            let tab = &sg.cx.tab;
+            let bits = tab.int_bits(x);
+            buf.clear();
+            if tab.a_of(x) == 1 {
+                buf.push(45);
+                text.push_u64(&mut buf, 1u64 << (bits - 1) as u64);
+            } else {
+                buf.push(48);
+            }
+            d.arg("min", buf.as_slice());
+            buf.clear();
+            text.push_u64(&mut buf, if tab.a_of(x) == 1 then (1u64 << (bits - 1) as u64) - 1 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1);
+            d.arg("max", buf.as_slice());
+        } else if code == 204 {
+            d.begin(204, "");
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("from", buf.as_slice());
+            ty_text(&mut buf, sg, ds, nm, sc, g.b.as_slice()[k]);
+            d.arg("to", buf.as_slice());
+        } else {
+            debug.assert(false, "a type error row with no diagnostic");
+            continue;
+        }
+        d.end(f, s, z);
+    }
+}
