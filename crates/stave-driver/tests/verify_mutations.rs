@@ -63,8 +63,9 @@ fn lowered(file: &str, target: &str) -> (Module, FuncId) {
     o.target = Some(Triple::parse(target).unwrap());
     let out = pipeline::run(&repo().join(file), &Library::in_dir(&repo()), &o).unwrap();
     assert!(!out.has_errors(), "{file}: {:?}", out.diagnostics);
-    let main = out.main.unwrap_or_else(|| panic!("{file}: no main"));
-    (out.module.expect("checked IR"), main)
+    let m = out.module.expect("checked IR");
+    let main = m.main.unwrap_or_else(|| panic!("{file}: no main"));
+    (m, main)
 }
 
 /// Int constants at the edges of every type and of every shift, index, and size rule.
@@ -514,7 +515,7 @@ fn verifies(m: &Module) -> bool {
 /// and the interpreter.
 fn downstream(m: &Module, main: FuncId, target: &str, release: bool) {
     let triple = Triple::parse(target).unwrap();
-    let _ = codegen_link(m, main, triple, release, Some(1), None);
+    let _ = codegen_link(m, triple, release, Some(1), None);
     if let Some(f) = m.func(main) {
         let limits = Limits { max_steps: 200_000, max_depth: 200, check: false, borrow: false };
         let _ = interp::run(m, &f.path.clone(), triple, &[], &[], limits);
@@ -534,7 +535,7 @@ fn verified_mutants_do_not_panic() {
             // the mutants reach the program's own code only if the back end builds the whole module
             for release in [false, true] {
                 let triple = Triple::parse(target).unwrap();
-                let built = codegen_link(&m, main, triple, release, Some(1), None);
+                let built = codegen_link(&m, triple, release, Some(1), None);
                 assert!(built.is_ok(), "{file} for {target} (release {release}): {:?}", built.err());
             }
             let mut r = Rng(0x9e37_79b9_7f4a_7c15 ^ (pi as u64 + 1) ^ ((ti as u64) << 32));

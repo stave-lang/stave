@@ -248,7 +248,9 @@ fn exec_one(file: &Path, repo: &Path, release: bool) -> ExitCode {
             return ExitCode::SUCCESS;
         }
     }
-    let (Some(m), Some(main), Some(img)) = (&out.module, out.main, &out.image) else {
+    let (Some(m), Some(main), Some(img)) =
+        (&out.module, out.module.as_ref().and_then(|m| m.main), &out.image)
+    else {
         println!("failure \"no module, main, or image without diagnostics\"");
         println!("done");
         return ExitCode::SUCCESS;

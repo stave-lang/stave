@@ -240,15 +240,17 @@ fn release_and_aarch64_runs() {
 fn ir_dump_is_deterministic() {
     for name in ["fib", "json_lite", "wordcount"] {
         let p = repo().join("tests/conformance/run").join(name);
-        let base = stave_ir::print_checked(&lowered(&p, "x86_64-linux", Mode::Debug, None));
+        let base = stave_ir::print_checked(&lowered(&p, "x86_64-linux", Mode::Debug, None)).unwrap();
         assert!(base.contains("fn @"));
         for threads in [1usize, 3, 12] {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-            let t = pool.install(|| stave_ir::print_checked(&lowered(&p, "x86_64-linux", Mode::Debug, None)));
+            let t = pool.install(|| {
+                stave_ir::print_checked(&lowered(&p, "x86_64-linux", Mode::Debug, None)).unwrap()
+            });
             assert!(t == base, "{name}: threads {threads} differ");
         }
         for seed in [1u64, 7, 99] {
-            let t = stave_ir::print_checked(&lowered(&p, "x86_64-linux", Mode::Debug, Some(seed)));
+            let t = stave_ir::print_checked(&lowered(&p, "x86_64-linux", Mode::Debug, Some(seed))).unwrap();
             assert!(t == base, "{name}: shuffle {seed} differs");
         }
     }
@@ -277,7 +279,7 @@ fn module_decls_match_the_decl_ids_the_ir_refers_to() {
         refs.dedup();
         assert_eq!(ids, refs, "{name}: an entry is unreferenced or a reference has no entry");
         // every `d<N>` of the dump has an entry
-        let dump = stave_ir::print_checked(&m);
+        let dump = stave_ir::print_checked(&m).unwrap();
         let mut printed = 0;
         for tok in dump.split(|c: char| !c.is_ascii_alphanumeric()) {
             let Some(n) = tok.strip_prefix('d').and_then(|n| n.parse::<u32>().ok()) else { continue };
@@ -310,7 +312,7 @@ fn std_and_runtime_lower_and_verify_on_both_arches() {
     for t in ["x86_64-linux", "aarch64-linux"] {
         let m = lowered(&p, t, Mode::DebugAll, None);
         assert!(m.funcs.len() > 100, "{t}: {} funcs", m.funcs.len());
-        let text = stave_ir::print_checked(&m);
+        let text = stave_ir::print_checked(&m).unwrap();
         assert!(!text.contains(" ?") && !text.contains("%?") && !text.contains("b?"), "{t}: unresolved ids");
         assert!(!text.contains("\n\n") && !text.contains(" \n"));
     }
@@ -343,15 +345,17 @@ fn checked_ir_of_small_fns() {
     )
     .unwrap();
     let m = lowered(&dir, "x86_64-linux", Mode::Release, None);
-    let text = stave_ir::print_checked(&m);
+    let text = stave_ir::print_checked(&m).unwrap();
     let f = |name: &str| -> String {
-        let start = text.find(&format!(" {name} {{\n")).map(|i| text[..i].rfind("fn @").unwrap_or(i));
+        let start = text.find(&format!(" {name}(")).map(|i| text[..i].rfind("fn @").unwrap_or(i));
         let s = start.unwrap_or_else(|| panic!("no {name} in\n{text}"));
         let e = text[s..].find("}\n").map_or(text.len(), |e| s + e + 2);
         text[s..e].to_string()
     };
     let max = f("main.max");
-    let max_body: String = max.lines().skip(1).collect::<Vec<_>>().join("\n");
+    // the instructions' site rows (`!N`) are not under test here
+    let no_sites = |l: &str| l.split(" !").next().unwrap().to_string();
+    let max_body: String = max.lines().skip(1).map(no_sites).collect::<Vec<_>>().join("\n");
     assert_eq!(
         max_body,
         "b0(%0: t3, %1: t3):\n  %2 = gt t5 %0 %1\n  cbr %2 b1() b2()\nb1():\n  ret %0\nb2():\n  ret %1\n}"
@@ -431,13 +435,13 @@ fn generated_corpus_lowers_and_verifies() {
         best.as_secs_f64() * 1e3,
         best.as_secs_f64() * 1e3 * 100_000.0 / src_lines as f64
     );
-    let a = stave_ir::print_checked(&m);
+    let a = stave_ir::print_checked(&m).unwrap();
     let m1 = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
         .unwrap()
         .install(|| stave_sema::lower(&p, &tc, Mode::Debug));
-    assert!(stave_ir::print_checked(&m1.unwrap()) == a, "thread count changes the ir dump");
+    assert!(stave_ir::print_checked(&m1.unwrap()).unwrap() == a, "thread count changes the ir dump");
     let _ = std::fs::remove_dir_all(&out);
 }
 
@@ -450,7 +454,7 @@ fn dump() {
     let mode = if std::env::var("STAVE_LOWER_RELEASE").is_ok() { Mode::Release } else { Mode::Debug };
     let mut m = lowered(&p, "x86_64-linux", mode, None);
     if std::env::var("STAVE_LOWER_IR").is_ok() {
-        println!("{}", stave_ir::print_checked(&m));
+        println!("{}", stave_ir::print_checked(&m).unwrap());
     }
     let files = if p.is_dir() { data_files(&p) } else { Vec::new() };
     let r = run(&mut m, SyscallAbi::X86_64, &files);
@@ -658,10 +662,13 @@ fn main() -> i32 {
 "#;
     let dir = temp_pkg("tour", src);
     let mut m = lowered(&dir, "x86_64-linux", Mode::Debug, None);
-    let text = stave_ir::print_checked(&m);
-    assert!(text.lines().any(|l| l.starts_with("fn @") && l.contains('.') && l.ends_with("main.main {")));
+    let text = stave_ir::print_checked(&m).unwrap();
+    assert!(text.lines().any(|l| l.starts_with("fn @") && l.contains(" main.main(")));
     assert!(
-        text.lines().any(|l| l.starts_with("fn @") && l.split(' ').nth(1).is_some_and(|i| i.contains('.'))),
+        text.lines().any(|l| l
+            .strip_prefix("fn @")
+            .and_then(|r| r.split(' ').next())
+            .is_some_and(|i| i.contains('.'))),
         "a closure fn @k.0"
     );
     let r = run(&mut m, SyscallAbi::X86_64, &[]);

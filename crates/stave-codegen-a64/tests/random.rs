@@ -51,7 +51,7 @@ fn random_fixed_seeds() {
 fn debug_seed() {
     let seed: u64 = std::env::var("STAVE_SEED").unwrap().parse().unwrap();
     let p = program(seed);
-    println!("{}", stave_ir::print_checked(&p.m));
+    println!("{}", stave_ir::print_checked(&p.m).unwrap_or_else(|e| format!("{e:?}")));
     check(&p, "dbg");
 }
 
@@ -62,6 +62,6 @@ fn debug_seed() {
 fn debug_stress_seed() {
     let seed: u64 = std::env::var("STAVE_SEED").unwrap().parse().unwrap();
     let p = program_stress(seed);
-    println!("{}", stave_ir::print_checked(&p.m));
+    println!("{}", stave_ir::print_checked(&p.m).unwrap_or_else(|e| format!("{e:?}")));
     check(&p, "dbg");
 }

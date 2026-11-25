@@ -7,33 +7,39 @@ mod common;
 use common::*;
 use stave_ir::interp::Val;
 use stave_ir::{
-    AdtShape, CastKind, DeclId, FuncBuilder, GenericArg, Module, Op, Operand, PanicKind, TypeKey,
-    print_checked, verify_module,
+    AdtShape, CastKind, DeclId, FuncBuilder, GenericArg, Module, Op, Operand, PanicKind, Site, SiteInfo,
+    TypeKey, print_checked,
+    types::{AdtKind, DeclInfo},
+    verify_module,
 };
 
-fn check(m: &mut Module, expected: &str) {
+/// Prints `m` and compares with `tests/print_golden/<name>.ir` (`STAVE_BLESS=1` rewrites it).
+fn check(m: &mut Module, name: &str) {
     m.canonicalize_types().expect("canonical");
     if let Err(e) = verify_module(m) {
         panic!("verify: {e:#?}");
     }
-    let got = print_checked(m);
+    let got = print_checked(m).unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/print_golden")
+        .join(format!("{name}.ir"));
+    if std::env::var_os("STAVE_BLESS").is_some() {
+        std::fs::write(&path, &got).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     assert_eq!(got, expected, "\n--- got ---\n{got}\n--- expected ---\n{expected}");
 }
 
-/// The contract's own example, with the contract's type ids.
+/// The contract's own example (the first complete file in checked-ir.md), built by hand.
 #[test]
 fn contract_example() {
     let mut m = Module::new();
-    for k in 0..10u32 {
-        let key = match k {
-            3 => TypeKey::Int { signed: true, bits: stave_ir::IntBits::B32 },
-            9 => TypeKey::Bool,
-            _ => TypeKey::Param(k),
-        };
-        m.types.intern(key);
-    }
-    let (i32t, bt) = (stave_ir::TypeId(3), stave_ir::TypeId(9));
-    let f = m.declare(inst(&[41]), "app.max", vec![i32t, i32t], Some(i32t));
+    let i32t = m.types.i32();
+    let bt = m.types.bool();
+    m.sites.push(SiteInfo { file: "src/app.stv".into(), line: 1, col: 4, func: "app.max".into() });
+    let f = m.declare(inst(&[0]), "app.max", vec![i32t, i32t], Some(i32t));
+    m.func_mut(f).unwrap().name_site = Site(0);
     let mut b = FuncBuilder::new(&[i32t, i32t]);
     let (x, y) = (b.param(0).unwrap(), b.param(1).unwrap());
     let then = b.create_block();
@@ -46,20 +52,13 @@ fn contract_example() {
     b.ret(Some(y.into()));
     m.define(f, b.finish().unwrap());
     verify_module(&m).unwrap();
-    let expected = "\
-type t3 int s 32
-type t9 bool
-fn @41 app.max {
-b0(%0: t3, %1: t3):
-  %2 = gt t9 %0 %1
-  cbr %2 b1() b2()
-b1():
-  ret %0
-b2():
-  ret %1
-}
-";
-    assert_eq!(print_checked(&m), expected);
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/checked-ir.md"),
+    )
+    .unwrap();
+    let start = doc.find("```\nstave.ir 4 ").expect("the contract example") + 4;
+    let example = &doc[start..start + doc[start..].find("```").unwrap()];
+    assert_eq!(print_checked(&m).unwrap(), example);
     assert_eq!(ret_val(run(&m, f, vec![Val::S(3), Val::S(9)])), Val::S(9));
 }
 
@@ -87,25 +86,7 @@ fn if_else() {
     b.switch_to(join);
     b.ret(Some(jp[0].into()));
     m.define(f, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int s 32
-type t1 bool
-fn @1 app.abs {
-b0(%0: t0):
-  %1 = lt t1 %0 0
-  cbr %1 b1() b2()
-b1():
-  %2 = neg t0 %0
-  br b3(%2)
-b2():
-  br b3(%0)
-b3(%3: t0):
-  ret %3
-}
-",
-    );
+    check(&mut m, "if_else");
     assert_eq!(ret_val(run(&m, f, vec![Val::S((-5i64) as u64)])), Val::S(5));
     assert!(matches!(run(&m, f, vec![Val::S(i32::MIN as i64 as u64)]), stave_ir::Outcome::Trap(_)));
 }
@@ -148,28 +129,7 @@ fn loop_with_carried_local() {
     b.switch_to(exit);
     b.ret(Some(ep[0].into()));
     m.define(f, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int u 64
-type t1 bool
-fn @2 app.sum {
-b0(%0: t0):
-  br b1(0, 0)
-b1(%1: t0, %2: t0):
-  %3 = eq t1 %1 %0
-  cbr %3 b3() b4()
-b2(%4: t0):
-  ret %4
-b3():
-  br b2(%2)
-b4():
-  %5 = add t0 %2 %1
-  %6 = add t0 %1 1
-  br b1(%6, %5)
-}
-",
-    );
+    check(&mut m, "loop_with_carried_local");
     assert_eq!(ret_val(run(&m, f, vec![Val::S(100)])), Val::S(4950));
 }
 
@@ -230,37 +190,7 @@ fn while_break_continue() {
     b.switch_to(exit);
     b.ret(Some(ep[0].into()));
     m.define(f, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int u 32
-type t1 bool
-fn @3 app.count {
-b0(%0: t0):
-  br b1(0, 0)
-b1(%1: t0, %2: t0):
-  %3 = lt t1 %1 %0
-  cbr %3 b2() b3(%2)
-b2():
-  %4 = add t0 %1 1
-  %5 = rem t0 %4 3
-  %6 = eq t1 %5 0
-  cbr %6 b4() b5()
-b3(%7: t0):
-  ret %7
-b4():
-  br b1(%4, %2)
-b5():
-  %8 = eq t1 %2 10
-  cbr %8 b6() b7()
-b6():
-  br b3(%2)
-b7():
-  %9 = add t0 %2 1
-  br b1(%4, %9)
-}
-",
-    );
+    check(&mut m, "while_break_continue");
     assert_eq!(ret_val(run(&m, f, vec![Val::S(9)])), Val::S(6));
     assert_eq!(ret_val(run(&m, f, vec![Val::S(100)])), Val::S(10));
 }
@@ -278,6 +208,7 @@ fn match_to_switch() {
     let mut m = Module::new();
     let f64t = m.types.f64();
     let shape = m.types.adt(DeclId(5), vec![], AdtShape::enumeration(vec![vec![f64t], vec![f64t, f64t]]));
+    m.decls.push(DeclInfo { id: DeclId(5), kind: AdtKind::Enum, path: "app.Shape".into() });
     let u32t = m.types.u32();
     let f = m.declare(inst(&[4]), "app.area", vec![shape], Some(f64t));
     let mut b = FuncBuilder::new(&[shape]);
@@ -308,34 +239,7 @@ fn match_to_switch() {
     b.switch_to(join);
     b.ret(Some(jp[0].into()));
     m.define(f, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int u 32
-type t1 float 64
-type t2 adt d5
-fn @4 app.area {
-b0(%0: t2):
-  %1 = enum.tag t0 %0
-  switch %1 0:b1() _:b3()
-b1():
-  %2 = enum.get t1 %0 0 0
-  br b2()
-b2():
-  %3 = mul t1 %2 %2
-  br b5(%3)
-b3():
-  %4 = enum.get t1 %0 1 0
-  %5 = enum.get t1 %0 1 1
-  br b4()
-b4():
-  %6 = mul t1 %4 %5
-  br b5(%6)
-b5(%7: t1):
-  ret %7
-}
-",
-    );
+    check(&mut m, "match_to_switch");
     let circle = Val::agg(vec![Val::S(0), Val::f64(3.0)]);
     let rect = Val::agg(vec![Val::S(1), Val::f64(2.0), Val::f64(3.5)]);
     assert_eq!(ret_val(run(&m, f, vec![circle])), Val::f64(9.0));
@@ -385,34 +289,7 @@ fn slots_for_address_taken_locals() {
     let sum = b.binary(Op::Add, i32t, ab, cv);
     b.ret(Some(sum.into()));
     m.define(fid, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int s 32
-type t1 ref mut t0
-fn @5 app.bump {
-b0(%0: t1):
-  %1 = load t0 %0
-  %2 = add t0 %1 1
-  store () %0 %2
-  ret
-}
-fn @6 app.f {
-b0():
-  %0 = slot t1
-  %1 = slot t1
-  store () %0 1
-  store () %1 2
-  call () @5 %0
-  call () @5 %1
-  %2 = load t0 %0
-  %3 = add t0 %2 5
-  %4 = load t0 %1
-  %5 = add t0 %3 %4
-  ret %5
-}
-",
-    );
+    check(&mut m, "slots_for_address_taken_locals");
     assert_eq!(ret_val(run(&m, fid, vec![])), Val::S(10));
 }
 
@@ -453,34 +330,7 @@ fn calls_and_closure_order() {
     let r = b.call(apply, Some(i64t), &[Operand::Func(inc), k]).unwrap();
     b.ret(Some(r.into()));
     m.define(main, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int s 64
-type t1 fntype t0 -> t0
-fn @2 app.inc {
-b0(%0: t0):
-  %1 = add t0 %0 1
-  ret %1
-}
-fn @7 app.apply {
-b0(%0: t1, %1: t0):
-  %2 = call.ind t0 %0 %1
-  %3 = call t0 @7.0 %2
-  ret %3
-}
-fn @7.0 app.apply {
-b0(%0: t0):
-  %1 = mul.wrap t0 %0 2
-  ret %1
-}
-fn @8 app.main {
-b0():
-  %0 = call t0 @7 @2 40
-  ret %0
-}
-",
-    );
+    check(&mut m, "calls_and_closure_order");
     assert_eq!(ret_val(run(&m, main, vec![])), Val::S(82));
 }
 
@@ -519,32 +369,7 @@ fn intrinsic_call() {
     let z = b.int(0);
     b.ret(Some(z));
     m.define(main, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int u 8
-type t1 int u size
-type t2 int s 32
-type t3 int s size
-type t4 str
-type t5 ref t4
-type t6 ptr const t0
-fn @5 runtime.os.write {
-b0(%0: t2, %1: t5):
-  %2 = slice.ptr t6 %1
-  %3 = cast t1 %2
-  %4 = slice.len t1 %1
-  %5 = cast.wrap t1 %0
-  %6 = intrinsic.syscall3 t3 1 %5 %3 %4
-  ret %6
-}
-fn @6 app.main {
-b0():
-  %0 = call t3 @5 1 s0
-  ret 0
-}
-",
-    );
+    check(&mut m, "intrinsic_call");
     let (o, h) = run_host(&m, main, vec![]);
     assert_eq!(ret_val(o), Val::S(0));
     assert_eq!(h.stdout, b"hi\n");
@@ -595,36 +420,7 @@ fn trap_ops() {
     let body = m.funcs[f.index()].body.as_mut().unwrap();
     let k = body.insts.op.iter().position(|o| *o == Op::Cast(CastKind::Exact)).unwrap();
     body.insts.op[k] = Op::Cast(CastKind::Round);
-    check(
-        &mut m,
-        "\
-type t0 int u size
-type t1 int s 32
-type t2 float 32
-type t3 bool
-type t4 array t1 4
-fn @9 app.traps {
-b0(%0: t1, %1: t1, %2: t4, %3: t0):
-  %4 = add t1 %0 %1
-  %5 = div t1 %4 %1
-  %6 = shl t1 %5 %3
-  check.bounds () %3 4
-  %7 = get t1 %2 %3
-  %8 = add.wrap t1 %6 %7
-  %9 = mul.sat t1 %8 2
-  %10 = rem t1 %9 7
-  %11 = cast.round t2 %0
-  %12 = lt t3 %11 0x3f000000
-  %13 = eq t3 %10 0
-  cbr %13 b1() b2()
-b1():
-  panic.unwrap ()
-  unreachable
-b2():
-  ret %10
-}
-",
-    );
+    check(&mut m, "trap_ops");
     let xs = |v: [i64; 4]| Val::agg(v.iter().map(|x| Val::S(*x as u64)).collect());
     let si = |x: i64| Val::S(x as u64);
     // (3 + 4) / 4 = 1; 1 << 1 = 2; xs[1] = 5 → 7; 7 *| 2 = 14; 14 % 7 = 0 → panic.unwrap
@@ -662,19 +458,7 @@ fn unreachable_blocks_dropped() {
     let z = b.binary(Op::Mul, i32t, x, two);
     b.ret(Some(z.into()));
     m.define(f, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int s 32
-fn @1 app.g {
-b0(%0: t0):
-  br b1()
-b1():
-  %1 = mul t0 %0 2
-  ret %1
-}
-",
-    );
+    check(&mut m, "unreachable_blocks_dropped");
 }
 
 /// Instance type args and every TypeKey form.
@@ -739,18 +523,5 @@ fn instance_type_args() {
     let e = b.op(Op::Get, u8t, &[v.into(), z]);
     b.ret(Some(e.into()));
     m.define(f, b.finish().unwrap());
-    check(
-        &mut m,
-        "\
-type t0 int u 8
-type t1 ref t2
-type t2 array t0 3
-fn @12 std.mem.first<t0,t2,3> {
-b0(%0: t1):
-  %1 = load t2 %0
-  %2 = get t0 %1 0
-  ret %2
-}
-",
-    );
+    check(&mut m, "instance_type_args");
 }

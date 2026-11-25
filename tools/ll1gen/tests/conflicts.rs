@@ -1,7 +1,7 @@
 //! The LL(1) conflict set of `contracts/grammar.ebnf`, unlisted and stale
 //! overrides, the D3 split map, deterministic output, and grammar errors with line numbers.
 
-use ll1gen::{Config, Error, OVERRIDES, Sym, Tables, build_tables, generate};
+use ll1gen::{Config, Error, LANGUAGE, OVERRIDES, Sym, Tables, build_tables, generate};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -158,6 +158,7 @@ fn rules_named_by_parse_errors_contract_are_required() {
         required_rules: &[],
         required_overrides: &[("TypeBase", "<")],
         pass_through: &[],
+        ..Config::contract()
     };
     let no_d2 = Config { overrides: &OVERRIDES[..1], ..cfg };
     let Err(errs) = build_tables(&fixture_src("base.ebnf"), &no_d2) else { panic!("expected errors") };
@@ -191,23 +192,23 @@ fn pass_through_rules_must_exist_and_not_derive_epsilon() {
 fn too_many_terminals_for_the_u8_kind_column_are_refused() {
     let mut t = contract();
     let mut i = 0;
-    while t.terms.len() <= ll1gen::MAX_TERMINALS {
+    while t.terms.len() <= LANGUAGE.terminal_ids.max_terminals() {
         t.terms.push(format!("synthetic{i}"));
         i += 1;
     }
-    let err = ll1gen::render(&t, "contracts/grammar.ebnf").err().expect("too many terminals").to_string();
+    let err = ll1gen::render(&t, LANGUAGE.grammar, &LANGUAGE).err().expect("too many terminals").to_string();
     assert!(err.contains("255 terminals, at most 254"), "{err}");
     // At the limit the count check passes (the synthetic terminals then fail naming instead).
     t.terms.pop();
-    let err = ll1gen::render(&t, "contracts/grammar.ebnf").err().map(|e| e.to_string()).unwrap_or_default();
+    let err = ll1gen::render(&t, LANGUAGE.grammar, &LANGUAGE).err().map(|e| e.to_string()).unwrap_or_default();
     assert!(!err.contains("at most 254"), "{err}");
 }
 
 #[test]
 fn output_is_byte_identical_across_runs() {
     let src = contract_src();
-    let (_, a) = generate(&src, "contracts/grammar.ebnf", &Config::contract()).expect("generate");
-    let (_, b) = generate(&src, "contracts/grammar.ebnf", &Config::contract()).expect("generate");
+    let (_, a) = generate(&src, "contracts/grammar.ebnf", &LANGUAGE).expect("generate");
+    let (_, b) = generate(&src, "contracts/grammar.ebnf", &LANGUAGE).expect("generate");
     assert_eq!(a.len(), 7);
     for (x, y) in a.iter().zip(&b) {
         assert_eq!(x.path, y.path);
@@ -251,6 +252,8 @@ fn ll1gen() -> Command {
 fn cli_exits_1_on_unlisted_conflict() {
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ll1gen-conflict");
     let out = ll1gen()
+        .arg("--profile")
+        .arg("language")
         .arg("--root")
         .arg(&tmp)
         .arg("--grammar")
@@ -270,7 +273,7 @@ fn cli_check_detects_stale_files() {
     let g = fixture("base.ebnf");
     let run = |check: bool| {
         let mut c = ll1gen();
-        c.arg("--root").arg(&tmp).arg("--grammar").arg(&g);
+        c.args(["--profile", "language", "--root"]).arg(&tmp).arg("--grammar").arg(&g);
         if check {
             c.arg("--check");
         }

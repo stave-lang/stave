@@ -313,7 +313,7 @@ fn judge_run(c: &Case, lib: &Library, slow: bool) -> (Verdict, Duration, u64) {
     {
         return (Verdict::Fail(format!("declares the report [{w}] but has no unsafe of its own")), none, 0);
     }
-    let main = out.main.and_then(|f| m.func(f)).map_or_else(|| "main.main".to_string(), |f| f.path.clone());
+    let main = m.main.and_then(|f| m.func(f)).map_or_else(|| "main.main".to_string(), |f| f.path.clone());
     let lim = Limits { check: true, borrow: true, max_steps: MAX_STEPS, ..Limits::default() };
     let t = Instant::now();
     let got = interp::run(m, &main, target, &[], &data_files(c), lim);

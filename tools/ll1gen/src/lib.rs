@@ -1,9 +1,12 @@
-//! `ll1gen`: LL(1) table generator for `contracts/grammar.ebnf`. One generated table drives both the stage0
-//! parser (`stave-syntax`) and the stage1 GPU parser (`stage1/src/generated`).
+//! `ll1gen`: LL(1) table generator. A [`Profile`] names one grammar and everything specific to it:
+//! the grammar file, start rule, lexical classes, pass-through rules, listed overrides, output
+//! directories and file / symbol prefixes. [`LANGUAGE`] (`contracts/grammar.ebnf`) drives the
+//! stage0 parser (`stave-syntax`) and the stage1 GPU parser; [`IR_TEXT`]
+//! (`contracts/ir-text.ebnf`) drives the readers of the IR text in both compilers.
 //!
 //! Pipeline: [`ebnf::parse`] → [`lower::lower`] → terminal interning → [`analyze::analyze`] →
-//! conflict resolution by the listed greedy [`OVERRIDES`] → [`Tables`] → [`emit_rust`] and
-//! [`emit_stave`].
+//! `AnyWord` expansion → conflict resolution by the profile's listed greedy overrides →
+//! [`Tables`] → [`emit_rust`] and [`emit_stave`].
 
 pub mod analyze;
 pub mod ebnf;
@@ -125,9 +128,35 @@ pub const PASS_THROUGH: [&str; 14] = [
     "Postfix",
 ];
 
-/// What the generator enforces.
+/// The word-shaped pseudo-class of a grammar. Its terminal matches every token of the Word shape
+/// `[A-Za-z_][A-Za-z0-9_.]*`: a keyword whose spelling has that shape, a token of one of
+/// `word_classes`, and itself (the class of a Word that is neither a keyword nor another class).
+#[derive(Debug, Clone, Copy)]
+pub struct AnyWord<'a> {
+    /// The class name as written in the grammar.
+    pub name: &'a str,
+    /// The other lexical classes whose tokens have the Word shape.
+    pub word_classes: &'a [&'a str],
+}
+
+/// True if `s` has the Word shape `[A-Za-z_][A-Za-z0-9_.]*`.
+pub fn is_word_shaped(s: &str) -> bool {
+    let mut cs = s.chars();
+    cs.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// What the generator enforces for one grammar.
 #[derive(Debug, Clone, Copy)]
 pub struct Config<'a> {
+    /// The start rule: the first rule of the grammar.
+    pub start: &'a str,
+    /// Lexical class terminals (named in the grammar, not spelled). `EOF` is always one.
+    pub classes: &'a [&'a str],
+    /// The word-shaped pseudo-class, if the grammar uses one. It is a lexical class too.
+    pub any_word: Option<AnyWord<'a>>,
+    /// Split actions ([`SPLIT`] for the language grammar).
+    pub split: &'a [(&'a str, &'a str, &'a str)],
     pub overrides: &'a [Override],
     pub required_rules: &'a [&'a str],
     pub required_overrides: &'a [(&'a str, &'a str)],
@@ -136,17 +165,167 @@ pub struct Config<'a> {
     pub pass_through: &'a [&'a str],
 }
 
+/// Lexical classes of the language grammar (besides `EOF`).
+pub const LANGUAGE_CLASSES: [&str; 6] = ["Ident", "IntLit", "FloatLit", "StrLit", "FmtLit", "CharLit"];
+
 impl Config<'static> {
     /// The configuration for `contracts/grammar.ebnf`.
     pub const fn contract() -> Self {
         Config {
+            start: "File",
+            classes: &LANGUAGE_CLASSES,
+            any_word: None,
+            split: &SPLIT,
             overrides: &OVERRIDES,
             required_rules: &REQUIRED_RULES,
             required_overrides: &REQUIRED_OVERRIDES,
             pass_through: &PASS_THROUGH,
         }
     }
+
+    /// The configuration for `contracts/ir-text.ebnf`: no override, no split token, no
+    /// pass-through rule, the `AnyWord` pseudo-class.
+    pub const fn ir_text() -> Self {
+        Config {
+            start: "Line",
+            classes: &IR_TEXT_CLASSES,
+            any_word: Some(AnyWord { name: "AnyWord", word_classes: &IR_TEXT_WORD_CLASSES }),
+            split: &[],
+            overrides: &[],
+            required_rules: &[],
+            required_overrides: &[],
+            pass_through: &[],
+        }
+    }
 }
+
+/// Lexical classes of the IR text grammar (besides `EOF` and `AnyWord`).
+pub const IR_TEXT_CLASSES: [&str; 11] =
+    ["Val", "Blk", "TId", "SId", "DId", "FnRef", "Intr", "Int", "Hex", "Bytes", "String"];
+
+/// The IR text classes whose tokens have the Word shape.
+pub const IR_TEXT_WORD_CLASSES: [&str; 6] = ["Intr", "Blk", "TId", "SId", "DId", "Bytes"];
+
+/// The integer type of the terminal ids in a profile's generated Stave constants, and with it
+/// the most terminals the profile may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalIds {
+    /// Ids are stage1 token kinds, stored in `u8` columns. The lexer needs two values above the
+    /// ids: its error kind (`NTERM`) and 255 as no kind.
+    U8,
+    U16,
+}
+
+impl TerminalIds {
+    pub const fn stave_type(self) -> &'static str {
+        match self {
+            TerminalIds::U8 => "u8",
+            TerminalIds::U16 => "u16",
+        }
+    }
+
+    pub const fn max_terminals(self) -> usize {
+        match self {
+            TerminalIds::U8 => 254,
+            TerminalIds::U16 => u16::MAX as usize,
+        }
+    }
+
+    fn why_limited(self) -> &'static str {
+        match self {
+            TerminalIds::U8 => {
+                "token kinds are u8, and the lexer needs two values above the ids: its error kind and 255 as no kind"
+            }
+            TerminalIds::U16 => "table entries are 16-bit",
+        }
+    }
+}
+
+/// One generated table set: a grammar and everything specific to it.
+#[derive(Debug, Clone, Copy)]
+pub struct Profile {
+    /// The name given to `--profile`.
+    pub name: &'static str,
+    /// The grammar file, relative to the repository root.
+    pub grammar: &'static str,
+    pub config: Config<'static>,
+    /// Output directories, relative to the repository root.
+    pub rust_dir: &'static str,
+    pub stave_dir: &'static str,
+    /// Prefix of every generated file stem (`ir_text_` gives `ir_text_ll1_table.rs`).
+    pub file_prefix: &'static str,
+    /// Prefix of every top-level name in the generated Stave files (they share one package
+    /// namespace with the other grammars' tables).
+    pub symbol_prefix: &'static str,
+    /// Appended to "Terminals in sorted spelling order (byte order)" in the terminal files.
+    pub order_note: &'static str,
+    /// Two lexical class names, quoted in the terminal docs.
+    pub class_examples: [&'static str; 2],
+    /// The type of the terminal ids in the Stave constants.
+    pub terminal_ids: TerminalIds,
+}
+
+/// Paths of the language grammar's generated files, relative to the repository root.
+pub const RUST_DIR: &str = "crates/stave-syntax/src/generated";
+pub const STAVE_DIR: &str = "stage1/src/generated";
+
+/// `contracts/grammar.ebnf`.
+pub const LANGUAGE: Profile = Profile {
+    name: "language",
+    grammar: "contracts/grammar.ebnf",
+    config: Config::contract(),
+    rust_dir: RUST_DIR,
+    stave_dir: STAVE_DIR,
+    file_prefix: "",
+    symbol_prefix: "",
+    order_note: ", which is the E0004 expected-set order",
+    class_examples: ["Ident", "IntLit"],
+    terminal_ids: TerminalIds::U8,
+};
+
+/// `contracts/ir-text.ebnf`: the grammar of one line of the IR text.
+///
+/// # Token classification the tables assume
+///
+/// A reader lexes one line (no `\n` inside) into terminal ids of `terminals`, then runs the PDA
+/// from the start rule `Line`; the end of the line is the terminal `EOF`, appended once. Blank
+/// and comment-only lines never reach the table. Spaces and tabs only separate tokens.
+///
+/// 1. Punctuation, maximal munch: `->` and `<=` are single tokens, then one of `( ) < > , : = !
+///    | { }`. A `-` not followed by a digit and not starting `->` is a lexical error.
+/// 2. `%` Num is `Val`; `@` Num (`.` Num)* (`.u`)? is `FnRef`; a double-quoted string with the
+///    `strings` dump escapes is `String`; `0x` plus exactly 4, 8 or 16 lowercase hex digits is
+///    `Hex`; `-`? Num is `Int` (no leading zero except `0` itself, no `-0`).
+/// 3. A Word is `[A-Za-z_][A-Za-z0-9_.]*`, taken by maximal munch, then classified by the first
+///    rule that matches, shape before keyword: `intrinsic.` `[a-z0-9_]+` is `Intr`; `b` Num is
+///    `Blk`; `t` Num is `TId`; `s` Num is `SId`; `d` Num is `DId`; `x` followed by 1 to 64
+///    pairs of lowercase hex digits is `Bytes`; a spelling that is a keyword terminal of the
+///    table is that keyword (a class name such as `Val` is not a keyword); anything else is a `Name`, which has no terminal of its own and is
+///    lexed as the `AnyWord` terminal. No keyword has a shape of the first six rules, so the
+///    order is not observable for keywords (`b16`, the bfloat16 float key, is a `Blk`).
+/// 4. `AnyWord` is the pseudo-class of the Word shape: `TERM_IS_WORD[t]` is true for every
+///    keyword spelled in the Word shape, for `Intr`, `Blk`, `TId`, `SId`, `DId`, `Bytes` and for
+///    `AnyWord` itself. The table already holds the fallback: in a row where `AnyWord` has an
+///    action, every Word-shaped terminal whose own column was empty holds that action. Where
+///    the PDA expects the terminal `AnyWord` it accepts any token with `TERM_IS_WORD` set;
+///    every other expected terminal matches by equal id. `AnyWord` is expected in the `Path`
+///    rule only.
+/// 5. After the stack is empty the only token left must be the final `EOF`.
+pub const IR_TEXT: Profile = Profile {
+    name: "ir-text",
+    grammar: "contracts/ir-text.ebnf",
+    config: Config::ir_text(),
+    rust_dir: "crates/stave-ir/src/generated",
+    stave_dir: "stage1/src/generated",
+    file_prefix: "ir_text_",
+    symbol_prefix: "IR_",
+    order_note: "",
+    class_examples: ["Val", "TId"],
+    terminal_ids: TerminalIds::U16,
+};
+
+/// Every profile `gen` runs, language first.
+pub const PROFILES: [&Profile; 2] = [&LANGUAGE, &IR_TEXT];
 
 /// An output nonterminal.
 #[derive(Debug, Clone)]
@@ -206,8 +385,13 @@ pub struct Tables {
     /// `table[nt * nterm + term]`: production, or -1.
     pub table: Vec<i16>,
     pub overrides: Vec<OverrideCell>,
-    /// Split actions ([`SPLIT`]): (token, first, rest) terminal ids.
+    /// Split actions ([`Config::split`]): (token, first, rest) terminal ids.
     pub split: Vec<(u16, u16, u16)>,
+    /// The terminal id of the word-shaped pseudo-class ([`Config::any_word`]).
+    pub any_word: Option<u16>,
+    /// Per terminal: a token of it has the Word shape (a keyword spelled in the Word shape, a
+    /// word class, the pseudo-class itself). Empty without a pseudo-class.
+    pub term_is_word: Vec<bool>,
 }
 
 impl Tables {
@@ -247,7 +431,15 @@ impl Tables {
 /// conflicts (naming origin rule, token and alternatives), stale overrides, missing rules.
 pub fn build_tables(src: &str, cfg: &Config) -> Result<Tables, Vec<Error>> {
     let rules = ebnf::parse(src).map_err(|e| vec![e])?;
-    let g = lower::lower(&rules).map_err(|e| vec![e])?;
+    let mut classes: Vec<&str> = cfg.classes.to_vec();
+    classes.extend(cfg.any_word.map(|a| a.name));
+    let g = lower::lower(&rules, &classes).map_err(|e| vec![e])?;
+    if rules.first().map(|r| r.name.as_str()) != Some(cfg.start) {
+        let found = rules.first().map_or("(none)", |r| r.name.as_str());
+        let line = rules.first().map(|r| r.line);
+        let msg = format!("the start rule `{}` must be the first rule, found `{found}`", cfg.start);
+        return Err(vec![Error { line, msg }]);
+    }
 
     // Terminals: every spelling used, plus EOF and the split tokens, in byte order.
     let mut tset: BTreeSet<String> = BTreeSet::new();
@@ -259,7 +451,7 @@ pub fn build_tables(src: &str, cfg: &Config) -> Result<Tables, Vec<Error>> {
         }
     }
     tset.insert(lower::EOF.to_string());
-    for (a, b, c) in SPLIT {
+    for &(a, b, c) in cfg.split {
         tset.extend([a, b, c].map(String::from));
     }
     let terms: Vec<String> = tset.into_iter().collect();
@@ -283,7 +475,7 @@ pub fn build_tables(src: &str, cfg: &Config) -> Result<Tables, Vec<Error>> {
         })
         .collect();
     let eof = tid[lower::EOF];
-    let an = analyze::analyze(&analyze::Input {
+    let mut an = analyze::analyze(&analyze::Input {
         prods: &prods,
         nnt: g.nts.len(),
         nterm: terms.len(),
@@ -325,8 +517,21 @@ pub fn build_tables(src: &str, cfg: &Config) -> Result<Tables, Vec<Error>> {
         })
         .collect();
 
-    let split = SPLIT.iter().map(|(a, b, c)| (tid[a], tid[b], tid[c])).collect();
-    let term_is_class = terms.iter().map(|s| lower::LEX_CLASSES.contains(&s.as_str())).collect();
+    let split = cfg.split.iter().map(|(a, b, c)| (tid[a], tid[b], tid[c])).collect();
+    let term_is_class: Vec<bool> = terms.iter().map(|s| lower::is_class(&classes, s)).collect();
+    let any_word = cfg.any_word.and_then(|a| tid.get(a.name).copied());
+    let term_is_word: Vec<bool> = match cfg.any_word {
+        None => Vec::new(),
+        Some(a) => terms
+            .iter()
+            .zip(&term_is_class)
+            .map(
+                |(s, &c)| {
+                    if c { s == a.name || a.word_classes.contains(&s.as_str()) } else { is_word_shaped(s) }
+                },
+            )
+            .collect(),
+    };
     let mut t = Tables {
         terms,
         term_is_class,
@@ -336,6 +541,8 @@ pub fn build_tables(src: &str, cfg: &Config) -> Result<Tables, Vec<Error>> {
         table: Vec::new(),
         overrides: Vec::new(),
         split,
+        any_word,
+        term_is_word,
     };
 
     let mut errors = Vec::new();
@@ -345,6 +552,37 @@ pub fn build_tables(src: &str, cfg: &Config) -> Result<Tables, Vec<Error>> {
     }
     if nkind > 256 {
         errors.push(Error::new(format!("{nkind} named rules: node kinds must fit in u8")));
+    }
+
+    // The pseudo-class stands for every Word-shaped terminal: in a row where it has an action, a
+    // Word-shaped terminal takes that action too, and a different action there is a conflict.
+    if let Some(any) = cfg.any_word {
+        match t.any_word {
+            None => {
+                errors.push(Error::new(format!("the pseudo-class `{}` is not used by the grammar", any.name)))
+            }
+            Some(a) => {
+                for name in any.word_classes {
+                    if !classes.contains(name) {
+                        errors
+                            .push(Error::new(format!("word class `{name}` is not a declared lexical class")));
+                    }
+                }
+                for row in &mut an.cells {
+                    let from_any = row[a as usize].clone();
+                    if from_any.is_empty() {
+                        continue;
+                    }
+                    for (w, cell) in row.iter_mut().enumerate() {
+                        if w != a as usize && t.term_is_word[w] {
+                            cell.extend(from_any.iter().copied());
+                            cell.sort_unstable();
+                            cell.dedup();
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Conflict resolution.
@@ -442,34 +680,29 @@ pub struct Output {
     pub content: String,
 }
 
-/// Paths of the generated files, relative to the repository root.
-pub const RUST_DIR: &str = "crates/stave-syntax/src/generated";
-pub const STAVE_DIR: &str = "stage1/src/generated";
-
-/// The most terminals the stage1 token-kind column (u8) can hold.
-pub const MAX_TERMINALS: usize = 254;
-
 /// Renders every generated file. `grammar` is the grammar path shown in the headers.
-pub fn render(t: &Tables, grammar: &str) -> Result<Vec<Output>, Error> {
-    // Two values above the terminal ids stay free for the lexer's error kind (`NTERM`) and its
-    // no-kind mark (255).
-    if t.nterm() > MAX_TERMINALS {
+pub fn render(t: &Tables, grammar: &str, prof: &Profile) -> Result<Vec<Output>, Error> {
+    let max = prof.terminal_ids.max_terminals();
+    if t.nterm() > max {
         return Err(Error::new(format!(
-            "{} terminals, at most {MAX_TERMINALS}: stage1 token kinds are u8, and the lexer needs two values above the terminal ids (its error kind and 255 as no kind)",
+            "{} terminals, at most {max} for the {} profile: its terminal ids are {} ({})",
             t.nterm(),
+            prof.name,
+            prof.terminal_ids.stave_type(),
+            prof.terminal_ids.why_limited(),
         )));
     }
     let names = naming::Names::new(t)?;
     let header = format!("generated by tools/ll1gen from {grammar}; do not edit");
-    let mut out = emit_rust::emit(t, &names, &header);
-    out.extend(emit_stave::emit(t, &names, &header));
+    let mut out = emit_rust::emit(t, &names, &header, prof);
+    out.extend(emit_stave::emit(t, &names, &header, prof));
     Ok(out)
 }
 
 /// Builds and renders in one step.
-pub fn generate(src: &str, grammar: &str, cfg: &Config) -> Result<(Tables, Vec<Output>), Vec<Error>> {
-    let t = build_tables(src, cfg)?;
-    let out = render(&t, grammar).map_err(|e| vec![e])?;
+pub fn generate(src: &str, grammar: &str, prof: &Profile) -> Result<(Tables, Vec<Output>), Vec<Error>> {
+    let t = build_tables(src, &prof.config)?;
+    let out = render(&t, grammar, prof).map_err(|e| vec![e])?;
     Ok((t, out))
 }
 

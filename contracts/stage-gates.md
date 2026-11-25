@@ -21,7 +21,9 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
 | `kinds` | `sigs` table type, impl, (type, trait) with a candidate impl | `t<T> FLAGS depth D SIZE`, `impl d<D> trait .. head .. gen N methods[..]`, `apply t<T> d<D> [d<D> ..]` | T, then (trait, head, I), then (T, trait D) |
 | `types` | expression node | `I N T` and, once, the type table `T key` | T table, then I, N |
 | `borrow` | access | `I N access-kind verdict loan` | I, N, access-kind |
-| `ir` | checked IR line | the canonical checked-IR printer ([checked-ir.md](checked-ir.md); after type, borrow, and mono; before optimization) | instance id, block, inst |
+| `lir` | IR text line | the IR text at level `lowered` ([checked-ir.md](checked-ir.md): after lowering and the IR verifier, before the removal of proven checks) | section order (checked-ir.md "Sections"), then instance id, block, inst |
+| `ir` | IR text line | the IR text at level `checked` (checked-ir.md: after the removal of the checks that have a witness, before the release passes) | as `lir` |
+| `opt` | IR text line | the IR text at level `opt` (checked-ir.md: after the release passes; release builds only) | as `lir` |
 | `diags` | diagnostic | the JSON line of `diagnostics.schema.json` | canonical diagnostic order (`diagnostics.schema.json`) |
 | `stats` | stage | `STAGE ms items rounds fallbacks peak_bytes` (informational, never compared) | pipeline order |
 
@@ -195,7 +197,11 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
   - `verdict` is `ok` or the diagnostic code reported for this access (`E0501`, `E0502`, `E0503`,
     `E0512`, `E0513`).
   - `loan` is the conflicting loan `L` reported (smallest creation offset), or `-`.
-- `ir`: `ir.txt` is absent (not written) when the build has error diagnostics.
+- `lir`, `ir`, `opt`: the gate form of the IR text (checked-ir.md "Levels and forms"): the emit
+  form with the stack-section lines filtered out. Each file is absent (not written) when the build has error diagnostics; `opt.txt`
+  is written only by a `--release` build (cli.md). `lir` gates the lowering alone, `ir` adds the
+  bounds prover and the witness checker, `opt` the release passes. `opt` also gates the Stave
+  optimizer: from the same `ir` text, its `opt` text equals stave-opt's.
 - `stats` `peak_bytes`: the stage's device-memory high-water mark from stage1's own arena counters.
   stage0 writes `-`.
 

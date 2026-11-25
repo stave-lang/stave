@@ -354,6 +354,7 @@ fn cast(kind: CastKind, from: TypeKey, to: TypeKey, x: Val) -> Result<Val, Optio
     let ft = m.types.intern(from);
     let tt = m.types.intern(to);
     let rt = if kind == CastKind::Try {
+        record_decl(&mut m, DeclId(1), stave_ir::types::AdtKind::Enum, "t.Option");
         m.types.adt(
             DeclId(1),
             vec![stave_ir::GenericArg::Type(tt)],

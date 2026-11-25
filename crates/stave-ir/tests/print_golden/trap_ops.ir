@@ -1,0 +1,26 @@
+stave.ir 4 "x86_64-linux-v2" debug checked
+type t0 int u size
+type t1 int s 32
+type t2 float 32
+type t3 bool
+type t4 array t1 4
+fn @9 app.traps(t1, t1, t4, t0) -> t1 {
+b0(%0: t1, %1: t1, %2: t4, %3: t0):
+  %4 = add t1 %0 %1
+  %5 = div t1 %4 %1
+  %6 = shl t1 %5 %3
+  check.bounds () %3 4
+  %7 = get t1 %2 %3
+  %8 = add.wrap t1 %6 %7
+  %9 = mul.sat t1 %8 2
+  %10 = rem t1 %9 7
+  %11 = cast.round t2 %0
+  %12 = lt t3 %11 0x3f000000
+  %13 = eq t3 %10 0
+  cbr %13 b1() b2()
+b1():
+  panic.unwrap ()
+  unreachable
+b2():
+  ret %10
+}

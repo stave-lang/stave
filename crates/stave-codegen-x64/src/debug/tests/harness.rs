@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use stave_ir::types::{AdtShape, DeclId, GenericArg};
+use stave_ir::types::{AdtKind, AdtShape, DeclId, GenericArg};
 use stave_ir::{
     BufferHost, CastKind, Config, FuncBuilder, FuncId, InstanceId, Interp, IntrinsicId, Module, Op, Operand,
     Outcome, PanicKind, SyscallAbi, TypeId, TypeKey, Val,
@@ -215,16 +215,19 @@ impl Prog {
     /// `Option<t>` (variant 0 = None, 1 = Some).
     pub fn option(&mut self, t: TypeId) -> TypeId {
         self.next_decl += 1;
+        self.m.record_decl(DeclId(1), AdtKind::Enum, "t.Option");
         self.m.types.adt(DeclId(1), vec![GenericArg::Type(t)], AdtShape::enumeration(vec![vec![], vec![t]]))
     }
 
     pub fn structure(&mut self, fields: Vec<TypeId>) -> TypeId {
         self.next_decl += 1;
+        self.m.record_decl(DeclId(self.next_decl), AdtKind::Struct, format!("t.S{}", self.next_decl));
         self.m.types.adt(DeclId(self.next_decl), vec![], AdtShape::structure(fields))
     }
 
     pub fn enumeration(&mut self, vs: Vec<Vec<TypeId>>) -> TypeId {
         self.next_decl += 1;
+        self.m.record_decl(DeclId(self.next_decl), AdtKind::Enum, format!("t.E{}", self.next_decl));
         self.m.types.adt(DeclId(self.next_decl), vec![], AdtShape::enumeration(vs))
     }
 

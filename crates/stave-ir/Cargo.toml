@@ -1,6 +1,6 @@
 [package]
 name = "stave-ir"
-description = "SSA IR, interpreter, checked-IR printer"
+description = "SSA IR, interpreter, IR text printer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

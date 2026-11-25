@@ -1,0 +1,244 @@
+(* Stave IR text, v0.4: the syntax of the checked-IR text that both compilers print and read
+   (`--dump=lir`, `--dump=ir`, `--dump=opt`, `stave ir`). Meaning, canonical spelling, section
+   order and the checks on load are in checked-ir.md; this file is the only place for syntax.
+
+   Notation as in grammar.ebnf: X? optional, X* zero or more, X+ one or more, "t" terminal,
+   A | B alternatives.
+
+   One line, one statement. A file is a sequence of lines separated by "\n". Each line is lexed
+   and parsed on its own, with `Line` as the start rule and the end of the line as EOF, so lines
+   parse in parallel after a split at "\n". A blank line, or a line holding only white space and
+   a comment, is skipped before parsing. Every line kind is decided by its first token. Section
+   order and the nesting of `fn ... {`, block headers and `}` are checked afterwards by the
+   structure pass (checked-ir.md "Loading"), not by this grammar.
+
+   LL(1) claim: the table has no conflict and needs no override. AnyWord is a lookahead in one
+   row only, `Path`, which has no keyword entry: a Word-shaped token whose own column is empty
+   in a row takes that row's AnyWord action, and an expected AnyWord matches any Word-shaped
+   token. Everywhere else AnyWord does not occur.
+
+   Lexical classes the generator profile must declare as terminals (the lexical part below
+   defines them; none is a grammar rule):
+     Val Blk TId SId DId FnRef Intr Int Hex Bytes String   token classes
+     AnyWord                                              pseudo-class: matches every token
+                                                          of the Word shape (a keyword, Intr,
+                                                          Blk, TId, SId, DId, Bytes or Name)
+   Every use of a class below is marked by its name; Name itself is never expected, only
+   AnyWord. *)
+
+(* ---------- lexical ---------- *)
+Space    = (" " | "\t")+ ;                      (* separates tokens; no other white space. A
+                                                   "\r" anywhere is a lexical error *)
+Comment  = "#" ~"\n"* ;                         (* outside a String only; to the end of the line.
+                                                   The printer emits no comments and no blank lines *)
+Num      = "0" | [1-9] [0-9]* ;                 (* no leading zeros *)
+Word     = [A-Za-z_] [A-Za-z0-9_.]* ;           (* maximal munch, then classified in this order:
+                                                   1. "intrinsic." [a-z0-9_]+       -> Intr
+                                                   2. "b" Num                       -> Blk
+                                                   3. "t" Num                       -> TId
+                                                   4. "s" Num                       -> SId
+                                                   5. "d" Num                       -> DId
+                                                   6. "x" ([0-9a-f] [0-9a-f]){1,64} -> Bytes
+                                                   7. a terminal spelling of this grammar -> that keyword
+                                                   8. anything else                 -> Name
+                                                   No keyword has a shape of steps 1-6: `b16` (the
+                                                   bfloat16 key) is therefore a Blk token, see FloatW *)
+Val      = "%" Num ;
+FnRef    = "@" Num ("." Num)* (".u")? ;         (* instance id; ".u" = unchecked entry *)
+Int      = "-"? Num ;                           (* "-0" is not an Int; a "-" not followed by a digit
+                                                   is the start of "->" or a lexical error *)
+Hex      = "0x" (H4 | H8 | H16) ;               (* exactly 4, 8 or 16 lowercase hex digits; "0"
+                                                   followed by "x" always starts a Hex *)
+String   = '"' (Plain | Escape)* '"' ;          (* the `strings` dump escape rule (stage-gates.md):
+                                                   Plain = a byte 0x20-0x7E other than '\' and '"';
+                                                   Escape = '\\' | '\"' | '\n' | '\t' | '\x' Hex2,
+                                                   Hex2 two lowercase hex digits, used for every
+                                                   other byte (a '\x' escape of a byte that has a
+                                                   shorter form is rejected) *)
+Punct    = "(" | ")" | "<" | ">" | "," | ":" | "=" | "!" | "|" | "{" | "}" | "->" | "<=" ;
+                                                (* "->" and "<=" are single tokens (maximal munch) *)
+
+(* ---------- items: the line rules ---------- *)
+
+Line         = HeaderLine
+             | DeclLine | TypeLine | ShapeLine | StrLine | SiteLine
+             | StaticLine | DataLine | RefLine
+             | MainLine | CellLine
+             | RunStackLine | TruncatedLine | NodeLine | EdgeLine | NodesLine
+             | FnLine | ClaimLine
+             | BlockLine | ValueInst | EffectInst | TermLine
+             | "}" ;
+
+(* ---- module sections ---- *)
+
+Path         = AnyWord | String ;                          (* a decl, fn, static or site fn path: bare
+                                                              when it has the Word shape, else quoted *)
+
+HeaderLine   = "stave.ir" Int String Mode Level ;          (* Int: contract version; String: canonical target name *)
+Mode         = "debug" | "release" ;
+Level        = "lowered" | "checked" | "opt" ;
+
+DeclLine     = "decl" DId DeclKind Path ;
+DeclKind     = "struct" | "enum" ;
+
+TypeLine     = "type" TId Key ;
+Key          = "int" Sign IntW
+             | "float" FloatW
+             | "bool"
+             | "char"
+             | "str"
+             | "ref" "mut"? TId
+             | "ptr" PtrMut TId
+             | "array" TId Int
+             | "slice" TId ("align" Int)?
+             | "tuple" TId*
+             | "adt" DId GArg*
+             | "fntype" TId* "->" TId Feature*
+             | "vec" TId Lanes
+             | "mask" Int Lanes ;
+Sign         = "s" | "u" ;
+IntW         = Int | "size" ;                              (* Int: 8, 16, 32 or 64 *)
+FloatW       = Int | Blk ;                                 (* Int: 16, 32 or 64; Blk: only `b16` (bfloat16) *)
+PtrMut       = "const" | "mut" ;
+Lanes        = Int | "n" ;                                 (* "n": the sizeless lane count *)
+GArg         = TId | Int ;
+
+Feature      = "sse42" | "avx" | "avx2" | "fma" | "bmi2" | "f16c"
+             | "avx512f" | "avx512bw" | "avx512vl" | "avx512dq" | "avx512cd" | "avx512vbmi"
+             | "avx512vbmi2" | "avx512vpopcntdq" | "avx512bitalg" | "avx512fp16" | "avx512bf16"
+             | "neon" | "fp16" | "dotprod" | "bf16" | "sve" | "sve2"
+             | "cuda" ;
+
+ShapeLine    = "shape" TId ShapeBody ;
+ShapeBody    = "struct" TId*
+             | "enum" Variant* ;
+Variant      = "|" TId* ;
+
+StrLine      = "str" SId String ;
+SiteLine     = "site" Int String Int Int Path ;            (* row, file, line, column, fn path *)
+
+StaticLine   = "static" Int TId Path ;                     (* index, type, path *)
+DataLine     = "data" Int Int Bytes ;                      (* static, offset, bytes *)
+RefLine      = "ref" Int Int RefTarget Int ;               (* static, offset, target, addend *)
+RefTarget    = SId | "static" Int ;
+
+MainLine     = "main" FnRef ;
+CellLine     = "cell" DId ;
+
+(* ---- stack section: printed only by `stave ir emit`, never in a dump ---- *)
+
+RunStackLine = "runstack" Int ;
+TruncatedLine = "truncated" ;
+NodeLine     = "node" Int "rec"? ;
+EdgeLine     = "edge" Int Int EdgeKind ;
+EdgeKind     = "call" | "indirect" | "spawn" ;
+NodesLine    = "nodes" FnRef Int+ ;
+
+(* ---- functions ---- *)
+
+FnLine       = "fn" FnRef Path GenericArgs? "(" TypeList? ")" FnRet?
+               Needs? Symbol? "variadic"? "known"? "altstack"? "unbuilt"? NameSite?
+               "{"? ;                                      (* no "{": no body *)
+GenericArgs  = "<" GArg ("," GArg)* ">" ;
+TypeList     = TId ("," TId)* ;
+FnRet        = "->" TId ;
+Needs        = "needs" "(" Feature ("," Feature)* ")" ;
+Symbol       = "symbol" String ;
+NameSite     = "site" Int ;
+
+ClaimLine    = "claim" FnRef ClaimKind CTerm "<=" CTerm Int ;   (* a <= b + Int *)
+ClaimKind    = "pre" "checked"? | "post" ;
+CTerm        = "zero" | "result" | "lenresult" | "p" Int | "lenp" Int ;
+
+(* ---- bodies ---- *)
+
+BlockLine    = Blk "(" (BlockParam ("," BlockParam)*)? ")" ":" ;
+BlockParam   = Val ":" TId ;
+
+ValueInst    = Val "=" ValueOp At? ;
+EffectInst   = EffectOp At? ;
+At           = "!" Int ;                                   (* site row *)
+
+Opnd         = Val | Int | Hex | "bf16" Hex | SId | FnRef | TId ;
+
+(* Value ops: the result type, then the operands. Grouped by operand shape; within a group the
+   lists are complete. Int marks an operand that must be an int constant. *)
+ValueOp      = Op0 TId
+             | Op1 TId Opnd
+             | Op2 TId Opnd Opnd
+             | Op3 TId Opnd Opnd Opnd
+             | "make" TId Opnd*
+             | "enum.make" TId Int Opnd*
+             | "enum.get" TId Opnd Int Int
+             | "addr.field" TId Opnd Int
+             | "addr.enum_field" TId Opnd Int Int
+             | "fn.make" TId FnRef Opnd
+             | "call" TId FnRef Opnd*
+             | "call.ind" TId Opnd Opnd*
+             | Intr TId Opnd*
+             | VecOp0 TId
+             | VecOp1 TId Opnd
+             | VecOp2 TId Opnd Opnd
+             | VecOp3 TId Opnd Opnd Opnd
+             | "vec.div_const" TId Opnd Int
+             | "vec.permute" TId Opnd Int+ ;
+
+Op0          = "slot" ;
+Op1          = "neg" | "not" | "popcount" | "clz" | "ctz"
+             | "cast" | "cast.wrap" | "cast.sat" | "cast.round" | "cast.try"
+             | "enum.tag" | "load" | "slice.len" | "slice.ptr" ;
+Op2          = "add" | "sub" | "mul" | "div" | "rem"
+             | "add.wrap" | "sub.wrap" | "mul.wrap" | "shl.wrap"
+             | "add.sat" | "sub.sat" | "mul.sat"
+             | "shl" | "shr" | "and" | "or" | "xor" | "mul.wide"
+             | "eq" | "ne" | "lt" | "le" | "gt" | "ge"
+             | "get" | "addr.elem" | "slice.make" ;
+Op3          = "select" | "set" ;
+
+VecOp0       = "mask.all" | "mask.none" ;
+VecOp1       = "vec.splat" | "vec.neg" | "vec.abs" | "vec.sqrt" | "vec.floor" | "vec.ceil"
+             | "vec.round" | "vec.trunc" | "vec.abs_wrap" | "vec.popcount" | "vec.clz" | "vec.not"
+             | "vec.reduce_add" | "vec.reduce_add_wrap" | "vec.reduce_min" | "vec.reduce_max"
+             | "vec.reduce_and" | "vec.reduce_or" | "vec.scan_add" | "vec.scan_add_wrap"
+             | "vec.cast" | "vec.cast.wrap" | "vec.cast.sat" | "vec.cast.round" | "vec.cast.try"
+             | "vec.bitcast" | "vec.split" | "vec.widen_lo" | "vec.widen_hi"
+             | "mask.not" | "mask.to_bits" | "mask.to_vec" | "mask.first_n" | "mask.rewiden" ;
+VecOp2       = "vec.add" | "vec.sub" | "vec.mul" | "vec.div" | "vec.copysign"
+             | "vec.min" | "vec.max" | "vec.min_num" | "vec.max_num" | "vec.min_x86" | "vec.max_x86"
+             | "vec.add.wrap" | "vec.sub.wrap" | "vec.mul.wrap" | "vec.add.sat" | "vec.sub.sat"
+             | "vec.mul.sat" | "vec.mul_hi" | "vec.checked_add" | "vec.checked_sub"
+             | "vec.checked_mul" | "vec.div_lanes"
+             | "vec.and" | "vec.or" | "vec.xor" | "vec.andnot" | "vec.shl" | "vec.shr" | "vec.shl.wrap"
+             | "vec.eq" | "vec.ne" | "vec.lt" | "vec.le" | "vec.gt" | "vec.ge"
+             | "vec.reduce_add_ordered" | "vec.join" | "vec.narrow_wrap" | "vec.narrow_sat"
+             | "vec.lookup" | "vec.compress" | "vec.expand"
+             | "vec.load" | "vec.load_aligned" | "vec.gather"
+             | "mask.and" | "mask.or" | "mask.xor" ;
+VecOp3       = "vec.fma" | "vec.load_masked" | "mask.select" ;
+
+(* Effect ops: no result, printed with "(" ")" in the result-type place. *)
+EffectOp     = EffOp0 "(" ")"
+             | EffOp2 "(" ")" Opnd Opnd
+             | "call" "(" ")" FnRef Opnd*
+             | "call.ind" "(" ")" Opnd Opnd*
+             | Intr "(" ")" Opnd*
+             | VecStore3 "(" ")" Opnd Opnd Opnd
+             | "vec.store_masked" "(" ")" Opnd Opnd Opnd Opnd ;
+
+EffOp0       = "mem.fence_stream"
+             | "panic.bounds" | "panic.overflow" | "panic.div_by_zero" | "panic.assert"
+             | "panic.out_of_memory" | "panic.stack_overflow" | "panic.unwrap"
+             | "panic.unsupported_cpu" | "panic.deadlock" | "panic.contract" ;
+EffOp2       = "store" | "check.bounds" | "mem.store_stream"
+             | "mem.prefetch_read_l1" | "mem.prefetch_read_l2" | "mem.prefetch_read_l3"
+             | "mem.prefetch_read_nta" | "mem.prefetch_write_l1" | "mem.prefetch_write_l2"
+             | "mem.prefetch_write_l3" | "mem.prefetch_write_nta" ;
+VecStore3    = "vec.store" | "vec.store_aligned" | "vec.store_stream" | "vec.scatter" ;
+
+TermLine     = "br" Target
+             | "cbr" Opnd Target Target
+             | "switch" Opnd Case* "_" ":" Target
+             | "ret" Opnd?
+             | "unreachable" ;
+Case         = Int ":" Target ;
+Target       = Blk "(" (Opnd ("," Opnd)*)? ")" ;
