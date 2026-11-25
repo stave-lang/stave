@@ -1,0 +1,42 @@
+stave.ir 4 "x86_64-linux-v2" release opt
+type t0 int u 8
+type t1 int u 64
+type t2 int s 32
+type t3 bool
+type t4 ref mut t6
+type t5 ref mut t7
+type t6 array t0 64
+type t7 array t1 8
+fn @0 main.a(t1) -> t1 {
+b0(%0: t1):
+  %1 = slot t4
+  %2 = add.wrap t1 %0 1
+  ret %2
+}
+fn @1 main.c(t1) -> t1 {
+b0(%0: t1):
+  %1 = slot t5
+  ret %0
+}
+fn @2 main.run(t1) -> t2 {
+b0(%0: t1):
+  %1 = slot t4
+  %2 = slot t4
+  %3 = slot t5
+  %4 = add.wrap t1 %0 1
+  br b1(%4)
+b1(%5: t1):
+  %6 = eq t3 %5 0
+  %7 = add.wrap t1 %5 1
+  br b2(%7)
+b2(%8: t1):
+  cbr %6 b3() b5()
+b3():
+  %9 = call t1 @0 %8
+  br b4(%9)
+b4(%10: t1):
+  %11 = cast.wrap t2 %10
+  ret %11
+b5():
+  ret 0
+}

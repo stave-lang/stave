@@ -1,0 +1,1 @@
+An unchecked entry @n.u as callee next to its checked fn: both inlined, keyed and printed by their own ids; a callee with an empty unreachable block and one with a trap; a check whose operands become constants folds (C2, C3) and the trap goes with its unreachable block (C4) only because the branch to it is decided; a five-block chain merges into b0.

@@ -1,0 +1,42 @@
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 64
+type t1 int s 32
+type t2 bool
+type t3 ref mut t0
+str s0 "unused"
+site 0 "src/main.stv" 1 4 main.bump
+site 1 "src/main.stv" 2 5 main.bump
+site 2 "src/main.stv" 5 4 main.main
+site 3 "src/main.stv" 7 9 main.main
+site 4 "src/main.stv" 8 9 main.main
+site 5 "src/main.stv" 9 9 main.main
+main @2
+fn @0 main.bump(t0) -> t0 site 0 {
+b0(%0: t0):
+  %1 = slot t3
+  store () %1 %0 !1
+  %2 = load t0 %1
+  %3 = add t0 %2 1 !1
+  ret %3
+}
+claim @0 post result <= p 0 1
+fn @1 main.ext(t0) -> t0 symbol "ext"
+fn @2 main.main() -> t1 site 2 {
+b0():
+  %0 = slot t3
+  store () %0 0
+  br b1(0)
+b1(%1: t0):
+  %2 = lt t2 %1 3
+  cbr %2 b2() b3()
+b2():
+  %3 = call t0 @0 %1 !3
+  %4 = call t0 @1 %3 !4
+  %5 = call t0 @0 %4 !5
+  store () %0 %5
+  br b1(%3)
+b3():
+  %6 = load t0 %0
+  %7 = cast.wrap t1 %6
+  ret %7
+}

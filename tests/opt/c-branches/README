@@ -1,0 +1,1 @@
+C3 on a constant switch that takes the default and one that takes a case (both written by X), a cbr with equal targets and equal operands (becomes br) and one with different operands (stays); C5 refuses a br with arguments; a second round substitutes the now single-edge params, folds their add, and merges; a third round changes nothing.

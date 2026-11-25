@@ -1,0 +1,1 @@
+Base passes only. Three steps insert at one place (the start of b0, for params of b0): each later step's insertions go before the earlier ones; within B2' the groups order by type (an input type before the type B2 added), within B3 by the constant k, not by print order.

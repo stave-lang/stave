@@ -49,7 +49,9 @@ the level order can change the output.
 the base passes on the canonical result. `M` is the loaded `checked` module of a `release` file,
 canonical. `D` decides (section 3), `X` expands (section 4), `C*` cleans up (section 5), `B` is
 the base passes (section 6), `canon` is checked-ir.md "Canonical module". Each phase reads only
-the module the previous one wrote. [N: a composition of functions.]
+the module the previous one wrote. With `n` rounds, `--dump-phase=inline` and
+`--dump-phase=clean` print the canonical module after `X` and after `C*` of round `n`. [N: a
+composition of functions.]
 
 **P2.** Every phase keeps every fn, its instance id, header, and `claim` lines, and the site,
 string, static, `main`, and `cell` lines and the stack section. Only bodies change, and with them
@@ -83,6 +85,12 @@ and the output never hold one; only the module after `X` (`--dump-phase=inline`)
 
 Op weights: `slot` 0; `call`, `call.ind` 3; `intrinsic.*` 2; every other op 1. The weights,
 `T`, `CAP`, and the slot limits are tunable data: changing them changes no rule, within K3.
+
+A limit override `NAME=N` (`stage1 ir opt --limit`, a golden's `limits` file) names a key of
+`[limits]` (`threshold`, `cap`, `call_saved`, `slot_callee`, `slot_caller`, `rounds`) and gives a
+decimal integer `N` without sign. The ranges: `threshold`, `cap`, `slot_callee`, `slot_caller`
+`N >= 0`; `call_saved` `0 <= N <= w(call)` (K3); `rounds` `N >= 1`. An unknown `NAME` or an `N`
+outside its range is an error, never replaced by the table's value.
 
 **K2.** An op row's `removable`: `yes`; `no`; `float` (yes iff the result type is a float type);
 `const-index` (yes iff operand 1 is an int constant); `lanes` (yes iff the `vec.*` or `mask.*`
@@ -119,9 +127,10 @@ target of the slot's pointee type (`slot t<ref mut T>`: the size of T). [N: a su
 is an edge. [N: a property of `G`, not of the algorithm that finds the components.]
 
 **F7. `level(f)`**: on the condensation of `G` (one node per component), 0 when `f`'s component
-has no edge to another component, else 1 + the largest level of a component it has an edge to.
-Fns without a body have level 0. [F: longest path in a finite DAG, a least fixpoint of
-`level(c) = max(0, 1 + level(c'))` over the edges, join = max.]
+has no edge to another component, else 1 + the largest level of a component that `f`'s component
+has an edge to; all members of a component have its level. Fns without a body have level 0. [F:
+longest path in a finite DAG, a least fixpoint of `level(c) = max(0, 1 + level(c'))` over the
+edges, join = max.]
 
 **F8. Callee tests**, each a predicate of `g` alone, in this order (the verdict names in bold):
 
@@ -169,8 +178,9 @@ names one instruction of `f`. [A.]
 
 **D4. Budget cut.** For the j-th candidate in that order let `a_j = max(S(g_j) - W_CALL, 0)` and
 `z_j = SB(g_j)`. Candidate j is accepted iff `a_1 + .. + a_j <= max(CAP - size0(f), 0)` and
-`z_1 + .. + z_j <= SLOT_CALLER`. Both sums grow with j, so `A(f)` is a prefix of the sorted list.
-[A: a prefix of a sorted list.]
+`z_1 + .. + z_j <= SLOT_CALLER`. Both sums grow with j, so `A(f)` is a prefix of the sorted list:
+every candidate after the first one not accepted is not accepted, whatever its own `a_j` and
+`z_j`. [A: a prefix of a sorted list.]
 
 **D5. Schedule.** Fns decide by level, ascending; all fns of one level may decide at once. A
 callee that passes F8 is not `cyclic`, so it lies in another component and, `G` having an edge
@@ -211,7 +221,7 @@ has a result, else none; its instructions are those of `B` after index `k`; its 
 `br K()`. `%r` keeps its identity as `K`'s param, so no use of it changes.
 
 **X6. Several rows of one block** are expanded left to right: the continuation of one is the
-block the next is split from. The call's own `!s` goes with the call. Every copied instruction
+block the next is split from. The call's own `!s` is deleted with the call. Every copied instruction
 keeps its `!<row>`; types, strings, sites, statics, intrinsic names, and fns are module-wide and
 copied by id.
 
@@ -253,15 +263,16 @@ type, `bool`, or `char`; `bits` is R's width, 64 for `int s|u size` on every cur
 - `add.wrap sub.wrap mul.wrap`: the exact result reduced into R's range modulo 2^bits.
   `add.sat sub.sat mul.sat`: the exact result clamped to R's range.
 - `shl shr`: undefined when `y < 0` or `y >= bits`; `shl` is `x * 2^y` reduced modulo 2^bits into
-  R's range; `shr` is `floor(x / 2^y)` (arithmetic when R is signed, `x` read in R).
+  R's range; `shr` is `floor(x / 2^y)`.
   `shl.wrap`: `shl` by `y mod bits` (the amount's two's-complement bits masked by `bits - 1`).
 - `and or xor not`: on `bool` the logical operation; on ints the bitwise operation on the
   two's-complement `bits`-wide representations, read back in R.
 - `popcount clz ctz`: the count over the `bits`-wide representation of `x` (`clz` and `ctz` of 0
   are `bits`).
 - `eq ne lt le gt ge`: the comparison of the two mathematical values; the result is 1 or 0.
-- `cast`, `cast.wrap`, `cast.sat` with R an int type or `char`: `x`; `x` reduced modulo 2^bits
-  into R's range; `x` clamped to R's range. Other casts (and these with another R) do not fold.
+- `cast` with R an int type or `char`: `x`. `cast.wrap`, `cast.sat` with R an int type: `x`
+  reduced modulo 2^bits into R's range; `x` clamped to R's range. Other casts (and these with
+  another R) do not fold.
 
 This is checked-ir.md "Ops" applied to constants; stave-ir `arith` computes the same. Floats,
 vectors, masks, aggregates, `mul.wide`, `cast.round`, `cast.try`, and `check.bounds` never fold.
@@ -393,8 +404,9 @@ site @<inst> b<b> <k> @<callee> <S(callee)> <verdict>
 ```
 
 `<S(callee)>` is `-` for a callee without a body; `b<b>` and `<k>` are in the round's input
-numbering; `cyclic` is printed when `cyc(f)`. Each line ends with one `\n`; nothing else is
-printed.
+numbering; `cyclic` is printed when `cyc(f)`. A round's lines are printed after every level of
+that round has decided, so `<S(callee)>` is the callee's final `S`, also for a callee of the
+caller's own level. Each line ends with one `\n`; nothing else is printed.
 
 ## 9. Gates
 
@@ -406,7 +418,12 @@ printed.
   a budget cut and its tie-break; constant, string, and `@fn` arguments; a unit call and an unused
   result; a site in `b0`; two sites in one block; an `@n.u` callee; every reachable verdict. A case
   run under limits other than the table's keeps them beside its texts in a file `limits`, one
-  `NAME=N` per line, each passed as `--limit NAME=N` to every run of the case (10.10: `cap=20`).
+  `NAME=N` per line (K1), each passed as `--limit NAME=N` to every run of the case (10.10:
+  `cap=20`). A case is a directory holding `input.ir` and, of the texts it checks,
+  `inline.txt` (the `inline` dump), `inline.ir` (after `X`), `clean.ir` (after `C*`, omitted
+  when equal to `output.ir`), `output.ir`; and `limits` when it has one. A case run with
+  `--passes=base` holds a file `passes` with the one line `base`, and only `input.ir` and
+  `output.ir` besides it.
 - **Base**: on every `release` cell of the stage1 IR corpus, `stage1 ir opt --passes=base` equals
   `stave ir opt` on the same `checked` text, both in the same form (gate or emit).
 - **Verifiers**: stage1's verifier after every phase (`--verify-phases`) and stage0's

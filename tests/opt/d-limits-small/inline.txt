@@ -1,0 +1,12 @@
+round 1
+fn @0 size 4 closed 4 slots 0 level 0
+fn @1 size 5 closed 5 slots 0 level 0
+fn @2 size 0 closed 0 slots 8 level 0
+fn @3 size 0 closed 0 slots 9 level 0
+fn @4 size 19 closed 17 slots 16 level 1
+site @4 b0 0 @0 4 budget
+site @4 b0 1 @1 5 size
+site @4 b0 2 @2 0 inline
+site @4 b0 3 @3 0 slots
+site @4 b0 4 @2 0 inline
+site @4 b0 5 @2 0 budget
