@@ -8,7 +8,7 @@
 | `--timings` | Adds `compiler: gpu (stage1, <device>)` or `compiler: cpu (stage0)`, and per stage `ms`, `items`, `rounds`, `fallbacks`. Fallbacks are the number of times a stage left its parallel path for a slower one, always on the device (dense lexer rerun, chunk-local error re-parse, forward-backward SCC, warp worklist, match-task split) |
 
 **`stage1 ir opt [--passes=base|full] [--dump=inline] [--dump-phase=inline|clean|base]
-[--verify-phases] FILE`** (the stage1 binary's optimizer, run directly; `stave ir opt` stays
+[--verify-phases] [--limit NAME=N]... FILE`** (the stage1 binary's optimizer, run directly; `stave ir opt` stays
 stage0's base passes): loads FILE with stage1's IR library (checked-ir.md "Loading" steps 1-3);
 the header must say `release` and level `checked` (exit 1 otherwise). It runs the release passes
 of [opt-passes.md](opt-passes.md), `full` (the default: rule P1) or `base` (rule P3), and prints
@@ -17,12 +17,16 @@ printed unchanged, so `stave ir emit --release`, `stage1 ir opt`, `stave ir buil
 the front end's stack bounds.
 
 - `--dump=inline`: prints the decision tables (opt-passes.md "The `inline` dump") on stdout
-  instead of the module.
+  instead of the module. With `--passes=base` (no decision runs) it is a usage error.
 - `--dump-phase=P`: prints, instead of the output, the canonical module after phase P of the
   last round, at level `opt` and in the file's form: `inline` after the expansion, `clean` after
   the clean-up, `base` after the base passes (the output itself). A phase that `--passes` does not
   run is a usage error.
 - `--verify-phases`: stage1's IR verifier also runs after every phase, not only on the output.
+- `--limit NAME=N`: for this run, the `[limits]` entry `NAME` of `opt.toml` (`threshold`, `cap`,
+  `call_saved`, `slot_callee`, `slot_caller`, `rounds`) is the decimal `N` (opt-passes.md K1);
+  for goldens and tuning sweeps. A value that breaks opt-passes.md K3, or `rounds=0`, is a usage
+  error.
 
 Faults in FILE print as for `stave ir` and exit 1; an unreadable FILE or a bad command line
 (an unknown flag or value, `--dump` with `--dump-phase`) exits 2. A verifier fault in a phase's

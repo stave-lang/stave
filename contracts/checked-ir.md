@@ -17,7 +17,9 @@ error diagnostics; with errors, its file is not written.
 | `opt` | the release passes ([opt-passes.md](opt-passes.md)), which keep the module canonical, then the IR verifier on their output; release builds only | `opt` |
 
 Each level is printed from the canonical module of that point ("Canonical module"), so ids of
-one level do not correspond to those of another.
+one level do not correspond to those of another. stage0's own release build also runs the bounds
+audit on the output of its base passes, as a self-check of stage0; that audit is not part of level
+`opt`, and loading an `opt` text does not run it.
 
 The **gate form** is what the dumps hold. The **emit form** (`stave ir emit`) is the gate form
 plus the stack section: the `runstack`, `truncated`, `node`, `edge` and `nodes` lines. Rule: the
@@ -305,7 +307,10 @@ step stops before the next.
    header (a module error: the line of the `type` or `static` it names, else line 1). The
    verifier requires every `intrinsic.<name>` to be an intrinsic of intrinsics.md with its
    operand and result types, the `slot` instructions of a body to be a prefix of `b0` (every
-   level), and a `known` fn to have its item's signature; against the header,
+   level), a `switch` scrutinee to be a value except at level `opt`, where it may also be an int
+   constant (its case values are then checked only for duplicates; the release passes write one
+   only between inlining and the branch folding that removes it, opt-passes.md P4), and a `known`
+   fn to have its item's signature; against the header,
    every intrinsic must be built for the target's arch (intrinsics.md, the rule E0704 applies to
    a declaration).
 4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds

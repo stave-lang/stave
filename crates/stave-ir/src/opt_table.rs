@@ -248,6 +248,38 @@ mod tests {
         }
     }
 
+    /// The `lanes` rule as the contract states it (opt-passes.md K2): a vector or mask op is
+    /// removable unless it traps or touches memory, and these are the ops that do.
+    #[test]
+    fn lanes_rule_names_the_trapping_and_memory_ops() {
+        let kept = [
+            "vec.div_lanes",
+            "vec.div_const",
+            "vec.shl",
+            "vec.shr",
+            "vec.load",
+            "vec.store",
+            "vec.load_aligned",
+            "vec.store_aligned",
+            "vec.store_stream",
+            "vec.load_masked",
+            "vec.store_masked",
+            "vec.gather",
+            "vec.scatter",
+        ];
+        for v in VecOp::ALL {
+            let removable = v.trap_kinds().is_empty() && !v.is_memory();
+            assert_eq!(removable, !kept.contains(&v.name()), "{}", v.name());
+        }
+    }
+
+    #[test]
+    fn the_closed_size_rules_hold() {
+        let call = op_row(Op::Call).unwrap().weight;
+        assert!(CALL_SAVED <= call);
+        assert_eq!(TERM_BR, TERM_RET);
+    }
+
     #[test]
     fn inlined_known_items_have_no_abi() {
         for &k in &KNOWN_INLINE {

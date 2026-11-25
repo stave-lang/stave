@@ -3,8 +3,8 @@
 The release passes turn the canonical `checked` module of a `release` build into the module of
 level `opt` ([checked-ir.md](checked-ir.md) "Levels and forms"). This file is their whole
 specification: two implementations that follow it print byte-equal `opt` text from the same input.
-The full pipeline is stage1's (`stage1 ir opt`, [cli-stage1.md](cli-stage1.md)); stage0 runs the
-base passes only (rule P3), which is what `stave build --release` and `stave ir opt` do.
+The full pipeline is stage1's (`stage1 ir opt`, [cli-stage1.md](cli-stage1.md)); stage0
+implements the base passes only (rule P3), for `stave build --release` and `stave ir opt`.
 
 Every number below that is not a rule of the IR comes from the table
 `crates/stave-ir/tables/opt.toml` ("Constants"); `tools/gen-tables` generates it into both
@@ -58,7 +58,12 @@ the type table and decls that `canon` derives from the bodies.
 **P3.** With `--passes=base` (and in stage0) the pipeline is `canon(B(M))`.
 
 **P4.** After each phase, and always on the output, the module satisfies the IR verifier and the
-invariants of section 7. A violation is a compiler bug.
+invariants of section 7. A violation is a compiler bug. A `switch` whose scrutinee is an int
+constant is legal at level `opt` (checked-ir.md "Loading" step 3): X writes one when it
+substitutes a constant argument for a param a callee switches on, and C1 when it substitutes a
+constant for a param. C3 of the same clean-up round turns every such `switch` into a `br`, and
+nothing after C3 (C4-C6, `B`, `canon`) puts a constant into a scrutinee, so the module after `C*`
+and the output never hold one; only the module after `X` (`--dump-phase=inline`) may.
 
 ## 2. Constants
 
@@ -71,18 +76,25 @@ invariants of section 7. A violation is a compiler bug.
 | `W_CALL` | `limits.call_saved` | 3 | the weight an inlined call removes |
 | `SLOT_CALLEE` | `limits.slot_callee` | 64 | largest closed slot bytes `SB` of an inlined callee |
 | `SLOT_CALLER` | `limits.slot_caller` | 1024 | most slot bytes one caller gains in a round |
-| `ROUNDS` | `limits.rounds` | 1 | rounds of rule P1 |
+| `ROUNDS` | `limits.rounds` | 1 | rounds of rule P1 (`stage1 ir opt --limit NAME=N` overrides a limit for one run) |
 | `w(term)` | `term.*` | `cbr` 1, `switch` 2, `br` `ret` `unreachable` 0 | terminator weights |
 | `w(op)`, `removable`, `fold` | `[[op]]` | per op | instruction weight; rules C2, C6, B5 |
 | inlined known items | `known.inline` | `SetUserSite` (`runtime.panic.set_user_site`) | rule F8 |
 
 Op weights: `slot` 0; `call`, `call.ind` 3; `intrinsic.*` 2; every other op 1. The weights,
-`T`, `CAP`, and the slot limits are tunable data: changing them changes no rule.
+`T`, `CAP`, and the slot limits are tunable data: changing them changes no rule, within K3.
 
 **K2.** An op row's `removable`: `yes`; `no`; `float` (yes iff the result type is a float type);
-`const-index` (yes iff operand 1 is an int constant); `lanes` (yes iff the vector or mask op has no
-trap kind and accesses no memory, stave-ir `simd`). A row whose name ends in `*` covers every op
-name with that prefix that no other row names; every op has exactly one row.
+`const-index` (yes iff operand 1 is an int constant); `lanes` (yes iff the `vec.*` or `mask.*`
+op is not marked † in checked-ir.md "Vector and mask ops" and is none of the memory ops
+`vec.load`, `vec.store`, `vec.load_aligned`, `vec.store_aligned`, `vec.store_stream`,
+`vec.load_masked`, `vec.store_masked`, `vec.gather`, `vec.scatter`). A row whose name ends in `*`
+covers every op name with that prefix that no other row names; every op has exactly one row.
+
+**K3.** The table satisfies `W_CALL <= w(call)` and `w(br) = w(ret)`. `tools/gen-tables` refuses
+a table that does not, and `stage1 ir opt --limit` refuses an override that does not. The first
+keeps every `S` non-negative (D1); the second keeps `S` exact (D1), since X turns each copied
+`ret` into a `br`.
 
 ## 3. Decision `D`
 
@@ -116,21 +128,25 @@ Fns without a body have level 0. [F: longest path in a finite DAG, a least fixpo
 1. **`nobody`**: `g` has no body.
 2. **`noret`**: no block of `g` ends in `ret`.
 3. **`cyclic`**: `cyc(g)`.
-4. **`altstack`**: `g` has the `altstack` mark (also a test of the caller: rule F9).
-5. **`symbol`**: `g` has a `symbol`.
-6. **`known`**: `g` has the `known` mark and its known item is not one of `known.inline`
-   (an item with an ABI signature is never listed).
-7. **`indirect`**: `g`'s body holds a `call.ind` whose operand 0 is a value.
-8. **`gpu`**: `g`'s body holds a `gpu.*` op or an `intrinsic.<name>` of arch `ptx`.
+4. **`symbol`**: `g` has a `symbol`.
+5. **`known`**: `g` has the `known` mark and its known item is not one of `known.inline`
+   (an item with an ABI signature, or a panic report entry, is never listed).
+6. **`indirect`**: `g`'s body holds a `call.ind` whose operand 0 is a value.
+7. **`gpu`**: `g`'s body holds a `gpu.*` op or an `intrinsic.<name>` of arch `ptx`. No body
+   holds either today (the verifier refuses a `ptx` intrinsic on a CPU target, and no `gpu.*` op
+   exists); the test becomes reachable when `gpu.*` ops or a PTX target reach the IR.
 
-[N: pointwise.]
+A callee with the `altstack` mark needs no test of its own: the verifier allows the mark only on
+a panic report entry, which `known.inline` never lists, so it fails `noret` or `known`. An
+`unbuilt` callee has no body (`nobody`) or a trap for a body (`noret`). [N: pointwise.]
 
 **F9. Caller tests** of a row `(f, b, k, g)`, in this order:
 
-- **`altstack`** (in the position of test 4 of F8): `f` has the `altstack` mark.
-- **`features`**: `g` has the `unbuilt` mark, or the features of `g`'s `needs` are not all in
-  the closure, under the implications of simd-ops.md "Features", of the target baseline of the
-  header and `f`'s `needs`.
+- **`altstack`** (between `cyclic` and `symbol` of F8): `f` has the `altstack` mark: its frame
+  must stay on the report stack.
+- **`features`**: the features of `g`'s `needs` are not all in the closure, under the
+  implications of simd-ops.md "Features", of the target baseline of the header and `f`'s
+  `needs`.
 - **`cold`**: not `ret(f, b)`.
 
 [N: pointwise.]
@@ -140,8 +156,9 @@ Fns without a body have level 0. [F: longest path in a finite DAG, a least fixpo
     S(f)  = size0(f) + sum over (f, b, k, g) in A(f) of (S(g) - W_CALL)
     SB(f) = slot0(f) + sum over (f, b, k, g) in A(f) of SB(g)
 
-`S(f)` is the weight, and `SB(f)` the slot bytes, of the expanded body `F(f)` of rule X1 when
-`W_CALL` equals the weight of `call`. Both are defined by recursion on `level`: an accepted
+`SB(f)` is the slot bytes of the expanded body `F(f)` of rule X1. `S(f)` is its weight when
+`W_CALL` equals `w(call)` (with K3's `w(br) = w(ret)`); under K3 it is never negative. Both are
+defined by recursion on `level`: an accepted
 callee lies in a lower level (D5). [N: sums over a well-founded recursion.]
 
 **D2. Candidates** of `f`: its rows that pass F8 and F9 and whose callee has `S(g) <= T` and
@@ -162,9 +179,9 @@ cyclic component decide like other callers; their callees inside the component f
 `cyclic`. [F over levels; within a level, A per fn.]
 
 **D6. Verdict** of a row: the name of the first test it fails, in the order `nobody`, `noret`,
-`cyclic`, `altstack`, `symbol`, `known`, `indirect`, `gpu`, `features`, `cold`, then **`size`**
-(`S(g) > T`), **`slots`** (`SB(g) > SLOT_CALLEE`), **`budget`** (a candidate D4 does not
-accept); else **`inline`**. [N: the first failing test of a fixed list.]
+`cyclic`, `altstack` (caller), `symbol`, `known`, `indirect`, `gpu`, `features`, `cold`, then
+**`size`** (`S(g) > T`), **`slots`** (`SB(g) > SLOT_CALLEE`), **`budget`** (a candidate D4 does
+not accept); else **`inline`**. [N: the first failing test of a fixed list.]
 
 **D7. Decisions read the input only.** No fact is read from an expanded or cleaned body: `S` is
 arithmetic on the tables of `M'`.
@@ -227,7 +244,7 @@ constants, and whose result below is defined, is deleted, and every use of its r
 result constant. A `select` (`fold` `cond`) whose operand 0 is an int constant is deleted, and its
 result is replaced by operand 1 when the constant is 1, by operand 2 when it is 0. Repeat until no
 instruction qualifies. Results, with `x`, `y` the operand values and the result type R (an int
-type, `bool`, or `char`):
+type, `bool`, or `char`; `bits` is R's width, 64 for `int s|u size` on every current target):
 
 - `add sub mul`: `x + y`, `x - y`, `x * y`; undefined (stays) when outside R's range.
 - `div rem`: truncating quotient and remainder (the remainder has the sign of `x`); undefined
@@ -279,26 +296,30 @@ params keep their order. [F: a least fixpoint over sets of values.]
 
 ## 6. Base passes `B`
 
-The passes stage0 runs on every body (stave-opt `optimize`), in this order, on a canonical
-module (P1) read in its input numbering.
+The base passes run on every body, in this order, on a canonical module (P1) read in its input
+numbering. stage0 implements them in stave-opt (`optimize`); the base gate (section 9) holds the
+two implementations to each other.
 
 **B1. Slice lengths.** The *parts* are the instructions `%v = slice.len t s` whose operand is a
 value `s`. Parts with equal `(s, t)` form a group. A group *moves* when it has two or more parts,
 or one of its parts is in a block of greater loop depth (B7) than the block that defines `s`.
 Moving: the group's first part in print order is taken out of its block and inserted at the
-*place* of `s` (directly after `s`'s defining instruction, or, when `s` is a block param, at the
-start of that block, in `b0` after its slots), keeping its result, type, operand, and site; every
-other part of the group is deleted and its result replaced by the first part's. Groups inserted
-at one place go in ascending `(t, k)` order (`t` by type id in B's input, a type B2 added after
-every other; `k` the group's constant, B3). A place "after" an instruction that itself moves in
-the same step is that instruction's old position.
+*place* of `s`: directly after `s`'s defining instruction; or, when `s` is a param of block `x`,
+directly before the first instruction of `x` that is not a `slot` (in `b0` after its slots,
+elsewhere at the block's start). It keeps its result, type, operand, and site; every other part of
+the group is deleted and its result replaced by the first part's. Groups that one step inserts at
+one place go in ascending `(s, t, k)` order: `s` by value number in B's input (so the params of
+one block in param order), `t` by type id in B's input with a type B2 added after every other,
+`k` the group's constant (B3). An insertion goes directly at its place, before the instructions
+an earlier step inserted there. A place after an instruction that moves or is deleted in the same
+step is that instruction's old position.
 [A: the survivor of a group is its minimum in print order; groups are disjoint.]
 
 **B2. Element addresses.** Every `addr.elem s i`, `vec.load s i`, and `vec.store s i v` (exactly
 those operand counts) whose operand 0 is a value `s` of type `ref` or `ptr` (`mut` or `const`)
-`slice T`, with `T` neither an array nor a slice, gets `%p = slice.ptr t<ptr mut T> s` directly
-before it, with the access's site, and reads `%p` as operand 0. The type `ptr mut T` is added to
-the type table when the module lacks it. [N: pointwise.]
+`slice T` (with or without `align`), with `T` neither an array nor a slice, gets
+`%p = slice.ptr t<ptr mut T> s` directly before it, with the access's site, and reads `%p` as
+operand 0. The type `ptr mut T` is added to the type table when the module lacks it. [N: pointwise.]
 
 **B2'.** Only when B2 changed the body: B1 with `slice.ptr` in place of `slice.len`.
 
@@ -362,8 +383,8 @@ would trap.
 ## 8. The `inline` dump
 
 `stage1 ir opt --dump=inline` prints the decision tables instead of the module text, per round:
-a line `round <r>`, then per fn with a body, by instance id, its line and then one line per site
-row of the fn in `(b, k)` order:
+a line `round <r>` (`r` from 1), then per fn with a body, by instance id, its line and then one
+line per site row of the fn in `(b, k)` order:
 
 ```
 round <r>
@@ -379,9 +400,13 @@ printed.
 
 - **Goldens**: hand-written `checked` texts with their `inline` dump, their text after `X`
   (`--dump-phase=inline`), after `C*` (`--dump-phase=clean`), and the output, byte-equal; the
-  expected texts are derived from this file, not from an implementation.
+  expected texts are derived from this file, not from an implementation. The cases include the
+  examples of section 10 and at least: a single-block callee; several `ret`s; a callee with a
+  loop; slots; nesting three deep; self and mutual recursion; `features` both ways; a cold site;
+  a budget cut and its tie-break; constant, string, and `@fn` arguments; a unit call and an unused
+  result; a site in `b0`; two sites in one block; an `@n.u` callee; every reachable verdict.
 - **Base**: on every `release` cell of the stage1 IR corpus, `stage1 ir opt --passes=base` equals
-  `stave ir opt` on the same `checked` text.
+  `stave ir opt` on the same `checked` text, both in the same form (gate or emit).
 - **Verifiers**: stage1's verifier after every phase (`--verify-phases`) and stage0's
   (`stave ir check`) on every full `opt` output: no fault.
 - **Behaviour**: `stave ir run` with `STAVE_INTERP_CHECK=1` on the `checked` text and on its full
@@ -391,12 +416,18 @@ printed.
   opt(t)` and `fmt(opt(t)) = opt(t)`; the same for the `inline` dump.
 - **Folding**: every `fold` op on every int type against the stave-ir interpreter, exhaustive on
   8 bits, boundary and random values wider, traps included.
+- **Mutants** (at acceptance and on every change of the optimizer, not in every `check`): a fixed
+  list of seeded faults in the optimizer (a swapped argument in `σ`, a dropped slot move, a
+  missing `K` param, an off-by-one block place, a skipped tie-break, a wrong prefix cut, a fold
+  with the wrong signedness, ...), each built and run through the goldens, the verifiers, and the
+  behaviour gate: every mutant is killed.
 
 ## 10. Worked examples
 
 Target `x86_64-linux-v2` (baseline `sse42`), the constants of K1. Each input is a complete
 `release checked` text; each output repeats the input's lines except the header (`release opt`)
-and the bodies shown. `canon` keeps every type in these examples, so type ids do not change.
+and the bodies shown. `canon` keeps every type in 10.1-10.6 and 10.9-10.10, so type ids do not
+change there; 10.7 and 10.8 show their whole output.
 
 ### 10.1 A getter in a loop, nested three deep (F, D, X, C1, C5)
 
@@ -797,7 +828,7 @@ b0():
 }
 ```
 
-### 10.4 Every verdict but `altstack`, `gpu`, `budget` (decision only)
+### 10.4 Every callee verdict but `gpu` (decision only)
 
 Input:
 
@@ -953,7 +984,7 @@ fn @14 size 3 closed 1 slots 0 level 1
 site @14 b0 0 @10 1 inline
 ```
 
-### 10.5 The budget cut and its order (decision only)
+### 10.5 The budget cut on slots and its order (decision only)
 
 Input:
 
@@ -1026,4 +1057,372 @@ site @2 b0 13 @0 0 inline
 site @2 b0 14 @0 0 inline
 site @2 b0 15 @0 0 inline
 site @2 b0 16 @0 0 inline
+```
+
+### 10.6 A caller with `altstack` (decision only)
+
+The verifier allows `altstack` only on a panic report entry, here `runtime.panic.abort`. Its call
+of `leaf` fails `altstack` (the caller test comes before `cold`, which it would also fail):
+
+```
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 8
+type t1 int u 64
+type t2 int s 32
+type t3 ref t4
+type t4 slice t0
+fn @0 main.leaf(t1) -> t1 {
+b0(%0: t1):
+  %1 = add.wrap t1 %0 1
+  ret %1
+}
+fn @1 main.main() -> t2 {
+b0():
+  %0 = call t1 @0 1
+  %1 = cast.wrap t2 %0
+  ret %1
+}
+fn @2 runtime.panic.abort(t3) known altstack {
+b0(%0: t3):
+  %1 = call t1 @0 7
+  panic.assert ()
+  unreachable
+}
+```
+
+```
+round 1
+fn @0 size 1 closed 1 slots 0 level 0
+fn @1 size 4 closed 2 slots 0 level 1
+site @1 b0 0 @0 1 inline
+fn @2 size 4 closed 4 slots 0 level 1
+site @2 b0 0 @0 1 altstack
+```
+
+### 10.7 `switch` on a constant, `select`, equal targets, a fold that would trap, dead code
+
+Input:
+
+```
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 8
+type t1 int u 64
+type t2 int u size
+type t3 int s 32
+type t4 bool
+type t5 str
+type t6 ref t5
+str s0 "hi"
+fn @0 main.sel(t1) -> t1 {
+b0(%0: t1):
+  switch %0 0:b1() 1:b2() _:b3()
+b1():
+  ret 10
+b2():
+  ret 20
+b3():
+  ret 30
+}
+fn @1 main.note(t6) {
+b0(%0: t6):
+  %1 = slice.len t2 %0
+  ret
+}
+fn @2 main.ovf(t0) -> t0 {
+b0(%0: t0):
+  %1 = add t0 %0 9
+  ret %1
+}
+fn @3 main.main() -> t3 {
+b0():
+  %0 = call t1 @0 1
+  call () @1 s0
+  %1 = call t0 @2 250
+  %2 = eq t4 %1 0
+  %3 = select t1 1 %0 7
+  cbr %2 b1(%3) b1(%3)
+b1(%4: t1):
+  %5 = cast.wrap t3 %4
+  ret %5
+}
+```
+
+Decision: `size0`: `sel` 2 (`switch`), `note` 1, `ovf` 1, `main` 3 x 3 + 1 + 1 + 1 + 1 = 13.
+The candidates sort `note` `(1, 0, 1)`, `ovf` `(1, 0, 2)`, `sel` `(2, 0, 0)`, every `a_j` = 0;
+`S(main)` = 13 + (2 - 3) + (1 - 3) + (1 - 3) = 8.
+
+```
+round 1
+fn @0 size 2 closed 2 slots 0 level 0
+fn @1 size 1 closed 1 slots 0 level 0
+fn @2 size 1 closed 1 slots 0 level 0
+fn @3 size 13 closed 8 slots 0 level 1
+site @3 b0 0 @0 2 inline
+site @3 b0 1 @1 1 inline
+site @3 b0 2 @2 1 inline
+```
+
+After `X` (other fns unchanged). The string argument and the constants reach the callee code;
+`switch 1` is legal here only because the level is `opt` (P4); the call of `note` has no result,
+so its continuation `b5` has no param:
+
+```
+fn @3 main.main() -> t3 {
+b0():
+  switch 1 0:b1() 1:b2() _:b3()
+b1():
+  br b4(10)
+b2():
+  br b4(20)
+b3():
+  br b4(30)
+b4(%0: t1):
+  %1 = slice.len t2 s0
+  br b5()
+b5():
+  %2 = add t0 250 9
+  br b6(%2)
+b6(%3: t0):
+  %4 = eq t4 %3 0
+  %5 = select t1 1 %0 7
+  cbr %4 b7(%5) b7(%5)
+b7(%6: t1):
+  %7 = cast.wrap t3 %6
+  ret %7
+}
+```
+
+Clean-up of `main`, round 1: C1 replaces `%3` by `%2` (`b6` has one edge); C2 leaves `add t0 250 9`
+(259 is outside `u8`: it would trap) and replaces the `select` by `%0`; C3 makes `b0` `br b2()`
+(case 1) and the `cbr` with two equal targets `br b7(%0)`; C4 deletes `b1` and `b3`; C5 merges
+`b2` into `b0` and `b5`, `b6` into `b4`; C6 deletes `slice.len` and `eq` (removable, unused) and
+keeps the `add` (not removable). Round 2: C1 replaces `%0` and `%6` by 20, C2 folds
+`cast.wrap t3 20` to 20, C5 merges every block into `b0`. Round 3 changes nothing. `note`'s
+`slice.len` goes by C6 too, so `usize` and `bool` lose their last use and `canon` drops them.
+`B` changes nothing. Output (`--dump-phase=clean` prints the same text):
+
+```
+stave.ir 4 "x86_64-linux-v2" release opt
+type t0 int u 8
+type t1 int u 64
+type t2 int s 32
+type t3 str
+type t4 ref t3
+str s0 "hi"
+fn @0 main.sel(t1) -> t1 {
+b0(%0: t1):
+  switch %0 0:b1() 1:b2() _:b3()
+b1():
+  ret 10
+b2():
+  ret 20
+b3():
+  ret 30
+}
+fn @1 main.note(t4) {
+b0(%0: t4):
+  ret
+}
+fn @2 main.ovf(t0) -> t0 {
+b0(%0: t0):
+  %1 = add t0 %0 9
+  ret %1
+}
+fn @3 main.main() -> t2 {
+b0():
+  %0 = add t0 250 9
+  ret 20
+}
+```
+
+### 10.8 The base passes B1-B7 (`--passes=base`)
+
+Input:
+
+```
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 64
+type t1 int u size
+type t2 bool
+type t3 ref t0
+type t4 ref t6
+type t5 ref mut t0
+type t6 slice t0
+fn @0 main.sum(t4, t4) -> t0 {
+b0(%0: t4, %1: t4):
+  %2 = slot t5
+  %3 = slice.len t1 %1
+  %4 = slice.len t1 %0
+  %5 = sub.sat t1 %4 3
+  %6 = sub.sat t1 %4 3
+  store () %2 0
+  br b1(0)
+b1(%7: t1):
+  %8 = lt t2 %7 %4
+  cbr %8 b2() b3()
+b2():
+  %9 = slice.len t1 %0
+  %10 = addr.elem t3 %0 %7
+  %11 = load t0 %10
+  %12 = load t0 %2
+  %13 = add.wrap t0 %12 %11
+  store () %2 %13
+  %14 = add.wrap t1 %7 1
+  %15 = lt t2 %14 %9
+  %16 = add.wrap t1 %7 1
+  br b1(%16)
+b3():
+  %17 = add.wrap t1 %5 %6
+  %18 = cast.wrap t0 %17
+  %19 = load t0 %2
+  %20 = add.wrap t0 %19 %18
+  ret %20
+}
+```
+
+Loop depth (B7): the edge `b2 -> b1` is a back edge, so `b1` and `b2` have depth 1. B1: group `%0`
+has two parts (`%4`, `%9`) and moves: `%4` goes before the first non-slot instruction of `b0`,
+`%9` is deleted and reads `%4`; group `%1` has one part at depth 0 and stays. B2: `%10`'s slice
+operand gets `slice.ptr` of the new type `ptr mut t0` before it. B2': its one part is at depth 1,
+so it moves to the same place as `%4` and goes before it (an earlier step's insertion). B3: `%5`,
+`%6` form one group and move to directly after `%4`; `%6` reads `%5`. B4: in `b2`, `%16` has the
+key of `%14`, only branch arguments read it, and the search from `b2` pops `b1`, `b3`, then `b2`:
+it reads `%14`. B5 deletes `%15` and `%3`. Output, whole:
+
+```
+stave.ir 4 "x86_64-linux-v2" release opt
+type t0 int u 64
+type t1 int u size
+type t2 bool
+type t3 ref t0
+type t4 ref t7
+type t5 ref mut t0
+type t6 ptr mut t0
+type t7 slice t0
+fn @0 main.sum(t4, t4) -> t0 {
+b0(%0: t4, %1: t4):
+  %2 = slot t5
+  %3 = slice.ptr t6 %0
+  %4 = slice.len t1 %0
+  %5 = sub.sat t1 %4 3
+  store () %2 0
+  br b1(0)
+b1(%6: t1):
+  %7 = lt t2 %6 %4
+  cbr %7 b2() b3()
+b2():
+  %8 = addr.elem t3 %3 %6
+  %9 = load t0 %8
+  %10 = load t0 %2
+  %11 = add.wrap t0 %10 %9
+  store () %2 %11
+  %12 = add.wrap t1 %6 1
+  br b1(%12)
+b3():
+  %13 = add.wrap t1 %5 %5
+  %14 = cast.wrap t0 %13
+  %15 = load t0 %2
+  %16 = add.wrap t0 %15 %14
+  ret %16
+}
+```
+
+### 10.9 Two slice params at one place (`--passes=base`)
+
+Both groups move to the start of `b0`, after the slot. They are ordered by `s`: the group of `%0`
+comes first although the first part in print order reads `%1`.
+
+```
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u size
+type t1 ref t3
+type t2 ref mut t0
+type t3 slice t0
+fn @0 main.f(t1, t1) -> t0 {
+b0(%0: t1, %1: t1):
+  %2 = slot t2
+  %3 = slice.len t0 %1
+  %4 = slice.len t0 %0
+  %5 = slice.len t0 %1
+  %6 = slice.len t0 %0
+  %7 = add.wrap t0 %3 %4
+  %8 = add.wrap t0 %5 %6
+  %9 = add.wrap t0 %7 %8
+  store () %2 %9
+  %10 = load t0 %2
+  ret %10
+}
+```
+
+Output (`B4` keeps both `add.wrap`: an instruction, not a branch argument, reads each):
+
+```
+fn @0 main.f(t1, t1) -> t0 {
+b0(%0: t1, %1: t1):
+  %2 = slot t2
+  %3 = slice.len t0 %0
+  %4 = slice.len t0 %1
+  %5 = add.wrap t0 %4 %3
+  %6 = add.wrap t0 %4 %3
+  %7 = add.wrap t0 %5 %6
+  store () %2 %7
+  %8 = load t0 %2
+  ret %8
+}
+```
+
+### 10.10 The budget cut on `CAP` (decision only, `--limit cap=20`)
+
+With `CAP` = 20, `main`'s budget is `20 - size0(main)` = `20 - 10` = 10. The candidates sort `h8`
+`(8, 0, 1)`, `h8` `(8, 0, 2)`, `h9` `(9, 0, 0)` with `a_j` = 5, 5, 6; the prefix sums 5 and 10
+fit, 16 does not. With the table's `CAP` all three are inlined and `S(main)` is 26.
+
+```
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 64
+type t1 int s 32
+main @2
+fn @0 main.h8(t0) -> t0 {
+b0(%0: t0):
+  %1 = add.wrap t0 %0 1
+  %2 = add.wrap t0 %1 1
+  %3 = add.wrap t0 %2 1
+  %4 = add.wrap t0 %3 1
+  %5 = add.wrap t0 %4 1
+  %6 = add.wrap t0 %5 1
+  %7 = add.wrap t0 %6 1
+  %8 = add.wrap t0 %7 1
+  ret %8
+}
+fn @1 main.h9(t0) -> t0 {
+b0(%0: t0):
+  %1 = add.wrap t0 %0 1
+  %2 = add.wrap t0 %1 1
+  %3 = add.wrap t0 %2 1
+  %4 = add.wrap t0 %3 1
+  %5 = add.wrap t0 %4 1
+  %6 = add.wrap t0 %5 1
+  %7 = add.wrap t0 %6 1
+  %8 = add.wrap t0 %7 1
+  %9 = add.wrap t0 %8 1
+  ret %9
+}
+fn @2 main.main() -> t1 {
+b0():
+  %0 = call t0 @1 1
+  %1 = call t0 @0 %0
+  %2 = call t0 @0 %1
+  %3 = cast.wrap t1 %2
+  ret %3
+}
+```
+
+```
+round 1
+fn @0 size 8 closed 8 slots 0 level 0
+fn @1 size 9 closed 9 slots 0 level 0
+fn @2 size 10 closed 20 slots 0 level 1
+site @2 b0 0 @1 9 budget
+site @2 b0 1 @0 8 inline
+site @2 b0 2 @0 8 inline
 ```

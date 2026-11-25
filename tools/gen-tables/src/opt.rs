@@ -7,7 +7,8 @@
 //! Checks: every limit is set and `rounds` is at least 1; the five terminators have a weight;
 //! op names are unique and well formed; a family name (`prefix*`) is the prefix of no other row;
 //! `removable` and `fold` take their listed values; the inlined known items are unique variant
-//! names.
+//! names; `call_saved` is at most the weight of `call` and `br` weighs what `ret` weighs, so the
+//! closed sizes of the inlining decision stay non-negative and exact.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -144,6 +145,17 @@ pub fn parse(text: &str) -> Result<Table, String> {
         {
             return Err(format!("{TABLE}: op `{}` is also matched by the family `{fam}*`", o.name));
         }
+    }
+    let call =
+        ops.iter().find(|o| o.name == "call").ok_or_else(|| format!("{TABLE}: no row for op `call`"))?;
+    if raw.limits.call_saved > call.weight {
+        return Err(format!(
+            "{TABLE}: limits.call_saved {} exceeds the weight of `call` ({})",
+            raw.limits.call_saved, call.weight
+        ));
+    }
+    if t.br != t.ret {
+        return Err(format!("{TABLE}: term.br ({}) must equal term.ret ({})", t.br, t.ret));
     }
     Ok(Table { limits: raw.limits, term, known_inline: raw.known.inline, ops })
 }
@@ -290,6 +302,12 @@ name = "intrinsic.*"
 weight = 2
 removable = "no"
 fold = "no"
+
+[[op]]
+name = "call"
+weight = 3
+removable = "no"
+fold = "no"
 "#;
 
     #[test]
@@ -311,8 +329,8 @@ fold = "no"
     fn stave_form() {
         let t = parse(SMALL).unwrap();
         let stv = emit_stave(&t, &["Option", "SetUserSite"]).unwrap();
-        assert!(stv.contains("pub const OPT_OP_NAME_OFF: [u32; 3] = [\n    0, 3, 14,\n];\n"), "{stv}");
-        assert!(stv.contains("pub const OPT_OP_FOLD: [u8; 2] = [\n    1, 0,\n];\n"), "{stv}");
+        assert!(stv.contains("pub const OPT_OP_NAME_OFF: [u32; 4] = [\n    0, 3, 14, 18,\n];\n"), "{stv}");
+        assert!(stv.contains("pub const OPT_OP_FOLD: [u8; 3] = [\n    1, 0, 0,\n];\n"), "{stv}");
         assert!(stv.contains("pub const REMOVABLE_CONST_INDEX: u8 = 3;\n"), "{stv}");
         assert!(stv.ends_with("pub const OPT_KNOWN_INLINE: [u32; 1] = [\n    1,\n];\n"), "{stv}");
         assert!(emit_stave(&t, &["Option"]).unwrap_err().contains("not a known item"));
@@ -329,6 +347,9 @@ fold = "no"
         assert!(bad("[\"SetUserSite\"]", "[\"SetUserSite\", \"SetUserSite\"]").contains("twice"));
         assert!(bad("[\"SetUserSite\"]", "[\"set_user_site\"]").contains("variant"));
         assert!(bad("unreachable = 0\n", "").contains("unreachable"));
+        assert!(bad("call_saved = 3", "call_saved = 4").contains("exceeds the weight of `call`"));
+        assert!(bad("ret = 0", "ret = 1").contains("must equal term.ret"));
+        assert!(bad("name = \"call\"", "name = \"call.ind\"").contains("no row for op `call`"));
     }
 
     #[test]

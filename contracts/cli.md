@@ -187,8 +187,9 @@ Outputs and statuses of the code-generating commands:
     file a compiler printed comes back unchanged).
   - `opt`: runs stage0's release passes (opt-passes.md, the base passes: rule P3) on the loaded
     module, then the IR verifier on their output, and prints the module at level `opt` on
-    stdout. The header must say `release` and a level other than `opt` (exit 1 otherwise). The
-    full pipeline, inlining included, is stage1's `stage1 ir opt` (cli-stage1.md).
+    stdout in the file's form: the stack section of an emit-form file is printed unchanged. The
+    header must say `release` and a level other than `opt` (exit 1 otherwise). The full
+    pipeline, inlining included, is stage1's `stage1 ir opt` (cli-stage1.md).
   - `run [-- ARGS...]`: runs the loaded module's `main` in the stave-ir interpreter with `ARGS`
     and the inherited stdio, and exits with the program's status, as `stave run`. A file without
     a `main` line is exit 1. `STAVE_INTERP_CHECK` works as below, except that borrow tracking is
