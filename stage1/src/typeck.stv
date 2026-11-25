@@ -786,8 +786,12 @@ impl tc_rows.Typeck {
         let target = sg.cx.uses.target.as_slice()[lo];
         if tag == resolve.TAG_LOCAL {
             let b = self.base + target as usize;
-            // a generic param: a const one is a value (not checked yet), a type one names none
-            if kind(tree, b) == K_GENERIC_PARAM { return UNK; }
+            // a generic param: a const one is a value of its type, a type one names none
+            if kind(tree, b) == K_GENERIC_PARAM {
+                let (ty, is_const) = self.generic_param(sg, ds, t, tree, b);
+                if ty == UNK || is_const { return ty; }
+                return if head then NONE else UNK;
+            }
             return self.loc.as_slice()[b];
         }
         let dk = ds.kind.as_slice()[target as usize];

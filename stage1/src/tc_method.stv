@@ -62,6 +62,42 @@ impl tc_rows.Typeck {
         return (m, c, b as% u32);
     }
 
+    // Method s named through generic param type c (`T.m`, stage0's `type_rel` on a param): the
+    // one trait method of the name its bounds give, with or without `self`; (method,
+    // `tc_rows.SELF_VAR`, bindings row: the bound's trait arguments, the method's own generics
+    // unbound, then `Self` bound to c), or NONE three times.
+    pub fn bound_assoc(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, c: u32, s: u32) -> (u32, u32, u32) {
+        let e = self.tq.env_of(sg, self.sc);
+        let p = sg.cx.tab.a_of(c);
+        self.tq.tr.bound_methods(ds, e, p, s, &mut self.tq.bm);
+        if self.tq.bm.len() != 4 { return (NONE, NONE, NONE); }
+        let tr = self.tq.bm.as_slice()[0];
+        let m = self.tq.bm.as_slice()[1];
+        let off = self.tq.bm.as_slice()[2] as usize;
+        let na = self.tq.bm.as_slice()[3] as usize;
+        if has_const(sg, tr) || has_const(sg, m) { return (NONE, NONE, NONE); }
+        let gl = sg.cx.gens.lo.as_slice();
+        let np = (gl[tr as usize + 1] - gl[tr as usize]) as usize;
+        let own = (gl[m as usize + 1] - gl[m as usize]) as usize;
+        if na != 3 * np { return (NONE, NONE, NONE); }
+        let b = self.binds.len();
+        for i in 0..np {
+            let w = self.tq.tr.env_words(e);
+            let k = w[off + 3 * i];
+            let x = w[off + 3 * i + 1];
+            if k != types.GA_TYPE || x == ERR {
+                self.binds.truncate(b);
+                return (NONE, NONE, NONE);
+            }
+            self.binds.push(x);
+        }
+        for _ in 0..own {
+            self.binds.push(NONE);
+        }
+        self.binds.push(c);
+        return (m, tc_rows.SELF_VAR, b as% u32);
+    }
+
     // Method s on a receiver whose level is struct or enum type c: (method, `Self`, bindings row),
     // or NONE three times.
     pub fn adt_method(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, c: u32, s: u32) -> (u32, u32, u32) {

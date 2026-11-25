@@ -34,6 +34,9 @@ const ERR: u32 = types.ERR;
 pub const UNK: u32 = tc_builtins.UNK;
 // `LIT | g`: the value of literal group g.
 pub const LIT: u32 = 2147483648;
+// The `Self` of a call of a trait method named through its trait or a generic param (`Tr.m(..)`,
+// `T.m(..)`): a binding of the call after the method's generics, and every argument is passed.
+pub const SELF_VAR: u32 = 4294967038;
 // The nesting a body may have: expression nodes, blocks, and patterns nested deeper than this
 // are E0005 case `expr`, an error.
 pub const MAX_DEPTH: u32 = 20000;
