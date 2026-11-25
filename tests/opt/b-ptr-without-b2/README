@@ -1,0 +1,1 @@
+Base passes only. B2' runs only when B2 changed the body: two slice.ptr of one slice in a loop, with no element access for B2 to rewrite, stay where they are (nothing else moves them).
