@@ -304,10 +304,12 @@ fn main() -> i32 {
     diag_sigs.sigs_diags(&mut d, &sg, &ds, &nm, &lx, &set, &toks, &cut);
     diag_kinds.impl_diags(&mut d, &mut sg, &ds, &md, &nm, &fl, &lx, &set, &toks, &tree);
     // Kinds, then the body checker (it extends the kinds' type table), when every signature's
-    // const forms are evaluated.
+    // const forms are evaluated. The body checker evaluates const forms of its own, so whether
+    // the signatures need one stage1 does not evaluate is read before it runs.
+    let sigs_ok = sg.cx.skip == consteval.CV_NONE;
     let mut kd: Option<kinds.Kinds> = Option.None;
     let mut tc: Option<tc_rows.Typeck> = Option.None;
-    if sg.cx.skip == consteval.CV_NONE {
+    if sigs_ok {
         let (_, order) = dump.sigs_order(&sg, &ds);
         let k = kinds.build(&mut sg, &ds, &fl, &md, &nm, order.as_slice());
         diag_kinds.const_drops(&mut d, &k, order.as_slice(), &sg, &ds, &nm, &lx, &set, &toks, &tree);
@@ -360,7 +362,7 @@ fn main() -> i32 {
             if code != EXIT_OK { return code; }
         }
         if cli.want_sigs {
-            if sg.cx.skip != consteval.CV_NONE {
+            if !sigs_ok {
                 io.eprint("stage1: sigs.txt not written: a signature needs a const form stage1 does not evaluate\n");
             } else {
                 let out = dump.sigs_txt(&sg, &ds, &md);

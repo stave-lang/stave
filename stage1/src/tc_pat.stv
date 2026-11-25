@@ -72,7 +72,7 @@ impl tc_rows.Typeck {
     // A literal pattern n (its literals the children: one, or a range's two) against a value of
     // type ty in mode m (a string literal tests the value itself, the others the value behind
     // its references): E0201 at the first literal if its kind is not the type's, else E0206 if
-    // the type has no `==`.
+    // the type has no `==`. Such a pattern binds nothing: the body's types are stage0's.
     fn lit_pattern(&mut self, tab: &types.Table, t: &lex.Tokens, tree: &ast.Ast, n: usize, ty: u32, m: u8) -> bool {
         let l0 = self.base + tree.kids.row(n)[0] as usize;
         let a = tree.tok.as_slice()[l0];
@@ -97,14 +97,10 @@ impl tc_rows.Typeck {
             return false;
         }
         if found != NONE {
-            self.bad = true;
             self.report(201, tc_rows.C_PENDING, l0 as% u32, pt, found, NONE);
-            return false;
+            return true;
         }
-        if !scalar_eq(tab, pt) {
-            self.no_eq_pattern(tab, n, pt);
-            return false;
-        }
+        if !scalar_eq(tab, pt) { self.no_eq_pattern(tab, n, pt); }
         return true;
     }
 
@@ -116,7 +112,6 @@ impl tc_rows.Typeck {
             x = tab.b_of(x);
         }
         let case = if tab.tag_of(x) == types.TK_STR then tc_rows.C_PATTERN_STR else tc_rows.C_PATTERN;
-        self.bad = true;
         self.report(206, case, n as% u32, ty, NONE, NONE);
     }
 
@@ -160,7 +155,7 @@ impl tc_rows.Typeck {
             let ct = sg.cx.ty.as_slice()[d as usize];
             if ct != ERR && !scalar_eq(&sg.cx.tab, ct) {
                 self.no_eq_pattern(&sg.cx.tab, n, ct);
-                return false;
+                return true;
             }
             return true;
         }
