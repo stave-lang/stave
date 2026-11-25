@@ -310,14 +310,10 @@ impl tc_rows.Typeck {
             }
             if !is_expr(ck) { return false; }
             let ks = tree.kids.row(r);
-            let op = tk(t, first_tok(tree, self.base + ks[1] as usize));
-            if op == T_EQ {
-                let lt = self.force_at(self.base + ks[0] as usize);
-                self.acc.as_mut_slice()[r] = lt;
-                self.set_hint(c, lt);
-            } else {
-                self.set_hint(c, UNK);
-            }
+            // `a = b` and `a op= b`: b under a's type
+            let lt = self.force_at(self.base + ks[0] as usize);
+            self.acc.as_mut_slice()[r] = lt;
+            self.set_hint(c, lt);
             return true;
         }
         if pk == K_FOR_STMT { return self.enter_for(sg, ds, nm, set, t, cut, tree, r, c); }
@@ -641,11 +637,9 @@ impl tc_rows.Typeck {
             if ks.len() >= 3 {
                 let rhs = self.base + ks[2] as usize;
                 let op = tk(t, first_tok(tree, self.base + ks[1] as usize));
-                if op == T_EQ {
-                    self.coerce_acc(&sg.cx.tab, rhs, r);
-                } else {
-                    self.poison_kids(tree, r);
-                }
+                self.coerce_acc(&sg.cx.tab, rhs, r);
+                let lt = self.acc.as_slice()[r];
+                if op != T_EQ { self.compound(sg, op, lt); }
             } else {
                 let _ = self.force_at(lhs);
             }
@@ -1004,6 +998,18 @@ impl tc_rows.Typeck {
         return self.op_on(tab, op, u);
     }
 
+    // `a op= b` with a of type lt, b checked against it (stage0 `compound_assign`): the binary
+    // operator's rule on two operands of type lt.
+    fn compound(&mut self, sg: &mut sigs.Sigs, op: u8, lt: u32) {
+        if lt == UNK || lt == NONE { return; }
+        let bin = compound_op(op);
+        if tc_ops.user_ty(&sg.cx.tab, lt) {
+            let _ = self.user_op(sg, tc_ops.binop_trait(bin), lt);
+            return;
+        }
+        let _ = self.op_on(&sg.cx.tab, bin, lt);
+    }
+
     // stage0's `op_on`: the type of a binary operator on two operands of type ty.
     fn op_on(&mut self, tab: &types.Table, op: u8, ty: u32) -> u32 {
         if ty == self.t_never { return ty; }
@@ -1310,6 +1316,27 @@ fn first_tok(tree: &ast.Ast, g: usize) -> u32 {
 
 fn is_expr(k: u8) -> bool {
     return consteval.is_expr_kind(k);
+}
+
+// The binary operator of compound assignment operator op.
+fn compound_op(op: u8) -> u8 {
+    if op == terminals.T_PLUS_EQ as% u8 { return T_PLUS; }
+    if op == terminals.T_MINUS_EQ as% u8 { return T_MINUS; }
+    if op == terminals.T_STAR_EQ as% u8 { return T_STAR; }
+    if op == terminals.T_SLASH_EQ as% u8 { return T_SLASH; }
+    if op == terminals.T_PERCENT_EQ as% u8 { return T_PERCENT; }
+    if op == terminals.T_PLUS_PERCENT_EQ as% u8 { return T_PLUS_PERCENT; }
+    if op == terminals.T_MINUS_PERCENT_EQ as% u8 { return T_MINUS_PERCENT; }
+    if op == terminals.T_STAR_PERCENT_EQ as% u8 { return T_STAR_PERCENT; }
+    if op == terminals.T_PLUS_PIPE_EQ as% u8 { return T_PLUS_PIPE; }
+    if op == terminals.T_MINUS_PIPE_EQ as% u8 { return T_MINUS_PIPE; }
+    if op == terminals.T_STAR_PIPE_EQ as% u8 { return T_STAR_PIPE; }
+    if op == terminals.T_AMP_EQ as% u8 { return T_AMP; }
+    if op == terminals.T_PIPE_EQ as% u8 { return T_PIPE; }
+    if op == terminals.T_CARET_EQ as% u8 { return T_CARET; }
+    if op == terminals.T_LT_LT_EQ as% u8 { return T_LT_LT; }
+    if op == terminals.T_GT_GT_EQ as% u8 { return T_GT_GT; }
+    return T_LT_LT_PERCENT;
 }
 
 // A node that is one level of `tc_rows.MAX_DEPTH` when the walk enters it.
