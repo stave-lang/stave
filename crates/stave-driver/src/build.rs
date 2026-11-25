@@ -216,10 +216,6 @@ pub(crate) fn checked_module(
         extend_nodes(n, &r.removal);
         stave_ir::canon::permute_by_func(n, &r.remap);
     }
-    debug_assert!(
-        stave_ir::canon::is_canonical(m),
-        "the removal of proven checks left a module that is not canonical"
-    );
     verified_final(m, Level::Checked)?;
     Ok(r)
 }
@@ -367,9 +363,21 @@ fn remove_checked(m: &mut Module, proved: Vec<Proved>, whole: bool) -> Result<Ch
     prof::mark("bounds-remove");
     let remap = match edits {
         Some(e) => {
+            // The partial renumbering must give exactly what the full one gives, module and map.
+            let full = cfg!(debug_assertions).then(|| {
+                let mut full_m = m.clone();
+                let map = canonical(&mut full_m);
+                (full_m, map)
+            });
             let remap = stave_ir::canon::restore_by(m, &e, |funcs, one| {
                 funcs.par_iter_mut().enumerate().for_each(|(i, f)| one(i, f))
             });
+            if let Some((full_m, map)) = full {
+                assert!(
+                    remap == map && *m == full_m,
+                    "the partial renumbering after the removal of proven checks differs from the full one"
+                );
+            }
             prof::mark("bounds-renumber");
             remap
         }
