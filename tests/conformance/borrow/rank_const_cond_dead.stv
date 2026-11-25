@@ -1,0 +1,77 @@
+//~ CHECK-ONLY
+// A join, spawn, or drop in an arm the instance never runs (an `if` on a constant condition) is
+// not checked for lock ranks, as a call there is not: each would take `LO` (rank 1) while `HI`
+// (rank 2) is held. The same in the taken arm is E1405 / E1406: `rank_const_cond_taken.stv`.
+import std.sync;
+
+static HI: sync.Mutex<u32, 2> = sync.Mutex::<u32, 2>.new(0u32);
+static LO: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0u32);
+
+struct L {
+    pub k: u32,
+}
+
+impl Drop for L {
+    fn drop(&mut self) {
+        let g = LO.lock();
+    }
+}
+
+fn lo() {
+    let g = LO.lock();
+}
+
+fn drop_dead(k: u32) -> u32 {
+    let g = HI.lock();
+    if false {
+        let l = L.{ k: k };
+    }
+    return *g.get();
+}
+
+// `u32` has no drop glue: the arm is dead in the only instance
+fn drop_dead_generic<T>(k: u32) -> u32 {
+    let g = HI.lock();
+    if needs_drop::<T>() {
+        let l = L.{ k: k };
+    }
+    return *g.get();
+}
+
+fn call_dead_generic<T>(k: u32) -> u32 {
+    let g = HI.lock();
+    if needs_drop::<T>() {
+        lo();
+    }
+    return *g.get();
+}
+
+fn join_dead() -> u32 {
+    let g = HI.lock();
+    if false {
+        scope {
+            spawn {
+                let h = LO.lock();
+            }
+        }
+    }
+    return *g.get();
+}
+
+fn spawn_dead_in_live_scope() -> u32 {
+    let g = HI.lock();
+    scope {
+        if !true {
+            spawn {
+                let h = LO.lock();
+            }
+        }
+    }
+    return *g.get();
+}
+
+fn main() -> i32 {
+    let a = drop_dead(1) +% drop_dead_generic::<u32>(2) +% call_dead_generic::<u32>(3);
+    let b = join_dead() +% spawn_dead_in_live_scope();
+    return 0;
+}

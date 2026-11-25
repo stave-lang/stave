@@ -72,12 +72,21 @@ unsized is E0911 `instance-layout` at the generic fn.
   - nothing in it counts as an effect (E1401, `stave effects`): neither an op that can trap, an
     `unsafe(..)`, a `scope`, or a `spawn`, nor a call (direct, through a fn value, a drop). A
     call in it is no call-graph edge: no call cycle (E1402), no lock acquired (E1405), no
-    features inherited from its callee (E0704 `inherited`). So
+    features inherited from its callee (E0704 `inherited`); no join or drop in it is checked
+    for lock ranks (E1405, E1406), and no `static` it names counts for a clause (E0211
+    `static`). So
     `fn f(v: &mut vec.Vec<u32>) without(trap) { v.clear(); }` is accepted (the element loop is
     dead), and the same with `vec.Vec<String>` is E1401;
   - a fn it calls is still instantiated and checked as an instance (E0911 `instance-layout`,
     E0902), and a closure literal in it is checked like any other: code in the closure's body is
     the closure's own, nothing of the instance reaches it.
+- What reads the instance's code reads the taken arm as if it were written in place of the
+  `if`: the proofs that remove bounds and contract checks see only its paths, so
+  `if true { if i >= xs.len() { return 0; } } return xs[i];` needs no check (accepted in a
+  `without(trap)` fn), per instance under `!needs_drop::<T>()`. What reads the source sees both
+  arms: type checking, the borrow checker (a move or a loan in the dead arm counts:
+  `if false { take(s); } s.len()` is E0502), and the drop schedule (a value the dead arm may
+  move counts as maybe moved; as the arm never runs, it is dropped once, where it ends).
 - Any other condition is computed at run time and both arms are code, even where its value is
   known: `const OFF: bool = false; if OFF { return xs[i]; }` in a `without(trap)` fn is E1401.
 

@@ -611,7 +611,8 @@ pub fn purity(prog: &Program, tc: &Typeck, sets: &EffectSets) -> Vec<Diagnostic>
 
 /// E0211 case `static`: a callee in a clause that reaches, through calls and drops, a body that
 /// names a `static` whose type is not Frozen (an atomic, `Mutex`, `Once`, ...): shared state the
-/// clause could change. A body counts with every static it names, its closures' included.
+/// clause could change. A body counts with every static it names, its closures' included, except
+/// in an arm the instance never runs ([`crate::constcond`]).
 /// `static mut` (built-in packages only, reached through `unsafe`) does not count.
 pub fn shared_statics(prog: &Program, tc: &Typeck) -> Vec<Diagnostic> {
     let g = &tc.call_graph;
@@ -647,8 +648,14 @@ pub fn shared_statics(prog: &Program, tc: &Typeck) -> Vec<Diagnostic> {
     let mut uses: Vec<Option<DeclId>> = vec![None; g.nodes.len()];
     for (i, u) in uses.iter_mut().enumerate() {
         let Some(b) = body_of(i as u32).and_then(|d| tc.body(d)) else { continue };
-        *u = b.targets.iter().find_map(|(_, t)| match t {
-            Target::Global { decl } if shared(*decl) => Some(*decl),
+        // a static named only in an arm the instance never runs is not used (the call graph's
+        // stored answers)
+        let taken = g.fn_of(i as u32).map_or(&[][..], |f| g.taken(f));
+        let dead = crate::constcond::DeadSites::new(prog, b, taken);
+        *u = b.targets.iter().find_map(|(tok, t)| match t {
+            Target::Global { decl } if shared(*decl) && !dead.as_ref().is_some_and(|d| d.holds_tok(*tok)) => {
+                Some(*decl)
+            }
             _ => None,
         });
     }

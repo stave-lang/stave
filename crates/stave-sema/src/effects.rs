@@ -458,7 +458,11 @@ fn builtin(prog: &Program, d: DeclId) -> bool {
         .is_some_and(|p| p.kind == crate::package::PackageKind::Builtin)
 }
 
-fn item_cx<'p>(prog: &'p Program, item: ItemId, br: &'p mut Option<Brackets>) -> Option<ItemCx<'p>> {
+pub(crate) fn item_cx<'p>(
+    prog: &'p Program,
+    item: ItemId,
+    br: &'p mut Option<Brackets>,
+) -> Option<ItemCx<'p>> {
     let it = prog.item(item)?;
     let f = prog.file(it.file)?;
     let info = f.parsed.items.get(it.index as usize)?;

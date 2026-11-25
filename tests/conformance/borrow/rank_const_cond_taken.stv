@@ -1,0 +1,52 @@
+//~ CHECK-ONLY
+// The taken-arm mirror of `rank_const_cond_dead.stv`: a drop or a join in the arm an `if` on a
+// constant condition runs is checked as any other (E1405, E1406). A generic fn is checked per
+// instance: `drop_by_type::<u32>` never drops the `L`, `drop_by_type::<L>` does (`L` has drop
+// glue), and only that instance is an error.
+import std.sync;
+
+static HI: sync.Mutex<u32, 2> = sync.Mutex::<u32, 2>.new(0u32);
+static LO: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0u32);
+
+struct L {
+    pub k: u32,
+}
+
+impl Drop for L {
+    fn drop(&mut self) {
+        let g = LO.lock();
+    }
+}
+
+fn drop_taken(k: u32) -> u32 {
+    let g = HI.lock();
+    if true {
+        let l = L.{ k: k };
+    } //~ ERROR E1405
+    return *g.get();
+}
+
+fn drop_by_type<T>(k: u32) -> u32 {
+    let g = HI.lock();
+    if needs_drop::<T>() {
+        let l = L.{ k: k };
+    } //~ ERROR E1405
+    return *g.get();
+}
+
+fn join_taken() -> u32 {
+    let g = HI.lock();
+    if !false {
+        scope {
+            spawn {
+                let h = LO.lock();
+            }
+        } //~ ERROR E1406
+    }
+    return *g.get();
+}
+
+fn main() -> i32 {
+    let a = drop_taken(1) +% drop_by_type::<u32>(2) +% drop_by_type::<L>(3) +% join_taken();
+    return 0;
+}

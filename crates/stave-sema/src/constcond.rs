@@ -152,3 +152,84 @@ pub fn dead_arms(ifs: &[ConstIf], taken: &[bool], owner: impl Fn(u32) -> u32) ->
 pub fn is_dead(dead: &[(u32, u32, u32)], owner: u32, tok: u32) -> bool {
     dead.iter().any(|&(o, lo, hi)| o == owner && lo <= tok && tok <= hi)
 }
+
+/// The dead arms of one instance of a body, for a consumer that reads sites by token or by
+/// source span (the lock-rank check, the contract purity check): the same arms as
+/// [`dead_arms`], from the call graph's stored answers. A site is dead when a dead arm holds it
+/// and the innermost closure holding it is the one holding that arm's `if` (a closure literal's
+/// first token is its maker's, as the call graph's closure event).
+pub struct DeadSites {
+    file: stave_diag::FileId,
+    /// Closure bodies: (first, last) token and (first, end) byte offset, sorted by first token.
+    closures: Vec<(u32, u32, u32, u32)>,
+    /// (owner, first, last) token and (first, end) byte offset.
+    arms: Vec<(u32, u32, u32, u32, u32)>,
+}
+
+impl DeadSites {
+    /// The dead sites of body `b` in an instance whose answers are `taken` (`None`: nothing is
+    /// dead there).
+    pub fn new(prog: &crate::Program, b: &TypedBody, taken: &[bool]) -> Option<DeadSites> {
+        if b.const_ifs.is_empty() || taken.is_empty() {
+            return None;
+        }
+        let mut br = None;
+        let icx = crate::effects::item_cx(prog, b.item, &mut br)?;
+        let end = |t: u32| {
+            let s = icx.tok_span(t);
+            s.offset + s.len
+        };
+        let mut closures: Vec<(u32, u32, u32, u32)> = crate::closures::closure_nodes(&icx, b.node)
+            .into_iter()
+            .map(|(node, _)| {
+                let lo = icx.a(node);
+                let hi = icx
+                    .child(node, NodeKind::Block)
+                    .map_or_else(|| icx.end_tok(node), |c| icx.close(icx.a(c)));
+                (lo, hi, icx.tok_start(lo), end(hi))
+            })
+            .collect();
+        closures.sort_unstable();
+        let mut d = DeadSites { file: icx.fid(), closures, arms: Vec::new() };
+        for (c, &t) in b.const_ifs.iter().zip(taken) {
+            if let Some((lo, hi)) = c.dead_arm(t) {
+                let o = d.owner_tok(c.tok);
+                d.arms.push((o, lo, hi, icx.tok_start(lo), end(hi)));
+            }
+        }
+        (!d.arms.is_empty()).then_some(d)
+    }
+
+    /// The innermost closure (`k + 1`, else 0) holding token `t` after its first token.
+    fn owner_tok(&self, t: u32) -> u32 {
+        let mut best = 0;
+        for (k, c) in self.closures.iter().enumerate() {
+            if c.0 < t && t <= c.1 {
+                best = k as u32 + 1;
+            }
+        }
+        best
+    }
+
+    /// [`DeadSites::owner_tok`] for byte offset `o`.
+    fn owner_byte(&self, o: u32) -> u32 {
+        let mut best = 0;
+        for (k, c) in self.closures.iter().enumerate() {
+            if c.2 < o && o < c.3 {
+                best = k as u32 + 1;
+            }
+        }
+        best
+    }
+
+    /// Whether token `t` of the body is in a dead arm.
+    pub fn holds_tok(&self, t: u32) -> bool {
+        self.arms.iter().any(|a| a.1 <= t && t <= a.2 && a.0 == self.owner_tok(t))
+    }
+
+    /// Whether the site starting at span `s` is in a dead arm.
+    pub fn holds(&self, s: stave_diag::Span) -> bool {
+        s.file == self.file
+            && self.arms.iter().any(|a| a.3 <= s.offset && s.offset < a.4 && a.0 == self.owner_byte(s.offset))
+    }
+}
