@@ -1,0 +1,1 @@
+@fn and constant arguments substituted for params (the same @fn twice, a param left unused); select on a constant folds to its fn operand, select on a value with equal arms stays; call.ind is never a site and makes no edge, and a call.ind through an @fn constant after the fold stays a call.ind.

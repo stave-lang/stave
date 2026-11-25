@@ -1,0 +1,1 @@
+Two accepted rows in one loop block around a refused one (nobody): the refused call stays in the first continuation, which the second row splits; callee slots from a non-entry block go to b0 after the caller's own, in (b, k) order; copied instructions keep their !rows, the calls' own rows go; str, site and claim lines are kept (P2) though no body uses the string.

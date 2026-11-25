@@ -1,0 +1,13 @@
+round 1
+fn @0 size 5 closed 5 slots 0 level 0
+fn @1 size 32 closed 32 slots 0 level 0
+fn @2 size 33 closed 33 slots 0 level 0
+fn @3 size 30 closed 32 slots 0 level 1
+site @3 b0 0 @0 5 inline
+fn @4 size 31 closed 33 slots 0 level 1
+site @4 b0 0 @0 5 inline
+fn @5 size 13 closed 71 slots 0 level 2
+site @5 b0 0 @1 32 inline
+site @5 b0 1 @2 33 size
+site @5 b0 2 @3 32 inline
+site @5 b0 3 @4 33 size

@@ -1,0 +1,27 @@
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 64
+type t1 bool
+fn @0 main.leaf(t0) -> t0 {
+b0(%0: t0):
+  %1 = add.wrap t0 %0 1
+  ret %1
+}
+fn @1 main.run(t0) -> t0 {
+b0(%0: t0):
+  %1 = eq t1 %0 0
+  cbr %1 b1() b3()
+b1():
+  %2 = call t0 @0 %0
+  br b2(%2)
+b2(%3: t0):
+  %4 = call t0 @0 %3
+  %5 = lt t1 %4 9
+  cbr %5 b2(%4) b5()
+b3():
+  br b4()
+b4():
+  %6 = call t0 @0 %0
+  br b4()
+b5():
+  ret %4
+}

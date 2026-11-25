@@ -10,6 +10,10 @@
 //!   `input.ir` for the `--passes=base` examples 10.8 and 10.9; from `output.ir` read at level
 //!   `checked` for 10.1, 10.2, 10.3, and 10.7, whose clean-up output is their output (the text
 //!   states that `B` changes nothing);
+//! - the further goldens beside the examples, `tests/opt/<phase>-<topic>/` in the same layout
+//!   plus a one-line `README` naming the rules the case exercises: the same load and `fmt`
+//!   checks, and `stave ir opt` gives the output of every `b-` case (`--passes=base`) from its
+//!   input and leaves the output of every other case unchanged;
 //! - cases of the base passes beside the examples: the parts of params placed after the slots
 //!   and a part whose anchor is deleted in the same step (B1, B3), dead code whose value has 255
 //!   uses and more (B5);
@@ -59,19 +63,58 @@ fn at_level(text: &str, from: &str, to: &str) -> String {
     format!("{head}{to}\n{rest}")
 }
 
-#[test]
-fn every_example_text_loads_and_is_canonical() {
+/// Every case directory under `tests/opt/`: the worked examples `10.<k>`, and the further goldens,
+/// named `<phase>-<topic>` with the phase `d` (decision), `x` (expansion), `c` (clean-up), `b`
+/// (base passes, run as `--passes=base`), or `p` (pipeline).
+fn case_dirs() -> Vec<String> {
     let mut dirs: Vec<String> = std::fs::read_dir(examples())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     dirs.sort();
-    let want: Vec<String> = (1..=10).map(|k| format!("10.{k}")).collect();
-    let mut sorted = want.clone();
-    sorted.sort();
-    assert_eq!(dirs, sorted, "one directory per worked example");
-    let mut texts = 0;
-    for d in &want {
+    dirs
+}
+
+fn worked_examples() -> Vec<String> {
+    (1..=10).map(|k| format!("10.{k}")).collect()
+}
+
+/// The goldens beside the worked examples.
+fn further_cases() -> Vec<String> {
+    let worked = worked_examples();
+    case_dirs().into_iter().filter(|d| !worked.contains(d)).collect()
+}
+
+#[test]
+fn every_case_directory_is_a_worked_example_or_a_named_golden() {
+    let dirs = case_dirs();
+    for d in worked_examples() {
+        assert!(dirs.contains(&d), "{d}: no directory for the worked example");
+    }
+    let phases = ["d-", "x-", "c-", "b-", "p-"];
+    for d in further_cases() {
+        assert!(
+            phases.iter().any(|p| d.starts_with(p))
+                && d.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "{d}: a golden is named <phase>-<topic>"
+        );
+        let dir = examples().join(&d);
+        assert!(dir.join("input.ir").is_file(), "{d}: no input.ir");
+        assert!(dir.join("README").is_file(), "{d}: no README");
+        let base = d.starts_with("b-");
+        assert_eq!(dir.join("inline.txt").is_file(), !base, "{d}: inline.txt iff not a base-passes case");
+        if base {
+            assert!(dir.join("output.ir").is_file(), "{d}: a base-passes case has an output.ir");
+            assert!(!dir.join("inline.ir").is_file(), "{d}: a base-passes case has no inline.ir");
+        }
+    }
+}
+
+#[test]
+fn every_case_text_loads_and_is_canonical() {
+    let worked = worked_examples();
+    let mut example_texts = 0;
+    for d in &case_dirs() {
         let dir = examples().join(d);
         assert!(dir.join("input.ir").is_file(), "{d}: no input.ir");
         for f in ["input.ir", "inline.ir", "output.ir"] {
@@ -86,17 +129,34 @@ fn every_example_text_loads_and_is_canonical() {
             let l = load(&name, &text);
             let printed = ir_cmd::fmt(&l).unwrap_or_else(|e| panic!("{name}: ir fmt: {:?}", e.lines()));
             assert_eq!(printed, text, "{name}: not its own `stave ir fmt`");
-            texts += 1;
+            if worked.contains(d) {
+                example_texts += 1;
+            }
         }
     }
-    assert_eq!(texts, 20);
+    assert_eq!(example_texts, 20);
 }
 
-/// A case's `limits` file: `NAME=N` lines over the `[limits]` names of opt.toml. Only 10.10, the
-/// budget cut on `CAP`, runs under a limit of its own.
+/// A case's `limits` file: `NAME=N` lines over the `[limits]` names of opt.toml. Of the worked
+/// examples only 10.10, the budget cut on `CAP`, runs under a limit of its own.
 #[test]
 fn a_case_keeps_its_limit_overrides_in_its_directory() {
     let names = ["threshold", "cap", "call_saved", "slot_callee", "slot_caller", "rounds"];
+    for d in further_cases() {
+        let p = examples().join(&d).join("limits");
+        if !p.is_file() {
+            continue;
+        }
+        let text = read(&p);
+        assert!(!text.is_empty() && text.ends_with('\n'), "{d}/limits: one `NAME=N` per line");
+        let mut seen = Vec::new();
+        for line in text.lines() {
+            let (name, n) = line.split_once('=').unwrap_or_else(|| panic!("{d}/limits: `{line}`"));
+            assert!(names.contains(&name) && n.parse::<u64>().is_ok(), "{d}/limits: `{line}`");
+            assert!(!seen.contains(&name), "{d}/limits: `{name}` twice");
+            seen.push(name);
+        }
+    }
     for k in 1..=10 {
         let p = examples().join(format!("10.{k}")).join("limits");
         if !p.is_file() {
@@ -124,6 +184,28 @@ fn base_passes_give_the_examples_output() {
         let want = read(&examples().join(d).join("output.ir"));
         let got = opt(&format!("{d}/output.ir as checked"), &at_level(&want, "opt", "checked"));
         assert_eq!(got, want, "{d}: the base passes change the clean-up's output");
+    }
+}
+
+/// The further goldens: a `b-` case is `--passes=base`, so `stave ir opt input.ir` is its output;
+/// every other case with an output states that `B` changes nothing after the clean-up, so the
+/// output read at level `checked` is its own base-passes result.
+#[test]
+fn base_passes_give_the_further_goldens_output() {
+    for d in further_cases() {
+        let dir = examples().join(&d);
+        let out = dir.join("output.ir");
+        if !out.is_file() {
+            continue;
+        }
+        let want = read(&out);
+        if d.starts_with("b-") {
+            let got = opt(&format!("{d}/input.ir"), &read(&dir.join("input.ir")));
+            assert_eq!(got, want, "{d}: `stave ir opt input.ir`");
+        } else {
+            let got = opt(&format!("{d}/output.ir as checked"), &at_level(&want, "opt", "checked"));
+            assert_eq!(got, want, "{d}: the base passes change the clean-up's output");
+        }
     }
 }
 

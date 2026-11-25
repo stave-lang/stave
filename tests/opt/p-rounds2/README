@@ -1,0 +1,1 @@
+Two rounds (rounds=2, threshold=4): round 1 refuses the callee on size, its clean-up deletes the callee's dead code, round 2 decides on the cleaned module in its own numbering and inlines; the dump prints both rounds. No inline.ir: which round's expansion `--dump-phase=inline` prints is not fixed.

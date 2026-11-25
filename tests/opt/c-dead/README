@@ -1,0 +1,1 @@
+C6 alone: a loop-carried param read only by its own update is dead with it (least fixpoint), its argument goes from both edges; an unused b0 param stays; each removable kind: get with a constant index goes, with a dynamic index stays; an int add stays, a float add goes; a lane op goes, a trapping lane op stays and keeps its operand live; a dead chain goes whole.

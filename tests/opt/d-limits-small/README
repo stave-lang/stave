@@ -1,0 +1,1 @@
+Limits threshold, call_saved, slot_callee, slot_caller overridden, each at its boundary and one over; a candidate without slots that sorts after the slot cut is cut too (the sums run over every earlier candidate).

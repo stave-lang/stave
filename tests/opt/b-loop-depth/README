@@ -1,0 +1,1 @@
+Base passes only. B7 depth in nested loops; B1 moves a single part from depth 2 to the slice param's place after the slots of b0; B3 moves a single part from depth 2 to the start of the loop head whose param it reads (depth 1), and keeps a single part at the head's own depth.

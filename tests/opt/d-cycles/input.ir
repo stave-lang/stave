@@ -1,0 +1,56 @@
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 64
+type t1 int s 32
+type t2 bool
+main @6
+fn @0 main.leaf(t0) -> t0 {
+b0(%0: t0):
+  %1 = add.wrap t0 %0 1
+  ret %1
+}
+fn @1 main.a(t0) -> t0 {
+b0(%0: t0):
+  %1 = call t0 @0 %0
+  %2 = call t0 @2 %1
+  ret %2
+}
+fn @2 main.b(t0) -> t0 {
+b0(%0: t0):
+  %1 = call t0 @3 %0
+  ret %1
+}
+fn @3 main.c(t0) -> t0 {
+b0(%0: t0):
+  %1 = eq t2 %0 0
+  cbr %1 b1() b2()
+b1():
+  ret 0
+b2():
+  %2 = sub.wrap t0 %0 1
+  %3 = call t0 @1 %2
+  ret %3
+}
+fn @4 main.r(t0) -> t0 {
+b0(%0: t0):
+  %1 = eq t2 %0 0
+  cbr %1 b1() b2()
+b1():
+  %2 = call t0 @0 %0
+  ret %2
+b2():
+  %3 = sub.wrap t0 %0 1
+  %4 = call t0 @4 %3
+  ret %4
+}
+fn @5 main.d(t0) -> t0 {
+b0(%0: t0):
+  %1 = call t0 @1 %0
+  ret %1
+}
+fn @6 main.main() -> t1 {
+b0():
+  %0 = call t0 @5 3
+  %1 = call t0 @4 %0
+  %2 = cast.wrap t1 %1
+  ret %2
+}

@@ -1,0 +1,19 @@
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 64
+type t1 int s 32
+main @1
+fn @0 main.fat(t0) -> t0 {
+b0(%0: t0):
+  %1 = add.wrap t0 %0 1
+  %2 = add.wrap t0 %0 7
+  %3 = add.wrap t0 %1 2
+  %4 = xor t0 %0 5
+  %5 = add.wrap t0 %3 3
+  ret %5
+}
+fn @1 main.main() -> t1 {
+b0():
+  %0 = call t0 @0 9
+  %1 = cast.wrap t1 %0
+  ret %1
+}

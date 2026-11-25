@@ -1,0 +1,1 @@
+A three-fn cycle and a self-recursive fn: every member is level 1 because its component has an edge to the leaf (b, which does not call the leaf itself, too); members still inline the leaf; a non-cyclic fn that only calls into the cycle is inlined, so its caller now calls the cycle directly.

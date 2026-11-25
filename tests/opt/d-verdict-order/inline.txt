@@ -1,0 +1,26 @@
+round 1
+fn @0 size 3 closed 3 slots 0 level 0 cyclic
+site @0 b0 0 @0 3 noret
+fn @1 size 6 closed 6 slots 0 level 0 cyclic
+site @1 b2 1 @1 6 cyclic
+fn @2 size 3 closed 3 slots 0 level 0
+fn @3 size 3 closed 3 slots 0 level 0
+fn @4 size 1 closed 1 slots 0 level 0
+fn @5 size 33 closed 33 slots 72 level 0
+fn @6 size 0 closed 0 slots 72 level 0
+fn @8 size 1 closed 1 slots 0 level 0
+fn @9 size 7 closed 7 slots 0 level 1
+site @9 b0 0 @1 6 cyclic
+site @9 b0 1 @10 0 altstack
+fn @10 size 0 closed 0 slots 0 level 0
+fn @11 size 34 closed 34 slots 0 level 1
+site @11 b0 0 @0 3 noret
+site @11 b0 1 @1 6 cyclic
+site @11 b0 2 @2 3 symbol
+site @11 b0 3 @3 3 indirect
+site @11 b0 4 @5 33 size
+site @11 b0 5 @6 0 slots
+site @11 b0 6 @7 - nobody
+site @11 b0 7 @8 1 noret
+site @11 b1 0 @4 1 features
+site @11 b1 1 @5 33 cold
