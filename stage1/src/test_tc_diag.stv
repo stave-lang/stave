@@ -1,0 +1,126 @@
+// The type errors of bodies and globals as diagnostics: the body checker's rows (`tc_rows.report`,
+// `tc_diag`, `diag_tc`) at the mismatch sites (annotation, operator, return, argument), the fix
+// each E0201 names, the arity of a call, `break` outside of a loop; E0413 for a `const` or
+// `static` of a reference or view type (`sigs` rows) and for a `const` with drop glue
+// (`diag_kinds.const_drops`).
+import diag;
+import diag_kinds;
+import diag_sigs;
+import diag_tc;
+import dump;
+import files;
+import kinds;
+import sigs;
+import tc_rows;
+import test_kit;
+import typeck;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const CORE: &str = "pub enum Option<T> { Some(T), None }\npub enum Result<T, E> { Ok(T), Err(E) }\npub trait Copy {}\npub trait Drop {\n    fn drop(&mut self);\n}\n";
+
+const MAIN: &str = "fn one(x: u16) -> u16 { return x; }\nfn f(a: u32, b: u64) -> u32 {\n    let c: u16 = a;\n    let d = a + b;\n    let e = one(1u16, 2u16);\n    return;\n}\nfn g() {\n    break;\n}\nfn h(o: Option<u32>) -> u32 {\n    return o;\n}\nfn k(x: u32) -> Option<u32> {\n    return x;\n}\nfn ok(n: u32) -> u32 {\n    let m: u32 = n + 1;\n    return m;\n}\nfn main() {}\n";
+
+const GLOBALS: &str = "struct R { fd: i32 }\nimpl Drop for R {\n    fn drop(&mut self) {}\n}\nconst S: &str = \"x\";\nconst T: &str = S;\nstatic U: &str = \"y\";\nconst V: Option<&u8> = Option.None;\nstatic W: Option<&u8> = Option.None;\nconst K: R = R.{ fd: 1i32 };\nconst N: u32 = 1;\nfn main() {}\n";
+
+fn has(hay: &[u8], needle: &str) -> bool {
+    let n = mem.str_bytes(needle);
+    if n.len() > hay.len() { return false; }
+    for i in 0..hay.len() - n.len() + 1 {
+        if hay[i..i + n.len()].eq(n) { return true; }
+    }
+    return false;
+}
+
+// Every message of d, one per line.
+fn messages(d: &diag.Diags) -> vec.Vec<u8> {
+    debug.assert(!d.bad.get(), "every row builds from its template");
+    let mut out = vec.Vec::<u8>.new();
+    for i in 0..d.len() {
+        d.message(i, &mut out);
+        out.push(10);
+    }
+    return out;
+}
+
+// The program `main` (module `main`) over the stand-in std core, through every stage that
+// raises type errors; their diagnostics, and the body checker's state.
+fn check(main_src: &str) -> (diag.Diags, tc_rows.Typeck) {
+    let mut k = test_kit.kit();
+    let m = k.package("main", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(m, "std", s);
+    k.file(m, "main", main_src);
+    k.file(s, "core", CORE);
+    let o = k.run();
+    let mut fl = files.FileList.empty();
+    fl.pkg_builtin.push(false);
+    fl.pkg_builtin.push(true);
+    fl.pkg_root.push(true);
+    fl.pkg_root.push(false);
+    let mut d = diag.Diags.new();
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    diag_sigs.sigs_diags(&mut d, &sg, &o.ds, &o.nm, &o.lx, &o.set, &o.toks, &o.cut);
+    let (_, order) = dump.sigs_order(&sg, &o.ds);
+    let kd = kinds.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, order.as_slice());
+    diag_kinds.const_drops(&mut d, &kd, order.as_slice(), &sg, &o.ds, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
+    let tc = typeck.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, true, sigs.baseline(mem.str_bytes("x86_64-linux")));
+    diag_tc.typeck_diags(&mut d, &tc, &sg, &o.ds, &o.md, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
+    return (d, tc);
+}
+
+test fn mismatches_and_their_fixes() {
+    let (d, tc) = check(MAIN);
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 7, "one diagnostic per error, none in `ok`");
+    debug.assert(has(ms, "mismatched types: expected `u16`, found `u32`\n"), "an annotation");
+    debug.assert(has(ms, "mismatched types: expected `u32`, found `u64`\n"), "the right operand");
+    debug.assert(has(ms, "`one` takes 1 arguments, found 2\n"), "arity");
+    debug.assert(has(ms, "mismatched types: expected `u32`, found `()`\n"), "`return;` in a fn with a value");
+    debug.assert(has(ms, "`break` outside of a loop\n"), "`break` outside of a loop");
+    debug.assert(has(ms, "mismatched types: expected `u32`, found `Option<u32>`\n"), "a return value");
+    debug.assert(has(ms, "mismatched types: expected `Option<u32>`, found `u32`\n"), "a return value to wrap");
+    let mut fixes: u32 = 0;
+    for r in 0..tc.dg.len() {
+        let c = tc.dg.case.as_slice()[r];
+        if c == tc_rows.C_UNWRAP_OPTION || c == tc_rows.C_SOME || c == tc_rows.C_AS_PERCENT { fixes = fixes + 1; }
+        debug.assert(c != tc_rows.C_PENDING, "every fix is decided");
+    }
+    debug.assert(fixes == 4, "`as%` for u32 to u16 and u64 to u32, unwrap for `Option<u32>` to u32, `Some` for u32 to `Option<u32>`");
+}
+
+test fn casts_operators_and_patterns() {
+    let (d, _) = check("struct P { x: u32 }\nfn f(a: u64, b: f32, p: P, q: P, s: &str) {\n    let c = a as u32;\n    let e = b +% b;\n    let g = p == q;\n    let h = a[0];\n    match s {\n        \"x\" => {}\n        _ => {}\n    }\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 5, "one diagnostic per error");
+    debug.assert(has(ms, "`as` from `u64` to `u32` can lose information\n"), "a lossy plain cast");
+    debug.assert(has(ms, "operator `+%` is not defined for `f32`\n"), "a wrapping float operator");
+    debug.assert(has(ms, "operator `==` is not defined for `P`\n"), "`==` on a struct");
+    debug.assert(has(ms, "operator `[]` is not defined for `u64`\n"), "indexing a scalar");
+    debug.assert(has(ms, "this pattern tests `==`, which is not defined for `&str`\n"), "a string pattern");
+}
+
+test fn literals() {
+    let (d, _) = check("fn main() {\n    let a = 7;\n    let b: u8 = 300;\n    let c: i8 = -129;\n    let e: i8 = -128i8;\n    let f: u64 = 0xffff_ffff_ffff_ffff;\n    let n = Option.None;\n    let m = 12abc;\n}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 5, "one diagnostic per error; `-128i8` and the u64 maximum fit");
+    debug.assert(has(ms, "literal `7` has no type context\n"), "no context");
+    debug.assert(has(ms, "literal `300` is out of range for `u8`\n"), "too big");
+    debug.assert(has(ms, "literal `-129` is out of range for `i8`\n"), "a folded minus");
+    debug.assert(has(ms, "the generic arguments of `Option.None` cannot be inferred\n"), "a generic unit variant without a context");
+    debug.assert(has(ms, "literal `12abc` is malformed\n"), "a bad suffix");
+}
+
+test fn globals_with_views_or_drop_glue() {
+    let (d, _) = check(GLOBALS);
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 3, "static strings and an int const are fine");
+    debug.assert(has(ms, "const `V` has reference or view type `Option<&u8>`\n"), "a view in a const");
+    debug.assert(has(ms, "static `W` has reference or view type `Option<&u8>`\n"), "a view in a static");
+    debug.assert(has(ms, "const `K` has type `R`, which has drop glue\n"), "drop glue in a const");
+}
