@@ -200,7 +200,8 @@ fn too_many_terminals_for_the_u8_kind_column_are_refused() {
     assert!(err.contains("255 terminals, at most 254"), "{err}");
     // At the limit the count check passes (the synthetic terminals then fail naming instead).
     t.terms.pop();
-    let err = ll1gen::render(&t, LANGUAGE.grammar, &LANGUAGE).err().map(|e| e.to_string()).unwrap_or_default();
+    let err =
+        ll1gen::render(&t, LANGUAGE.grammar, &LANGUAGE).err().map(|e| e.to_string()).unwrap_or_default();
     assert!(!err.contains("at most 254"), "{err}");
 }
 
