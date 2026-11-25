@@ -29,11 +29,13 @@
 //! array or slice a reference or raw pointer points to, by its type. Every use of a `slice.ptr`
 //! result is audited ([`AccessKind::ElemPtr`]): it must be an element access of that slice, or
 //! read no element (a prefetch, a cast to an int, `slice.make` of it with `slice.len s` and the
-//! type of `s`), so a slice's elements are reached only through accesses of the slice. The one
-//! `addr.elem` that is no access is pointer arithmetic of `unsafe` code: on a raw pointer `*T`
-//! (`T` not an array or slice) that is, through pointer-to-pointer casts, the result of a `load`
-//! or a call. On any other pointer to one element (the result of an element access, a parameter,
-//! ...) it is an access with nothing to check against, so it is refused.
+//! type of `s`), so within a function a slice's elements are reached only through accesses of
+//! the slice; an element pointer stored to memory and loaded back, or passed through a call, is
+//! a raw pointer the audit does not follow. The one `addr.elem` that is no access is pointer
+//! arithmetic of `unsafe` code: on a raw pointer `*T` (`T` not an array or slice) that is,
+//! through pointer-to-pointer casts, the result of a `load` or a call. On any other pointer to
+//! one element (the result of an element access, a parameter, ...) it is an access with nothing
+//! to check against, so it is refused.
 //!
 //! **Removal** ([`prove_func`], [`elide`]): the one pass that decides which checks a build
 //! keeps. It runs on the lowered IR of every build, debug and release alike, and depends on
@@ -684,6 +686,18 @@ struct Cx<'a> {
     facts: facts::Facts,
     /// The `slice.ptr` instructions with a use [`Cx::elem_ptr_use`] refuses, ascending.
     elem_ptr_misuse: std::cell::OnceCell<Vec<u32>>,
+    /// Per value: [`Cx::unsafe_root`]'s answer, filled as values are asked.
+    unsafe_roots: std::cell::RefCell<Vec<u8>>,
+    /// Per value: its uses ([`Cx::sole_use`]), computed once per body.
+    uses: std::cell::OnceCell<Vec<Uses>>,
+}
+
+/// How a value is used: a terminator or branch-argument use counts as more than one.
+#[derive(Clone, Copy)]
+enum Uses {
+    None,
+    One(u32, u32),
+    Many,
 }
 
 /// A contract check as the pass reads it.
@@ -785,6 +799,8 @@ impl<'a> Cx<'a> {
             contracts,
             facts: facts::Facts::default(),
             elem_ptr_misuse: std::cell::OnceCell::new(),
+            unsafe_roots: std::cell::RefCell::new(Vec::new()),
+            uses: std::cell::OnceCell::new(),
         }
     }
 
@@ -860,26 +876,49 @@ impl<'a> Cx<'a> {
 
     /// Whether pointer `p` is, through pointer-to-pointer casts, the result of a `load`, `call`, or
     /// `call.ind`: a pointer the function did not derive from an object it can see.
-    fn unsafe_root(&self, mut p: Operand) -> bool {
-        for _ in 0..=self.b.insts.len() {
-            let Some(d) = self.def_inst(p) else { return false };
-            match self.b.insts.op[d as usize] {
-                Op::Load | Op::Call | Op::CallInd => return true,
-                Op::Cast(_) => {
-                    let Some(&a) = self.b.args(d).first() else { return false };
-                    let from_ptr = self
-                        .ty(a)
-                        .and_then(|t| self.key(t))
-                        .is_some_and(|k| matches!(k, TypeKey::Ref { .. } | TypeKey::RawPtr { .. }));
-                    if !from_ptr {
-                        return false;
-                    }
-                    p = a;
-                }
-                _ => return false,
-            }
+    fn unsafe_root(&self, p: Operand) -> bool {
+        const UNKNOWN: u8 = 0;
+        const WALKING: u8 = 1;
+        const YES: u8 = 2;
+        const NO: u8 = 3;
+        let Operand::Value(mut v) = p else { return false };
+        let mut memo = self.unsafe_roots.borrow_mut();
+        if memo.is_empty() {
+            memo.resize(self.b.values.len(), UNKNOWN);
         }
-        false
+        // Each value's answer is decided once: a cast chain is walked once, iteratively, and
+        // every value on it gets the answer of its end.
+        let mut chain = Vec::new();
+        let answer = loop {
+            match memo.get(v.index()).copied() {
+                Some(UNKNOWN) => {}
+                Some(YES) => break true,
+                _ => break false,
+            }
+            memo[v.index()] = WALKING;
+            chain.push(v);
+            let Some(d) = self.def(v) else { break false };
+            match self.b.insts.op[d as usize] {
+                Op::Load | Op::Call | Op::CallInd => break true,
+                Op::Cast(_) => {
+                    let from = self.b.args(d).first().copied().filter(|&a| {
+                        self.ty(a)
+                            .and_then(|t| self.key(t))
+                            .is_some_and(|k| matches!(k, TypeKey::Ref { .. } | TypeKey::RawPtr { .. }))
+                    });
+                    match from {
+                        Some(Operand::Value(a)) => v = a,
+                        _ => break false,
+                    }
+                }
+                _ => break false,
+            }
+        };
+        let mark = if answer { YES } else { NO };
+        for c in chain {
+            memo[c.index()] = mark;
+        }
+        answer
     }
 
     /// The instruction defining operand `o`.
@@ -1012,30 +1051,43 @@ impl<'a> Cx<'a> {
     /// The one use of value `v` (instruction, operand position); `None` when it has none, more
     /// than one, or a terminator or branch-argument use.
     fn sole_use(&self, v: Value) -> Option<(u32, usize)> {
-        let r = Operand::Value(v);
-        let mut found = None;
-        for k in 0..self.b.insts.len() as u32 {
-            for (pos, &a) in self.b.args(k).iter().enumerate() {
-                if a == r {
-                    if found.is_some() {
-                        return None;
-                    }
-                    found = Some((k, pos));
+        let uses = self.uses.get_or_init(|| {
+            let mut uses = vec![Uses::None; self.b.values.len()];
+            let mut add = |o: Operand, at: Option<(u32, u32)>| {
+                if let Operand::Value(x) = o
+                    && let Some(u) = uses.get_mut(x.index())
+                {
+                    *u = match (*u, at) {
+                        (Uses::None, Some((i, pos))) => Uses::One(i, pos),
+                        _ => Uses::Many,
+                    };
+                }
+            };
+            for k in 0..self.b.insts.len() as u32 {
+                for (pos, &a) in self.b.args(k).iter().enumerate() {
+                    add(a, Some((k, pos as u32)));
                 }
             }
-        }
-        for (bi, bd) in self.b.blocks.iter().enumerate() {
-            let in_term = match bd.term {
-                Term::Cbr { cond: o, .. } | Term::Switch { scrut: o, .. } | Term::Ret(Some(o)) => o == r,
-                Term::Br(_) | Term::Ret(None) | Term::Unreachable => false,
-            };
-            if in_term
-                || self.b.successors(Block(bi as u32)).iter().any(|t| self.b.target_args(t).contains(&r))
-            {
-                return None;
+            for (bi, bd) in self.b.blocks.iter().enumerate() {
+                match bd.term {
+                    Term::Cbr { cond: o, .. } | Term::Switch { scrut: o, .. } | Term::Ret(Some(o)) => {
+                        add(o, None)
+                    }
+                    // no operand besides the target arguments, read below
+                    Term::Br(_) | Term::Ret(None) | Term::Unreachable => {}
+                }
+                for t in self.b.successors(Block(bi as u32)) {
+                    for &a in self.b.target_args(&t) {
+                        add(a, None);
+                    }
+                }
             }
+            uses
+        });
+        match uses.get(v.index())? {
+            Uses::One(i, pos) => Some((*i, *pos as usize)),
+            Uses::None | Uses::Many => None,
         }
-        found
     }
 
     /// The `slice.ptr` instructions with a use that [`Cx::elem_ptr_use`] refuses (a terminator or
