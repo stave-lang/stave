@@ -18,9 +18,11 @@
 //! assignment of the whole brings it back. A value moves whole: a pattern that binds a part by
 //! value takes the owner apart where the pattern is committed and drops the parts it ignores
 //! there; a part moved by an expression does not reach the lowering. The state flows along
-//! every edge the lowering builds: a join merges the states of its edges, and an owner that
-//! holds its value on one edge only makes the job be lowered again with a dynamic drop flag for
-//! it (a hidden `bool`: an SSA local for a local, a slot cleared at entry for a temporary). An
+//! every edge the lowering builds: a join merges the states of its edges. Whether a drop runs
+//! is not the lowering's to decide: the drop schedule says it per drop ([`Runs`]: emitted,
+//! left out, or behind a test of the owner's flag), and which owners have a flag
+//! ([`FnCx::make_flags`]). A flag is a `bool` slot, cleared at entry, set where its owner gets
+//! its value, cleared where the value is moved out and after each drop of the owner. An
 //! owner is dropped where it ends: a local at the end of its scope (reverse declaration order),
 //! a temporary at the end of its statement (reverse creation order), both on every `break`,
 //! `continue`, `return`, and `?` that leaves them; a place is dropped before it is overwritten.
@@ -36,7 +38,7 @@ use stave_syntax::NodeKind;
 
 use crate::Program;
 use crate::decls::DeclKind;
-use crate::drops::{Ledger, Made, Owner, Point};
+use crate::drops::{Ledger, Made, Owner, Point, Runs};
 use crate::ids::DeclId;
 use crate::itemcx::{Brackets, ItemCx};
 
@@ -182,8 +184,8 @@ pub(crate) struct LocalInfo {
     /// Lives in a slot.
     pub mem: bool,
     pub drop: bool,
-    /// The dynamic drop flag of an owner.
-    pub flag: Option<Flag>,
+    /// The flag of an owner: a `bool` slot of the fn that owns it, set while it holds its value.
+    pub flag: Option<Operand>,
     /// A temporary.
     pub temp: Option<Temp>,
 }
@@ -195,15 +197,6 @@ pub(crate) enum Init {
     #[default]
     Gone,
     Full,
-}
-
-/// A dynamic drop flag: set while its owner holds its value.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Flag {
-    /// A hidden `bool` local.
-    Ssa(usize),
-    /// A `bool` slot, cleared at fn entry.
-    Mem(Operand),
 }
 
 /// Where a temporary's value is.
@@ -228,8 +221,6 @@ pub(crate) enum Ends {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Temp {
-    /// Creation number in the job: the same in every lowering of it.
-    pub seq: u32,
     pub home: Home,
     pub ends: Ends,
     /// The innermost statement open when it was made ([`crate::temps`]).
@@ -237,14 +228,6 @@ pub(crate) struct Temp {
     /// The value it holds ([`crate::drops::Owner::Temp`]): with `stmt` its owner key in the
     /// drop schedule.
     pub made: Made,
-}
-
-/// An owner that needs a dynamic drop flag: a local's binding node, or a temporary's creation
-/// number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct FlagKey {
-    pub temp: bool,
-    pub id: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -314,6 +297,9 @@ pub(crate) struct FnState {
     /// The owners from this number on are this fn's own temporaries; those below belong to the
     /// fns around a closure body (and are the locals).
     pub own_temps: usize,
+    /// Where the next temporary's flag goes among the slots: after the locals' slots and the
+    /// flags made before it.
+    pub flag_at: usize,
     pub ret: Ty,
     pub site_consts: Vec<ConstId>,
     /// The values of the int constants made by [`FnCx::int`], by constant index.
@@ -429,12 +415,6 @@ pub(crate) struct FnCx<'a> {
     site_map: FxHashMap<u32, u32>,
     pub drop_memo: FxHashMap<Ty, bool>,
     subst_memo: FxHashMap<Ty, Ty>,
-    /// The owners that get a dynamic drop flag.
-    pub flagged: FxHashSet<FlagKey>,
-    /// Discovered during this attempt: owners that need a flag.
-    pub need_flag: Vec<FlagKey>,
-    /// Temporaries made so far.
-    pub temp_seq: u32,
     /// The `?` tokens of the body, sorted.
     pub try_toks: Vec<u32>,
     /// While a match guard is lowered: the owner states when it started, and whether an owner
@@ -499,9 +479,6 @@ impl<'a> FnCx<'a> {
             site_map: FxHashMap::default(),
             drop_memo: FxHashMap::default(),
             subst_memo: FxHashMap::default(),
-            flagged: FxHashSet::default(),
-            need_flag: Vec::new(),
-            temp_seq: 0,
             try_toks: Vec::new(),
             guard: None,
             slotted: FxHashSet::default(),
@@ -955,27 +932,48 @@ impl<'a> FnCx<'a> {
 
     /// Sets the flag of owner `l`, if it has one.
     fn set_flag(&mut self, l: usize, on: bool) {
-        let Some(f) = self.locals[l].flag else { return };
-        let v = self.int(i128::from(on));
-        match f {
-            Flag::Ssa(fl) => self.f.env.vals[fl] = Some(v),
-            Flag::Mem(p) => {
-                if self.open() {
-                    self.f.b.store(p, v);
-                }
-            }
+        let Some(p) = self.locals[l].flag else { return };
+        if self.open() {
+            let v = self.int(i128::from(on));
+            self.f.b.store(p, v);
         }
     }
 
-    /// The value of a flag (`None`: an SSA flag whose local is not bound here).
-    fn flag_val(&mut self, f: Flag) -> Option<Operand> {
-        match f {
-            Flag::Ssa(fl) => self.f.env.vals.get(fl).copied().flatten(),
-            Flag::Mem(p) => {
-                let bt = self.t_bool();
-                Some(Operand::Value(self.f.b.load(Self::ir(bt), p)))
+    /// Whether owner `o` has a flag: the drop schedule's answer. A lowering without a schedule
+    /// (of a program that was not borrow checked) gives every owner of a body one.
+    fn has_flag(&self, o: Owner) -> bool {
+        match self.sched {
+            Some(s) => s.flagged(o),
+            None => self.has_body,
+        }
+    }
+
+    /// A flag: a `bool` slot at position `at` among the slots, cleared at entry.
+    fn new_flag(&mut self, at: usize) -> Operand {
+        let bt = self.t_bool();
+        let p = self.t_ref(true, bt);
+        let fs = Operand::Value(self.f.b.slot_at(Self::ir(p), at));
+        let zero = self.int(0);
+        self.f.b.entry_store(fs, zero);
+        fs
+    }
+
+    /// The flags of the locals the fn being lowered owns (closure body `owner`, or the fn's
+    /// own), in local order, directly after the locals' slots: the temporaries' flags follow,
+    /// in the order the temporaries are made.
+    pub fn make_flags(&mut self, owner: Option<u32>) {
+        for l in 0..self.locals.len() {
+            let li = &self.locals[l];
+            if li.drop
+                && li.temp.is_none()
+                && self.owner(li.node) == owner
+                && self.has_flag(Owner::Local(li.node))
+            {
+                let fs = self.new_flag(usize::MAX);
+                self.locals[l].flag = Some(fs);
             }
         }
+        self.f.flag_at = self.f.b.slot_count();
     }
 
     /// Owner `l` is moved out.
@@ -1013,24 +1011,21 @@ impl<'a> FnCx<'a> {
     /// statement, or with the innermost scope when `scoped`. `made`: the value in the drop
     /// schedule ([`crate::drops::Owner::Temp`]).
     pub fn new_temp(&mut self, ty: Ty, home: Home, scoped: bool, made: Made) -> usize {
-        let seq = self.temp_seq;
-        self.temp_seq += 1;
         let ends = if scoped {
             Ends::Scope(self.f.scopes.len().saturating_sub(1))
         } else {
             Ends::Stmt(self.f.temps.len())
         };
+        let stmt = self.f.open.last().copied().unwrap_or(crate::temps::NONE);
         let mut flag = None;
-        if self.flagged.contains(&FlagKey { temp: true, id: seq }) {
-            let bt = self.t_bool();
-            let fs = self.new_slot(bt);
-            let (zero, one) = (self.int(0), self.int(1));
-            self.f.b.entry_store(fs, zero);
+        if self.has_flag(Owner::Temp(stmt, made)) {
+            let fs = self.new_flag(self.f.flag_at);
+            self.f.flag_at += 1;
+            let one = self.int(1);
             self.f.b.store(fs, one);
-            flag = Some(Flag::Mem(fs));
+            flag = Some(fs);
         }
         let l = self.locals.len();
-        let stmt = self.f.open.last().copied().unwrap_or(crate::temps::NONE);
         self.made_value(stmt, made, true);
         self.locals.push(LocalInfo {
             node: 0,
@@ -1038,7 +1033,7 @@ impl<'a> FnCx<'a> {
             mem: true,
             drop: true,
             flag,
-            temp: Some(Temp { seq, home, ends, stmt, made }),
+            temp: Some(Temp { home, ends, stmt, made }),
         });
         self.set_st(l, Init::Full);
         match ends {
@@ -1078,10 +1073,11 @@ impl<'a> FnCx<'a> {
         (s, st, l)
     }
 
-    /// A temporary for rvalue `v`, read as the value it is: the place. With a dynamic flag the
-    /// value lives in a slot, since its drop is then not dominated by `v`.
+    /// A temporary for rvalue `v`, read as the value it is: the place. With a flag the value
+    /// lives in a slot, since its drop is then not dominated by `v`.
     pub fn value_temp(&mut self, v: Operand, t: Ty, scoped: bool, made: Made) -> Place {
-        if self.flagged.contains(&FlagKey { temp: true, id: self.temp_seq }) {
+        let stmt = self.f.open.last().copied().unwrap_or(crate::temps::NONE);
+        if self.has_flag(Owner::Temp(stmt, made)) {
             let (s, st) = self.spill(v, t);
             let l = self.new_temp(t, Home::Slot(s), scoped, made);
             return Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) };
@@ -1177,27 +1173,9 @@ impl<'a> FnCx<'a> {
                 out.push(l);
             }
         }
-        // drop flags of droppable locals in scope
-        out.extend(self.flag_locals(lo));
         out.sort_unstable();
         out.dedup();
         out.retain(|&l| l < self.locals.len());
-        out
-    }
-
-    /// The SSA drop flags, bound here, of the locals declared before node `lo`.
-    pub fn flag_locals(&self, lo: u32) -> Vec<usize> {
-        let mut out = Vec::new();
-        for li in &self.locals {
-            if li.node >= lo {
-                continue;
-            }
-            if let Some(Flag::Ssa(fl)) = li.flag
-                && self.f.env.vals.get(fl).is_some_and(|v| v.is_some())
-            {
-                out.push(fl);
-            }
-        }
         out
     }
 
@@ -1242,24 +1220,16 @@ impl<'a> FnCx<'a> {
         args
     }
 
-    /// Merges the owner states `st` of one more edge into `merged`. An owner that holds its
-    /// value on one edge only is told by its flag, asked for here if it has none.
+    /// Merges the owner states `st` of one more edge into `merged`: an owner that holds its
+    /// value on one edge may hold it after the join.
     pub fn merge_states(&mut self, merged: &mut Vec<Init>, st: &[Init]) {
         if merged.len() < st.len() {
             merged.resize(st.len(), Init::Gone);
         }
         for (l, b) in st.iter().enumerate() {
-            if merged[l] == *b || l >= self.locals.len() {
-                continue;
+            if *b == Init::Full && l < self.locals.len() {
+                merged[l] = Init::Full;
             }
-            let li = &self.locals[l];
-            if li.flag.is_none() {
-                self.need_flag.push(match li.temp {
-                    Some(t) => FlagKey { temp: true, id: t.seq },
-                    None => FlagKey { temp: false, id: li.node },
-                });
-            }
-            merged[l] = Init::Full;
         }
     }
 
@@ -1681,23 +1651,48 @@ impl<'a> FnCx<'a> {
         (self.f.point, owner)
     }
 
-    /// Drops the value in place `p`, which is owner `l` or a part of it, if the owner holds its
-    /// value: its flag decides when it has one (a constant flag is folded), else the state.
+    /// Whether the drop of owner `l` at `key` runs: the drop schedule's answer, where a drop no
+    /// path from the entry reaches runs never. Without a schedule: never where the owner's
+    /// state says it holds no value, else behind its flag.
+    fn runs(&self, l: usize, key: (Point, Owner)) -> Runs {
+        match self.sched {
+            Some(s) => s.runs(key.0, key.1).unwrap_or(Runs::Never),
+            None if self.st(l) == Init::Gone => Runs::Never,
+            None => Runs::Flag,
+        }
+    }
+
+    /// Drops the value in place `p`, which is owner `l` or a part of it, as the drop schedule
+    /// says ([`FnCx::runs`]): always, never, or where the owner's flag is set (blocks: the drop,
+    /// then the code after it).
     fn drop_if_held(&mut self, l: usize, p: &Place, key: (Point, Owner)) {
         if !self.needs_drop(p.ty) || !self.open() {
             return;
         }
-        let Some(f) = self.locals[l].flag else {
-            if self.st(l) == Init::Full {
-                self.drop_held(l, p, key);
+        match self.runs(l, key) {
+            Runs::Never => {
+                // the lowering's state follows the same moves: a value it may hold here is
+                // one the checks find gone
+                if self.st(l) == Init::Full {
+                    let (point, owner) = key;
+                    self.fail_at(
+                        None,
+                        format!("a value the checks find gone is held: {owner:?} at {point:?}"),
+                    );
+                }
             }
-            return;
-        };
-        let Some(fv) = self.flag_val(f) else { return };
-        match self.kval(fv) {
-            Some(0) => {}
-            Some(_) => self.drop_held(l, p, key),
-            None => {
+            Runs::Always => self.drop_held(l, p, key),
+            Runs::Flag => {
+                let Some(fs) = self.locals[l].flag else {
+                    let (point, owner) = key;
+                    self.fail_at(
+                        None,
+                        format!("a tested drop of an owner without a flag: {owner:?} at {point:?}"),
+                    );
+                    return;
+                };
+                let bt = self.t_bool();
+                let fv = Operand::Value(self.f.b.load(Self::ir(bt), fs));
                 let yes = self.f.b.create_block();
                 let cont = self.f.b.create_block();
                 self.f.b.cbr(fv, yes, &[], cont, &[]);
@@ -1806,7 +1801,7 @@ impl<'a> FnCx<'a> {
         if !self.open() {
             return;
         }
-        if self.locals[l].flag.is_none() && self.st(l) == Init::Gone {
+        if self.runs(l, key) == Runs::Never && self.st(l) == Init::Gone {
             return;
         }
         let p = match self.local_place(l) {
@@ -1824,13 +1819,8 @@ impl<'a> FnCx<'a> {
             let pt = self.t_ref(true, self.locals[l].ty);
             self.event(stave_ir::EventKind::End, s, pt);
         }
-        // a temporary's flag says "made and not dropped" each time its statement runs
-        if let Some(Flag::Mem(fs)) = self.locals[l].flag
-            && self.open()
-        {
-            let zero = self.int(0);
-            self.f.b.store(fs, zero);
-        }
+        // a flag says "holds its value": a temporary's each time its statement runs
+        self.set_flag(l, false);
     }
 
     /// Drops the droppable locals of scope `s` (a depth index) on a path that leaves it,
@@ -2180,6 +2170,7 @@ impl FnState {
             cur: crate::temps::NONE,
             stmt_depth: Vec::new(),
             own_temps: 0,
+            flag_at: 0,
             ret,
             site_consts: Vec::new(),
             kvals: Vec::new(),

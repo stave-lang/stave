@@ -16,9 +16,13 @@
 //! internal error of the build. The other way round, the rows of code that can run are due
 //! ([`Schedule::require`]): where the lowering lowers their point it must have decided each
 //! one, so a drop it leaves out, or a value the checks keep alive that the code never made,
-//! fails the build too. The lowering's side of both directions is a [`Ledger`]. Whether a
-//! scheduled drop runs is the owner's init bit: the CFG's dataflow and the lowering's owner
-//! states (or dynamic flags) both follow the moves.
+//! fails the build too. The lowering's side of both directions is a [`Ledger`].
+//!
+//! **Whether a drop runs.** The CFG's init dataflow decides it once per row ([`Runs`],
+//! [`Schedule::runs`]): the drop runs where its owner is must-init, not where it is not
+//! may-init, and tests the owner's flag where it is may-init and not must-init. An owner has a
+//! flag exactly when one of its drops is tested ([`Schedule::flagged`]). The lowering reads
+//! both and decides neither.
 //!
 //! **Exits.** An exit that leaves scopes and statements drops in the order of their normal
 //! ends, innermost first ([`exit_order`], which both stages call): the temporaries of a
@@ -151,6 +155,36 @@ pub struct Row {
     pub head: Head,
 }
 
+/// Whether a scheduled drop runs where its point is reached, by the init dataflow of the
+/// borrow CFG (stave-borrow `cfg`): forward may-init and must-init bits of the dropped value's
+/// owner, just before the drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Runs {
+    /// Must-init: the drop runs.
+    Always,
+    /// Not may-init: no drop.
+    Never,
+    /// May-init and not must-init: the drop tests the owner's flag.
+    Flag,
+}
+
+impl Runs {
+    /// From the bits (may-init, must-init).
+    pub fn of(may: bool, must: bool) -> Runs {
+        match (may, must) {
+            (_, true) => Runs::Always,
+            (false, _) => Runs::Never,
+            (true, false) => Runs::Flag,
+        }
+    }
+
+    /// One answer for a row whose drop is reached at more than one place (a statement lowered
+    /// at each `return`): the drop is tested unless every place agrees.
+    pub fn join(self, other: Runs) -> Runs {
+        if self == other { self } else { Runs::Flag }
+    }
+}
+
 /// The drops of one body (its closures and `spawn` bodies included: nodes and tokens are the
 /// item's).
 #[derive(Clone, Debug, Default)]
@@ -160,6 +194,11 @@ pub struct Schedule {
     order: Vec<(Point, Owner)>,
     /// The drops the code must decide ([`Schedule::require`]).
     due: Vec<(Point, Owner)>,
+    /// Whether each reachable drop runs ([`Schedule::runs`]); a row the CFG's entry does not
+    /// reach has none. Once sealed, sorted with one entry per row.
+    runs: Vec<(Point, Owner, Runs)>,
+    /// The owners with a flag ([`Schedule::flagged`]); once sealed, sorted.
+    flags: Vec<Owner>,
     sorted: bool,
 }
 
@@ -183,10 +222,46 @@ impl Schedule {
         &self.due
     }
 
+    /// The drop of `owner` at `point` is reached with `runs`, joined over every place that
+    /// reaches it; `holder`: the owner whose value it drops (an assignment's old value: the
+    /// local assigned), flagged when the drop is tested.
+    pub fn set_runs(&mut self, point: Point, owner: Owner, runs: Runs, holder: Owner) {
+        self.runs.push((point, owner, runs));
+        if runs == Runs::Flag {
+            self.flags.push(holder);
+        }
+        self.sorted = false;
+    }
+
+    /// Whether the drop of `owner` at `point` runs (`None`: no path from the entry reaches it).
+    pub fn runs(&self, point: Point, owner: Owner) -> Option<Runs> {
+        if !self.sorted {
+            let mut out: Option<Runs> = None;
+            for &(p, o, r) in &self.runs {
+                if p == point && o == owner {
+                    out = Some(out.map_or(r, |x| x.join(r)));
+                }
+            }
+            return out;
+        }
+        let i = self.runs.partition_point(|x| (x.0, x.1) < (point, owner));
+        self.runs.get(i).filter(|x| x.0 == point && x.1 == owner).map(|x| x.2)
+    }
+
+    /// Whether `owner` has a flag: some drop of its value is tested ([`Runs::Flag`]).
+    pub fn flagged(&self, owner: Owner) -> bool {
+        if !self.sorted {
+            return self.flags.contains(&owner);
+        }
+        self.flags.binary_search(&owner).is_ok()
+    }
+
     pub fn extend(&mut self, other: &Schedule) {
         self.rows.extend_from_slice(&other.rows);
         self.order.extend_from_slice(&other.order);
         self.due.extend_from_slice(&other.due);
+        self.runs.extend_from_slice(&other.runs);
+        self.flags.extend_from_slice(&other.flags);
         self.sorted = false;
     }
 
@@ -198,6 +273,17 @@ impl Schedule {
         self.order.sort_by_key(|x| x.0);
         self.due.sort_unstable();
         self.due.dedup();
+        self.runs.sort_unstable();
+        let mut runs: Vec<(Point, Owner, Runs)> = Vec::with_capacity(self.runs.len());
+        for &(p, o, r) in &self.runs {
+            match runs.last_mut() {
+                Some(x) if x.0 == p && x.1 == o => x.2 = x.2.join(r),
+                _ => runs.push((p, o, r)),
+            }
+        }
+        self.runs = runs;
+        self.flags.sort_unstable();
+        self.flags.dedup();
         self.sorted = true;
     }
 

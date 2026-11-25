@@ -12,8 +12,7 @@ use crate::decls::DeclKind;
 use crate::drops::{Made, Mode, Owner, Point, Shape, Step, Sub};
 use crate::loops::ForKind;
 use crate::lower_fn::{
-    Base, E, Env, Flag, FlagKey, FnCx, FnOut, FnState, Home, Init, LocalInfo, LoopCx, LoopKind, Place, Proj,
-    Ty, WriteBack,
+    Base, E, Env, FnCx, FnOut, FnState, Home, Init, LocalInfo, LoopCx, LoopKind, Place, Proj, Ty, WriteBack,
 };
 use crate::mono::{InstKey, Req, Resolved};
 use crate::resolve::Res;
@@ -219,7 +218,7 @@ impl<'a> FnCx<'a> {
     }
 
     /// The innermost closure containing node `n`.
-    fn owner(&self, n: u32) -> Option<u32> {
+    pub(crate) fn owner(&self, n: u32) -> Option<u32> {
         let icx = self.icx;
         let mut best: Option<(u32, u32)> = None;
         for &c in &self.closure_nodes {
@@ -334,18 +333,6 @@ impl<'a> FnCx<'a> {
         }
         self.closure_nodes = infos.iter().map(|c| c.node).collect();
         self.closure_info = infos;
-        // dynamic drop flags: a hidden `bool` local per flagged local (a temporary's flag is made
-        // with it)
-        let n = if self.flagged.is_empty() { 0 } else { self.locals.len() };
-        for l in 0..n {
-            let node = self.locals[l].node;
-            if self.locals[l].drop && self.flagged.contains(&FlagKey { temp: false, id: node }) {
-                let fl = self.locals.len();
-                let bt = self.t_bool();
-                self.locals.push(LocalInfo { node, ty: bt, mem: false, drop: false, flag: None, temp: None });
-                self.locals[l].flag = Some(Flag::Ssa(fl));
-            }
-        }
         let q = Term::Question as u8;
         self.try_toks = (icx.a(root)..=icx.end_tok(root)).filter(|&t| icx.tk(t) == q).collect();
     }
@@ -423,6 +410,7 @@ impl<'a> FnCx<'a> {
         self.result_local(ret);
         self.fresh_env(params, ret);
         self.make_slots(None);
+        self.make_flags(None);
         self.push_scope();
         let icx = self.icx;
         self.bind_params(icx.child(fn_node, NodeKind::Params));
@@ -826,6 +814,7 @@ impl<'a> FnCx<'a> {
             }
         }
         self.make_slots(Some(n));
+        self.make_flags(Some(n));
         self.push_scope();
         let icx = self.icx;
         self.bind_params(icx.child(n, NodeKind::Params));

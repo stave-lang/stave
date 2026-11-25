@@ -74,6 +74,8 @@ pub struct FuncBuilder {
     cur: Option<Block>,
     site: Site,
     nslots: usize,
+    /// The stores [`FuncBuilder::entry_store`] placed after the slots.
+    nentry: usize,
     error: Option<BuildError>,
 }
 
@@ -88,6 +90,7 @@ impl FuncBuilder {
             cur: None,
             site: Site::NONE,
             nslots: 0,
+            nentry: 0,
             error: None,
         };
         let entry = b.create_block();
@@ -283,6 +286,17 @@ impl FuncBuilder {
     /// A stack slot; `ptr_ty` is a `ref mut T` / `ptr mut T` type. Always placed at the front of
     /// `b0` (after earlier slots), whatever the current block.
     pub fn slot(&mut self, ptr_ty: TypeId) -> Value {
+        self.slot_at(ptr_ty, usize::MAX)
+    }
+
+    /// The number of slots made so far.
+    pub fn slot_count(&self) -> usize {
+        self.nslots
+    }
+
+    /// A stack slot placed at position `at` among the slots of `b0` (the end when there are
+    /// fewer), whatever the current block.
+    pub fn slot_at(&mut self, ptr_ty: TypeId, at: usize) -> Value {
         let v = Value(self.values.len() as u32);
         self.values.push((ptr_ty, None));
         let raw = RawInst {
@@ -293,21 +307,22 @@ impl FuncBuilder {
             site: self.site,
         };
         if let Some(b0) = self.blocks.first_mut() {
-            let at = self.nslots.min(b0.insts.len());
-            b0.insts.insert(at, raw);
-            self.nslots = at + 1;
+            let n = self.nslots.min(b0.insts.len());
+            b0.insts.insert(at.min(n), raw);
+            self.nslots = n + 1;
         }
         v
     }
 
-    /// `store p, v` placed in `b0` right after the slots, whatever the current block: the
-    /// value slot `p` holds when the fn is entered.
+    /// `store p, v` placed in `b0` right after the slots and the entry stores made before it,
+    /// whatever the current block: the value slot `p` holds when the fn is entered.
     pub fn entry_store(&mut self, p: impl Into<Operand>, v: impl Into<Operand>) {
         let args = self.push_operands(&[p.into(), v.into()]);
         let raw = RawInst { op: Op::Store, ty: None, result: None, args, site: self.site };
         if let Some(b0) = self.blocks.first_mut() {
-            let at = self.nslots.min(b0.insts.len());
+            let at = (self.nslots + self.nentry).min(b0.insts.len());
             b0.insts.insert(at, raw);
+            self.nentry += 1;
         }
     }
 
