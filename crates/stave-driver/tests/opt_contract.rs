@@ -1,6 +1,14 @@
 //! stage0 against contracts/opt-passes.md, the release passes' contract. stage0 has the base
 //! passes only (rule P3), so this checks what it can:
 //!
+//! - the worked examples of section 10, one directory per example under `tests/opt/<section>/`:
+//!   `input.ir` (the `checked` input), `inline.ir` (the module after the expansion,
+//!   `--dump-phase=inline`), `output.ir` (the `opt` output), `inline.txt` (the decision dump,
+//!   `--dump=inline`; 10.10 with `--limit cap=20`). Every `.ir` text loads (`stave ir check`) and
+//!   is its own `stave ir fmt`. Where the output is the base passes' result of the clean-up's
+//!   output, `stave ir opt` gives it byte for byte: from `input.ir` for the `--passes=base`
+//!   examples 10.8 and 10.9; from `output.ir` read at level `checked` for 10.1, 10.3, and 10.7,
+//!   whose clean-up output is their output (the text states that `B` changes nothing);
 //! - cases of the base passes beside the examples: the parts of params placed after the slots
 //!   and a part whose anchor is deleted in the same step (B1, B3), dead code whose value has 255
 //!   uses and more (B5);
@@ -26,6 +34,14 @@ fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn examples() -> PathBuf {
+    repo().join("tests/opt")
+}
+
+fn read(p: &Path) -> String {
+    std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+}
+
 fn load(name: &str, text: &str) -> ir_cmd::LoadedIr {
     ir_cmd::load(name, text.as_bytes()).unwrap_or_else(|e| panic!("{name}: {:?}", e.lines()))
 }
@@ -40,6 +56,53 @@ fn at_level(text: &str, from: &str, to: &str) -> String {
     let (head, rest) = text.split_once('\n').unwrap();
     let head = head.strip_suffix(from).unwrap_or_else(|| panic!("header `{head}` is not at level {from}"));
     format!("{head}{to}\n{rest}")
+}
+
+#[test]
+fn every_example_text_loads_and_is_canonical() {
+    let mut dirs: Vec<String> = std::fs::read_dir(examples())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    dirs.sort();
+    let want: Vec<String> = (1..=10).map(|k| format!("10.{k}")).collect();
+    let mut sorted = want.clone();
+    sorted.sort();
+    assert_eq!(dirs, sorted, "one directory per worked example");
+    let mut texts = 0;
+    for d in &want {
+        let dir = examples().join(d);
+        assert!(dir.join("input.ir").is_file(), "{d}: no input.ir");
+        for f in ["input.ir", "inline.ir", "output.ir"] {
+            let p = dir.join(f);
+            if !p.is_file() {
+                continue;
+            }
+            let name = format!("{d}/{f}");
+            let text = read(&p);
+            let level = if f == "input.ir" { "checked" } else { "opt" };
+            assert!(text.lines().next().unwrap().ends_with(&format!(" release {level}")), "{name}: header");
+            let l = load(&name, &text);
+            let printed = ir_cmd::fmt(&l).unwrap_or_else(|e| panic!("{name}: ir fmt: {:?}", e.lines()));
+            assert_eq!(printed, text, "{name}: not its own `stave ir fmt`");
+            texts += 1;
+        }
+    }
+    assert_eq!(texts, 20);
+}
+
+#[test]
+fn base_passes_give_the_examples_output() {
+    for d in ["10.8", "10.9"] {
+        let dir = examples().join(d);
+        let got = opt(&format!("{d}/input.ir"), &read(&dir.join("input.ir")));
+        assert_eq!(got, read(&dir.join("output.ir")), "{d}: `stave ir opt input.ir`");
+    }
+    for d in ["10.1", "10.3", "10.7"] {
+        let want = read(&examples().join(d).join("output.ir"));
+        let got = opt(&format!("{d}/output.ir as checked"), &at_level(&want, "opt", "checked"));
+        assert_eq!(got, want, "{d}: the base passes change the clean-up's output");
+    }
 }
 
 /// B1: a part of a param of `b0` goes after the slots, which stay a prefix of `b0`; a part of a
@@ -175,6 +238,11 @@ b0(%0: t0):
 const SWITCH_PROGRAM: &str = "fn pick(x: i32) -> i32 {
     return match x { 0 => 10, 1 => 20, 7 => 40, _ => 30 };
 }
+
+fn main() -> i32 {
+    return pick(0);
+}
+";
 
 /// The `opt` text of [`SWITCH_PROGRAM`] for `target` in the emit form (`stave ir emit --release`,
 /// then `stave ir opt`), with the `checked` text it came from.

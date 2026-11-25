@@ -1,0 +1,23 @@
+stave.ir 4 "x86_64-linux-v2" release checked
+type t0 int u 8
+type t1 int u 64
+type t2 int s 32
+type t3 ref t4
+type t4 slice t0
+fn @0 main.leaf(t1) -> t1 {
+b0(%0: t1):
+  %1 = add.wrap t1 %0 1
+  ret %1
+}
+fn @1 main.main() -> t2 {
+b0():
+  %0 = call t1 @0 1
+  %1 = cast.wrap t2 %0
+  ret %1
+}
+fn @2 runtime.panic.abort(t3) known altstack {
+b0(%0: t3):
+  %1 = call t1 @0 7
+  panic.assert ()
+  unreachable
+}
