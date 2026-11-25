@@ -8,17 +8,19 @@
 // - BOOL CHAR STR NEVER SELF: no fields
 // - REF PTR: a = mutable (0, 1), b = the inner T
 // - ARRAY: a = the element T; extra: one const argument (3 words)
-// - SLICE: a = the element T, b = the alignment (0: none)
+// - SLICE: a = the element T, b = the alignment (0: none); an alignment of 0 written in IR text
+//   is b = 0 with one extra word 0
 // - TUPLE: extra: the element Ts
 // - ADT: a = the decl D; extra: 3 words per argument
 // - FN: a = the parameter count; extra: the parameter Ts, the return T, the feature bits (high
 //   word, low word), the deny bits
-// - VECTOR: a = the lane T, b = the lanes (2 .. 64, `LANES_N` sizeless)
+// - VECTOR: a = the lane T, b = the lanes (a count, or `LANES_N` sizeless: above every count)
 // - MASK: a = the lane width, b = the lanes
 // - PARAM CONSTPARAM: a = the flat parameter index
 // - RANGE: a = the element T, b = inclusive (0, 1)
 // A generic argument is 3 words, in the canonical order of arguments: (0, T, 0) a type, (1, hi,
-// lo) a value, (2, i, 0) the const parameter i, (3, 0, 0) a value unknown after an error.
+// lo) a value, (2, i, 0) the const parameter i, (3, 0, 0) a value unknown after an error, (4, w, 0)
+// an IR const argument outside u64, w its row in the IR module's wide-int pool.
 //
 // The error type has no key: it is `ERR`, and a key never holds it (making a key from it gives
 // `ERR`). A key taller than `MAX_HEIGHT` is refused: interning it gives `ERR` and counts a refusal.
@@ -56,12 +58,13 @@ pub const W_32: u32 = 2;
 pub const W_64: u32 = 3;
 pub const W_SIZE: u32 = 4;
 
-pub const LANES_N: u32 = 255;
+pub const LANES_N: u32 = 256;
 
 pub const GA_TYPE: u32 = 0;
 pub const GA_VALUE: u32 = 1;
 pub const GA_PARAM: u32 = 2;
 pub const GA_ERROR: u32 = 3;
+pub const GA_WIDE: u32 = 4;
 
 // The tallest key: a type is one above its tallest component, a type without components is 1.
 pub const MAX_HEIGHT: u32 = 1000;
@@ -230,6 +233,67 @@ impl Table {
         self.slots.as_mut_slice()[at] = id;
         if self.tag.len() * 2 > self.slots.len() { self.grow(); }
         return id;
+    }
+
+    // Appends key (tag, a, b) with the pending extra words as the next id, unindexed and without
+    // a height: a table read from IR text keeps the text's ids, components may come later, and
+    // equal keys are an input error. `first_equal` then finds them.
+    pub fn push_raw(&mut self, tag: u8, a: u32, b: u32) -> u32 {
+        let pend = self.pend.as_slice();
+        let id = self.tag.len() as% u32;
+        self.tag.push(tag);
+        self.a.push(a);
+        self.b.push(b);
+        self.extra.push_row(pend);
+        self.height.push(0);
+        self.hashes.push(Table.hash_of(tag, a, b, pend));
+        return id;
+    }
+
+    // For a table of raw rows: per row, the first earlier row with an equal key, or NONE. Indexes
+    // the rows; heights are the caller's (`height` after a well-formedness pass).
+    pub fn first_equal(&mut self) -> vec.Vec<u32> {
+        let n = self.tag.len();
+        let mut cap: usize = 64;
+        while cap < n * 2 + 2 {
+            cap = cap * 2;
+        }
+        let mask = cap - 1;
+        let mut slots = col.filled(cap, NONE);
+        let mut out = col.filled(n, NONE);
+        for t in 0..n {
+            let id = t as% u32;
+            let hash = self.hashes.as_slice()[t];
+            let mut at = (hash as usize) & mask;
+            loop {
+                let s = slots.as_slice()[at];
+                if s == NONE {
+                    slots.as_mut_slice()[at] = id;
+                    break;
+                }
+                let si = s as usize;
+                if self.hashes.as_slice()[si] == hash && self.same(s, self.tag.as_slice()[t], self.a.as_slice()[t], self.b.as_slice()[t], self.extra.row(t)) {
+                    out.as_mut_slice()[t] = s;
+                    break;
+                }
+                at = (at + 1) & mask;
+            }
+        }
+        self.slots = slots;
+        return out;
+    }
+
+    // The id of key (tag, a, b, xs) in an indexed table, or NONE (lookup only).
+    pub fn find(&self, tag: u8, a: u32, b: u32, xs: &[u32]) -> u32 {
+        let hash = Table.hash_of(tag, a, b, xs);
+        let mask = self.slots.len() - 1;
+        let mut at = (hash as usize) & mask;
+        loop {
+            let s = self.slots.as_slice()[at];
+            if s == NONE { return NONE; }
+            if self.hashes.as_slice()[s as usize] == hash && self.same(s, tag, a, b, xs) { return s; }
+            at = (at + 1) & mask;
+        }
     }
 
     // A key without extra words.

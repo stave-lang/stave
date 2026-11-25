@@ -28,6 +28,12 @@
 //! built-in package (`with_lock` calling `f` under its guard, `get_or_init` running `f`) is
 //! reported at the user call that leads there.
 //!
+//! **Dead arms.** No call, join, spawn, or drop in an arm the instance never runs (an `if` on a
+//! constant condition, [`crate::constcond`]) is checked: its calls make no call-graph edge, and
+//! its joins and drops are skipped by the call graph's stored answers
+//! ([`crate::constcond::DeadSites`]). The held locks still come from the borrow checker, which
+//! sees both arms.
+//!
 //! **Drops.** A drop (every row of the body's drop schedule, [`crate::drops`]: scope end,
 //! temporary, exit, a part a pattern ignores, the old value an assignment overwrites) runs the
 //! dropped type's drop glue, a node of the graph: it is checked like a call, without the local it
@@ -761,8 +767,15 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
         }
         // the joins of the node's `scope` statements: the spawn bodies inside each statement
         let Some(b) = body else { continue };
+        // the arms this instance never runs, by the call graph's stored answers: no join, spawn,
+        // or drop there runs (its calls are no `calls` entries already)
+        let dead = tc.body(decl).and_then(|tb| crate::constcond::DeadSites::new(prog, tb, g.taken(p)));
+        let is_dead = |s: Span| dead.as_ref().is_some_and(|d| d.holds(s));
         for s in &b.sites {
             let At::Join(scope) = s.at else { continue };
+            if is_dead(scope) {
+                continue;
+            }
             let held = cx.resolve(&s.held, &args, None);
             let Some(top) = held.into_iter().max_by_key(|h| h.rank) else { continue };
             let kids: Vec<u32> = (0..g.nodes.len() as u32)
@@ -773,6 +786,7 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
                             && sp.file == scope.file
                             && sp.offset >= scope.offset
                             && sp.offset < scope.offset + scope.len
+                            && !is_dead(sp)
                     }
                     _ => false,
                 })
@@ -786,6 +800,9 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
         // drop the node and its closures make
         for s in &b.sites {
             let At::Drop(t) = s.at else { continue };
+            if is_dead(s.span) {
+                continue;
+            }
             let ty = import(&mut tycx, &b.types, t).map(|t| tycx.subst(t, &args, None));
             // what the drop may acquire: the glue node's answer, else the glue's steps; a type
             // that cannot be named, or a step without a node, may acquire anything

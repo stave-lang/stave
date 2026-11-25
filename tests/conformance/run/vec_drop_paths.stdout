@@ -1,0 +1,11 @@
+| truncate past len: 0
+4 3 2 (len 2) | truncate 2: 3
+1 0 (len 0) | clear: 2
+9 | mem.drop: 1
+12 11 10 | scope end: 3
+31 30 | nested truncate: 2
+21 20 | nested drop: 2
+z z | zero-sized truncate: 2
+z | zero-sized drop: 1
+u32 lens 4 4 0, last 3, refilled 7
+string len 1

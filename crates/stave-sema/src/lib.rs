@@ -13,8 +13,8 @@
 //!    ([`modules`]);
 //! 5. declarations ([`decls`]), module scopes (E0105), the prelude (the `pub` items of
 //!    `std.core`, seen by modules of `std` and of every package depending on it; then the
-//!    built-in type names and `size_of` / `align_of`, seen everywhere), impl headers and method
-//!    tables;
+//!    built-in type names and `size_of` / `align_of` / `needs_drop`, seen everywhere), impl
+//!    headers and method tables;
 //! 6. name resolution, one item at a time in parallel ([`resolve`]): E0101 E0103 E0105 E0106;
 //! 7. canonical renumbering of decls.
 //!
@@ -38,6 +38,7 @@
 pub mod builtins;
 pub mod callgraph;
 pub mod closures;
+pub mod constcond;
 pub mod consteval;
 pub mod contracts;
 pub mod decls;

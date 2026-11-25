@@ -30,20 +30,6 @@ import std.mem;
 import std.vec;
 
 pub const KIND_ERROR: u8 = terminals.NTERM as% u8;
-pub const T_EOF: u8 = terminals.T_EOF as% u8;
-const T_DOT: u8 = terminals.T_DOT as% u8;
-const T_IDENT: u8 = terminals.T_IDENT as% u8;
-const T_INT: u8 = terminals.T_INT_LIT as% u8;
-const T_FLOAT: u8 = terminals.T_FLOAT_LIT as% u8;
-const T_STR: u8 = terminals.T_STR_LIT as% u8;
-const T_FMT: u8 = terminals.T_FMT_LIT as% u8;
-const T_CHAR: u8 = terminals.T_CHAR_LIT as% u8;
-const T_UNDERSCORE: u8 = terminals.T_UNDERSCORE as% u8;
-const T_KW_SELF: u8 = terminals.T_KW_SELF as% u8;
-const T_AS_PERCENT: u8 = terminals.T_AS_PERCENT as% u8;
-const T_AS_PIPE: u8 = terminals.T_AS_PIPE as% u8;
-const T_AS_QUESTION: u8 = terminals.T_AS_QUESTION as% u8;
-const T_AS_TILDE: u8 = terminals.T_AS_TILDE as% u8;
 // no terminal (keyword lookup miss)
 const NO_KIND: u8 = 255;
 
@@ -319,7 +305,7 @@ impl Lexer {
         let mut stop = STOP_NONE;
         if n > MAX_FILE_LEN {
             errs.push(E_TOO_LARGE, 0, 0);
-            out.push(T_EOF, 0);
+            out.push(terminals.T_EOF, 0);
             finish(out, &mut errs, STOP_TOO_LARGE);
             return;
         }
@@ -359,11 +345,11 @@ impl Lexer {
                 break;
             }
             out.push(kind, i);
-            dot_end = if kind == T_DOT then end else n + 1;
+            dot_end = if kind == terminals.T_DOT then end else n + 1;
             i = end;
         }
         let eof = if stopped then limit else n;
-        out.push(T_EOF, eof);
+        out.push(terminals.T_EOF, eof);
         sort_errs(&mut errs);
         if stopped {
             errs.push(E_INVALID_UTF8, limit, limit + bad_len);
@@ -376,8 +362,8 @@ impl Lexer {
     // scanned again, cut at the start of the next one. EOF ends where it starts.
     pub fn token_end(&self, src: &[u8], kind: &[u8], start: &[u32], i: usize) -> usize {
         let s = start[i] as usize;
-        if kind[i] == T_EOF || s >= src.len() { return s; }
-        let after_dot = i > 0 && kind[i - 1] == T_DOT && start[i - 1] as usize + 1 == s;
+        if kind[i] == terminals.T_EOF || s >= src.len() { return s; }
+        let after_dot = i > 0 && kind[i - 1] == terminals.T_DOT && start[i - 1] as usize + 1 == s;
         let mut errs = Errs.new();
         let (_, end) = self.scan(src, s, after_dot, &mut errs);
         if i + 1 < kind.len() && start[i + 1] as usize >= s {
@@ -422,25 +408,25 @@ impl Lexer {
 
     fn scan_word(&self, src: &[u8], i: usize) -> (u8, usize) {
         let j = self.skip_idcont(src, i + 1);
-        if j == i + 1 && src[i] == B_UNDERSCORE { return (T_UNDERSCORE, j); }
+        if j == i + 1 && src[i] == B_UNDERSCORE { return (terminals.T_UNDERSCORE, j); }
         if j == i + 2 && src[i] == B_A && src[i + 1] == B_S {
             let op = match at(src, j) {
-                37 => T_AS_PERCENT,
-                124 => T_AS_PIPE,
-                63 => T_AS_QUESTION,
-                126 => T_AS_TILDE,
+                37 => terminals.T_AS_PERCENT,
+                124 => terminals.T_AS_PIPE,
+                63 => terminals.T_AS_QUESTION,
+                126 => terminals.T_AS_TILDE,
                 _ => NO_KIND,
             };
             if op != NO_KIND { return (op, j + 1); }
         }
         let k = self.keyword(&src[i..j]);
-        return (if k == NO_KIND then T_IDENT else k, j);
+        return (if k == NO_KIND then terminals.T_IDENT else k, j);
     }
 
     fn scan_number(&self, src: &[u8], i: usize, after_dot: bool) -> (u8, usize) {
-        if after_dot { return (T_INT, self.skip_idcont(src, i + 1)); }
+        if after_dot { return (terminals.T_INT_LIT, self.skip_idcont(src, i + 1)); }
         let b1 = at(src, i + 1);
-        if src[i] == B_0 && (b1 == B_X || b1 == B_B || b1 == B_O) { return (T_INT, self.skip_idcont(src, i + 2)); }
+        if src[i] == B_0 && (b1 == B_X || b1 == B_B || b1 == B_O) { return (terminals.T_INT_LIT, self.skip_idcont(src, i + 2)); }
         let mut j = skip_digits(src, i + 1);
         let mut float = false;
         if at(src, j) == B_DOT && is_digit(at(src, j + 1)) {
@@ -459,7 +445,7 @@ impl Lexer {
             }
         }
         let end = self.skip_idcont(src, j);
-        return (if float then T_FLOAT else T_INT, end);
+        return (if float then terminals.T_FLOAT_LIT else terminals.T_INT_LIT, end);
     }
 
     // `f"…"` at i (the `f`).
@@ -473,7 +459,7 @@ impl Lexer {
                 return (KIND_ERROR, n);
             }
             let b = src[j];
-            if b == B_DQUOTE { return (if bad then KIND_ERROR else T_FMT, j + 1); }
+            if b == B_DQUOTE { return (if bad then KIND_ERROR else terminals.T_FMT_LIT, j + 1); }
             if b == B_NL {
                 errs.push(E_NEWLINE_IN_LITERAL, i, j);
                 return (KIND_ERROR, j);
@@ -504,7 +490,7 @@ impl Lexer {
             k = self.skip_idcont(src, k + 1);
             if k == s + 1 && src[s] == B_UNDERSCORE { return 0; }
             let kw = self.keyword(&src[s..k]);
-            if kw != NO_KIND && !(head && kw == T_KW_SELF) { return 0; }
+            if kw != NO_KIND && !(head && kw == terminals.T_KW_SELF) { return 0; }
             head = false;
             let b = at(src, k);
             if b == B_DOT {
@@ -542,7 +528,7 @@ impl Lexer {
 // `"…"` (is_char false) or `'…'` at i.
 fn scan_quoted(src: &[u8], i: usize, is_char: bool, errs: &mut Errs) -> (u8, usize) {
     let quote = if is_char then B_QUOTE else B_DQUOTE;
-    let ok = if is_char then T_CHAR else T_STR;
+    let ok = if is_char then terminals.T_CHAR_LIT else terminals.T_STR_LIT;
     let n = src.len();
     let mut j = i + 1;
     loop {

@@ -1,0 +1,70 @@
+// The faults of an input, in the order found, at most `MAX` (contracts/checked-ir.md "Loading"):
+// a line and column (steps 1 and 2) or a line alone (verification), and the message. Rendered
+// `FILE:LINE:COL: error: MSG` or `FILE:LINE: verify: MSG`.
+import bytes;
+import prims.ragged;
+import std.mem;
+import std.vec;
+
+pub const MAX: usize = 100;
+
+pub const K_SYNTAX: u8 = 0;
+pub const K_STRUCTURE: u8 = 1;
+pub const K_VERIFY: u8 = 2;
+
+pub struct Errs {
+    pub line: vec.Vec<u32>,
+    pub col: vec.Vec<u32>,
+    pub kind: vec.Vec<u8>,
+    pub msg: ragged.Ragged<u8>,
+}
+
+impl Errs {
+    pub fn new() -> Errs {
+        return Errs.{ line: vec.Vec::<u32>.new(), col: vec.Vec::<u32>.new(), kind: vec.Vec::<u8>.new(), msg: ragged.Ragged::<u8>.new() };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.line.len();
+    }
+
+    pub fn full(&self) -> bool {
+        return self.line.len() >= MAX;
+    }
+
+    // Adds a fault (dropped past `MAX`); col 0: none.
+    pub fn add(&mut self, kind: u8, line: u32, col: u32, msg: &[u8]) {
+        if self.full() { return; }
+        self.line.push(line);
+        self.col.push(col);
+        self.kind.push(kind);
+        self.msg.push_row(msg);
+    }
+
+    pub fn add_str(&mut self, kind: u8, line: u32, col: u32, msg: &str) {
+        self.add(kind, line, col, mem.str_bytes(msg));
+    }
+
+    // Every fault, one line each, for input file `file`.
+    pub fn render(&self, file: &[u8]) -> vec.Vec<u8> {
+        let mut out = vec.Vec::<u8>.new();
+        for k in 0..self.len() {
+            out.extend_from_slice(file);
+            out.push(58);
+            bytes.push_u32(&mut out, self.line.as_slice()[k]);
+            if self.kind.as_slice()[k] == K_VERIFY {
+                bytes.push_str(&mut out, ": verify: ");
+            } else {
+                let c = self.col.as_slice()[k];
+                if c != 0 {
+                    out.push(58);
+                    bytes.push_u32(&mut out, c);
+                }
+                bytes.push_str(&mut out, ": error: ");
+            }
+            out.extend_from_slice(self.msg.row(k));
+            out.push(10);
+        }
+        return out;
+    }
+}

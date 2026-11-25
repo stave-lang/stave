@@ -8,7 +8,7 @@
 //!   param starts a type-relative path, `T.m(x)`), then the module scope (items, import
 //!   bindings, error decls), the prelude (the `pub` items of `std.core`, in modules of packages
 //!   that depend on `std` and in `std` itself), the built-in type names (`never` included), the
-//!   built-in fns `size_of` / `align_of`;
+//!   built-in fns `size_of` / `align_of` / `needs_drop`;
 //! - type, bound, and pattern-path head: generic params (types only for patterns: none), then
 //!   module scope, prelude, built-ins.
 //!
@@ -52,7 +52,7 @@ pub enum Res {
     SelfType,
     /// A built-in type name (no line).
     Prim(Prim),
-    /// A built-in generic fn, `size_of` / `align_of` (no line).
+    /// A built-in generic fn, `size_of` / `align_of` / `needs_drop` (no line).
     Builtin(Builtin),
     /// Not found (E0101/E0103 reported): the type checker gives it the error type.
     Unresolved,

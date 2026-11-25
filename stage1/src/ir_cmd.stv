@@ -1,0 +1,51 @@
+// `stage1 ir check|fmt FILE`: loads IR text (contracts/checked-ir.md "Loading": lines, structure,
+// verification) and, for `fmt`, prints the module's text on stdout. A fault prints
+// `FILE:LINE:COL: error: MSG` or `FILE:LINE: verify: MSG` on stderr (at most 100) and exits 1;
+// an unreadable FILE or a bad command line exits 2.
+import ir.load;
+import ir.print;
+import text;
+import std.env;
+import std.io;
+import std.string;
+import std.vec;
+
+pub fn run() -> i32 {
+    let n = env.count();
+    if n != 4 {
+        io.eprint("stage1: usage: stage1 ir check|fmt FILE\n");
+        return 2;
+    }
+    let verb = match env.arg(2) {
+        Option.Some(s) => s,
+        Option.None => string.String.new(),
+    };
+    let fmt = text.eq_str(verb.as_bytes(), "fmt");
+    if !fmt && !text.eq_str(verb.as_bytes(), "check") {
+        io.eprint(f"stage1: unknown ir verb `{verb}` (stage1 runs ir check and ir fmt)\n");
+        return 2;
+    }
+    let file = match env.arg(3) {
+        Option.Some(s) => s,
+        Option.None => string.String.new(),
+    };
+    let mut src = vec.Vec::<u8>.new();
+    match io.read_file(file.as_str()) {
+        Result.Ok(b) => { src = b; }
+        Result.Err(e) => {
+            io.eprint(f"stage1: cannot read {file}: {e}\n");
+            return 2;
+        }
+    }
+    let ld = load.load(src.as_slice());
+    if !ld.ok() {
+        let out = ld.errs.render(file.as_bytes());
+        let _ = io.write_all(2, out.as_slice());
+        return 1;
+    }
+    if fmt {
+        let out = print.print(&ld.m);
+        let _ = io.write_all(1, out.as_slice());
+    }
+    return 0;
+}

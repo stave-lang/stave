@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// The taken arm of an `if` on a constant condition is the instance's code in place of the `if`,
+// so a bounds proof sees only its paths: after the taken arm returns for `i >= xs.len()`, `xs[i]`
+// needs no check. Per instance under `!needs_drop::<T>()`: `u32` takes the arm, `String` does not
+// (E1401: `const_cond_bounds_neg.stv`).
+fn f(xs: &[u32], i: usize) -> u32 without(trap) {
+    if true {
+        if i >= xs.len() {
+            return 0;
+        }
+    }
+    return xs[i];
+}
+
+fn g<T>(xs: &[u32], i: usize) -> u32 without(trap) {
+    if !needs_drop::<T>() {
+        if i >= xs.len() {
+            return 0;
+        }
+    }
+    return xs[i];
+}
+
+fn uses(xs: &[u32], i: usize) -> u32 {
+    return g::<u32>(xs, i);
+}
+
+fn main() {}

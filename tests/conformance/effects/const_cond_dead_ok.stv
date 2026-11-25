@@ -1,0 +1,103 @@
+//~ CHECK-ONLY
+// An `if` on a constant condition (`true`, `false`, `needs_drop::<T>()`, or `!` of one) runs one
+// arm per instance: the other arm has no effect, whether the op is inline or behind a call, in a
+// statement `if`, an `else if`, or a value `if`. A dead call is no call-graph edge either (no
+// cycle). `vec.Vec<u32>` has no drop glue: its `clear` never runs the element loop.
+import std.string;
+import std.vec;
+
+fn t(xs: &[u32], i: usize) -> u32 {
+    return xs[i];
+}
+
+fn lit_false(xs: &[u32], i: usize) -> u32 without(trap) {
+    if false {
+        return xs[i];
+    }
+    if false {
+        return t(xs, i);
+    }
+    return 0;
+}
+
+fn lit_true_else(xs: &[u32], i: usize) -> u32 without(trap) {
+    if true {
+        return 1;
+    } else {
+        return xs[i] + t(xs, i);
+    }
+}
+
+fn not_true(xs: &[u32], i: usize) -> u32 without(trap) {
+    if !true {
+        return xs[i];
+    }
+    if !!false {
+        return t(xs, i);
+    }
+    return 2;
+}
+
+fn not_false_else(xs: &[u32], i: usize) -> u32 without(trap) {
+    if !false {
+        return 3;
+    } else {
+        return t(xs, i);
+    }
+}
+
+fn chain(xs: &[u32], i: usize) -> u32 without(trap) {
+    if false {
+        return xs[i];
+    } else if true {
+        return 4;
+    } else {
+        return t(xs, i);
+    }
+}
+
+fn value(xs: &[u32], i: usize) -> u32 without(trap) {
+    let a = if false then xs[i] else 5;
+    let b = if !false then 6 else t(xs, i);
+    return a +% b;
+}
+
+// `u32` has no drop glue: the arm is dead in the only instance
+fn by_type<T>(xs: &[u32], i: usize) -> u32 without(trap) {
+    if needs_drop::<T>() {
+        return xs[i];
+    }
+    return 7;
+}
+
+// `String` has drop glue: `!` makes the arm dead in the only instance
+fn by_type_not<T>(xs: &[u32], i: usize) -> u32 without(trap) {
+    if !needs_drop::<T>() {
+        return t(xs, i);
+    }
+    return 8;
+}
+
+fn uses(xs: &[u32], i: usize) -> u32 {
+    return by_type::<u32>(xs, i) +% by_type_not::<string.String>(xs, i);
+}
+
+fn clear_plain(v: &mut vec.Vec<u32>) without(trap) {
+    v.clear();
+}
+
+fn no_unsafe(p: *const u32) -> u32 without(unsafe) {
+    if false {
+        return unsafe("never runs") *p;
+    }
+    return 9;
+}
+
+fn no_cycle(n: u32) -> u32 {
+    if false {
+        return no_cycle(n);
+    }
+    return n;
+}
+
+fn main() {}

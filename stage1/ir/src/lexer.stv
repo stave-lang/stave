@@ -1,0 +1,310 @@
+// The lexer of one IR text line (contracts/ir-text.ebnf, lexical part), on bytes: any input is a
+// token sequence or one error at a byte offset. A `Word` is munched, then classified by shape
+// (intrinsic op, block label, type, string, decl id, bytes), then by keyword, else `AnyWord`.
+// A number, value, fn reference, or float constant must end at a delimiter.
+import bytes;
+import grammar;
+import generated.ir_text_terminals;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+pub struct Lexed {
+    pub term: vec.Vec<u16>,
+    pub start: vec.Vec<u32>,
+    pub end: vec.Vec<u32>,
+    pub err_at: usize,
+    pub err: vec.Vec<u8>,
+}
+
+impl Lexed {
+    pub fn new() -> Lexed {
+        return Lexed.{ term: vec.Vec::<u16>.new(), start: vec.Vec::<u32>.new(), end: vec.Vec::<u32>.new(), err_at: 0, err: vec.Vec::<u8>.new() };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.term.len();
+    }
+
+    fn fail(&mut self, at: usize, msg: &str) -> bool {
+        self.err_at = at;
+        self.err.clear();
+        bytes.push_str(&mut self.err, msg);
+        return false;
+    }
+
+    fn push(&mut self, t: u16, s: usize, e: usize) {
+        self.term.push(t);
+        self.start.push(s as% u32);
+        self.end.push(e as% u32);
+    }
+}
+
+// `Num`: `0` or digits without a leading zero.
+pub fn is_num(w: &[u8]) -> bool {
+    if w.len() == 0 { return false; }
+    for i in 0..w.len() {
+        if !bytes.is_digit(w[i]) { return false; }
+    }
+    return w.len() == 1 || w[0] != 48;
+}
+
+// What can follow `intrinsic.`: `[a-z0-9_]+`.
+pub fn is_intrinsic_word(w: &[u8]) -> bool {
+    if w.len() == 0 { return false; }
+    for i in 0..w.len() {
+        let c = w[i];
+        if !((c >= 97 && c <= 122) || bytes.is_digit(c) || c == 95) { return false; }
+    }
+    return true;
+}
+
+fn shaped(w: &[u8], p: u8) -> bool {
+    return w.len() > 1 && w[0] == p && is_num(&w[1..w.len()]);
+}
+
+// The terminal of a Word.
+pub fn classify(g: &grammar.Grammar, w: &[u8]) -> u16 {
+    let pb = mem.str_bytes("intrinsic.");
+    if w.len() > pb.len() && w[0..pb.len()].eq(pb) && is_intrinsic_word(&w[pb.len()..w.len()]) { return ir_text_terminals.IR_T_INTR; }
+    if shaped(w, 98) { return ir_text_terminals.IR_T_BLK; }
+    if shaped(w, 116) { return ir_text_terminals.IR_T_T_ID; }
+    if shaped(w, 115) { return ir_text_terminals.IR_T_S_ID; }
+    if shaped(w, 100) { return ir_text_terminals.IR_T_D_ID; }
+    if w.len() >= 3 && w.len() <= 129 && w[0] == 120 && (w.len() - 1) % 2 == 0 {
+        let mut hex = true;
+        for i in 1..w.len() {
+            if !bytes.is_lower_hex(w[i]) { hex = false; }
+        }
+        if hex { return ir_text_terminals.IR_T_BYTES; }
+    }
+    let k = g.keyword(w);
+    if k != NONE { return k as% u16; }
+    return ir_text_terminals.IR_T_ANY_WORD;
+}
+
+// The end of the `Num` at i; false on an error.
+fn num_end(b: &[u8], i: usize, out: &mut Lexed) -> (bool, usize) {
+    let mut j = i;
+    while j < b.len() && bytes.is_digit(b[j]) {
+        j = j + 1;
+    }
+    if j == i { return (out.fail(i, "a decimal number is expected here"), 0); }
+    if b[i] == 48 && j - i > 1 { return (out.fail(i, "a number has no leading zero"), 0); }
+    return (true, j);
+}
+
+fn hex_val(c: u8) -> u8 {
+    return if bytes.is_digit(c) then c - 48 else c - 87;
+}
+
+// The form a byte must be written in when it has one other than `\xHH`, into msg.
+fn shorter(c: u8, msg: &mut vec.Vec<u8>) -> bool {
+    if c == 92 {
+        bytes.push_str(msg, "\\\\");
+    } else if c == 34 {
+        bytes.push_str(msg, "\\\"");
+    } else if c == 10 {
+        bytes.push_str(msg, "\\n");
+    } else if c == 9 {
+        bytes.push_str(msg, "\\t");
+    } else if c >= 32 && c <= 126 {
+        msg.push(c);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// The end of the string at i (the opening quote), every byte and escape checked.
+fn string_end(b: &[u8], i: usize, out: &mut Lexed) -> (bool, usize) {
+    let mut j = i + 1;
+    loop {
+        if j >= b.len() { return (out.fail(i, "unterminated string"), 0); }
+        let c = b[j];
+        if c == 34 { return (true, j + 1); }
+        if c == 92 {
+            if j + 1 >= b.len() { return (out.fail(j, "unknown escape (the escapes are `\\\\ \\\" \\n \\t \\xHH`)"), 0); }
+            let e = b[j + 1];
+            if e == 92 || e == 34 || e == 110 || e == 116 {
+                j = j + 2;
+            } else if e == 120 {
+                if j + 4 > b.len() || !bytes.is_lower_hex(b[j + 2]) || !bytes.is_lower_hex(b[j + 3]) {
+                    return (out.fail(j, "`\\x` takes two lowercase hex digits"), 0);
+                }
+                let byte = hex_val(b[j + 2]) * 16 + hex_val(b[j + 3]);
+                let mut s = vec.Vec::<u8>.new();
+                if shorter(byte, &mut s) {
+                    out.err_at = j;
+                    out.err.clear();
+                    bytes.push_str(&mut out.err, "`\\x");
+                    bytes.push_hex(&mut out.err, byte as u64, 2);
+                    bytes.push_str(&mut out.err, "` has the shorter form `");
+                    out.err.extend_from_slice(s.as_slice());
+                    out.err.push(96);
+                    return (false, 0);
+                }
+                j = j + 4;
+            } else {
+                return (out.fail(j, "unknown escape (the escapes are `\\\\ \\\" \\n \\t \\xHH`)"), 0);
+            }
+        } else if c >= 32 && c <= 126 {
+            j = j + 1;
+        } else {
+            out.err_at = j;
+            out.err.clear();
+            bytes.push_str(&mut out.err, "byte 0x");
+            bytes.push_hex(&mut out.err, c as u64, 2);
+            bytes.push_str(&mut out.err, " in a string is written `\\x");
+            bytes.push_hex(&mut out.err, c as u64, 2);
+            out.err.push(96);
+            return (false, 0);
+        }
+    }
+}
+
+// The bytes a string token denotes (`raw` includes the quotes; the lexer has checked it).
+pub fn unescape(raw: &[u8], out: &mut vec.Vec<u8>) {
+    let n = raw.len();
+    if n < 2 { return; }
+    let inner = &raw[1..n - 1];
+    let mut i: usize = 0;
+    while i < inner.len() {
+        if inner[i] == 92 && i + 1 < inner.len() {
+            let e = inner[i + 1];
+            if e == 110 {
+                out.push(10);
+            } else if e == 116 {
+                out.push(9);
+            } else if e == 120 && i + 3 < inner.len() {
+                out.push(hex_val(inner[i + 2]) * 16 + hex_val(inner[i + 3]));
+                i = i + 2;
+            } else {
+                out.push(e);
+            }
+            i = i + 2;
+        } else {
+            out.push(inner[i]);
+            i = i + 1;
+        }
+    }
+}
+
+// The tokens of line b (no `EOF`); none for a blank or comment-only line. False: an error at
+// `out.err_at`.
+pub fn lex(g: &grammar.Grammar, b: &[u8], out: &mut Lexed) -> bool {
+    out.term.clear();
+    out.start.clear();
+    out.end.clear();
+    for k in 0..b.len() {
+        if b[k] == 13 { return out.fail(k, "a carriage return is not allowed in IR text"); }
+    }
+    let n = b.len();
+    let mut i: usize = 0;
+    while i < n {
+        let c = b[i];
+        let s = i;
+        let mut term: u16 = 0;
+        let mut delimited = false;
+        if c == 32 || c == 9 {
+            i = i + 1;
+            continue;
+        } else if c == 35 {
+            break;
+        } else if c == 34 {
+            let (ok, e) = string_end(b, i, out);
+            if !ok { return false; }
+            i = e;
+            term = ir_text_terminals.IR_T_STRING;
+        } else if c == 37 {
+            let (ok, e) = num_end(b, i + 1, out);
+            if !ok { return false; }
+            i = e;
+            term = ir_text_terminals.IR_T_VAL;
+            delimited = true;
+        } else if c == 64 {
+            let (ok, e) = num_end(b, i + 1, out);
+            if !ok { return false; }
+            let mut j = e;
+            while j + 1 < n && b[j] == 46 && bytes.is_digit(b[j + 1]) {
+                let (ok2, e2) = num_end(b, j + 1, out);
+                if !ok2 { return false; }
+                j = e2;
+            }
+            if j + 1 < n && b[j] == 46 && b[j + 1] == 117 { j = j + 2; }
+            i = j;
+            term = ir_text_terminals.IR_T_FN_REF;
+            delimited = true;
+        } else if c == 45 {
+            if i + 1 < n && b[i + 1] == 62 {
+                i = i + 2;
+                term = ir_text_terminals.IR_T_MINUS_GT;
+            } else if i + 1 < n && bytes.is_digit(b[i + 1]) {
+                if b[i + 1] == 48 && !(i + 2 < n && bytes.is_digit(b[i + 2])) { return out.fail(i, "`-0` is not an integer: write `0`"); }
+                let (ok, e) = num_end(b, i + 1, out);
+                if !ok { return false; }
+                i = e;
+                term = ir_text_terminals.IR_T_INT;
+                delimited = true;
+            } else {
+                return out.fail(i, "`-` begins `->` or a negative integer");
+            }
+        } else if c == 48 && i + 1 < n && b[i + 1] == 120 {
+            let mut j = i + 2;
+            while j < n && (bytes.is_alpha(b[j]) || bytes.is_digit(b[j])) {
+                j = j + 1;
+            }
+            let nd = j - (i + 2);
+            let mut hex = nd == 4 || nd == 8 || nd == 16;
+            for k in i + 2..j {
+                if !bytes.is_lower_hex(b[k]) { hex = false; }
+            }
+            if !hex { return out.fail(i, "a float constant is `0x` and 4, 8 or 16 lowercase hex digits"); }
+            i = j;
+            term = ir_text_terminals.IR_T_HEX;
+            delimited = true;
+        } else if bytes.is_digit(c) {
+            let (ok, e) = num_end(b, i, out);
+            if !ok { return false; }
+            i = e;
+            term = ir_text_terminals.IR_T_INT;
+            delimited = true;
+        } else if c == 60 && i + 1 < n && b[i + 1] == 61 {
+            i = i + 2;
+            term = ir_text_terminals.IR_T_LT_EQ;
+        } else if c == 40 || c == 41 || c == 60 || c == 62 || c == 44 || c == 58 || c == 61 || c == 33 || c == 124 || c == 123 || c == 125 {
+            i = i + 1;
+            term = if c == 40 then ir_text_terminals.IR_T_L_PAREN else if c == 41 then ir_text_terminals.IR_T_R_PAREN else if c == 60 then ir_text_terminals.IR_T_LT else if c == 62 then ir_text_terminals.IR_T_GT else if c == 44 then ir_text_terminals.IR_T_COMMA else if c == 58 then ir_text_terminals.IR_T_COLON else if c == 61 then ir_text_terminals.IR_T_EQ else if c == 33 then ir_text_terminals.IR_T_BANG else if c == 124 then ir_text_terminals.IR_T_PIPE else if c == 123 then ir_text_terminals.IR_T_L_BRACE else ir_text_terminals.IR_T_R_BRACE;
+        } else if bytes.is_alpha(c) || c == 95 {
+            while i < n && bytes.is_word_byte(b[i]) {
+                i = i + 1;
+            }
+            term = classify(g, &b[s..i]);
+        } else if c >= 33 && c <= 126 {
+            out.err_at = i;
+            out.err.clear();
+            bytes.push_str(&mut out.err, "unexpected `");
+            out.err.push(c);
+            out.err.push(96);
+            return false;
+        } else {
+            out.err_at = i;
+            out.err.clear();
+            bytes.push_str(&mut out.err, "unexpected byte 0x");
+            bytes.push_hex(&mut out.err, c as u64, 2);
+            return false;
+        }
+        if delimited && i < n && bytes.is_word_byte(b[i]) {
+            out.err_at = i;
+            out.err.clear();
+            out.err.push(96);
+            bytes.push_show(&mut out.err, &b[s..i]);
+            bytes.push_str(&mut out.err, "` must be followed by a space or a punctuation mark");
+            return false;
+        }
+        out.push(term, s, i);
+    }
+    return true;
+}

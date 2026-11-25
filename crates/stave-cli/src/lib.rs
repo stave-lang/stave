@@ -777,7 +777,7 @@ mod tests {
         for ok in ["app", "a.out", "my-app", "x_1", ".hidden", "é"] {
             assert_eq!(output_file_name(ok), Ok(ok));
         }
-        for bad in ["", ".", "..", "../x", "/home/u/.local/bin/ls", "a/b", "a\\b", "a\0b", "-o", "--help"] {
+        for bad in ["", ".", "..", "../x", "/opt/bin/ls", "a/b", "a\\b", "a\0b", "-o", "--help"] {
             assert!(output_file_name(bad).is_err(), "{bad:?}");
         }
         assert!(output_file_name("a\0b").unwrap_err().contains("`a\\0b`"));

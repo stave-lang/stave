@@ -13,7 +13,7 @@ import kinds;
 import sigs;
 import test_kit;
 import text;
-import types;
+import ir.types;
 import std.debug;
 import std.idx;
 import std.mem;

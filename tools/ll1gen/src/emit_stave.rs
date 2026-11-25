@@ -59,12 +59,13 @@ fn strings(o: &mut String, name: &str, what: &str, ss: &[&str]) {
 fn terminals_stave(t: &Tables, names: &Names, header: &str, prof: &Profile) -> String {
     let n = t.nterm();
     let (p, sp) = (prof.file_prefix, prof.symbol_prefix);
+    let id = prof.terminal_ids.stave_type();
     let mut o = format!("// {header}\n");
     let _ = writeln!(o, "// Terminals in sorted spelling order (byte order){}.", prof.order_note);
     let _ = writeln!(o, "// {sp}T_* are the terminal ids of {p}ll1_table.stv.\n");
     let _ = writeln!(o, "pub const {sp}NTERM: usize = {n};\n");
     let consts: Vec<(String, String)> = (names.term_const.iter().zip(&t.terms).enumerate())
-        .map(|(i, (c, s))| (format!("pub const {sp}T_{c}: u16 = {i};"), s.clone()))
+        .map(|(i, (c, s))| (format!("pub const {sp}T_{c}: {id} = {i};"), s.clone()))
         .collect();
     commented(&mut o, &consts);
     o.push('\n');

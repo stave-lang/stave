@@ -14,7 +14,7 @@ import layout;
 import modules;
 import sigs;
 import traits;
-import types;
+import ir.types;
 import prims.col;
 import std.mem;
 import std.vec;

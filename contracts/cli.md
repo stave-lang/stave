@@ -198,7 +198,7 @@ Outputs and statuses of the code-generating commands:
     `--write-baseline` and review. An unreadable or malformed FILE is exit 2.
 
   The CI step `tools/ci-step/run.sh dup-gate` (part of `check`) runs `stave dup stage1 --all
-  --target x86_64-linux --baseline tools/ci-step/dup-baseline.txt` (stage1 with `prims`, `std`,
+  --target x86_64-linux --baseline tools/ci-step/dup-baseline.txt` (stage1 with `ir`, `prims`, `std`,
   `runtime`); `STAVE_BLESS=1` writes the baseline instead.
 
 - `stave fix [PKG_DIR] [--dry-run]`: runs `stave check` (always stage0), applies every fix whose

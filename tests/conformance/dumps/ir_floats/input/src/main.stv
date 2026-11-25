@@ -6,7 +6,7 @@ fn mix(x: f64, y: f32) -> f64 {
     let b = y + 1.0e10;
     let c: char = 'A';
     let t: bool = true;
-    let d = if t then a else -0.0;
+    let d = if (x > 0.0) == t then a else -0.0;
     return d + (b as f64) + ((c as u32) as f64);
 }
 

@@ -1,0 +1,516 @@
+# The compiler-known items (contracts/intrinsics.md "Paths fixed by the compiler", the lang types
+# and traits): the one table of their paths. `tools/gen-tables` writes stave-ir's `Known` enum from
+# it (`crates/stave-ir/src/generated/known_items.rs`) and stage1's table
+# (`stage1/ir/src/generated/known_items.stv`).
+#
+# One `[[item]]` per item, in `Known` order: `variant` (the Rust variant), `module`, `name`, and
+# `method` for a method of the item `name`. `report = true`: a panic report entry (it runs on the
+# alternate signal stack). `params` and `ret`: the signature of an item the stages call with an
+# argument list of their own (absent: none), each a type of `usize isize u32 u64 unit u32x4
+# mut_ptr_u8 const_ptr_u8 const_ptr_usize`.
+
+[[item]]
+variant = "Option"
+module = "std.core"
+name = "Option"
+
+[[item]]
+variant = "Result"
+module = "std.core"
+name = "Result"
+
+[[item]]
+variant = "Copy"
+module = "std.core"
+name = "Copy"
+
+[[item]]
+variant = "Send"
+module = "std.core"
+name = "Send"
+
+[[item]]
+variant = "Sync"
+module = "std.core"
+name = "Sync"
+
+[[item]]
+variant = "Flat"
+module = "std.core"
+name = "Flat"
+
+[[item]]
+variant = "Frozen"
+module = "std.core"
+name = "Frozen"
+
+[[item]]
+variant = "Drop"
+module = "std.core"
+name = "Drop"
+
+[[item]]
+variant = "Display"
+module = "std.core"
+name = "Display"
+
+[[item]]
+variant = "Write"
+module = "std.core"
+name = "Write"
+
+[[item]]
+variant = "OpAdd"
+module = "std.core"
+name = "Add"
+
+[[item]]
+variant = "OpWrapAdd"
+module = "std.core"
+name = "WrapAdd"
+
+[[item]]
+variant = "OpSatAdd"
+module = "std.core"
+name = "SatAdd"
+
+[[item]]
+variant = "OpSub"
+module = "std.core"
+name = "Sub"
+
+[[item]]
+variant = "OpWrapSub"
+module = "std.core"
+name = "WrapSub"
+
+[[item]]
+variant = "OpSatSub"
+module = "std.core"
+name = "SatSub"
+
+[[item]]
+variant = "OpMul"
+module = "std.core"
+name = "Mul"
+
+[[item]]
+variant = "OpWrapMul"
+module = "std.core"
+name = "WrapMul"
+
+[[item]]
+variant = "OpSatMul"
+module = "std.core"
+name = "SatMul"
+
+[[item]]
+variant = "OpDiv"
+module = "std.core"
+name = "Div"
+
+[[item]]
+variant = "OpRem"
+module = "std.core"
+name = "Rem"
+
+[[item]]
+variant = "OpShl"
+module = "std.core"
+name = "Shl"
+
+[[item]]
+variant = "OpWrapShl"
+module = "std.core"
+name = "WrapShl"
+
+[[item]]
+variant = "OpShr"
+module = "std.core"
+name = "Shr"
+
+[[item]]
+variant = "OpBitAnd"
+module = "std.core"
+name = "BitAnd"
+
+[[item]]
+variant = "OpBitOr"
+module = "std.core"
+name = "BitOr"
+
+[[item]]
+variant = "OpBitXor"
+module = "std.core"
+name = "BitXor"
+
+[[item]]
+variant = "OpNeg"
+module = "std.core"
+name = "Neg"
+
+[[item]]
+variant = "OpNot"
+module = "std.core"
+name = "Not"
+
+[[item]]
+variant = "String"
+module = "std.string"
+name = "String"
+
+[[item]]
+variant = "StringNew"
+module = "std.string"
+name = "String"
+method = "new"
+
+[[item]]
+variant = "StringPushStr"
+module = "std.string"
+name = "String"
+method = "push_str"
+
+[[item]]
+variant = "StringAsStr"
+module = "std.string"
+name = "String"
+method = "as_str"
+
+[[item]]
+variant = "UnsafeCell"
+module = "std.cell"
+name = "UnsafeCell"
+
+[[item]]
+variant = "UnsafeCellNew"
+module = "std.cell"
+name = "UnsafeCell"
+method = "new"
+
+[[item]]
+variant = "Soa"
+module = "std.soa"
+name = "Soa"
+
+[[item]]
+variant = "AtomicU32New"
+module = "std.atomic"
+name = "U32"
+method = "new"
+
+[[item]]
+variant = "AtomicU64New"
+module = "std.atomic"
+name = "U64"
+method = "new"
+
+[[item]]
+variant = "AtomicUsizeNew"
+module = "std.atomic"
+name = "Usize"
+method = "new"
+
+[[item]]
+variant = "AtomicBoolNew"
+module = "std.atomic"
+name = "Bool"
+method = "new"
+
+[[item]]
+variant = "Mutex"
+module = "std.sync"
+name = "Mutex"
+
+[[item]]
+variant = "MutexNew"
+module = "std.sync"
+name = "Mutex"
+method = "new"
+
+[[item]]
+variant = "MutexLock"
+module = "std.sync"
+name = "Mutex"
+method = "lock"
+
+[[item]]
+variant = "MutexGuard"
+module = "std.sync"
+name = "MutexGuard"
+
+[[item]]
+variant = "Once"
+module = "std.sync"
+name = "Once"
+
+[[item]]
+variant = "OnceNew"
+module = "std.sync"
+name = "Once"
+method = "new"
+
+[[item]]
+variant = "OnceGetOrInit"
+module = "std.sync"
+name = "Once"
+method = "get_or_init"
+
+[[item]]
+variant = "LockPair"
+module = "std.sync"
+name = "lock_pair"
+
+[[item]]
+variant = "MemForget"
+module = "std.mem"
+name = "forget"
+
+[[item]]
+variant = "CopyRaw"
+module = "std.slice"
+name = "copy_raw"
+params = ["mut_ptr_u8", "const_ptr_u8", "usize"]
+ret = "unit"
+
+[[item]]
+variant = "ThreadJoin"
+module = "std.thread"
+name = "join"
+
+[[item]]
+variant = "ParFor"
+module = "std.thread"
+name = "par_for"
+
+[[item]]
+variant = "ParForMut"
+module = "std.thread"
+name = "par_for_mut"
+
+[[item]]
+variant = "StartEntry"
+module = "runtime.start"
+name = "entry"
+params = ["const_ptr_usize"]
+ret = "unit"
+
+[[item]]
+variant = "Trap"
+module = "runtime.panic"
+name = "trap"
+report = true
+params = ["u32", "u32"]
+ret = "unit"
+
+[[item]]
+variant = "TrapMsg"
+module = "runtime.panic"
+name = "trap_msg"
+report = true
+
+[[item]]
+variant = "TrapErr"
+module = "runtime.panic"
+name = "trap_err"
+report = true
+
+[[item]]
+variant = "Abort"
+module = "runtime.panic"
+name = "abort"
+report = true
+
+[[item]]
+variant = "OnSignal"
+module = "runtime.panic"
+name = "on_signal"
+params = ["usize", "usize", "usize"]
+ret = "unit"
+
+[[item]]
+variant = "PanicBegin"
+module = "runtime.panic"
+name = "begin"
+
+[[item]]
+variant = "RequiresFailed"
+module = "runtime.panic"
+name = "requires_failed"
+report = true
+
+[[item]]
+variant = "EnsuresFailed"
+module = "runtime.panic"
+name = "ensures_failed"
+report = true
+
+[[item]]
+variant = "SetUserSite"
+module = "runtime.panic"
+name = "set_user_site"
+
+[[item]]
+variant = "TestInput"
+module = "runtime.panic"
+name = "test_input"
+
+[[item]]
+variant = "TestSkip"
+module = "runtime.panic"
+name = "test_skip"
+
+[[item]]
+variant = "ErrtracePush"
+module = "runtime.errtrace"
+name = "push"
+
+[[item]]
+variant = "ErrtraceRestart"
+module = "runtime.errtrace"
+name = "restart"
+
+[[item]]
+variant = "ErrtraceSave"
+module = "runtime.errtrace"
+name = "save"
+
+[[item]]
+variant = "ErrtraceRestore"
+module = "runtime.errtrace"
+name = "restore"
+
+[[item]]
+variant = "ThreadEntry"
+module = "runtime.thread"
+name = "entry"
+params = ["usize"]
+ret = "usize"
+
+[[item]]
+variant = "ThreadStart"
+module = "runtime.thread"
+name = "start"
+
+[[item]]
+variant = "RtThreadJoin"
+module = "runtime.thread"
+name = "join"
+
+[[item]]
+variant = "ScopeSpawn"
+module = "runtime.thread"
+name = "scope_spawn"
+
+[[item]]
+variant = "ScopeJoin"
+module = "runtime.thread"
+name = "scope_join"
+
+[[item]]
+variant = "RunQueued"
+module = "runtime.thread"
+name = "run_queued"
+
+[[item]]
+variant = "CpuFeatures"
+module = "runtime.cpu"
+name = "features"
+
+[[item]]
+variant = "CpuWord"
+module = "runtime.cpu"
+name = "WORD"
+
+[[item]]
+variant = "CpuInit"
+module = "runtime.cpu"
+name = "init"
+params = []
+ret = "unit"
+
+[[item]]
+variant = "CpuTrace"
+module = "runtime.cpu"
+name = "trace"
+
+[[item]]
+variant = "Alloc"
+module = "runtime.alloc"
+name = "alloc"
+
+[[item]]
+variant = "TryAlloc"
+module = "runtime.alloc"
+name = "try_alloc"
+params = ["usize", "usize"]
+ret = "mut_ptr_u8"
+
+[[item]]
+variant = "Free"
+module = "runtime.alloc"
+name = "free"
+params = ["mut_ptr_u8", "usize", "usize"]
+ret = "unit"
+
+[[item]]
+variant = "Realloc"
+module = "runtime.alloc"
+name = "realloc"
+
+[[item]]
+variant = "TryRealloc"
+module = "runtime.alloc"
+name = "try_realloc"
+params = ["mut_ptr_u8", "usize", "usize", "usize"]
+ret = "mut_ptr_u8"
+
+[[item]]
+variant = "AtomicLock"
+module = "runtime.atomic"
+name = "lock"
+
+[[item]]
+variant = "AtomicTryLock"
+module = "runtime.atomic"
+name = "try_lock"
+
+[[item]]
+variant = "AtomicUnlock"
+module = "runtime.atomic"
+name = "unlock"
+
+[[item]]
+variant = "Futex"
+module = "runtime.os"
+name = "futex"
+
+[[item]]
+variant = "OsRead"
+module = "runtime.os"
+name = "read"
+
+[[item]]
+variant = "OsWrite"
+module = "runtime.os"
+name = "write"
+
+[[item]]
+variant = "OsPread64"
+module = "runtime.os"
+name = "pread64"
+
+[[item]]
+variant = "OsPwrite64"
+module = "runtime.os"
+name = "pwrite64"
+
+[[item]]
+variant = "OsOpenat"
+module = "runtime.os"
+name = "openat"
+
+[[item]]
+variant = "OsFlock"
+module = "runtime.os"
+name = "flock"

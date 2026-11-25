@@ -41,6 +41,58 @@ reference for what a program may write and what it means.
   the borrow checker read the same mode. Reason: a mode the thread rule and the borrow checker
   derive separately can disagree, and a `&` capture written from many threads races.
 
+## §1 Type queries
+
+`size_of::<T>()`, `align_of::<T>()`, and `needs_drop::<T>()` are built-in generic fns of every
+package (no import; a declaration of the same name in scope comes first). Each takes exactly one
+type argument (E0202 when none is written) and no value argument (E0201); T must have a layout:
+an unsized concrete type (`str`, `[T]`) is E0911 at the call, and an instance that makes T
+unsized is E0911 `instance-layout` at the generic fn.
+
+- `size_of` / `align_of` return `usize` and are const-exprs (E0904 `generic` when T has a type
+  parameter there).
+- `needs_drop::<T>() -> bool` is true iff dropping a value of T runs code: T has an `impl Drop`,
+  or holds a type that has one by value (a field, an enum payload, a tuple or array element; an
+  array whatever its length, `[S; 0]` included). Scalars, references (`&str` too), raw
+  pointers, and fn types hold nothing: false. It is the answer the drop schedule, the lowering,
+  and the borrow checker read for T (`vec.Vec<u8>` and `String` are true, `Option<u32>` false).
+- `needs_drop` is no const-expr (E0904), even of a concrete type: its value is fixed per instance
+  of the generic fn it is written in, after monomorphization.
+- **Constant conditions.** The condition of an `if` (statement, `else if`, or value `if`) is a
+  constant condition when it is `true`, `false`, `needs_drop::<T>()` (the built-in, not a
+  declaration of that name), or `!` of a constant condition. Nothing else is: not one in
+  parentheses, a `const` item, a local, `&&` / `||`, a comparison (`1 == 1`,
+  `size_of::<T>() == 4`), or a `static`; a `while` or `match` never is.
+- Its value is decided once per instance of the fn it is written in, after monomorphization, and
+  every stage reads that one answer. The instance runs the taken arm only. The other arm, the
+  dead arm, is type- and borrow-checked as written (its errors are reported; a move in it counts
+  for the code after the `if`), but it is no code of the instance:
+  - no build emits it, a debug build included: `if needs_drop::<T>() { while .. { .. } }` leaves
+    no loop in the instance of a T without drop glue (`vec.Vec<u32>` truncates in O(1));
+  - nothing in it counts as an effect (E1401, `stave effects`): neither an op that can trap, an
+    `unsafe(..)`, a `scope`, or a `spawn`, nor a call (direct, through a fn value, a drop). A
+    call in it is no call-graph edge: no call cycle (E1402), no lock acquired (E1405), no
+    features inherited from its callee (E0704 `inherited`); no join or drop in it is checked
+    for lock ranks (E1405, E1406), and no `static` it names counts for a clause (E0211
+    `static`). So
+    `fn f(v: &mut vec.Vec<u32>) without(trap) { v.clear(); }` is accepted (the element loop is
+    dead), and the same with `vec.Vec<String>` is E1401;
+  - a fn it calls is still instantiated and checked as an instance (E0911 `instance-layout`,
+    E0902), and a closure literal in it is checked like any other: code in the closure's body is
+    the closure's own, nothing of the instance reaches it (a `static` named in that body counts
+    for E0211 as in any closure).
+- What reads the instance's code reads the taken arm as if it were written in place of the
+  `if`: the proofs that remove bounds and contract checks see only its paths, so
+  `if true { if i >= xs.len() { return 0; } } return xs[i];` needs no check (accepted in a
+  `without(trap)` fn), per instance under `!needs_drop::<T>()`. What reads the source sees both
+  arms: type checking, the borrow checker (a move or a loan in the dead arm counts:
+  `if false { take(s); } s.len()` is E0502), and the drop schedule (a value the dead arm may
+  move counts as maybe moved; as the arm never runs, it is dropped once, where it ends), and
+  with the borrow checker the locks a guard may hold (a guard the dead arm stores into an outer
+  binding counts as held after the `if`: a lower-rank lock taken there is E1405).
+- Any other condition is computed at run time and both arms are code, even where its value is
+  known: `const OFF: bool = false; if OFF { return xs[i]; }` in a `without(trap)` fn is E1401.
+
 ## §2 Type nesting depth
 
 - A type without components (a scalar, `str`, a mask, a generic parameter) is 1 level deep. A
@@ -265,7 +317,8 @@ changes only through interior mutability, so the reference is a constant like a 
 wherever it flows: returned without `from`, stored through a `&mut` param, into a captured
 reference, a struct field, an `Option`, or a value another thread reads. Still rejected: `&mut A`
 (E0503), a `static mut` (E0809), a local or param that shadows the static, and a `const` (a
-temporary) are borrows of locals (E0512, E0513).
+temporary) are borrows of locals (E0512, E0513). A by-value use of a non-Copy static or a part
+of one moves out of it and is E0504: `let o = O;`, `M.into_inner()`, `A[0]`.
 
 ## §3 Drops
 
@@ -283,6 +336,9 @@ when that owner ends.
   nothing. A captured place assigned inside a closure or `spawn` body is no exception: a
   capture always holds a value when the body runs, so each run of the assignment drops the
   old value (`o = Option.None;` in a closure releases a guard `o` held).
+- **`impl Drop` and `impl Copy` heads.** An `impl Drop` head that overlaps an `impl Copy` head
+  (some type is an instance of both, bounds not counted) is E0416: `impl<T: Copy> Copy for W<T>`
+  with `impl<U> Drop for W<vec.Vec<U>>` overlap at `W<vec.Vec<u8>>`.
 - **`impl Drop`, order inside a value.** A value whose type has an `impl Drop` is dropped as a
   whole: its `drop` runs once, then its fields are dropped, in declaration order (tuple and
   array elements in index order; of an enum, the fields of the value's variant). No pattern

@@ -923,7 +923,7 @@ mod tests {
     fn display_paths() {
         let root = Path::new("/w/pkg");
         assert_eq!(display(root, Path::new("/w/pkg/src/a.stv")), "src/a.stv");
-        assert_eq!(display(root, Path::new("/home/u/lib/b.stv")), "/home/u/lib/b.stv");
+        assert_eq!(display(root, Path::new("/opt/lib/b.stv")), "/opt/lib/b.stv");
         assert_eq!(display(Path::new("pkg"), Path::new("./x.stv")), "x.stv");
         assert_eq!(display(Path::new("pkg"), Path::new("other/x.stv")), "other/x.stv");
         assert_eq!(display(Path::new("/w/x/../pkg"), Path::new("/w/pkg/dep/src/c.stv")), "dep/src/c.stv");

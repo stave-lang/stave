@@ -37,6 +37,11 @@
 //! detection), nor is the backend's thread start stub calling
 //! `runtime.thread.entry`.
 //!
+//! **Dead arms.** Expanding a fn instance decides its answer to each constant condition of its
+//! body once ([`crate::constcond`], [`CallGraph::taken`]). Nothing in the arm it never runs, of
+//! the fn or of the closure holding that `if`, makes an edge, a call site, a fn value, a root, or
+//! a flow; the instances and glue the arm names are still nodes, as lowering asks for them.
+//!
 //! **Tables.** A fn value is made by a fn item used as a value (coercion `FnItem`), a closure
 //! literal, or a `spawn` body (which `runtime.thread` runs as a `fn()` value). The only coercion
 //! between fn types keeps the params and the return type and changes the features or the deny
@@ -256,6 +261,10 @@ pub struct CallGraph {
     /// name, an operator, the `for` token, an f-string); a fn-value call reaches the values that
     /// flow there or its table. [`CallGraph::out`] keeps one edge per (caller, callee) only.
     pub calls: Vec<(u32, u32, u32)>,
+    /// Per fn node whose body has constant-condition `if`s ([`crate::constcond`]): whether each
+    /// takes its first arm in this instance, in [`TypedBody::const_ifs`] order. Sorted by node.
+    /// The one answer: lowering and the effect pass read it. No edge leaves the other arm.
+    pub taken: Vec<(u32, Box<[bool]>)>,
 }
 
 /// Most instances of one generic on one discovery chain (lowering's limit).
@@ -331,6 +340,11 @@ impl CallGraph {
             NodeKind::Closure { parent, .. } => Some(parent),
             NodeKind::Table { .. } | NodeKind::Glue { .. } => None,
         }
+    }
+
+    /// [`CallGraph::taken`] of fn node `n` (empty: its body has no constant condition).
+    pub fn taken(&self, n: u32) -> &[bool] {
+        self.taken.binary_search_by_key(&n, |x| x.0).map_or(&[], |i| &self.taken[i].1)
     }
 
     /// Where node `n` was first asked for: the site of its first in-edge, else its own span.
@@ -594,7 +608,8 @@ struct BodyEvents<'b> {
     /// The fn's param binding nodes.
     params: Vec<u32>,
     evs: Vec<Ev<'b>>,
-    /// (owner, value type, site token): each type an owner may drop once, at its first site.
+    /// (owner, value type, site token), sorted: each site where an owner may drop a type. An
+    /// instance makes one drop edge per (owner, type), at its first site outside a dead arm.
     drops: Vec<(u32, TypeId, u32)>,
     file: FileId,
 }
@@ -1169,7 +1184,7 @@ fn extract<'b>(
         });
     }
     evs.sort_by_key(|e| e.order());
-    // a value type once per owner, at its first site
+    // every site: which is the first live one depends on the instance's dead arms
     let mut drops: Vec<(u32, TypeId, u32)> = body
         .drops
         .iter()
@@ -1179,7 +1194,7 @@ fn extract<'b>(
         })
         .collect();
     drops.sort_unstable();
-    drops.dedup_by_key(|d| (d.0, d.1));
+    drops.dedup();
     BodyEvents { closures, params, evs, drops, file }
 }
 
@@ -1309,6 +1324,11 @@ struct Walk<'a> {
     truncated_at: Option<(Span, Option<DeclId>)>,
     /// Nodes whose expansion made a refusal ([`crate::types::claim_refusals`]).
     refused_in: Vec<u32>,
+    /// [`CallGraph::taken`], in node order.
+    taken: Vec<(u32, Box<[bool]>)>,
+    /// The event being expanded is in an arm its instance never runs: the nodes it names are
+    /// found (lowering still lowers the arm, then deletes it), but no edge is made.
+    dead: bool,
 }
 
 impl<'a> Walk<'a> {
@@ -1503,6 +1523,9 @@ impl<'a> Walk<'a> {
             _ => EdgeKind::Call,
         };
         let to = self.fn_targets(decl, args, inst);
+        if self.dead {
+            return Vec::new();
+        }
         for &t in &to {
             self.edges.push((from, t, kind, site, 0));
             self.covers.push((from, t, self.cover));
@@ -1614,6 +1637,25 @@ impl<'a> Walk<'a> {
         };
         let evs = self.evs;
         let Some(be) = evs[bi].as_ref() else { return };
+        // the instance's answer to each constant condition, decided here once
+        let bodies = self.bodies;
+        let ifs = &bodies[bi].const_ifs;
+        let dead = if ifs.is_empty() {
+            Vec::new()
+        } else {
+            let taken: Box<[bool]> = ifs
+                .iter()
+                .map(|c| {
+                    c.cond.value(|t| {
+                        let t = self.subst(t, &args);
+                        self.needs_drop(t)
+                    })
+                })
+                .collect();
+            let d = crate::constcond::dead_arms(ifs, &taken, |t| owner_of(&be.closures, t));
+            self.taken.push((i, taken));
+            d
+        };
         self.consts = spec
             .iter()
             .enumerate()
@@ -1653,6 +1695,20 @@ impl<'a> Walk<'a> {
         let mut last: (u32, Vec<u32>, Option<usize>) = (u32::MAX, Vec::new(), None);
         for (ei, ev) in be.evs.iter().enumerate() {
             let from = node_of(ev.owner);
+            self.dead = !dead.is_empty() && crate::constcond::is_dead(&dead, ev.owner, ev.tok);
+            if self.dead {
+                // a dead arm's calls and fn items are still nodes (lowering asks for them before
+                // it deletes the arm); nothing else in it makes an edge or a flow
+                match &ev.what {
+                    What::Call(..) | What::AsStr | What::Fstring => {}
+                    What::FnItem { decl, args: ga, .. } => {
+                        let ga = self.subst_args(ga, &args);
+                        self.fn_targets(*decl, ga, i);
+                        continue;
+                    }
+                    _ => continue,
+                }
+            }
             match &ev.what {
                 What::Call(t, cover) => {
                     // the fn values the call passes: the callee is specialized on them
@@ -1807,14 +1863,24 @@ impl<'a> Walk<'a> {
                 }
             }
         }
+        self.dead = false;
+        // one drop edge per (owner, type), at its first live site; a type dropped only in a
+        // dead arm still gets its glue node (lowering asks for it)
+        let mut done: Option<(u32, TypeId)> = None;
         for &(o, ty, tok) in &be.drops {
+            if done == Some((o, ty)) {
+                continue;
+            }
             let t = self.subst(ty, &args);
             if !self.needs_drop(t) {
                 continue;
             }
             let site = Site::Tok { file: be.file, tok };
-            if let Some(g) = self.glue_node(t, i, site) {
+            if let Some(g) = self.glue_node(t, i, site)
+                && !crate::constcond::is_dead(&dead, o, tok)
+            {
                 self.edges.push((node_of(o), g, EdgeKind::Drop, site, 0));
+                done = Some((o, ty));
             }
         }
         self.consts.clear();
@@ -2278,6 +2344,8 @@ pub(crate) fn build(
         truncated: false,
         truncated_at: None,
         refused_in: Vec::new(),
+        taken: Vec::new(),
+        dead: false,
     };
     for (i, b) in bodies.iter().enumerate() {
         if evs[i].is_some() && sigs.fn_sig(b.decl).is_some_and(|s| s.generics.is_empty()) {
@@ -2430,6 +2498,7 @@ fn finish(w: Walk<'_>) -> CallGraph {
         truncated_at: w.truncated_at,
         calls,
         made,
+        taken: w.taken,
     };
     g.scc_drop = (0..g.scc_count() as u32)
         .map(|s| {
