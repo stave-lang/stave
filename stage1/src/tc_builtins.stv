@@ -27,10 +27,11 @@ import intern;
 import modules;
 import sigs;
 import types;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 0xffff_ffff;
+pub const NONE: u32 = idx.NONE;
 // A type or callee the checker does not decide (printed `?`); `tc_rows.UNK` is this value.
 pub const UNK: u32 = 0xffff_fffd;
 

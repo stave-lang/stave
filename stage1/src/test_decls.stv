@@ -4,9 +4,10 @@ import decls;
 import resdiag;
 import test_kit;
 import std.debug;
+import std.idx;
 import std.vec;
 
-const NONE: u32 = 0xffff_ffff;
+const NONE: u32 = idx.NONE;
 
 // The key of decl d as its definition states it: the module path (a module decl: without its
 // last segment), then per step from the top-level decl down (name, kind, tiebreak, offset).

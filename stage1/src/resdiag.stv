@@ -19,6 +19,7 @@
 // - E0811 extern ABI: a = the case (`ABI_*`), the span is the ABI string or the `extern` /
 //   `unsafe` keyword as stage0 places it.
 import prims.ragged;
+import std.idx;
 import std.vec;
 
 pub const E0101: u16 = 101;
@@ -30,7 +31,7 @@ pub const E0106: u16 = 106;
 pub const E0107: u16 = 107;
 pub const E0811: u16 = 811;
 
-pub const NONE: u32 = 0xffff_ffff;
+pub const NONE: u32 = idx.NONE;
 
 // E0105 scopes: a module (id M), a type, trait, or variant (its decl D), the methods of an impl
 // head (the impl decl D of the first impl of that head), and the locals of an item (c = the item

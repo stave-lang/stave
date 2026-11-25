@@ -37,10 +37,11 @@ import source;
 import types;
 import prims.col;
 import prims.search;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 0xffff_ffff;
+pub const NONE: u32 = idx.NONE;
 
 // Outcome of an evaluation, and the state of a const item's value.
 pub const CV_NONE: u8 = 0;

@@ -26,10 +26,11 @@ import prims.col;
 import prims.ragged;
 import prims.search;
 import prims.sort;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 0xffff_ffff;
+pub const NONE: u32 = idx.NONE;
 const NO_GOAL: u32 = 0xffff_fffc;
 
 pub const K_COPY: u16 = 1;

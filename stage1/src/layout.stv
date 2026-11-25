@@ -29,9 +29,10 @@ import prims.col;
 import prims.ragged;
 import prims.search;
 import prims.sort;
+import std.idx;
 import std.vec;
 
-pub const NONE: u32 = 0xffff_ffff;
+pub const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 // A field whose substituted type would be taller than `types.MAX_HEIGHT`.
 pub const TALL: u32 = 0xffff_fffd;

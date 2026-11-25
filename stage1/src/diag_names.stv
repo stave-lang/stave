@@ -16,10 +16,11 @@ import modules;
 import resdiag;
 import source;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 0xffff_ffff;
+const NONE: u32 = idx.NONE;
 
 // Appends bytes with a line feed written `\n`.
 fn push_escaped(out: &mut vec.Vec<u8>, b: &[u8]) {

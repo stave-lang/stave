@@ -14,10 +14,11 @@ import test_kit;
 import text;
 import types;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 0xffff_ffff;
+const NONE: u32 = idx.NONE;
 
 fn tuple(tab: &mut types.Table, xs: &[u32]) -> u32 {
     tab.begin();

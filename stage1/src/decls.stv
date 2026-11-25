@@ -35,10 +35,11 @@ import resdiag;
 import source;
 import text;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 0xffff_ffff;
+pub const NONE: u32 = idx.NONE;
 
 // Decl kinds, in canonical key order.
 pub const DK_MODULE: u8 = 0;

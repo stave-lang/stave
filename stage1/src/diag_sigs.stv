@@ -14,10 +14,11 @@ import source;
 import text;
 import types;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 0xffff_ffff;
+const NONE: u32 = idx.NONE;
 const DISPLAY_MAX: usize = 4096;
 const DEPTH_MAX: u32 = 64;
 

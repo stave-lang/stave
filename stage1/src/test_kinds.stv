@@ -15,10 +15,11 @@ import test_kit;
 import text;
 import types;
 import std.debug;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 0xffff_ffff;
+const NONE: u32 = idx.NONE;
 
 const CORE: &str = "pub enum Option<T> { Some(T), None }\npub trait Copy {}\npub unsafe(\"x\") trait Send {}\npub unsafe(\"x\") trait Sync {}\npub trait Flat {}\npub trait Frozen {}\npub trait Drop {\n    fn drop(&mut self);\n}\npub trait Add {\n    fn add(self, rhs: Self) -> Self;\n}\n";
 

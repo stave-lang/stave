@@ -36,10 +36,11 @@ import prims.col;
 import prims.ragged;
 import prims.search;
 import prims.sort;
+import std.idx;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 0xffff_ffff;
+pub const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 
 pub const H_NONE: u64 = 0;

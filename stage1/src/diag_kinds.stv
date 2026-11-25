@@ -28,10 +28,11 @@ import types;
 import prims.col;
 import prims.search;
 import prims.sort;
+import std.idx;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 0xffff_ffff;
+const NONE: u32 = idx.NONE;
 const ERR: u32 = types.ERR;
 
 const T_KW_PUB: u8 = terminals.T_KW_PUB as% u8;
