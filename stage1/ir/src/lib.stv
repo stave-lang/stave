@@ -19,3 +19,4 @@
 //   generated.opt_table  the release optimizer's limits, weights, and op rows (opt.toml)
 //   errs       the faults of an input and their rendering
 //   umap       a u64 -> u32 map for per-fn numbering
+//   arith      the integer evaluator of the fold list (`add` to `cast.sat` on constants)

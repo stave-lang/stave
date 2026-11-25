@@ -1094,7 +1094,7 @@ impl V {
             if !self.check_operand(m, ol + 2, ty) { return self.prefix("argument 2: "); }
             return true;
         }
-        let ck = cast_kind(op);
+        let ck = vtypes.cast_kind(op);
         if ck != 255 {
             if !self.arity(n, 1) || !self.res(ty) { return false; }
             let mut to_t = ty;
@@ -1503,15 +1503,6 @@ impl V {
 }
 
 // The cast kind of a scalar cast op, or 255.
-fn cast_kind(op: u16) -> u8 {
-    if op == ir_text_terminals.IR_T_KW_CAST { return vtypes.C_EXACT; }
-    if op == ir_text_terminals.IR_T_CAST_DOT_WRAP { return vtypes.C_WRAP; }
-    if op == ir_text_terminals.IR_T_CAST_DOT_SAT { return vtypes.C_SAT; }
-    if op == ir_text_terminals.IR_T_CAST_DOT_ROUND { return vtypes.C_ROUND; }
-    if op == ir_text_terminals.IR_T_CAST_DOT_TRY { return vtypes.C_TRY; }
-    return 255;
-}
-
 fn cmp(a: &[u8], b: &[u8]) -> i32 {
     let n = if a.len() < b.len() then a.len() else b.len();
     for i in 0..n {
