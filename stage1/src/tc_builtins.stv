@@ -122,13 +122,14 @@ pub fn is_builtin(x: u32) -> bool {
 
 // The built-in fns, in this order (stage0's `prim.Builtin`); which of them a name is, the
 // resolver decides (`decls.builtin_fn`).
-const FNS: &str = "size_of align_of fence_stream soa_row_size soa_read soa_write";
+const FNS: &str = "size_of align_of needs_drop fence_stream soa_row_size soa_read soa_write";
 const F_SIZE_OF: usize = 0;
 const F_ALIGN_OF: usize = 1;
-const F_FENCE: usize = 2;
-const F_ROW_SIZE: usize = 3;
-const F_READ: usize = 4;
-const F_WRITE: usize = 5;
+const F_NEEDS_DROP: usize = 2;
+const F_FENCE: usize = 3;
+const F_ROW_SIZE: usize = 4;
+const F_READ: usize = 5;
+const F_WRITE: usize = 6;
 
 // The names the table looks up, as interned strings (NONE: not in this program).
 pub struct Builtins {
@@ -160,8 +161,8 @@ impl Builtins {
     // The call of built-in fn s with the type written in its turbofish (NONE: none written) as a
     // fn type (its parameters and result), as stage0's `call` on `St::Builtin`; ERR for a call
     // stage0 rejects (a turbofish missing or given to `fence_stream`), UNK for `size_of` /
-    // `align_of` of a type that holds no generic param and is not a scalar, a reference, or a
-    // pointer (stage0 asks its layout, E0911 when there is none).
+    // `align_of` / `needs_drop` of a type that holds no generic param and is not a scalar, a
+    // reference, or a pointer (stage0 asks its layout, E0911 when there is none).
     pub fn fn_type(&self, tab: &mut types.Table, s: u32, ty: u32) -> u32 {
         let mut k: usize = 0;
         while k < self.fns.len() && self.fns.as_slice()[k] != s {
@@ -169,14 +170,14 @@ impl Builtins {
         }
         if s == NONE || k == self.fns.len() { return UNK; }
         if (k == F_FENCE) != (ty == NONE) { return types.ERR; }
-        if (k == F_SIZE_OF || k == F_ALIGN_OF) && !has_params(tab, ty) {
+        if (k == F_SIZE_OF || k == F_ALIGN_OF || k == F_NEEDS_DROP) && !has_params(tab, ty) {
             let tag = tab.tag_of(ty);
             let laid = tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_REF || tag == types.TK_PTR;
             if !laid { return UNK; }
         }
         let us = tab.usize_t();
         let u8t = tab.int(false, types.W_8);
-        let ret = if k == F_FENCE || k == F_WRITE then tab.unit() else if k == F_READ then ty else us;
+        let ret = if k == F_FENCE || k == F_WRITE then tab.unit() else if k == F_READ then ty else if k == F_NEEDS_DROP then tab.key(types.TK_BOOL, 0, 0) else us;
         let p = tab.mk_ptr(k == F_WRITE, u8t);
         tab.begin();
         if k == F_READ || k == F_WRITE {
