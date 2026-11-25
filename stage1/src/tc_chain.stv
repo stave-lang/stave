@@ -30,6 +30,7 @@ import tc_traits;
 import types;
 import prims.search;
 import prims.sort;
+import std.mem;
 import std.vec;
 
 const NONE: u32 = tc_rows.NONE;
@@ -823,13 +824,117 @@ impl tc_rows.Typeck {
 
     // The use resolved at token seg of the chain whose head is row head, or NONE.
     fn use_at(&self, sg: &sigs.Sigs, t: &lex.Tokens, head: usize, seg: u32) -> u32 {
+        return self.use_off(sg, head, t.start.as_slice()[seg as usize]);
+    }
+
+    // The use keyed at row head whose name starts at byte offset off, or NONE.
+    fn use_off(&self, sg: &sigs.Sigs, head: usize, off: u32) -> u32 {
         let n = (head - self.base) as% u32;
         let (lo, hi) = sg.cx.uses.range(self.it, n);
-        let off = t.start.as_slice()[seg as usize];
         for u in lo..hi {
             if sg.cx.uses.off.as_slice()[u] == off { return u as% u32; }
         }
         return NONE;
+    }
+
+    // An f-string (`Primary` row r), as stage0's `fstring`: `std.string.String`. The value of each
+    // hole (`{` `.`-separated names `}`: a local, `self`, a const or static, through module steps,
+    // then fields) must have a type whose references peeled implement `Display`; a hole whose
+    // value this stage does not know decides nothing.
+    pub fn fstring_value(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) -> u32 {
+        if self.string == NONE { return self.err(); }
+        let a = tree.tok.as_slice()[r];
+        let src = set.file(cut.file.as_slice()[self.it as usize] as usize);
+        let mut h = search.lower_bound(nm.hole_tok.as_slice(), a);
+        let mut segs = vec.Vec::<u32>.new();
+        let mut j = t.start.as_slice()[a as usize] as usize + 2;
+        while j < src.len() {
+            let b = src[j];
+            if b == 34 { break; }
+            if b == 92 {
+                j = j + 2;
+                continue;
+            }
+            if b != 123 {
+                j = j + 1;
+                continue;
+            }
+            let mut k = j + 1;
+            let mut ok = false;
+            segs.clear();
+            loop {
+                let s0 = k;
+                while k < src.len() && is_idcont(src[k]) { k = k + 1; }
+                if k == s0 { break; }
+                segs.push(s0 as% u32);
+                segs.push(k as% u32);
+                if k < src.len() && src[k] == 46 {
+                    k = k + 1;
+                } else {
+                    ok = k < src.len() && src[k] == 125;
+                    if ok { k = k + 1; }
+                    break;
+                }
+            }
+            if ok { h = self.fmt_hole(sg, ds, nm, set, t, cut, tree, src, r, segs.as_slice(), h); }
+            j = if k > j + 1 then k else j + 1;
+        }
+        let tab = &mut sg.cx.tab;
+        tab.begin();
+        return tab.intern(types.TK_ADT, self.string, 0);
+    }
+
+    // The hole of f-string row r with names segs (start, end byte offsets in src), its first
+    // name not `self` hole string h: checked; the next hole string.
+    fn fmt_hole(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, src: &[u8], r: usize, segs: &[u32], h0: usize) -> usize {
+        let n = segs.len() / 2;
+        let mut h = h0;
+        let mut syms = vec.Vec::<u32>.new();
+        for p in 0..n {
+            let is_self = src[segs[2 * p] as usize..segs[2 * p + 1] as usize].eq(mem.str_bytes("self"));
+            if is_self {
+                syms.push(NONE);
+            } else {
+                syms.push(nm.hole_str.as_slice()[h]);
+                h = h + 1;
+            }
+        }
+        let mut ty = UNK;
+        let mut k: usize = 1;
+        if syms.as_slice()[0] == NONE {
+            if self.self_row == NONE { return h; }
+            ty = self.loc.as_slice()[self.self_row as usize];
+        } else {
+            let u = self.use_off(sg, r, segs[0]);
+            if u == NONE { return h; }
+            self.set_chain(r, S_ERR, UNK);
+            self.path_state(sg, ds, nm, set, t, cut, tree, r, u as usize, NONE, true);
+            while k < n && self.chain.as_slice()[r] != S_VAL {
+                let u2 = self.use_off(sg, r, segs[2 * k]);
+                if u2 == NONE { break; }
+                self.path_state(sg, ds, nm, set, t, cut, tree, r, u2 as usize, NONE, false);
+                k = k + 1;
+            }
+            let st = self.chain.as_slice()[r];
+            if st == S_NOVAL {
+                let _ = self.err();
+                return h;
+            }
+            if st != S_VAL { return h; }
+            let v = self.acc.as_slice()[r];
+            ty = self.force(v);
+        }
+        for p in k..n {
+            if ty == UNK { return h; }
+            ty = self.field_sym(sg, ds, ty, syms.as_slice()[p]);
+        }
+        let disp = self.tq.tr.lang.display;
+        if ty == UNK || ty == NONE || disp == NONE { return h; }
+        let inner = peel_refs(&sg.cx.tab, ty);
+        let e = self.tq.env_of(sg, self.sc);
+        let ans = self.tq.holds(sg, e, inner, disp);
+        if ans == tc_traits.A_NO || ans == tc_traits.A_WAIT && self.tq.last { self.bad = true; }
+        return h;
     }
 
     // A call of `callee` (a fn or method without generics of its own; NONE: a callee not checked
@@ -1400,6 +1505,11 @@ impl tc_rows.Typeck {
     // Field `seg` of a value of type recv (through references): a struct's field, with the
     // struct's arguments.
     fn field_of(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, recv: u32, seg: u32) -> u32 {
+        return self.field_sym(sg, ds, recv, nm.tok_str.as_slice()[seg as usize]);
+    }
+
+    // Field named s of a value of type recv.
+    fn field_sym(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, recv: u32, s: u32) -> u32 {
         if recv == UNK { return UNK; }
         if recv == NONE { return self.err(); }
         let tab = &mut sg.cx.tab;
@@ -1408,7 +1518,6 @@ impl tc_rows.Typeck {
         let d = tab.a_of(inner);
         // a `Soa` outside its module: a column (not checked yet)
         if d == self.soa && self.module != self.soa_mod { return UNK; }
-        let s = nm.tok_str.as_slice()[seg as usize];
         if ds.kind.as_slice()[d as usize] != decls.DK_STRUCT { return self.err(); }
         let f = member(ds, d, s);
         if f == NONE { return self.err(); }
@@ -1453,6 +1562,10 @@ pub fn headless_names(ds: &decls.Decls) -> vec.Vec<u32> {
         out.push(xs.as_slice()[perm.as_slice()[k] as usize]);
     }
     return out;
+}
+
+fn is_idcont(b: u8) -> bool {
+    return (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
 }
 
 // A type with its references peeled.

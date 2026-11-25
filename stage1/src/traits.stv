@@ -59,6 +59,7 @@ pub struct Lang {
     pub drop: u32,
     pub unsafe_cell: u32,
     pub guard: u32,
+    pub display: u32,
     pub ops: vec.Vec<u32>,
 }
 
@@ -86,6 +87,7 @@ pub fn lang_items(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, n
         drop: known(fl, md, ds, nm, "std.core", mem.str_bytes("Drop")),
         unsafe_cell: known(fl, md, ds, nm, "std.cell", mem.str_bytes("UnsafeCell")),
         guard: known(fl, md, ds, nm, "std.sync", mem.str_bytes("MutexGuard")),
+        display: known(fl, md, ds, nm, "std.core", mem.str_bytes("Display")),
         ops: ops,
     };
 }

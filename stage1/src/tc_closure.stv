@@ -6,10 +6,11 @@
 // What a closure captures does not change its type. A param or return type that does not lower
 // is a type error.
 //
-// A fn-type coercion `coerce` cannot decide from the two types alone (`fn_coercions`), as
-// stage0's `coerce`: a value `if` / `match` or parentheses convert each arm instead; a fn value
-// made right there (a closure literal or a fn item, through wrappers) also converts to a type
-// that denies more effects (it is made with them); any other is a type error.
+// The coercions `coerce` cannot decide from the two types alone (`node_coercions`), as stage0's
+// `coerce`: to a fn type, a value `if` / `match` or parentheses convert each arm instead, and a
+// fn value made right there (a closure literal or a fn item, through wrappers) also converts to
+// a type that denies more effects (it is made with them); an f-string (through parentheses)
+// converts to `&str`; any other is a type error.
 import ast;
 import consteval;
 import decls;
@@ -40,6 +41,7 @@ const K_UNARY: u8 = node_kinds.KIND_UNARY;
 const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
 const T_COMMA: u8 = terminals.T_COMMA as% u8;
 const T_KW_FN: u8 = terminals.T_KW_FN as% u8;
+const T_FMT_LIT: u8 = terminals.T_FMT_LIT as% u8;
 
 impl tc_rows.Typeck {
     // Before child c of closure Primary r: the params' bindings take their types, the return
@@ -106,12 +108,16 @@ impl tc_rows.Typeck {
         return self.known(ft);
     }
 
-    // Decides the fn-type coercions `coerce` left (`fc_node`, `fc_want`).
-    pub fn fn_coercions(&mut self, tab: &types.Table, t: &lex.Tokens, tree: &ast.Ast) {
+    // Decides the coercions `coerce` left (`fc_node`, `fc_want`).
+    pub fn node_coercions(&mut self, tab: &types.Table, t: &lex.Tokens, tree: &ast.Ast) {
         let mut arms = vec.Vec::<u32>.new();
         for i in 0..self.fc_node.len() {
             let e = self.fc_node.as_slice()[i] as usize;
             let want = self.fc_want.as_slice()[i];
+            if tab.tag_of(want) != types.TK_FN {
+                if !fstring_node(t, tree, self.base, e) { self.bad = true; }
+                continue;
+            }
             value_arms(t, tree, self.base, e, &mut arms);
             for j in 0..arms.len() {
                 let a = arms.as_slice()[j] as usize;
@@ -181,6 +187,21 @@ fn value_arms(t: &lex.Tokens, tree: &ast.Ast, base: usize, n: usize, out: &mut v
         }
         out.push(x as% u32);
     }
+}
+
+// Whether row n is an f-string through parentheses (stage0 `fstring_node`).
+fn fstring_node(t: &lex.Tokens, tree: &ast.Ast, base: usize, n: usize) -> bool {
+    let mut c = n;
+    while tree.kind.as_slice()[c] == K_PRIMARY {
+        let a = tree.tok.as_slice()[c] as usize;
+        let k = t.kind.as_slice()[a];
+        if k == T_FMT_LIT { return true; }
+        let cs = tree.kids.row(c);
+        let end = tree.tok_end.as_slice()[c] as usize;
+        if k != T_L_PAREN || cs.len() != 1 || end < 2 || t.kind.as_slice()[end - 2] == T_COMMA { return false; }
+        c = base + cs[0] as usize;
+    }
+    return false;
 }
 
 // The node a `Unary` or `Postfix` row c only wraps (one child, starting where c starts), else

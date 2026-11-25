@@ -111,6 +111,7 @@ const T_IDENT: u8 = terminals.T_IDENT as% u8;
 const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
 const T_FLOAT_LIT: u8 = terminals.T_FLOAT_LIT as% u8;
 const T_STR_LIT: u8 = terminals.T_STR_LIT as% u8;
+const T_FMT_LIT: u8 = terminals.T_FMT_LIT as% u8;
 const T_CHAR_LIT: u8 = terminals.T_CHAR_LIT as% u8;
 const T_COMMA: u8 = terminals.T_COMMA as% u8;
 const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
@@ -259,7 +260,7 @@ impl tc_rows.Typeck {
                 self.st_kid.as_mut_slice()[top] = (k + 1) as% u32;
                 let c = self.base + ks[k] as usize;
                 let ent = self.enter(sg, ds, nm, set, t, cut, tree, r, k, c);
-                if self.fc_node.len() > 0 { self.fn_coercions(&sg.cx.tab, t, tree); }
+                if self.fc_node.len() > 0 { self.node_coercions(&sg.cx.tab, t, tree); }
                 if ent {
                     self.st_row.push(c as% u32);
                     self.st_kid.push(0);
@@ -274,7 +275,7 @@ impl tc_rows.Typeck {
             self.st_kid.truncate(top);
             if is_level(kind(tree, r)) { self.depth = self.depth - 1; }
             self.finish(sg, ds, nm, set, t, cut, tree, r);
-            if self.fc_node.len() > 0 { self.fn_coercions(&sg.cx.tab, t, tree); }
+            if self.fc_node.len() > 0 { self.node_coercions(&sg.cx.tab, t, tree); }
         }
     }
 
@@ -761,7 +762,7 @@ impl tc_rows.Typeck {
         if ft == T_L_PAREN { return self.paren(sg, t, tree, r); }
         if ft == T_L_BRACKET { return self.array_lit(sg, ds, nm, set, t, cut, tree, r, h); }
         if ft == T_KW_FN { return self.closure_value(sg, tree, r); }
-        // f-strings: not checked yet
+        if ft == T_FMT_LIT { return self.fstring_value(sg, ds, nm, set, t, cut, tree, r); }
         return self.unknown(tree, r);
     }
 

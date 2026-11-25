@@ -124,7 +124,8 @@ pub struct Typeck {
     pub base_feats: u64,
     // per node row: it made a fn item a value (`tc_closure`)
     pub fn_item: vec.Vec<bool>,
-    // the fn-type coercions `coerce` leaves to `tc_closure.fn_coercions`: node, wanted type
+    // the coercions `coerce` leaves to `tc_closure.node_coercions` (they depend on the node's
+    // form): node, wanted type
     pub fc_node: vec.Vec<u32>,
     pub fc_want: vec.Vec<u32>,
 }
@@ -302,8 +303,11 @@ impl Typeck {
         }
         if v == want || v == self.t_never { return; }
         if self.coercible(tab, v, want) { return; }
-        if tab.tag_of(v) == types.TK_FN && tab.tag_of(want) == types.TK_FN {
-            // decided from the node's arms and how its value was made
+        let fns = tab.tag_of(v) == types.TK_FN && tab.tag_of(want) == types.TK_FN;
+        let fstr = want == self.t_ref_str && self.string != NONE && tab.tag_of(v) == types.TK_ADT && tab.a_of(v) == self.string;
+        if fns || fstr {
+            // fn types: decided from the node's arms and how its value was made; `String` to
+            // `&str`: an f-string's
             self.fc_node.push(e as% u32);
             self.fc_want.push(want);
             return;
