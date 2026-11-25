@@ -193,9 +193,9 @@ Outputs and statuses of the code-generating commands:
     [up to `Self`] as `<existing>` (<file>:<line>): call it instead` (a `self` class: `write it
     once, generic over a trait the types implement`), `<existing>` being a member the baseline
     had, a callable one first (`pub`, no other mark); then `dup: <n> new duplicates not in the
-    baseline`, exit 1. Baseline lines that match no class are allowed (one stderr line counts
-    them): removing a class is always allowed, adding one takes `--write-baseline` and review.
-    An unreadable or malformed FILE is exit 2.
+    baseline`, exit 1. Baseline lines that share no two fns with a class are allowed (one
+    stderr line counts them): removing a class is always allowed, adding one takes
+    `--write-baseline` and review. An unreadable or malformed FILE is exit 2.
 
   The CI step `tools/ci-step/run.sh dup-gate` (part of `check`) runs `stave dup stage1 --all
   --target x86_64-linux --baseline tools/ci-step/dup-baseline.txt` (stage1 with `prims`, `std`,

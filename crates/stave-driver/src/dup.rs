@@ -779,7 +779,8 @@ pub fn parse_baseline(text: &str) -> Result<Baseline, String> {
 pub struct Verdict {
     /// One message per class no baseline class covers (exit 1 when not empty).
     pub new: Vec<String>,
-    /// Baseline classes that cover no class of the report (removing them is allowed).
+    /// Baseline classes that share no two fns with a class of the report: their duplicate is gone
+    /// (removing them is allowed).
     pub stale: usize,
 }
 
@@ -804,6 +805,8 @@ pub fn check(r: &Report, b: &Baseline) -> Verdict {
             let common = paths.iter().filter(|p| bp.binary_search_by(|x| x.as_str().cmp(p)).is_ok()).count();
             if common == paths.len() {
                 covered = true;
+            }
+            if common >= 2 {
                 used[k] = true;
             }
             if common > 0 && best.is_none_or(|(_, n)| common > n) {
