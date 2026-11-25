@@ -3,13 +3,13 @@
 // `FILE:LINE:COL: error: MSG` or `FILE:LINE: verify: MSG` on stderr (at most 100) and exits 1;
 // an unreadable FILE or a bad command line exits 2.
 //
-// `stage1 ir opt [--passes=full] [--dump=inline] [--dump-phase=inline|clean] [--verify-phases]
-// [--limit NAME=N]... FILE` (contracts/cli-stage1.md): on a `release checked` FILE, canonicalized
-// before the first round, the rounds of rule P1, each `canon(C*(X(D(M'))))`: the decision tables of
-// every round, or the canonical module after X or after C* of the last round. The stage1 verifier
-// checks the module printed and, with `--verify-phases`, the canonical module after every phase of
-// every round (a fault: exit 3). The base passes are not built: `--passes=base`,
-// `--dump-phase=base`, and the plain output are a usage error.
+// `stage1 ir opt [--passes=base|full] [--dump=inline] [--dump-phase=inline|clean|base]
+// [--verify-phases] [--limit NAME=N]... FILE` (contracts/cli-stage1.md): on a `release checked`
+// FILE, canonicalized before the first round, the rounds of rule P1, each `canon(C*(X(D(M'))))`,
+// then the base passes and `canon`: the module at level `opt`, or the decision tables of every
+// round, or the canonical module after X, after C*, or after B. With `--passes=base` the rounds
+// are left out (rule P3). The stage1 verifier checks the module printed and, with
+// `--verify-phases`, the canonical module after every phase of every round (a fault: exit 3).
 import ir.canon;
 import ir.load;
 import ir.model;
@@ -39,7 +39,7 @@ pub fn run() -> i32 {
     let a = args.as_slice();
     if n > 2 && text.eq_str(a[2].as_bytes(), "opt") { return opt_run(a); }
     if n != 4 {
-        io.eprint("stage1: usage: stage1 ir check|fmt FILE, stage1 ir opt [--dump=inline|--dump-phase=inline|clean] [--verify-phases] [--limit NAME=N]... FILE\n");
+        io.eprint("stage1: usage: stage1 ir check|fmt FILE, stage1 ir opt [--passes=base|full] [--dump=inline|--dump-phase=inline|clean|base] [--verify-phases] [--limit NAME=N]... FILE\n");
         return 2;
     }
     let verb = a[2].as_bytes();
@@ -85,11 +85,11 @@ const SHOW_CLEAN: u8 = 2;
 const SHOW_OUTPUT: u8 = 3;
 
 fn opt_run(a: &[string.String]) -> i32 {
-    if a.len() == 5 && text.eq_str(a[3].as_bytes(), "--passes=base") { return opt_base(&a[4]); }
     let mut lim = decide.Limits.table();
     let mut show = SHOW_OUTPUT;
     let mut dump = false;
-    let mut base = false;
+    let mut only_base = false;
+    let mut passed = false;
     let mut verify = false;
     let mut phased = false;
     let mut k: usize = 3;
@@ -104,10 +104,10 @@ fn opt_run(a: &[string.String]) -> i32 {
             show = SHOW_CLEAN;
             phased = true;
         } else if text.eq_str(f, "--dump-phase=base") && !phased {
-            base = true;
             phased = true;
-        } else if text.eq_str(f, "--passes=base") {
-            base = true;
+        } else if (text.eq_str(f, "--passes=base") || text.eq_str(f, "--passes=full")) && !passed {
+            only_base = text.eq_str(f, "--passes=base");
+            passed = true;
         } else if text.eq_str(f, "--verify-phases") {
             verify = true;
         } else if text.eq_str(f, "--limit") && k + 2 < a.len() {
@@ -117,7 +117,7 @@ fn opt_run(a: &[string.String]) -> i32 {
                 io.eprint(f"stage1: ir opt: bad --limit `{s}` (NAME=N, NAME one of threshold cap call_saved slot_callee slot_caller rounds, within opt-passes.md K3)\n");
                 return 2;
             }
-        } else if !text.eq_str(f, "--passes=full") {
+        } else {
             let s = &a[k];
             io.eprint(f"stage1: ir opt: unknown or repeated flag `{s}`\n");
             return 2;
@@ -125,18 +125,18 @@ fn opt_run(a: &[string.String]) -> i32 {
         k = k + 1;
     }
     if k + 1 != a.len() || text.starts_with(a[k].as_bytes(), mem.str_bytes("--")) {
-        io.eprint("stage1: usage: stage1 ir opt [--passes=full] [--dump=inline|--dump-phase=inline|clean] [--verify-phases] [--limit NAME=N]... FILE\n");
+        io.eprint("stage1: usage: stage1 ir opt [--passes=base|full] [--dump=inline|--dump-phase=inline|clean|base] [--verify-phases] [--limit NAME=N]... FILE\n");
         return 2;
     }
     if dump && phased {
         io.eprint("stage1: ir opt: --dump and --dump-phase exclude each other\n");
         return 2;
     }
-    if dump { show = SHOW_DUMP; }
-    if base || show == SHOW_OUTPUT {
-        io.eprint("stage1: ir opt: the base passes are not built: --passes=base, --dump-phase=base, and the output need them (--dump=inline and --dump-phase=inline|clean run)\n");
+    if only_base && (dump || show == SHOW_INLINE || show == SHOW_CLEAN) {
+        io.eprint("stage1: ir opt: --passes=base runs no decision, expansion, or clean-up: --dump=inline and --dump-phase=inline|clean need --passes=full\n");
         return 2;
     }
+    if dump { show = SHOW_DUMP; }
     let file = &a[k];
     let mut src = vec.Vec::<u8>.new();
     if !read_into(file, &mut src) { return 2; }
@@ -154,7 +154,7 @@ fn opt_run(a: &[string.String]) -> i32 {
     canon.canon(m);
     let mut out = vec.Vec::<u8>.new();
     let mut txt = vec.Vec::<u8>.new();
-    let n = lim.rounds;
+    let n = if only_base then 0 else lim.rounds;
     let mut r: u64 = 1;
     while r <= n {
         let last = r == n;
@@ -173,7 +173,12 @@ fn opt_run(a: &[string.String]) -> i32 {
         if (verify || (last && show == SHOW_CLEAN)) && !phase_text(file, "clean", &*m, &mut txt) { return 3; }
         r = r + 1;
     }
-    // with SHOW_OUTPUT the base passes and `canon` follow here (P1)
+    if show == SHOW_OUTPUT {
+        base.run(m);
+        canon.canon(m);
+        m.level = model.LEVEL_OPT;
+        if !phase_text(file, "base", &*m, &mut txt) { return 3; }
+    }
     let _ = io.write_all(1, if show == SHOW_DUMP then out.as_slice() else txt.as_slice());
     return 0;
 }
@@ -211,30 +216,6 @@ fn phase_verified(file: &string.String, ph: &str, t: &[u8]) -> bool {
     }
     let _ = io.write_all(2, e.as_slice());
     return false;
-}
-
-// `stage1 ir opt --passes=base FILE` (opt-passes.md P3): `canon(B(M))` of the canonical module,
-// printed at level `opt`.
-fn opt_base(file: &string.String) -> i32 {
-    let mut src = vec.Vec::<u8>.new();
-    if !read_into(file, &mut src) { return 2; }
-    let mut ld = load.load(src.as_slice());
-    if !ld.ok() {
-        let out = ld.errs.render(file.as_bytes());
-        let _ = io.write_all(2, out.as_slice());
-        return 1;
-    }
-    if ld.m.mode != model.MODE_RELEASE || ld.m.level != model.LEVEL_CHECKED {
-        io.eprint(f"{file}: error: ir opt reads a `release checked` module\n");
-        return 1;
-    }
-    canon.canon(&mut ld.m);
-    base.run(&mut ld.m);
-    canon.canon(&mut ld.m);
-    ld.m.level = model.LEVEL_OPT;
-    let out = print.print(&ld.m);
-    let _ = io.write_all(1, out.as_slice());
-    return 0;
 }
 
 // `NAME=N` into lim.
