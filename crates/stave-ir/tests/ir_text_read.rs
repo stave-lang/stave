@@ -1412,10 +1412,10 @@ b1(%3: t4):
             "type t6 ref mut t4
 fn @0 main.get(t3, t0) -> t1 {
 b0(%0: t3, %1: t0):
-  %2 = slice.ptr t4 %0
-  %3 = slot t6
-  store () %3 %2
-  %4 = load t4 %3
+  %2 = slot t6
+  %3 = slice.ptr t4 %0
+  store () %2 %3
+  %4 = load t4 %2
   %5 = addr.elem t5 %4 %1
   %6 = load t1 %5
   ret %6
