@@ -1,0 +1,559 @@
+// The base passes `B` (contracts/opt-passes.md section 6) on every body of a canonical module, in
+// the contract's order: B1 slice lengths, B2 element addresses, B2' element pointers (only when
+// B2 changed the body), B3 chunk bounds, B4 repeated loop steps, B5 dead instructions. B6, the
+// `canon` after them, is the caller's (rule P1, P3).
+//
+// - Bodies are independent: a body's passes read only that body, the type table, and the op
+//   table, and write only that body. The `ptr mut T` types B2 reads are interned before any body,
+//   one per slice type of the table, in type order, so no body writes the table (a type B2 adds
+//   comes after every input type).
+// - The control flow (cfg.stv) is computed once per body: B moves no terminator.
+// - Each pass reads the body the one before wrote (edits.stv): values by their ids in B's input,
+//   new values after them; instructions in print order.
+import cfg;
+import edits;
+import facts;
+import ir.generated.ir_text_terminals as term;
+import ir.generated.opt_table;
+import ir.grammar;
+import ir.model;
+import ir.types;
+import prims.col;
+import prims.perm;
+import prims.sort;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+// The blocks B4's reach search marks before it answers no.
+const REACH_LIMIT: usize = 4096;
+
+// The parts B1, B2', and B3 group.
+const PART_LEN: u8 = 0;
+const PART_PTR: u8 = 1;
+const PART_CHUNK: u8 = 2;
+
+// B4's candidate ops.
+const CANDIDATES: [u16; 16] = [term.IR_T_KW_ADD, term.IR_T_KW_SUB, term.IR_T_KW_MUL, term.IR_T_KW_NEG, term.IR_T_ADD_DOT_WRAP, term.IR_T_SUB_DOT_WRAP, term.IR_T_MUL_DOT_WRAP, term.IR_T_SHL_DOT_WRAP, term.IR_T_ADD_DOT_SAT, term.IR_T_SUB_DOT_SAT, term.IR_T_MUL_DOT_SAT, term.IR_T_KW_SHL, term.IR_T_KW_SHR, term.IR_T_KW_AND, term.IR_T_KW_OR, term.IR_T_KW_XOR];
+
+// The ops of a `lanes` row that never go (K2): marked † in checked-ir.md "Vector and mask ops", or
+// a memory op.
+const LANES_NO: [u16; 13] = [term.IR_T_VEC_DOT_DIV_LANES, term.IR_T_VEC_DOT_DIV_CONST, term.IR_T_VEC_DOT_SHL, term.IR_T_VEC_DOT_SHR, term.IR_T_VEC_DOT_LOAD, term.IR_T_VEC_DOT_STORE, term.IR_T_VEC_DOT_LOAD_ALIGNED, term.IR_T_VEC_DOT_STORE_ALIGNED, term.IR_T_VEC_DOT_STORE_STREAM, term.IR_T_VEC_DOT_LOAD_MASKED, term.IR_T_VEC_DOT_STORE_MASKED, term.IR_T_VEC_DOT_GATHER, term.IR_T_VEC_DOT_SCATTER];
+
+const SIGN: u64 = 0x8000_0000_0000_0000;
+
+// Per op of the grammar (by terminal id): whether it is a B4 candidate, and its K2 `removable`
+// class with a `lanes` row resolved to yes or no; the class per name of the module's intrinsic
+// table. An op without a row is `no`.
+pub struct Ops {
+    cand: vec.Vec<bool>,
+    rm: vec.Vec<u8>,
+    intr_rm: vec.Vec<u8>,
+}
+
+fn listed(xs: &[u16], op: u16) -> bool {
+    for k in 0..xs.len() {
+        if xs[k] == op { return true; }
+    }
+    return false;
+}
+
+// The `removable` class of op `op` named x.
+fn class_of(x: &[u8], op: u16) -> u8 {
+    let r = facts.op_row(x);
+    if r == NONE { return opt_table.REMOVABLE_NO; }
+    let c = opt_table.OPT_OP_REMOVABLE[r as usize];
+    if c != opt_table.REMOVABLE_LANES { return c; }
+    return if listed(&LANES_NO, op) then opt_table.REMOVABLE_NO else opt_table.REMOVABLE_YES;
+}
+
+pub fn ops(m: &model.Module) -> Ops {
+    let g = grammar.Grammar.new();
+    let mut o = Ops.{ cand: vec.Vec::<bool>.new(), rm: vec.Vec::<u8>.new(), intr_rm: vec.Vec::<u8>.new() };
+    for t in 0..g.nterm() {
+        let op = t as% u16;
+        o.cand.push(listed(&CANDIDATES, op));
+        o.rm.push(class_of(g.spell(t as% u32), op));
+    }
+    let mut name = vec.Vec::<u8>.new();
+    for i in 0..m.intr.rows() {
+        name.clear();
+        name.extend_from_slice(mem.str_bytes("intrinsic."));
+        name.extend_from_slice(m.intr.row(i));
+        o.intr_rm.push(class_of(name.as_slice(), term.IR_T_INTR));
+    }
+    return o;
+}
+
+impl Ops {
+    fn candidate(&self, op: u16) -> bool {
+        return (op as usize) < self.cand.len() && self.cand.as_slice()[op as usize];
+    }
+
+    // K2 on instruction row r of fn f.
+    fn removable(&self, m: &model.Module, f: usize, r: usize) -> bool {
+        let op = m.ins_op.as_slice()[r];
+        let mut c = opt_table.REMOVABLE_NO;
+        if op == term.IR_T_INTR {
+            let x = m.ins_intr.as_slice()[r] as usize;
+            if x < self.intr_rm.len() { c = self.intr_rm.as_slice()[x]; }
+        } else if (op as usize) < self.rm.len() {
+            c = self.rm.as_slice()[op as usize];
+        }
+        if c == opt_table.REMOVABLE_YES { return true; }
+        if c == opt_table.REMOVABLE_FLOAT { return m.types.tag_of(m.ins_ty.as_slice()[r]) == types.TK_FLOAT; }
+        if c != opt_table.REMOVABLE_CONST_INDEX || m.ins_opnd_n.as_slice()[r] < 2 { return false; }
+        let (k, _, _) = int_const(m, f, m.ins_opnd_lo.as_slice()[r] as usize + 1);
+        return k;
+    }
+}
+
+// Whether operand row x of fn f is an int constant, and its value as two's-complement (hi, lo).
+fn int_const(m: &model.Module, f: usize, x: usize) -> (bool, u64, u64) {
+    if x >= m.opnd_kind.len() || m.opnd_kind.as_slice()[x] != model.O_CONST { return (false, 0, 0); }
+    let id = m.opnd_id.as_slice()[x];
+    if id >= m.fn_const_n.as_slice()[f] { return (false, 0, 0); }
+    let c = m.fn_const_lo.as_slice()[f] as usize + id as usize;
+    if m.const_kind.as_slice()[c] != model.C_INT { return (false, 0, 0); }
+    let w = m.const_bits.as_slice()[c] as usize;
+    return (true, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
+}
+
+// Interns `ptr mut T` for the element T of every slice type, in type order.
+fn elem_pointers(m: &mut model.Module) {
+    let n = m.types.len();
+    for t in 0..n {
+        let id = t as% u32;
+        if m.types.tag_of(id) != types.TK_SLICE { continue; }
+        let e = m.types.a_of(id);
+        let _ = m.types.mk_ptr(true, e);
+    }
+}
+
+pub fn run(m: &mut model.Module) {
+    elem_pointers(m);
+    let o = ops(&*m);
+    for f in 0..m.fns() {
+        if m.has_body(f) { body(m, f, &o); }
+    }
+}
+
+// All of `B` on fn f.
+fn body(m: &mut model.Module, f: usize, o: &Ops) {
+    let g = cfg.of(&*m, f);
+    let _ = unify(m, f, &g, PART_LEN);
+    if elem_addrs(m, f) { let _ = unify(m, f, &g, PART_PTR); }
+    let _ = unify(m, f, &g, PART_CHUNK);
+    let _ = repeats(m, f, &g, o);
+    let _ = dead(m, f, o);
+}
+
+// `order` stably sorted by keys[order[i]].
+fn by(order: vec.Vec<u32>, keys: &[u64]) -> vec.Vec<u32> {
+    let ks = perm.gather(keys, order.as_slice());
+    let p = sort.sort_perm(ks.as_slice());
+    return perm.gather(order.as_slice(), p.as_slice());
+}
+
+// Per value of the body: the block that defines it and, for an instruction's result, the local
+// instruction (NONE: a param, or no definition).
+fn defs(m: &model.Module, e: &edits.Edit) -> (vec.Vec<u32>, vec.Vec<u32>) {
+    let nv = e.nv as usize;
+    let mut db = col.filled(nv, NONE);
+    let mut di = col.filled(nv, NONE);
+    for b in 0..e.nb {
+        let pv = m.blk_val_lo.as_slice()[e.blo + b];
+        for v in pv..pv + m.blk_param_n.as_slice()[e.blo + b] {
+            if (v as usize) < nv { db.as_mut_slice()[v as usize] = b as% u32; }
+        }
+    }
+    for k in 0..e.len() {
+        let v = m.ins_res.as_slice()[e.row.as_slice()[k] as usize];
+        if v == NONE || v as usize >= nv { continue; }
+        db.as_mut_slice()[v as usize] = e.blk.as_slice()[k];
+        di.as_mut_slice()[v as usize] = k as% u32;
+    }
+    return (db, di);
+}
+
+// The place of a part of a param of block b: before its first instruction that is not a `slot`.
+fn after_slots(m: &model.Module, e: &edits.Edit, b: usize) -> u32 {
+    let mut last = NONE;
+    for k in e.first.as_slice()[b] as usize..e.first.as_slice()[b + 1] as usize {
+        if m.ins_op.as_slice()[e.row.as_slice()[k] as usize] != term.IR_T_KW_SLOT { break; }
+        last = k as% u32;
+    }
+    return if last == NONE then e.at_start(b) else e.after(last as usize);
+}
+
+// The parts of one kind (B1, B2', B3): local instruction, operand value, result type, constant.
+struct Parts {
+    k: vec.Vec<u32>,
+    s: vec.Vec<u32>,
+    key: vec.Vec<u64>,
+    hi: vec.Vec<u64>,
+    lo: vec.Vec<u64>,
+}
+
+fn parts(m: &model.Module, f: usize, e: &edits.Edit, kind: u8) -> Parts {
+    let want = if kind == PART_LEN then term.IR_T_SLICE_DOT_LEN else if kind == PART_PTR then term.IR_T_SLICE_DOT_PTR else term.IR_T_SUB_DOT_SAT;
+    let arity: u32 = if kind == PART_CHUNK then 2 else 1;
+    let mut p = Parts.{ k: vec.Vec::<u32>.new(), s: vec.Vec::<u32>.new(), key: vec.Vec::<u64>.new(), hi: vec.Vec::<u64>.new(), lo: vec.Vec::<u64>.new() };
+    for k in 0..e.len() {
+        let r = e.row.as_slice()[k] as usize;
+        if m.ins_op.as_slice()[r] != want || m.ins_opnd_n.as_slice()[r] != arity { continue; }
+        let t = m.ins_ty.as_slice()[r];
+        if t == NONE || m.ins_res.as_slice()[r] == NONE { continue; }
+        let x = m.ins_opnd_lo.as_slice()[r] as usize;
+        if m.opnd_kind.as_slice()[x] != model.O_VALUE { continue; }
+        let mut hi: u64 = 0;
+        let mut lo: u64 = 0;
+        if kind == PART_CHUNK {
+            let (ok, h, l) = int_const(m, f, x + 1);
+            if !ok { continue; }
+            hi = h ^ SIGN;
+            lo = l;
+        }
+        let s = m.opnd_id.as_slice()[x];
+        p.k.push(k as% u32);
+        p.s.push(s);
+        p.key.push(((s as u64) << 32) | (t as u64));
+        p.hi.push(hi);
+        p.lo.push(lo);
+    }
+    return p;
+}
+
+// B1 (and B2', B3): every group of parts with one (s, t, k) that moves becomes its first part at
+// the place of s, the others reading its result. Groups go in ascending (s, t, k) order, so at
+// one place in that order.
+fn unify(m: &mut model.Module, f: usize, g: &cfg.Cfg, kind: u8) -> bool {
+    let mut e = edits.Edit.new(&*m, f);
+    let p = parts(&*m, f, &e, kind);
+    let n = p.k.len();
+    if n == 0 { return false; }
+    let mut order = col.iota(n);
+    if kind == PART_CHUNK {
+        order = by(order, p.lo.as_slice());
+        order = by(order, p.hi.as_slice());
+    }
+    order = by(order, p.key.as_slice());
+    let (db, di) = defs(&*m, &e);
+    let os = order.as_slice();
+    let mut j: usize = 0;
+    while j < n {
+        let a = os[j] as usize;
+        let mut end = j + 1;
+        while end < n && p.key.as_slice()[os[end] as usize] == p.key.as_slice()[a] && p.hi.as_slice()[os[end] as usize] == p.hi.as_slice()[a] && p.lo.as_slice()[os[end] as usize] == p.lo.as_slice()[a] {
+            end = end + 1;
+        }
+        let lo = j;
+        j = end;
+        let s = p.s.as_slice()[a];
+        if s >= e.nv { continue; }
+        let d = db.as_slice()[s as usize];
+        if d == NONE || !g.reach.as_slice()[d as usize] { continue; }
+        let dd = g.depth.as_slice()[d as usize];
+        let mut deeper = false;
+        for q in lo..end {
+            let b = e.blk.as_slice()[p.k.as_slice()[os[q] as usize] as usize];
+            if g.depth.as_slice()[b as usize] > dd { deeper = true; }
+        }
+        if end - lo < 2 && !deeper { continue; }
+        let di_s = di.as_slice()[s as usize];
+        let at = if di_s == NONE then after_slots(&*m, &e, d as usize) else e.after(di_s as usize);
+        let first = p.k.as_slice()[a] as usize;
+        let r = e.row.as_slice()[first] as usize;
+        let v = m.ins_res.as_slice()[r];
+        e.insert(at, m.ins_op.as_slice()[r], m.ins_intr.as_slice()[r], m.ins_ty.as_slice()[r], m.ins_opnd_lo.as_slice()[r], m.ins_opnd_n.as_slice()[r], m.ins_site.as_slice()[r], v);
+        for q in lo..end {
+            let k = p.k.as_slice()[os[q] as usize] as usize;
+            e.remove(k);
+            let w = m.ins_res.as_slice()[e.row.as_slice()[k] as usize];
+            if k != first && w != NONE { e.replace(w, v); }
+        }
+    }
+    let changed = e.changed();
+    e.apply(m);
+    return changed;
+}
+
+// The `ptr mut T` of a value of type t that B2 rewrites (a `ref` or `ptr` to `slice T`, T neither
+// an array nor a slice), else NONE.
+fn elem_ptr(m: &model.Module, t: u32) -> u32 {
+    let tag = m.types.tag_of(t);
+    if tag != types.TK_REF && tag != types.TK_PTR { return NONE; }
+    let inner = m.types.b_of(t);
+    if m.types.tag_of(inner) != types.TK_SLICE { return NONE; }
+    let el = m.types.a_of(inner);
+    let et = m.types.tag_of(el);
+    if et == types.TK_ARRAY || et == types.TK_SLICE { return NONE; }
+    return m.types.find(types.TK_PTR, 1, el, vec.Vec::<u32>.new().as_slice());
+}
+
+// B2: `slice.ptr` before every element access through a slice reference, which then reads it.
+fn elem_addrs(m: &mut model.Module, f: usize) -> bool {
+    let mut e = edits.Edit.new(&*m, f);
+    let vlo = m.fn_val_lo.as_slice()[f] as usize;
+    for k in 0..e.len() {
+        let r = e.row.as_slice()[k] as usize;
+        let op = m.ins_op.as_slice()[r];
+        let arity: u32 = if op == term.IR_T_ADDR_DOT_ELEM || op == term.IR_T_VEC_DOT_LOAD then 2 else if op == term.IR_T_VEC_DOT_STORE then 3 else 0;
+        if arity == 0 || m.ins_opnd_n.as_slice()[r] != arity { continue; }
+        let x = m.ins_opnd_lo.as_slice()[r] as usize;
+        if m.opnd_kind.as_slice()[x] != model.O_VALUE { continue; }
+        let s = m.opnd_id.as_slice()[x];
+        if s >= e.nv { continue; }
+        let pt = elem_ptr(&*m, m.val_ty.as_slice()[vlo + s as usize]);
+        if pt == NONE { continue; }
+        let pv = e.value(pt);
+        let olo = edits.value_operand(m, s);
+        let at = e.before(k);
+        let site = m.ins_site.as_slice()[r];
+        e.insert(at, term.IR_T_SLICE_DOT_PTR, NONE, pt, olo, 1, site, pv);
+        m.opnd_id.as_mut_slice()[x] = pv;
+    }
+    let changed = e.changed();
+    e.apply(m);
+    return changed;
+}
+
+// Operand j of the operand rows olo..olo + on of fn f as a key word: none, a value by id, an int
+// constant by value (its wide-int row), any other operand by kind and id.
+fn arg_key(m: &model.Module, f: usize, olo: usize, on: usize, j: usize) -> u64 {
+    if j >= on { return 0; }
+    let x = olo + j;
+    let kind = m.opnd_kind.as_slice()[x];
+    let id = m.opnd_id.as_slice()[x] as u64;
+    if kind == model.O_VALUE { return (1u64 << 32) | id; }
+    let (ok, _, _) = int_const(m, f, x);
+    if ok {
+        let c = m.fn_const_lo.as_slice()[f] as usize + id as usize;
+        return (2u64 << 32) | m.const_bits.as_slice()[c];
+    }
+    return ((8 + kind as u64) << 32) | id;
+}
+
+// B4's scope on the dominator-tree walk: per key class the result and the block that added it
+// (NONE: not in scope), the classes the open blocks added, and the reach search's marks.
+struct Scope {
+    val: vec.Vec<u32>,
+    blk: vec.Vec<u32>,
+    added: vec.Vec<u32>,
+    seen: vec.Vec<u32>,
+    stamp: u32,
+    work: vec.Vec<u32>,
+}
+
+impl Scope {
+    // Whether block `to` is found from the successors of block x (B4 "Reached").
+    fn reaches(&mut self, g: &cfg.Cfg, x: usize, to: u32) -> bool {
+        self.stamp = self.stamp + 1;
+        let st = self.stamp;
+        self.work.clear();
+        self.work.extend_from_slice(g.succs(x));
+        let mut marked: usize = 0;
+        while self.work.len() > 0 {
+            let top = self.work.len() - 1;
+            let y = self.work.as_slice()[top];
+            self.work.truncate(top);
+            if y == to { return true; }
+            if self.seen.as_slice()[y as usize] == st { continue; }
+            self.seen.as_mut_slice()[y as usize] = st;
+            marked = marked + 1;
+            if marked > REACH_LIMIT { return false; }
+            self.work.extend_from_slice(g.succs(y as usize));
+        }
+        return false;
+    }
+
+    // The candidates of block b in order: cls[k] is local instruction k's key class (NONE: no
+    // candidate), edge[v] whether only edge arguments read value v.
+    fn visit(&mut self, m: &model.Module, g: &cfg.Cfg, e: &mut edits.Edit, b: usize, cls: &[u32], edge: &[bool]) {
+        for k in e.first.as_slice()[b] as usize..e.first.as_slice()[b + 1] as usize {
+            let c = cls[k] as usize;
+            if cls[k] == NONE { continue; }
+            let v = m.ins_res.as_slice()[e.row.as_slice()[k] as usize];
+            let p = self.val.as_slice()[c];
+            if p == NONE {
+                self.val.as_mut_slice()[c] = v;
+                self.blk.as_mut_slice()[c] = b as% u32;
+                self.added.push(c as% u32);
+                continue;
+            }
+            let a = self.blk.as_slice()[c];
+            if edge[v as usize] && self.reaches(g, b, a) {
+                e.remove(k);
+                e.replace(v, p);
+            }
+        }
+    }
+}
+
+// B4: per body, the candidates' key classes, then the preorder walk of the dominator tree.
+fn repeats(m: &mut model.Module, f: usize, g: &cfg.Cfg, o: &Ops) -> bool {
+    let mut e = edits.Edit.new(&*m, f);
+    let nv = e.nv as usize;
+    let n = e.len();
+    if g.nb == 0 { return false; }
+    let mut edge = col.filled(nv, true);
+    for k in 0..n {
+        let r = e.row.as_slice()[k] as usize;
+        let ol = m.ins_opnd_lo.as_slice()[r] as usize;
+        for x in ol..ol + m.ins_opnd_n.as_slice()[r] as usize {
+            let v = m.opnd_id.as_slice()[x] as usize;
+            if m.opnd_kind.as_slice()[x] == model.O_VALUE && v < nv { edge.as_mut_slice()[v] = false; }
+        }
+    }
+    for b in e.blo..e.blo + e.nb {
+        let x = m.blk_topnd.as_slice()[b];
+        if x == NONE || m.opnd_kind.as_slice()[x as usize] != model.O_VALUE { continue; }
+        let v = m.opnd_id.as_slice()[x as usize] as usize;
+        if v < nv { edge.as_mut_slice()[v] = false; }
+    }
+    let mut ck = vec.Vec::<u32>.new();
+    let mut w0 = vec.Vec::<u64>.new();
+    let mut w1 = vec.Vec::<u64>.new();
+    let mut w2 = vec.Vec::<u64>.new();
+    for k in 0..n {
+        let r = e.row.as_slice()[k] as usize;
+        let t = m.ins_ty.as_slice()[r];
+        let op = m.ins_op.as_slice()[r];
+        let on = m.ins_opnd_n.as_slice()[r] as usize;
+        if m.ins_res.as_slice()[r] == NONE || t == NONE || !o.candidate(op) || m.types.tag_of(t) != types.TK_INT || on > 2 { continue; }
+        let ol = m.ins_opnd_lo.as_slice()[r] as usize;
+        ck.push(k as% u32);
+        w0.push(((op as u64) << 32) | (t as u64));
+        w1.push(arg_key(&*m, f, ol, on, 0));
+        w2.push(arg_key(&*m, f, ol, on, 1));
+    }
+    let nc = ck.len();
+    if nc < 2 { return false; }
+    let mut order = col.iota(nc);
+    order = by(order, w2.as_slice());
+    order = by(order, w1.as_slice());
+    order = by(order, w0.as_slice());
+    // equal keys share a class; only a class of two or more with a repeat can change the body
+    let mut cls = col.filled(n, NONE);
+    let mut ncls: u32 = 0;
+    let mut useful = false;
+    let mut size: usize = 0;
+    let mut rep = false;
+    let os = order.as_slice();
+    for j in 0..nc {
+        let a = os[j] as usize;
+        let fresh = j == 0 || w0.as_slice()[a] != w0.as_slice()[os[j - 1] as usize] || w1.as_slice()[a] != w1.as_slice()[os[j - 1] as usize] || w2.as_slice()[a] != w2.as_slice()[os[j - 1] as usize];
+        if fresh {
+            ncls = ncls + 1;
+            size = 0;
+            rep = false;
+        }
+        let k = ck.as_slice()[a] as usize;
+        cls.as_mut_slice()[k] = ncls - 1;
+        size = size + 1;
+        if edge.as_slice()[m.ins_res.as_slice()[e.row.as_slice()[k] as usize] as usize] { rep = true; }
+        if size >= 2 && rep { useful = true; }
+    }
+    if !useful { return false; }
+    let mut sc = Scope.{ val: col.filled(ncls as usize, NONE), blk: col.filled(ncls as usize, NONE), added: vec.Vec::<u32>.new(), seen: col.filled(g.nb, 0u32), stamp: 0, work: vec.Vec::<u32>.new() };
+    // the walk's stack: block, next child row, the length of `added` when it was entered
+    let mut sb = vec.Vec::<u32>.new();
+    let mut sk = vec.Vec::<u32>.new();
+    let mut sa = vec.Vec::<u32>.new();
+    sb.push(0);
+    sk.push(g.kid_off.as_slice()[0]);
+    sa.push(0);
+    sc.visit(&*m, g, &mut e, 0, cls.as_slice(), edge.as_slice());
+    while sb.len() > 0 {
+        let top = sb.len() - 1;
+        let b = sb.as_slice()[top] as usize;
+        let kp = sk.as_slice()[top];
+        if kp < g.kid_off.as_slice()[b + 1] {
+            sk.as_mut_slice()[top] = kp + 1;
+            let c = g.kid.as_slice()[kp as usize];
+            sb.push(c);
+            sk.push(g.kid_off.as_slice()[c as usize]);
+            sa.push(col.ids(sc.added.len()));
+            sc.visit(&*m, g, &mut e, c as usize, cls.as_slice(), edge.as_slice());
+            continue;
+        }
+        let open = sa.as_slice()[top] as usize;
+        for q in open..sc.added.len() {
+            let c = sc.added.as_slice()[q] as usize;
+            sc.val.as_mut_slice()[c] = NONE;
+        }
+        sc.added.truncate(open);
+        sb.truncate(top);
+        sk.truncate(top);
+        sa.truncate(top);
+    }
+    let changed = e.changed();
+    e.apply(m);
+    return changed;
+}
+
+// B5: the removable instructions whose result nothing live reads go, transitively.
+fn dead(m: &mut model.Module, f: usize, o: &Ops) -> bool {
+    let mut e = edits.Edit.new(&*m, f);
+    let nv = e.nv as usize;
+    let n = e.len();
+    let mut uses = col.filled(nv, 0u32);
+    for k in 0..n {
+        let r = e.row.as_slice()[k] as usize;
+        count(&*m, m.ins_opnd_lo.as_slice()[r], m.ins_opnd_n.as_slice()[r], uses.as_mut_slice());
+    }
+    for b in e.blo..e.blo + e.nb {
+        let x = m.blk_topnd.as_slice()[b];
+        if x != NONE { count(&*m, x, 1, uses.as_mut_slice()); }
+        let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+        for t in tl..tl + m.blk_tgt_n.as_slice()[b] as usize {
+            count(&*m, m.tgt_opnd_lo.as_slice()[t], m.tgt_opnd_n.as_slice()[t], uses.as_mut_slice());
+        }
+    }
+    let mut def = col.filled(nv, NONE);
+    let mut work = vec.Vec::<u32>.new();
+    for k in 0..n {
+        let v = m.ins_res.as_slice()[e.row.as_slice()[k] as usize];
+        if v == NONE || v as usize >= nv { continue; }
+        def.as_mut_slice()[v as usize] = k as% u32;
+    }
+    for k in 0..n {
+        let r = e.row.as_slice()[k] as usize;
+        let v = m.ins_res.as_slice()[r];
+        if v == NONE || v as usize >= nv || uses.as_slice()[v as usize] != 0 { continue; }
+        if o.removable(&*m, f, r) { work.push(k as% u32); }
+    }
+    while work.len() > 0 {
+        let top = work.len() - 1;
+        let i = work.as_slice()[top] as usize;
+        work.truncate(top);
+        if e.removed(i) { continue; }
+        e.remove(i);
+        let r = e.row.as_slice()[i] as usize;
+        let ol = m.ins_opnd_lo.as_slice()[r] as usize;
+        for x in ol..ol + m.ins_opnd_n.as_slice()[r] as usize {
+            if m.opnd_kind.as_slice()[x] != model.O_VALUE { continue; }
+            let v = m.opnd_id.as_slice()[x] as usize;
+            if v >= nv { continue; }
+            let c = uses.as_slice()[v];
+            if c == 0 { continue; }
+            uses.as_mut_slice()[v] = c - 1;
+            let d = def.as_slice()[v];
+            if c == 1 && d != NONE && o.removable(&*m, f, e.row.as_slice()[d as usize] as usize) { work.push(d); }
+        }
+    }
+    let changed = e.changed();
+    e.apply(m);
+    return changed;
+}
+
+// Counts the value operands among rows lo..lo + n.
+fn count(m: &model.Module, lo: u32, n: u32, uses: &mut [u32]) {
+    for x in lo as usize..(lo + n) as usize {
+        if m.opnd_kind.as_slice()[x] != model.O_VALUE { continue; }
+        let v = m.opnd_id.as_slice()[x] as usize;
+        if v < uses.len() { uses[v] = uses[v] + 1; }
+    }
+}

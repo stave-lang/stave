@@ -176,6 +176,49 @@ bytes=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
 echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots, $((end - start)) s; $empty empty files stage0 wrote (no text)"
 if grep -v '^SAME\|^EMPTY' "$OUT/result.txt"; then fail=1; fi
 
+# Base passes (opt-passes.md section 9 "Base"): `stage1 ir opt --passes=base` on every `release`
+# `ir` text of the round trip that has stage0's `opt` dump beside it equals that dump byte for
+# byte; on every tests/opt case with a `passes` file it equals the case's `output.ir`.
+find "$OUT/w" -path '*-release/ir.txt' -size +0 | sort > "$OUT/base-inputs.txt"
+xargs -P "$(nproc)" -I F sh -c '
+  o="$(dirname "$2")/opt.txt"
+  [ -s "$o" ] || exit 0
+  t=$(basename "$(dirname "$2")" | sed "s/-release\$//")
+  if "$1" ir opt --passes=base "$2" > "$2.base" 2> "$2.base.err"; then
+    if cmp -s "$o" "$2.base"; then echo "SAME $t $(wc -c < "$2") $2"; else echo "DIFF $t $2 (first: $(cmp "$o" "$2.base" 2>&1 | head -1))"; fi
+  else
+    echo "FAIL $t $2 ($(head -c 300 "$2.base.err"))"
+  fi' sh "$S1" F < "$OUT/base-inputs.txt" > "$OUT/base.txt"
+bcases=0
+bsame=0
+for c in "$ROOT"/tests/opt/*/; do
+  [ -f "$c/passes" ] || continue
+  bcases=$((bcases + 1))
+  o="$OUT/base-$(basename "$c").ir"
+  if grep -qx base "$c/passes" && "$S1" ir opt --passes=base "$c/input.ir" > "$o" 2>&1 && cmp -s "$c/output.ir" "$o"; then
+    bsame=$((bsame + 1))
+  else
+    echo "BASE DIFF $(basename "$c") ($(diff "$c/output.ir" "$o" 2>&1 | head -3 | tr '\n' ' '))"
+    fail=1
+  fi
+done
+for t in x86_64-linux aarch64-linux; do
+  n=$(awk -v t="$t" '$2 == t' "$OUT/base.txt" | wc -l)
+  s=$(awk -v t="$t" '$1 == "SAME" && $2 == t' "$OUT/base.txt" | wc -l)
+  echo "stage1-ir-gate: base passes $t: $s / $n release texts equal stage0's opt dump"
+done
+echo "stage1-ir-gate: base passes cases $bsame / $bcases equal output.ir"
+if grep -v '^SAME' "$OUT/base.txt"; then fail=1; fi
+bbig=$(awk '$1 == "SAME" { print $3, $4 }' "$OUT/base.txt" | sort -n | tail -1 | cut -d' ' -f2)
+if [ -n "$bbig" ]; then
+  t0=$(date +%s%N)
+  "$S0" ir opt "$bbig" > "$OUT/bbig.s0" 2>/dev/null || true
+  t1=$(date +%s%N)
+  "$S1" ir opt --passes=base "$bbig" > "$OUT/bbig.s1"
+  t2=$(date +%s%N)
+  echo "stage1-ir-gate: base passes on the largest release text $(wc -c < "$bbig") bytes ($bbig): stage0 ir opt $(( (t1 - t0) / 1000000 )) ms, stage1 ir opt --passes=base $(( (t2 - t1) / 1000000 )) ms"
+fi
+
 # the largest text: stage1 read + print against stage0's
 big=$(awk '$1 == "SAME" { print $5, $6 }' "$OUT/result.txt" | sort -n | tail -1 | cut -d' ' -f2)
 if [ -n "$big" ]; then

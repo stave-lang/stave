@@ -14,6 +14,7 @@ import ir.canon;
 import ir.load;
 import ir.model;
 import ir.print;
+import opt.base;
 import opt.clean;
 import opt.decide;
 import opt.expand;
@@ -84,6 +85,7 @@ const SHOW_CLEAN: u8 = 2;
 const SHOW_OUTPUT: u8 = 3;
 
 fn opt_run(a: &[string.String]) -> i32 {
+    if a.len() == 5 && text.eq_str(a[3].as_bytes(), "--passes=base") { return opt_base(&a[4]); }
     let mut lim = decide.Limits.table();
     let mut show = SHOW_OUTPUT;
     let mut dump = false;
@@ -209,6 +211,30 @@ fn phase_verified(file: &string.String, ph: &str, t: &[u8]) -> bool {
     }
     let _ = io.write_all(2, e.as_slice());
     return false;
+}
+
+// `stage1 ir opt --passes=base FILE` (opt-passes.md P3): `canon(B(M))` of the canonical module,
+// printed at level `opt`.
+fn opt_base(file: &string.String) -> i32 {
+    let mut src = vec.Vec::<u8>.new();
+    if !read_into(file, &mut src) { return 2; }
+    let mut ld = load.load(src.as_slice());
+    if !ld.ok() {
+        let out = ld.errs.render(file.as_bytes());
+        let _ = io.write_all(2, out.as_slice());
+        return 1;
+    }
+    if ld.m.mode != model.MODE_RELEASE || ld.m.level != model.LEVEL_CHECKED {
+        io.eprint(f"{file}: error: ir opt reads a `release checked` module\n");
+        return 1;
+    }
+    canon.canon(&mut ld.m);
+    base.run(&mut ld.m);
+    canon.canon(&mut ld.m);
+    ld.m.level = model.LEVEL_OPT;
+    let out = print.print(&ld.m);
+    let _ = io.write_all(1, out.as_slice());
+    return 0;
 }
 
 // `NAME=N` into lim.

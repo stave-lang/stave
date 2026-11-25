@@ -1,0 +1,248 @@
+// The control flow of one body, computed once: the base passes add, move, and delete
+// instructions only, so it holds for every pass of `B` (contracts/opt-passes.md B4, B7).
+//
+// Blocks are local to the fn: block k is the model's block row `fn_blk_lo + k`.
+//
+// - `succ`: per reachable block, the targets of its terminator in order (`then`, `else`; the
+//   cases, then the default), one entry per edge; an unreachable block has none, and a target
+//   outside the body is no edge. `pred`: per block, the reachable blocks with an edge into it,
+//   ascending, one entry per edge.
+// - The depth-first search from b0 visits successors in `succ` order. `post` is its postorder,
+//   `rpo` the reverse; an edge into a block still on the search's stack is a back edge.
+// - `idom`: the immediate dominator of every reachable block (b0: itself; unreachable: NONE);
+//   `kid`: the dominator tree's children of each block, ascending.
+// - `depth` (B7): per back edge l -> h, h and every block that reaches l over `pred` without
+//   passing h count one, at most 255. On a reducible body these are the natural loops of the
+//   edges whose head dominates their tail.
+import ir.canon;
+import ir.model;
+import prims.col;
+import prims.scan;
+import std.idx;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+pub struct Cfg {
+    pub nb: usize,
+    pub reach: vec.Vec<bool>,
+    pub succ_off: vec.Vec<u32>,
+    pub succ: vec.Vec<u32>,
+    pub pred_off: vec.Vec<u32>,
+    pub pred: vec.Vec<u32>,
+    pub post: vec.Vec<u32>,
+    pub rpo: vec.Vec<u32>,
+    pub back_from: vec.Vec<u32>,
+    pub back_to: vec.Vec<u32>,
+    pub idom: vec.Vec<u32>,
+    pub kid_off: vec.Vec<u32>,
+    pub kid: vec.Vec<u32>,
+    pub depth: vec.Vec<u8>,
+}
+
+// The control flow of fn f's body.
+pub fn of(m: &model.Module, f: usize) -> Cfg {
+    let lo = m.fn_blk_lo.as_slice()[f] as usize;
+    let nb = m.fn_blk_n.as_slice()[f] as usize;
+    let mut g = Cfg.{
+        nb: nb,
+        reach: canon.reached(m, lo, nb),
+        succ_off: vec.Vec::<u32>.with_capacity(nb + 1),
+        succ: vec.Vec::<u32>.new(),
+        pred_off: vec.Vec::<u32>.new(),
+        pred: vec.Vec::<u32>.new(),
+        post: vec.Vec::<u32>.with_capacity(nb),
+        rpo: vec.Vec::<u32>.with_capacity(nb),
+        back_from: vec.Vec::<u32>.new(),
+        back_to: vec.Vec::<u32>.new(),
+        idom: col.filled(nb, NONE),
+        kid_off: vec.Vec::<u32>.new(),
+        kid: vec.Vec::<u32>.new(),
+        depth: col.filled(nb, 0u8),
+    };
+    g.edges(m, lo);
+    g.search();
+    g.dominators();
+    g.tree();
+    g.loop_depth();
+    return g;
+}
+
+impl Cfg {
+    pub fn succs(&self, b: usize) -> &[u32] from self {
+        return &self.succ.as_slice()[self.succ_off.as_slice()[b] as usize..self.succ_off.as_slice()[b + 1] as usize];
+    }
+
+    pub fn preds(&self, b: usize) -> &[u32] from self {
+        return &self.pred.as_slice()[self.pred_off.as_slice()[b] as usize..self.pred_off.as_slice()[b + 1] as usize];
+    }
+
+    pub fn kids(&self, b: usize) -> &[u32] from self {
+        return &self.kid.as_slice()[self.kid_off.as_slice()[b] as usize..self.kid_off.as_slice()[b + 1] as usize];
+    }
+
+    fn edges(&mut self, m: &model.Module, lo: usize) {
+        let nb = self.nb;
+        let mut cnt = col.filled(nb, 0u32);
+        for b in 0..nb {
+            self.succ_off.push(col.ids(self.succ.len()));
+            if !self.reach.as_slice()[b] { continue; }
+            let tl = m.blk_tgt_lo.as_slice()[lo + b] as usize;
+            for t in tl..tl + m.blk_tgt_n.as_slice()[lo + b] as usize {
+                let y = m.tgt_blk.as_slice()[t];
+                if y as usize >= nb { continue; }
+                self.succ.push(y);
+                let c = cnt.as_slice()[y as usize] + 1;
+                cnt.as_mut_slice()[y as usize] = c;
+            }
+        }
+        self.succ_off.push(col.ids(self.succ.len()));
+        self.pred_off = scan.offsets(cnt.as_slice());
+        let mut at = vec.Vec::<u32>.with_capacity(nb);
+        at.extend_from_slice(&self.pred_off.as_slice()[0..nb]);
+        self.pred = col.filled(self.succ.len(), 0u32);
+        for b in 0..nb {
+            for e in self.succ_off.as_slice()[b] as usize..self.succ_off.as_slice()[b + 1] as usize {
+                let y = self.succ.as_slice()[e] as usize;
+                let a = at.as_slice()[y] as usize;
+                self.pred.as_mut_slice()[a] = b as% u32;
+                at.as_mut_slice()[y] = a as% u32 + 1;
+            }
+        }
+    }
+
+    // The search: per block 0 unseen, 1 on the stack, 2 done.
+    fn search(&mut self) {
+        let nb = self.nb;
+        if nb == 0 { return; }
+        let mut state = col.filled(nb, 0u8);
+        let mut sv = vec.Vec::<u32>.new();
+        let mut se = vec.Vec::<u32>.new();
+        state.as_mut_slice()[0] = 1;
+        sv.push(0);
+        se.push(self.succ_off.as_slice()[0]);
+        while sv.len() > 0 {
+            let top = sv.len() - 1;
+            let x = sv.as_slice()[top] as usize;
+            let e = se.as_slice()[top];
+            if e < self.succ_off.as_slice()[x + 1] {
+                se.as_mut_slice()[top] = e + 1;
+                let y = self.succ.as_slice()[e as usize];
+                let st = state.as_slice()[y as usize];
+                if st == 0 {
+                    state.as_mut_slice()[y as usize] = 1;
+                    sv.push(y);
+                    se.push(self.succ_off.as_slice()[y as usize]);
+                } else if st == 1 {
+                    self.back_from.push(x as% u32);
+                    self.back_to.push(y);
+                }
+                continue;
+            }
+            state.as_mut_slice()[x] = 2;
+            self.post.push(x as% u32);
+            sv.truncate(top);
+            se.truncate(top);
+        }
+        let mut k = self.post.len();
+        while k > 0 {
+            k = k - 1;
+            let b = self.post.as_slice()[k];
+            self.rpo.push(b);
+        }
+    }
+
+    // The iterative dominator algorithm over `rpo`, intersecting by postorder number. Its fixpoint
+    // is the immediate dominator, whatever the visiting order.
+    fn dominators(&mut self) {
+        let nb = self.nb;
+        if nb == 0 { return; }
+        let mut po = col.filled(nb, NONE);
+        for k in 0..self.post.len() {
+            po.as_mut_slice()[self.post.as_slice()[k] as usize] = k as% u32;
+        }
+        self.idom.as_mut_slice()[0] = 0;
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for j in 0..self.rpo.len() {
+                let b = self.rpo.as_slice()[j] as usize;
+                if b == 0 { continue; }
+                let mut new = NONE;
+                for e in self.pred_off.as_slice()[b] as usize..self.pred_off.as_slice()[b + 1] as usize {
+                    let p = self.pred.as_slice()[e];
+                    if self.idom.as_slice()[p as usize] == NONE { continue; }
+                    if new == NONE {
+                        new = p;
+                        continue;
+                    }
+                    let mut x = p;
+                    let mut y = new;
+                    while x != y {
+                        while po.as_slice()[x as usize] < po.as_slice()[y as usize] {
+                            x = self.idom.as_slice()[x as usize];
+                        }
+                        while po.as_slice()[y as usize] < po.as_slice()[x as usize] {
+                            y = self.idom.as_slice()[y as usize];
+                        }
+                    }
+                    new = x;
+                }
+                if new != self.idom.as_slice()[b] {
+                    self.idom.as_mut_slice()[b] = new;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    fn tree(&mut self) {
+        let nb = self.nb;
+        let mut cnt = col.filled(nb, 0u32);
+        for b in 1..nb {
+            let p = self.idom.as_slice()[b];
+            if p == NONE || p as usize == b { continue; }
+            let c = cnt.as_slice()[p as usize] + 1;
+            cnt.as_mut_slice()[p as usize] = c;
+        }
+        self.kid_off = scan.offsets(cnt.as_slice());
+        self.kid = col.filled(self.kid_off.as_slice()[nb] as usize, 0u32);
+        let mut at = vec.Vec::<u32>.with_capacity(nb);
+        at.extend_from_slice(&self.kid_off.as_slice()[0..nb]);
+        for b in 1..nb {
+            let p = self.idom.as_slice()[b];
+            if p == NONE || p as usize == b { continue; }
+            let a = at.as_slice()[p as usize];
+            self.kid.as_mut_slice()[a as usize] = b as% u32;
+            at.as_mut_slice()[p as usize] = a + 1;
+        }
+    }
+
+    fn loop_depth(&mut self) {
+        let nb = self.nb;
+        let mut mark = col.filled(nb, NONE);
+        let mut work = vec.Vec::<u32>.new();
+        for li in 0..self.back_from.len() {
+            let l = li as% u32;
+            let h = self.back_to.as_slice()[li] as usize;
+            mark.as_mut_slice()[h] = l;
+            self.deepen(h);
+            work.clear();
+            work.push(self.back_from.as_slice()[li]);
+            while work.len() > 0 {
+                let top = work.len() - 1;
+                let x = work.as_slice()[top] as usize;
+                work.truncate(top);
+                if mark.as_slice()[x] == l { continue; }
+                mark.as_mut_slice()[x] = l;
+                self.deepen(x);
+                work.extend_from_slice(self.preds(x));
+            }
+        }
+    }
+
+    fn deepen(&mut self, b: usize) {
+        let d = self.depth.as_slice()[b];
+        if d < 255 { self.depth.as_mut_slice()[b] = d + 1; }
+    }
+}

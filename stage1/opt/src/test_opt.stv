@@ -1,6 +1,8 @@
-// The decision's facts and verdicts, the expansion, and the clean-up, on hand-written
-// `release` texts; the expected tables and texts follow contracts/opt-passes.md sections 2, 3,
-// 4, 5, and 8.
+// The decision's facts and verdicts, the expansion, the clean-up, and the base passes, on
+// hand-written texts; the expected tables and texts follow contracts/opt-passes.md sections 2, 3,
+// 4, 5, 8, and 9.
+import base;
+import cfg;
 import clean;
 import decide;
 import expand;
@@ -345,4 +347,89 @@ test fn the_worked_example_needs_two_rounds() {
     let lines = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 int s 32", "fn @0 main.main() -> t1 {", "b0():", "  cbr 1 b1() b2()", "b1():", "  %0 = mul t0 5 3", "  br b3(%0)", "b2():", "  %1 = add t0 5 1", "  br b3(%1)", "b3(%2: t0):", "  cbr 0 b4() b5()", "b4():", "  %3 = mul t0 %2 3", "  br b6(%3)", "b5():", "  %4 = add t0 %2 1", "  br b6(%4)", "b6(%5: t0):", "  cbr 0 b7() b8()", "b7():", "  %6 = mul t0 7 3", "  br b9(%6)", "b8():", "  %7 = add t0 7 1", "  br b9(%7)", "b9(%8: t0):", "  %9 = cast.wrap t1 %5", "  ret %9", "}"];
     let want = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int s 32", "fn @0 main.main() -> t0 {", "b0():", "  ret 16", "}"];
     debug.assert(cleans_to(&lines, &want, 2), "opt-passes.md 10.2: round 2 substitutes 15 and %4, folds 16, merges");
+}
+
+// The base passes: `canon(B(M))` of the canonical module of `lines` (rule P3), printed at level
+// `opt`, against the lines `want`.
+fn based(lines: &[&str], want: &[&str]) -> bool {
+    let mut ld = loaded(lines);
+    canon.canon(&mut ld.m);
+    base.run(&mut ld.m);
+    canon.canon(&mut ld.m);
+    ld.m.level = model.LEVEL_OPT;
+    let got = print.print(&ld.m);
+    let mut w = vec.Vec::<u8>.new();
+    for i in 0..want.len() {
+        bytes.push_str(&mut w, want[i]);
+        w.push(10);
+    }
+    return got.as_slice().eq(w.as_slice());
+}
+
+// An outer loop b1..b4 around an inner self-loop b3.
+fn loop_nest() -> [&str; 21] {
+    return ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u size", "type t1 bool", "type t2 ref t3", "type t3 slice t0", "fn @0 main.n(t2, t1) -> t0 {", "b0(%0: t2, %1: t1):", "  br b1(0)", "b1(%2: t0):", "  cbr %1 b2() b5()", "b2():", "  br b3()", "b3():", "  %3 = slice.len t0 %0", "  %4 = add.wrap t0 %2 %3", "  cbr %1 b3() b4()", "b4():", "  br b1(%4)", "b5():", "  ret %2", "}"];
+}
+
+test fn loop_depth_counts_each_enclosing_back_edge() {
+    let mut ld = loaded(&loop_nest());
+    canon.canon(&mut ld.m);
+    let g = cfg.of(&ld.m, 0);
+    debug.assert(g.depth.as_slice().eq(&[0u8, 1, 1, 2, 1, 0]), "depth: b3 in both loops, b5 outside");
+    debug.assert(g.back_from.as_slice().eq(&[3u32, 4]) && g.back_to.as_slice().eq(&[3u32, 1]), "back edges in search order");
+    debug.assert(g.idom.as_slice().eq(&[0u32, 0, 1, 2, 3, 1]), "immediate dominators");
+    debug.assert(g.kids(1).eq(&[2u32, 5]) && g.rpo.as_slice().eq(&[0u32, 1, 5, 2, 3, 4]), "dominator children ascending, reverse postorder");
+    debug.assert(g.preds(1).eq(&[0u32, 4]) && g.preds(3).eq(&[2u32, 3]), "predecessors by source block");
+}
+
+test fn a_part_two_loops_deep_moves_to_its_param() {
+    let out = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u size", "type t1 bool", "type t2 ref t3", "type t3 slice t0", "fn @0 main.n(t2, t1) -> t0 {", "b0(%0: t2, %1: t1):", "  %2 = slice.len t0 %0", "  br b1(0)", "b1(%3: t0):", "  cbr %1 b2() b5()", "b2():", "  br b3()", "b3():", "  %4 = add.wrap t0 %3 %2", "  cbr %1 b3() b4()", "b4():", "  br b1(%4)", "b5():", "  ret %3", "}"];
+    debug.assert(based(&loop_nest(), &out), "the slice.len of b3 goes to the start of b0");
+}
+
+// b1 and b2 form a loop with two entries (b0 -> b1, b0 -> b2); b4 is a self-loop.
+fn two_entry_loop() -> [&str; 20] {
+    return ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u size", "type t1 bool", "type t2 ref t3", "type t3 slice t0", "fn @0 main.k(t2, t1) -> t0 {", "b0(%0: t2, %1: t1):", "  cbr %1 b1() b2()", "b1():", "  br b2()", "b2():", "  cbr %1 b1() b3()", "b3():", "  br b4()", "b4():", "  %2 = slice.len t0 %0", "  cbr %1 b4() b5()", "b5():", "  ret %2", "}"];
+}
+
+test fn a_loop_with_two_entries_counts_its_search_back_edge() {
+    let mut ld = loaded(&two_entry_loop());
+    canon.canon(&mut ld.m);
+    let g = cfg.of(&ld.m, 0);
+    // the search meets b2 -> b1 as a back edge; b0 reaches b2 without passing b1, so b0 counts too
+    debug.assert(g.depth.as_slice().eq(&[1u8, 1, 1, 0, 1, 0]), "depth from the search's back edges");
+    debug.assert(g.idom.as_slice().eq(&[0u32, 0, 0, 2, 3, 4]), "neither of b1, b2 dominates the other");
+    let out = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u size", "type t1 bool", "type t2 ref t3", "type t3 slice t0", "fn @0 main.k(t2, t1) -> t0 {", "b0(%0: t2, %1: t1):", "  cbr %1 b1() b2()", "b1():", "  br b2()", "b2():", "  cbr %1 b1() b3()", "b3():", "  br b4()", "b4():", "  %2 = slice.len t0 %0", "  cbr %1 b4() b5()", "b5():", "  ret %2", "}"];
+    debug.assert(based(&two_entry_loop(), &out), "b4 is no deeper than b0: the part stays");
+}
+
+test fn unreachable_blocks_have_no_edges() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 bool", "fn @0 m.f(t0, t1) -> t0 {", "b0(%0: t0, %1: t1):", "  cbr %1 b1() b2()", "b1():", "  br b1()", "b2():", "  ret %0", "}"];
+    let mut ld = loaded(&lines);
+    // loading refuses an unreachable block: b0's `then` target is turned to b2 afterwards
+    let t = ld.m.blk_tgt_lo.as_slice()[ld.m.fn_blk_lo.as_slice()[0] as usize] as usize;
+    ld.m.tgt_blk.as_mut_slice()[t] = 2;
+    let g = cfg.of(&ld.m, 0);
+    debug.assert(g.reach.as_slice().eq(&[true, false, true]), "b1 is unreachable");
+    debug.assert(g.succs(1).len() == 0 && g.preds(1).len() == 0 && g.preds(2).eq(&[0u32, 0]), "no edge from b1, two from b0");
+    debug.assert(g.idom.as_slice().eq(&[0u32, 0xffff_ffff, 0]) && g.depth.as_slice().eq(&[0u8, 0, 0]), "b1: no dominator, its self-loop no back edge");
+    debug.assert(g.post.as_slice().eq(&[2u32, 0]), "the search sees b0 and b2");
+}
+
+test fn chunk_bounds_group_by_constant_value() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int s 64", "type t1 int u size", "type t2 bool", "type t3 ref t4", "type t4 slice t0", "fn @0 main.f(t3, t0) -> t0 {", "b0(%0: t3, %1: t0):", "  br b1(0)", "b1(%2: t1):", "  %3 = slice.len t1 %0", "  %4 = lt t2 %2 %3", "  cbr %4 b2() b3()", "b2():", "  %5 = add.wrap t1 %2 1", "  br b1(%5)", "b3():", "  %6 = sub.sat t0 %1 2", "  %7 = sub.sat t0 %1 -1", "  %8 = sub.sat t0 %1 2", "  %9 = sub.sat t0 %1 -1", "  %10 = add.wrap t0 %6 %7", "  %11 = add.wrap t0 %8 %9", "  %12 = add.wrap t0 %10 %11", "  ret %12", "}"];
+    let out = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u size", "type t1 int s 64", "type t2 bool", "type t3 ref t4", "type t4 slice t1", "fn @0 main.f(t3, t1) -> t1 {", "b0(%0: t3, %1: t1):", "  %2 = sub.sat t1 %1 -1", "  %3 = sub.sat t1 %1 2", "  %4 = slice.len t0 %0", "  br b1(0)", "b1(%5: t0):", "  %6 = lt t2 %5 %4", "  cbr %6 b2() b3()", "b2():", "  %7 = add.wrap t0 %5 1", "  br b1(%7)", "b3():", "  %8 = add.wrap t1 %3 %2", "  %9 = add.wrap t1 %3 %2", "  %10 = add.wrap t1 %8 %9", "  ret %10", "}"];
+    debug.assert(based(&lines, &out), "B3: -1 before 2 at the param's place, before B1's part");
+}
+
+test fn dead_instructions_by_removable_class() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 float 64", "type t2 ref t0", "type t3 array t0 4", "fn @0 main.g(t0, t1, t3, t2) -> t0 {", "b0(%0: t0, %1: t1, %2: t3, %3: t2):", "  %4 = add.wrap t0 %0 1", "  %5 = mul.wrap t0 %4 %4", "  %6 = add t0 %0 1", "  %7 = add t1 %1 %1", "  %8 = shl t0 %0 3", "  %9 = get t0 %2 1", "  %10 = get t0 %2 %0", "  %11 = load t0 %3", "  %12 = shl.wrap t0 %0 3", "  %13 = div t0 %0 %0", "  ret %0", "}"];
+    let out = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 float 64", "type t2 ref t0", "type t3 array t0 4", "fn @0 main.g(t0, t1, t3, t2) -> t0 {", "b0(%0: t0, %1: t1, %2: t3, %3: t2):", "  %4 = add t0 %0 1", "  %5 = shl t0 %0 3", "  %6 = get t0 %2 %0", "  %7 = load t0 %3", "  %8 = div t0 %0 %0", "  ret %0", "}"];
+    debug.assert(based(&lines, &out), "B5: wrapping ops, float ops, a constant-index get go; traps, loads, shl stay");
+}
+
+test fn a_repeat_shares_only_inside_a_loop() {
+    let lines = ["stave.ir 4 \"x86_64-linux-v2\" release checked", "type t0 int u 64", "type t1 bool", "fn @0 main.h(t0, t0) -> t0 {", "b0(%0: t0, %1: t0):", "  %2 = add.wrap t0 %0 1", "  %3 = add.wrap t0 %0 1", "  %4 = lt t1 %0 %1", "  cbr %4 b1(%2) b1(%3)", "b1(%5: t0):", "  %6 = add.wrap t0 %5 1", "  %7 = add.wrap t0 %5 1", "  %8 = lt t1 %6 %1", "  cbr %8 b1(%7) b2()", "b2():", "  ret %6", "}"];
+    let out = ["stave.ir 4 \"x86_64-linux-v2\" release opt", "type t0 int u 64", "type t1 bool", "fn @0 main.h(t0, t0) -> t0 {", "b0(%0: t0, %1: t0):", "  %2 = add.wrap t0 %0 1", "  %3 = add.wrap t0 %0 1", "  %4 = lt t1 %0 %1", "  cbr %4 b1(%2) b1(%3)", "b1(%5: t0):", "  %6 = add.wrap t0 %5 1", "  %7 = lt t1 %6 %1", "  cbr %7 b1(%6) b2()", "b2():", "  ret %6", "}"];
+    debug.assert(based(&lines, &out), "B4: the twin in b0 stays, the one in loop b1 reads the first");
 }
