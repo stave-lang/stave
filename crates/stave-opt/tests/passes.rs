@@ -84,6 +84,7 @@ fn optimized(m: &Module) -> Module {
     let mut c = m.clone();
     bounds::elide(&mut c).unwrap_or_else(|r| panic!("witness refused: {r:?}"));
     verify_module(&c).unwrap();
+    let before = element_accesses(&bounds::audit(&c).unwrap_or_else(|u| panic!("unguarded: {u:?}")));
     stave_opt::slices::declare_elem_pointers(&mut c.types);
     let types = c.types.clone();
     for f in &mut c.funcs {
@@ -92,8 +93,16 @@ fn optimized(m: &Module) -> Module {
         }
     }
     verify_module(&c).unwrap_or_else(|e| panic!("optimized IR does not verify: {e:?}"));
-    bounds::audit(&c).unwrap_or_else(|u| panic!("unguarded after the release passes: {u:?}"));
+    let after = bounds::audit(&c).unwrap_or_else(|u| panic!("unguarded after the release passes: {u:?}"));
+    // the element pointer form the passes make (`slice.ptr` + the access) is audited as before
+    assert_eq!(element_accesses(&after), before);
     c
+}
+
+/// The number of element accesses per kind, without the `slice.ptr`s.
+fn element_accesses(acc: &[bounds::Access]) -> [usize; 4] {
+    use bounds::AccessKind as K;
+    [K::Elem, K::Get, K::Set, K::Vector].map(|k| acc.iter().filter(|a| a.kind == k).count())
 }
 
 fn count(b: &Body, op: Op) -> usize {
@@ -118,8 +127,8 @@ fn same_results_and_traps() {
 
 /// `t.windows(s: &mut [u64], k: usize) -> u64`: the sum of `s[i]` for `i < k`, where every
 /// iteration checks `i` against `len -| 3` twice and against `len -| 1` once, each check with
-/// its own `slice.len` and `sub.sat`; and `t.main(k: usize) -> u64`, which calls it on eight
-/// elements `3 j + 1`.
+/// its own `slice.len` and `sub.sat`, then reads `s[i]` behind its own check against `len`;
+/// and `t.main(k: usize) -> u64`, which calls it on eight elements `3 j + 1`.
 fn windows() -> (Module, FuncId, FuncId) {
     let mut m = Module::new();
     let (u64_, usize_, bool_) = (m.types.u64(), m.types.usize(), m.types.bool());
@@ -146,6 +155,8 @@ fn windows() -> (Module, FuncId, FuncId) {
         let lim = b.binary(Op::SubSat, usize_, n, w);
         b.bounds_check(hp[0], lim);
     }
+    let n = b.op(Op::SliceLen, usize_, &[s.into()]);
+    b.bounds_check(hp[0], n);
     let p = b.op(Op::ElemAddr, pel, &[s.into(), hp[0].into()]);
     let x = b.load(u64_, p);
     let acc = b.binary(Op::AddWrap, u64_, hp[1], x);
@@ -186,7 +197,7 @@ fn one_bound_per_slice_and_width() {
     let b = o.func(f).unwrap().body.as_ref().unwrap();
     assert_eq!(count(b, Op::SubSat), 2);
     assert_eq!(count(b, Op::SliceLen), 1);
-    assert_eq!(count(b, Op::BoundsCheck), 3);
+    assert_eq!(count(b, Op::BoundsCheck), 4);
     let entry = b.blocks[0].insts;
     let in_entry = entry.indices().filter(|&i| b.insts.op[i as usize] == Op::SubSat).count();
     assert_eq!(in_entry, 2, "both bounds are computed where the slice is defined");

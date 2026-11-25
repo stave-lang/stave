@@ -334,12 +334,7 @@ fn audit(l: &Loaded) -> Result<(), Vec<ReadError>> {
         for u in bounds::audit_func(m, FuncId(f as u32)).1 {
             let line = l.lines.funcs.get(f).and_then(|x| x.insts.get(u.inst as usize).copied());
             let line = line.or_else(|| l.lines.funcs.get(f).map(|x| x.header)).unwrap_or(l.lines.header);
-            errs.push(ReadError {
-                line,
-                col: None,
-                kind: ErrorKind::Audit,
-                msg: format!("{:?} access without a bounds check or proof", u.kind),
-            });
+            errs.push(ReadError { line, col: None, kind: ErrorKind::Audit, msg: u.kind.unguarded_msg() });
         }
         if errs.len() >= MAX_ERRORS {
             break;

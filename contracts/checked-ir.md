@@ -309,7 +309,12 @@ step stops before the next.
    as errors (E0215, E0217, E0218: not in an instance of a generic fn).
 5. **Audit.** The bounds audit of every fn, reading calls by the loaded `claim` rows (level
    `checked` or `opt`) or the computed ones (`lowered`); an unguarded access is reported as in
-   step 3.
+   step 3. An element access indexes a reference or raw pointer to an array or slice, or the
+   element pointer `p = slice.ptr s` of a slice, which is an access of `s`. A `slice.ptr` result
+   points to the slice's element type, and its every use is such an access of its slice, a
+   prefetch, `slice.make` of it with `slice.len s`, or a cast to an int; any other is refused
+   as an unguarded access. An `addr.elem` on any other raw pointer is pointer arithmetic, the
+   `unsafe` code's own obligation, and no access.
 
 After steps 3-5 the loaded module is renumbered canonically. At level `lowered` the removal of
 step 4 follows, which keeps the module canonical, and then the IR verifier, as in a build; at the

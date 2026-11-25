@@ -23,9 +23,14 @@
 //!
 //! **Audit** ([`audit`]): every element access is classified with its [`Guard`]: a dominating
 //! `check.bounds` on the same index and length, the op's own trap, or a [`Proof`]. An access with
-//! none is [`Unguarded`], a compiler bug (the driver reports it as an internal error). Accesses
-//! through raw pointers (`addr.elem` on `*T`) are pointer arithmetic, the `unsafe` code's own
-//! obligation, and are not element accesses.
+//! none is [`Unguarded`], a compiler bug (the driver reports it as an internal error). An access
+//! indexes a reference or raw pointer to an array or slice, or the element pointer
+//! `p = slice.ptr s` of a slice `s` ([`Cx::elem_ptr_of`]), which is an access of `s`. Every use
+//! of a `slice.ptr` result is audited ([`AccessKind::ElemPtr`]): it must be an element access of
+//! that slice, or read no element (a prefetch, a cast to an int, `slice.make` of it with
+//! `slice.len s`), so a slice's elements are reached only through accesses of the slice. Any
+//! other `addr.elem` on a raw pointer `*T` (`T` not an array or slice) is pointer arithmetic, the
+//! `unsafe` code's own obligation, and is not an element access.
 //!
 //! **Removal** ([`prove_func`], [`elide`]): the one pass that decides which checks a build
 //! keeps. It runs on the lowered IR of every build, debug and release alike, and depends on
@@ -101,7 +106,7 @@ use std::sync::Arc;
 
 use crate::ir::{Block, Body, Func, FuncId, Module, Op, Operand, Site, Span, Term, Value, ValueDef};
 use crate::simd::VecOp;
-use crate::types::{TypeId, TypeKey, TypeTable};
+use crate::types::{IntBits, TypeId, TypeKey, TypeTable};
 use crate::verify::Dominators;
 use crate::witness::check::{Rejected, check_module, remove};
 use crate::witness::{
@@ -116,7 +121,7 @@ pub const BOUNDS_STEP_LIMIT: u32 = 64;
 /// What kind of element access an instruction is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AccessKind {
-    /// `addr.elem p i` with `p` a reference to an array or slice.
+    /// `addr.elem p i` with `p` a pointer to an array or slice, or a slice's element pointer.
     Elem,
     /// `get a i` on an array value.
     Get,
@@ -124,6 +129,24 @@ pub enum AccessKind {
     Set,
     /// A vector load or store (`vec.load`, `vec.store_masked`, `vec.gather`, ...).
     Vector,
+    /// `slice.ptr s`: the element pointer of slice `s`, guarded when it points to `s`'s element
+    /// type and its every use is an element access of `s` or reads no element.
+    ElemPtr,
+}
+
+impl AccessKind {
+    /// What the audit reports for an unguarded access of this kind.
+    pub fn unguarded_msg(self) -> String {
+        match self {
+            AccessKind::ElemPtr => {
+                "ElemPtr access: a slice.ptr result must point to the slice's element type \
+                                    and be used only by an element access of that slice, a prefetch, \
+                                    slice.make with the slice's slice.len, or a cast to an int"
+                    .to_string()
+            }
+            k => format!("{k:?} access without a bounds check or proof"),
+        }
+    }
 }
 
 /// Why an index is known to be in range.
@@ -169,6 +192,8 @@ pub enum Guard {
     Check(u32),
     /// The op traps `Bounds` itself (`get`/`set` with a dynamic index).
     SelfChecked,
+    /// A `slice.ptr` whose uses are each audited as an access of the slice or read no element.
+    Uses,
     Proof(Proof),
 }
 
@@ -194,7 +219,7 @@ pub struct Unguarded {
 
 impl std::fmt::Display for Unguarded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: inst {}: {:?} access without a bounds check or proof", self.path, self.inst, self.kind)
+        write!(f, "{}: inst {}: {}", self.path, self.inst, self.kind.unguarded_msg())
     }
 }
 
@@ -484,7 +509,7 @@ pub fn audit_func(m: &Module, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
 /// Only these ops can be element accesses: without one there is nothing to audit.
 fn has_access(b: &Body) -> bool {
     b.insts.op.iter().any(|op| match op {
-        Op::ElemAddr | Op::Get | Op::Set => true,
+        Op::ElemAddr | Op::Get | Op::Set | Op::SlicePtr => true,
         Op::Vec(v) => v.is_memory(),
         _ => false,
     })
@@ -643,6 +668,8 @@ struct Cx<'a> {
     /// The reachable contract checks, in order.
     contracts: Vec<ContractCheck>,
     facts: facts::Facts,
+    /// The `slice.ptr` instructions with a use [`Cx::elem_ptr_use`] refuses, ascending.
+    elem_ptr_misuse: std::cell::OnceCell<Vec<u32>>,
 }
 
 /// A contract check as the pass reads it.
@@ -743,6 +770,7 @@ impl<'a> Cx<'a> {
             checks,
             contracts,
             facts: facts::Facts::default(),
+            elem_ptr_misuse: std::cell::OnceCell::new(),
         }
     }
 
@@ -787,25 +815,113 @@ impl<'a> Cx<'a> {
     }
 
     /// The array length, or `None` for a slice, of what pointer `p` points to; `Err` if `p` is not
-    /// a reference to an array or slice.
+    /// a reference or raw pointer to an array or slice.
     fn len_of_ptr(&self, p: Operand) -> Result<Option<u64>, ()> {
         let pt = self.ty(p).ok_or(())?;
-        let inner = match self.key(pt) {
-            Some(TypeKey::Ref { inner, .. }) => *inner,
-            _ => return Err(()),
-        };
-        match self.key(inner) {
-            Some(TypeKey::Array { len, .. }) => Ok(Some(*len)),
-            Some(TypeKey::Slice { .. }) => Ok(None),
-            _ => Err(()),
+        crate::simd::mem_operand(self.types, pt).map(|mo| mo.len).ok_or(())
+    }
+
+    /// The object pointer operand `p` of an element access indexes, and its array length (`None`:
+    /// a slice): `p` itself when it points to an array or slice, the slice `s` when `p` is the
+    /// element pointer of `s` ([`Cx::elem_ptr_of`]); `None` for any other pointer.
+    fn indexed(&self, p: Operand) -> Option<(Operand, Option<u64>)> {
+        match self.len_of_ptr(p) {
+            Ok(len) => Some((p, len)),
+            Err(()) => self.elem_ptr_of(p).map(|s| (s, None)),
         }
+    }
+
+    /// The slice `s` whose element pointer `p` is: `p = slice.ptr s`, typed as a pointer to the
+    /// element type of `s`.
+    fn elem_ptr_of(&self, p: Operand) -> Option<Operand> {
+        let Operand::Value(v) = p else { return None };
+        let d = self.def(v)?;
+        if self.b.insts.op.get(d as usize) != Some(&Op::SlicePtr) {
+            return None;
+        }
+        let s = *self.b.args(d).first()?;
+        let pointee = match self.key(self.b.insts.ty.get(d as usize).copied().flatten()?)? {
+            TypeKey::Ref { inner, .. } | TypeKey::RawPtr { inner, .. } => *inner,
+            _ => return None,
+        };
+        let slice = match self.key(self.ty(s)?)? {
+            TypeKey::Ref { inner, .. } | TypeKey::RawPtr { inner, .. } => *inner,
+            _ => return None,
+        };
+        let elem_ok = match self.key(slice)? {
+            TypeKey::Slice { elem, .. } => *elem == pointee,
+            TypeKey::Str => self.key(pointee) == Some(&TypeKey::Int { signed: false, bits: IntBits::B8 }),
+            _ => false,
+        };
+        elem_ok.then_some(s)
+    }
+
+    /// Whether operand `pos` of instruction `user` is a use of the element pointer of slice `s`
+    /// that the audit accepts: the pointer operand of an element access (`addr.elem`, `vec.load`,
+    /// `vec.store`, each audited as an access of `s`), of a prefetch, of a cast to an int, or of
+    /// `slice.make` with `slice.len s`. Every other use is refused.
+    fn elem_ptr_use(&self, user: u32, pos: usize, s: Operand) -> bool {
+        let Some(&op) = self.b.insts.op.get(user as usize) else { return false };
+        match (op, pos) {
+            (Op::ElemAddr | Op::Vec(VecOp::Load | VecOp::Store) | Op::Prefetch(_), 0) => true,
+            (Op::Cast(_), 0) => {
+                let t = self.b.insts.ty.get(user as usize).copied().flatten();
+                matches!(t.and_then(|t| self.key(t)), Some(TypeKey::Int { .. }))
+            }
+            (Op::SliceMake, 0) => self.b.args(user).get(1).is_some_and(|&n| self.is_len_of(n, s, None)),
+            _ => false,
+        }
+    }
+
+    /// The `slice.ptr` instructions with a use that [`Cx::elem_ptr_use`] refuses (a terminator or
+    /// branch-argument use is refused too), ascending; computed once per body.
+    fn elem_ptr_misuse(&self) -> &[u32] {
+        self.elem_ptr_misuse.get_or_init(|| {
+            let mut bad = Vec::new();
+            let def_of = |o: Operand| match o {
+                Operand::Value(v) => self.def(v).filter(|&d| self.b.insts.op[d as usize] == Op::SlicePtr),
+                _ => None,
+            };
+            for k in 0..self.b.insts.len() as u32 {
+                for (pos, &a) in self.b.args(k).iter().enumerate() {
+                    if let Some(d) = def_of(a)
+                        && !self.b.args(d).first().is_some_and(|&s| self.elem_ptr_use(k, pos, s))
+                    {
+                        bad.push(d);
+                    }
+                }
+            }
+            for (bi, bd) in self.b.blocks.iter().enumerate() {
+                match bd.term {
+                    Term::Cbr { cond: o, .. } | Term::Switch { scrut: o, .. } | Term::Ret(Some(o)) => {
+                        bad.extend(def_of(o));
+                    }
+                    _ => {}
+                }
+                for t in self.b.successors(Block(bi as u32)) {
+                    bad.extend(self.b.target_args(&t).iter().filter_map(|&o| def_of(o)));
+                }
+            }
+            bad.sort_unstable();
+            bad.dedup();
+            bad
+        })
     }
 
     fn access_kind(&self, i: u32) -> Option<AccessKind> {
         let op = *self.b.insts.op.get(i as usize)?;
         let args = self.b.args(i);
         match op {
-            Op::ElemAddr => self.len_of_ptr(*args.first()?).ok().map(|_| AccessKind::Elem),
+            Op::ElemAddr => {
+                let p = *args.first()?;
+                // a raw pointer to one element that is no slice's element pointer: pointer
+                // arithmetic of `unsafe` code, no access; every other form is one
+                let raw_arith =
+                    self.ty(p).is_some_and(|t| crate::simd::elem_ptr_operand(self.types, t).is_some())
+                        && self.elem_ptr_of(p).is_none();
+                (!raw_arith).then_some(AccessKind::Elem)
+            }
+            Op::SlicePtr => Some(AccessKind::ElemPtr),
             Op::Get | Op::Set => {
                 let at = self.ty(*args.first()?)?;
                 matches!(self.key(at), Some(TypeKey::Array { .. })).then_some(if op == Op::Get {
@@ -814,9 +930,7 @@ impl<'a> Cx<'a> {
                     AccessKind::Set
                 })
             }
-            Op::Vec(v) if v.is_memory() => {
-                crate::simd::mem_operand(self.types, self.ty(*args.first()?)?).map(|_| AccessKind::Vector)
-            }
+            Op::Vec(v) if v.is_memory() => Some(AccessKind::Vector),
             _ => None,
         }
     }
@@ -881,8 +995,8 @@ impl<'a> Cx<'a> {
         let args = self.b.args(i);
         match kind {
             AccessKind::Elem => {
-                let (p, idx) = (args[0], *args.get(1)?);
-                let len = self.len_of_ptr(p).ok()?;
+                let idx = *args.get(1)?;
+                let (p, len) = self.indexed(*args.first()?)?;
                 if let (Some(k), Some(l)) = (self.konst(idx), len)
                     && k < l
                 {
@@ -908,6 +1022,17 @@ impl<'a> Cx<'a> {
                 (self.only_slice_base(i) && self.prove_le(i, t, n).is_some())
                     .then_some(Guard::Proof(Proof::SliceStart))
             }
+            AccessKind::ElemPtr => {
+                let to_elem = self
+                    .b
+                    .insts
+                    .result
+                    .get(i as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|r| self.elem_ptr_of(Operand::Value(r)).is_some());
+                (to_elem && self.elem_ptr_misuse().binary_search(&i).is_err()).then_some(Guard::Uses)
+            }
             AccessKind::Get | AccessKind::Set => {
                 let (a, idx) = (args[0], *args.get(1)?);
                 let Some(TypeKey::Array { len, .. }) = self.ty(a).and_then(|t| self.key(t)) else {
@@ -926,8 +1051,8 @@ impl<'a> Cx<'a> {
                 ) {
                     return Some(Guard::SelfChecked);
                 }
-                let (p, idx) = (args[0], *args.get(1)?);
-                let len = self.len_of_ptr(p).ok()?;
+                let idx = *args.get(1)?;
+                let (p, len) = self.indexed(*args.first()?)?;
                 let lanes = self.vec_lanes(i)?;
                 if let (Some(k), Some(l)) = (self.konst(idx), len)
                     && k.checked_add(lanes).is_some_and(|e| e <= l)
