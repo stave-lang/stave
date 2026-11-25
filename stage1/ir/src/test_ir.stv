@@ -140,6 +140,14 @@ test fn a_constant_switch_scrutinee_only_at_level_opt() {
     debug.assert(first_has(&load.load(text(&dup).as_slice()), "duplicate switch case"), "duplicates refused");
 }
 
+test fn a_claim_names_a_param_of_its_fn() {
+    let ok = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u size", "fn @0 a(t0) -> t0 {", "b0(%0: t0):", "  ret %0", "}", "claim @0 pre zero <= p 0 3", "claim @0 post result <= p 0 0"];
+    debug.assert(load.load(text(&ok).as_slice()).ok(), "rows on param 0");
+    let bad = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u size", "fn @0 a(t0) -> t0 {", "b0(%0: t0):", "  ret %0", "}", "claim @0 pre zero <= lenp 7 0"];
+    let lb = load.load(text(&bad).as_slice());
+    debug.assert(!lb.ok() && lb.errs.kind.as_slice()[0] == errs.K_VERIFY && lb.errs.line.as_slice()[0] == 3 && first_has(&lb, "claim names param 7"), "a row on a param the fn lacks, at the fn line");
+}
+
 test fn the_opt_table_keeps_the_closed_size_rules() {
     debug.assert(opt_table.OPT_TERM_BR == opt_table.OPT_TERM_RET, "br weighs what ret weighs");
     debug.assert(opt_table.OPT_ROUNDS >= 1, "at least one round");

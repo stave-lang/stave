@@ -1251,6 +1251,14 @@ fn claim_rules() {
         &with_head("fn @0 a() {\nb0():\nclaim @0 post zero <= zero 0\n"),
         "t.ir:4:1: error: `claim` line inside the body of fn @0",
     );
+    // a row names a param of its fn, in either term and either kind
+    let g = "type t0 int u size\nfn @0 a(t0) -> t0 {\nb0(%0: t0):\n  ret %0\n}\n";
+    for row in ["post result <= p 0 0", "pre zero <= p 0 3", "pre checked p 0 <= zero 9"] {
+        load(&with_head(&format!("{g}claim @0 {row}\n")));
+    }
+    for row in ["post result <= p 1 0", "pre zero <= lenp 7 0", "pre checked p 4294967295 <= zero 9"] {
+        rejects(&with_head(&format!("{g}claim @0 {row}\n")), "t.ir:3: verify: claim names param ");
+    }
 }
 
 #[test]

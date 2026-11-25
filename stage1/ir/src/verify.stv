@@ -614,6 +614,28 @@ impl V {
                 er.add(errs.K_VERIFY, ln_f[f], 0, self.msg.as_slice());
             }
         }
+        // claims: every `p i` and `lenp i` names a param of the fn (the audit reads a row at a
+        // call by the call's argument i)
+        let np = m.fn_params.row(f).len();
+        let cl = m.fn_claim_lo.as_slice()[f] as usize;
+        for c in cl..cl + m.fn_claim_n.as_slice()[f] as usize {
+            let a = m.claim_a.as_slice()[c];
+            let b = m.claim_b.as_slice()[c];
+            let ai = m.claim_ai.as_slice()[c];
+            let bi = m.claim_bi.as_slice()[c];
+            let bad_a = (a == model.RT_PARAM || a == model.RT_LENPARAM) && ai as usize >= np;
+            let bad_b = (b == model.RT_PARAM || b == model.RT_LENPARAM) && bi as usize >= np;
+            if bad_a || bad_b {
+                let mut e = vec.Vec::<u8>.new();
+                bytes.push_str(&mut e, "claim names param ");
+                bytes.push_u32(&mut e, if bad_a then ai else bi);
+                bytes.push_str(&mut e, " of a fn with ");
+                bytes.push_u32(&mut e, np as% u32);
+                bytes.push_str(&mut e, " params");
+                er.add(errs.K_VERIFY, ln_f[f], 0, e.as_slice());
+                break;
+            }
+        }
         if flags & model.F_BODY == 0 { return; }
         self.vlo = m.fn_val_lo.as_slice()[f] as usize;
         self.clo = m.fn_const_lo.as_slice()[f] as usize;

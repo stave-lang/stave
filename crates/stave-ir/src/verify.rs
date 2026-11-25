@@ -20,6 +20,7 @@ use crate::ir::{
 use crate::known;
 use crate::text::Level;
 use crate::types::{AdtKind, FloatBits, GenericArg, IntBits, TypeId, TypeKey, TypeTable};
+use crate::witness::Term as RowTerm;
 
 /// One verifier finding, located as precisely as known.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -428,6 +429,7 @@ impl<'a> FnVerifier<'a> {
             self.err(None, None, format!("name site {} out of range", f.name_site.0));
         }
         self.known_signature();
+        self.claim_params();
         let Some(body) = &f.body else { return };
         self.body = Some(body);
         if !self.structure(body) {
@@ -441,6 +443,21 @@ impl<'a> FnVerifier<'a> {
     /// `Site::NONE` or a row of the site table.
     fn site_ok(&self, s: Site) -> bool {
         s == Site::NONE || s.index() < self.m.sites.len()
+    }
+
+    /// Every `p i` and `lenp i` of the fn's summary rows (its `claim` lines) names one of its
+    /// params: the audit reads a row at a call by the call's argument `i`.
+    fn claim_params(&mut self) {
+        let Some(s) = self.m.stated.get(self.fid.0 as usize).and_then(|s| s.as_deref()) else { return };
+        let n = self.f.params.len();
+        let rows = s.pre.iter().map(|p| &p.row).chain(&s.post);
+        let bad = rows.flat_map(|r| [r.a, r.b]).find_map(|t| match t {
+            RowTerm::Param(i) | RowTerm::LenParam(i) if i as usize >= n => Some(i),
+            _ => None,
+        });
+        if let Some(i) = bad {
+            self.err(None, None, format!("claim names param {i} of a fn with {n} params"));
+        }
     }
 
     /// A known item's signature is the one the stages that call it themselves assume

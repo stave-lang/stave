@@ -306,13 +306,14 @@ step stops before the next.
    is about: a block error at the block's terminator, except the entry block's params, at its
    header (a module error: the line of the `type` or `static` it names, else line 1). The
    verifier requires every `intrinsic.<name>` to be an intrinsic of intrinsics.md with its
-   operand and result types, the `slot` instructions of a body to be a prefix of `b0` (every
-   level), a `switch` scrutinee to be a value except at level `opt`, where it may also be an int
-   constant (its case values are then checked only for duplicates; the release passes write one
-   only between inlining and the branch folding that removes it, opt-passes.md P4), and a `known`
-   fn to have its item's signature; against the header,
-   every intrinsic must be built for the target's arch (intrinsics.md, the rule E0704 applies to
-   a declaration).
+   operand and result types, every `p <i>` and `lenp <i>` of a fn's `claim` rows to name a param
+   of the fn (`i` below its param count; an error at the fn's line), the `slot` instructions of
+   a body to be a prefix of `b0` (every level), a `switch` scrutinee to be a value except at
+   level `opt`, where it may also be an int constant (its case values are then checked only for
+   duplicates; the release passes write one only between inlining and the branch folding that
+   removes it, opt-passes.md P4), and a `known` fn to have its item's signature; against the
+   header, every intrinsic must be built for the target's arch (intrinsics.md, the rule E0704
+   applies to a declaration).
 4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds
    checks"); it computes the summaries. A contract check that fails whenever reached, and a call
    that fails a `requires` whenever reached, are reported as in step 3 where a build reports them
