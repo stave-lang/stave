@@ -6,6 +6,8 @@
 //! - [`dce`]: dead pure instructions are removed.
 //! - [`regalloc`]: which values live in a register for their whole life (both backends).
 //! - [`layout`]: the block order of release code (cold blocks last).
+//! - [`inplace`]: loads of a whole slot that a backend reads in place (both backends, every
+//!   build).
 //!
 //! [`optimize`] runs the IR passes of a release build on one body. It runs after the removal of
 //! bounds checks, which every build shares (stave-ir `bounds`), and removes no check itself.
@@ -14,6 +16,7 @@ mod cfg;
 pub mod cse;
 pub mod dce;
 mod edit;
+pub mod inplace;
 pub mod layout;
 pub mod regalloc;
 pub mod slices;

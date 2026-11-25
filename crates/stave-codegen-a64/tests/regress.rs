@@ -1,13 +1,14 @@
 //! Regressions: scratch registers across far frame offsets, a fused compare's operand read later
 //! in its block, frame-size overflow, functions over the conditional-branch range, user fns named
 //! like compiler symbols, the thread child's stack alignment, references to fns without a body,
-//! zero-size statics.
+//! zero-size statics, whole-slot loads read in place.
 
 mod common;
 
 use common::*;
-use stave_codegen_a64::debug::{BuildConfig, ErrorKind, build_image};
+use stave_codegen_a64::debug::{BuildConfig, Codegen, ErrorKind, FuncScratch, build_image, prepare};
 use stave_ir::{CastKind, Op, Operand};
+use stave_obj::{ImageBuilder, Machine, Options};
 
 /// fn values compared when their homes are beyond the scaled-offset range (≥ 32 KiB from sp):
 /// loading the second operand must not clobber the first one's words.
@@ -334,4 +335,78 @@ fn reference_to_bodiless_fn_is_unsupported() {
         assert_eq!(e.func, Some(p.main));
         assert!(e.to_string().starts_with("aarch64 backend: unsupported in fn #"), "{e}");
     }
+}
+
+/// A `load` of a whole slot whose one use is the next store, call argument, or `ret` reads the
+/// slot in place (stave-opt `inplace`): the frame holds the slots and the `make`, and no home of
+/// its own for either such load. A load with a store to its slot before its use keeps a copy of
+/// the old bytes.
+#[test]
+fn whole_slot_load_is_read_in_place() {
+    let mut p = Prog::new();
+    let t = p.t;
+    let arr = p.m.types.array(t.u64, 512);
+    let parr = p.m.types.ref_(true, arr);
+    let pu64 = p.m.types.ref_(true, t.u64);
+    // fn pick(a: [u64; 512], i: usize) -> u64 { a[i] + a[511] }
+    let pick = p.func("app.pick", &[arr, t.usize], Some(t.u64), |b, _| {
+        let (a, i) = (b.param(0).unwrap(), b.param(1).unwrap());
+        let x = b.binary(Op::Get, t.u64, a, i);
+        let last = b.int(511);
+        let y = b.binary(Op::Get, t.u64, a, last);
+        let s = b.binary(Op::AddWrap, t.u64, x, y);
+        b.ret(Some(s.into()));
+    });
+    // fn made(k: u64) -> [u64; 512]: s1 = [0; 512], s1[0] = k, s1[511] = k + 1, s2 = s1,
+    // s1[0] = 9, return s2
+    let made = p.func("app.made", &[t.u64], Some(arr), |b, _| {
+        let k = b.param(0).unwrap();
+        let (s1, s2) = (b.slot(parr), b.slot(parr));
+        let zs: Vec<Operand> = (0..512).map(|_| b.int(0)).collect();
+        let z = b.op(Op::Make, arr, &zs);
+        b.store(s1, z);
+        let (i0, i511) = (b.int(0), b.int(511));
+        let e0 = b.op(Op::ElemAddr, pu64, &[s1.into(), i0]);
+        b.store(e0, k);
+        let e511 = b.op(Op::ElemAddr, pu64, &[s1.into(), i511]);
+        let one = b.int(1);
+        let k1 = b.binary(Op::AddWrap, t.u64, k, one);
+        b.store(e511, k1);
+        let v = b.load(arr, s1);
+        b.store(s2, v);
+        let nine = b.int(9);
+        b.store(e0, nine);
+        let w = b.load(arr, s2);
+        b.ret(Some(w.into()));
+    });
+    p.set_main(|b, p| {
+        let five = b.int(5);
+        let r = b.call(made, Some(arr), &[five]).unwrap();
+        let z = b.int(0);
+        let q = b.call(pick, Some(t.u64), &[r.into(), z]).unwrap();
+        p.out(b, q, t.u64);
+        let s3 = b.slot(parr);
+        b.store(s3, r);
+        let old = b.load(arr, s3);
+        let i0 = b.int(0);
+        let e0 = b.op(Op::ElemAddr, pu64, &[s3.into(), i0]);
+        let one = b.int(1);
+        b.store(e0, one);
+        let z = b.int(0);
+        let q = b.call(pick, Some(t.u64), &[old.into(), z]).unwrap();
+        p.out(b, q, t.u64);
+        let new = b.load(arr, s3);
+        let z = b.int(0);
+        let q = b.call(pick, Some(t.u64), &[new.into(), z]).unwrap();
+        p.out(b, q, t.u64);
+    });
+    let r = check(&p, "in_place_load");
+    let words: Vec<u8> = r.stdout.chunks(8).map(|c| c[0]).collect();
+    assert_eq!(words, [11, 11, 7]);
+    let mut img = ImageBuilder::new(Machine::Aarch64, Options::debug(Machine::Aarch64));
+    let syms = prepare(&mut img, &p.m, None).unwrap();
+    let cg = Codegen::new(&p.m, &syms);
+    let (_, made_use) = cg.compile_stack(made, &mut FuncScratch::default()).unwrap();
+    // two slots and the `make`: 3 x 4 KiB; a home per load would add 8 KiB
+    assert!(made_use.frame < 13 * 1024, "{}", made_use.frame);
 }

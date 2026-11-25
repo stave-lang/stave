@@ -1,7 +1,3 @@
-Write a complete Stave program in one source file. It reads no input and exits with status 0.
-Its standard output must be exactly the text under "Output" (every line ends with a newline).
-Compute the values in the program; do not print them as literal text.
-
 ## Task
 
 An inventory holds items (id, stock, price): (1, 10, 25), (2, 3, 100), (3, 50, 7). Define

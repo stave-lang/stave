@@ -654,7 +654,8 @@ it is not dumped, not compared with a golden, and not given to a backend.
     references (M18).
 - **A local a value is moved out of lives in a slot**, also when the canonical lowering keeps
   it as an SSA value: a move is an event on the bytes of its place. A local that is never
-  borrowed, captured, or moved out of stays an SSA value and is no allocation of the run.
+  borrowed, captured, moved out of, or stored into by part (`a[i] = v`), and whose type has no
+  drop glue, stays an SSA value and is no allocation of the run.
 - **Which by-value uses are moves.** Every one of a place whose type is not Copy, but a
   reference that the path of a place dereferences, a reference an implicit reborrow or a
   coercion takes (M6, M11), a `&mut T` place cast to a raw pointer (M11), and the reference a

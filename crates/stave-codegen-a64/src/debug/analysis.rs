@@ -85,6 +85,9 @@ pub struct Analysis {
     pub(crate) kind: Vec<Vk>,
     /// Per value: home slot (or slot area) offset from `sp`.
     pub(crate) home: Vec<u32>,
+    /// Per value: an aggregate load whose home is the slot it reads (stave-opt `inplace`): the
+    /// load emits nothing.
+    pub(crate) in_place: Vec<bool>,
     pub(crate) frame: u32,
     pub(crate) scratch_off: u32,
     /// A 32-byte, 16-byte aligned work area of the vector ops (in functions that have any).
@@ -759,14 +762,26 @@ impl Analysis {
         for (v, off) in slot_list {
             self.home[v] = (slot_base + off) as u32;
         }
+        let in_place = stave_opt::inplace::in_place_loads(body);
+        self.in_place.clear();
+        self.in_place.resize(nv, false);
+        for (v, s) in in_place.iter().enumerate() {
+            if let Some(s) = s
+                && matches!(self.kind[v], Vk::Mem(Ty::Mem { .. }))
+            {
+                self.in_place[v] = true;
+                self.home[v] = self.home[s.index()];
+            }
+        }
         // Linear scan over the intervals.
         self.bucket_start.clear();
         self.bucket_start.resize(nr + 1, 0);
         self.bucket_end.clear();
         self.bucket_end.resize(nr + 1, 0);
-        let needs_home = |k: Vk| matches!(k, Vk::Gpr(_) | Vk::Fpr(_) | Vk::Mem(_));
+        let needs_home =
+            |k: Vk, in_place: bool| matches!(k, Vk::Gpr(_) | Vk::Fpr(_) | Vk::Mem(_)) && !in_place;
         for v in 0..nv {
-            if needs_home(self.kind[v]) {
+            if needs_home(self.kind[v], self.in_place[v]) {
                 self.bucket_start[self.start[v] as usize + 1] += 1;
                 self.bucket_end[self.end[v] as usize + 1] += 1;
             }
@@ -785,7 +800,7 @@ impl Analysis {
         self.seen.clear();
         self.seen.extend_from_slice(&self.bucket_end[..nr]);
         for v in 0..nv {
-            if needs_home(self.kind[v]) {
+            if needs_home(self.kind[v], self.in_place[v]) {
                 let s = &mut self.work[self.start[v] as usize];
                 self.order[*s as usize] = v as u32;
                 *s += 1;

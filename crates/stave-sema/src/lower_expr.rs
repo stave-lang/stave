@@ -898,6 +898,13 @@ impl<'a> FnCx<'a> {
         let ty = self.nty(n);
         let TypeKind::Array { elem, len } = self.kind(ty) else { return self.fail(n, "array type") };
         if kids.len() == 2 && icx.is(icx.end_tok(kids[0]) + 1, Term::Semi) {
+            let into = match self.f.fill_into {
+                Some((at, l)) if at == n => {
+                    self.f.fill_into = None;
+                    Some(l)
+                }
+                _ => None,
+            };
             let Some(v) = self.val(kids[0], Some(elem)) else { return E::Never };
             let Some(len) = len.value() else { return self.fail(n, "array length") };
             if self.g.borrows
@@ -908,7 +915,7 @@ impl<'a> FnCx<'a> {
                 // each element after the first is a second owner of the one value
                 self.f.events.push(stave_ir::EventMark { value, kind: stave_ir::EventKind::Repeat });
             }
-            return self.repeat_fill(v, elem, ty, len);
+            return self.repeat_fill(v, elem, ty, len, into);
         }
         let mut vs = Vec::with_capacity(kids.len());
         let mut held = Vec::new();
@@ -926,16 +933,26 @@ impl<'a> FnCx<'a> {
     /// [`REPEAT_MAKE_MAX`] elements it is one `make` of `len` operands. A longer array is a
     /// frame slot filled by a counted loop that stores `v` into each element (no loop for a
     /// zero-size element), so the code does not grow with `len`; the result is then the slot's
-    /// place, which owns nothing: more than one copy of a value needs it to be Copy.
-    pub(crate) fn repeat_fill(&mut self, v: Operand, elem: Ty, ty: Ty, len: u64) -> E {
+    /// place, which owns nothing: more than one copy of a value needs it to be Copy. `into`: the
+    /// local in a slot a `let` binds to the array, whose slot is the one filled (and begun here).
+    pub(crate) fn repeat_fill(&mut self, v: Operand, elem: Ty, ty: Ty, len: u64, into: Option<usize>) -> E {
         if len <= REPEAT_MAKE_MAX {
             let vs = vec![v; len as usize];
             return E::V(self.opn(Op::Make, ty, &vs), ty);
         }
-        let s = self.new_slot(ty);
         let pt = self.t_ref(true, ty);
-        // each evaluation is a new temporary
-        self.event(stave_ir::EventKind::Begin, s, pt);
+        let s = match into.and_then(|l| Some((l, self.f.slot.get(l).copied().flatten()?))) {
+            Some((l, s)) => {
+                self.local_event(stave_ir::EventKind::Begin, l);
+                s
+            }
+            None => {
+                let s = self.new_slot(ty);
+                // each evaluation is a new temporary
+                self.event(stave_ir::EventKind::Begin, s, pt);
+                s
+            }
+        };
         if self.layout(elem).is_none_or(|l| l.0 > 0) {
             let us = self.t_usize();
             let (head, hv) = self.f.b.create_block_with(&[FnCx::ir(us)]);
@@ -1106,7 +1123,7 @@ impl<'a> FnCx<'a> {
                 };
                 let e = self.const_val(x, elem, tok);
                 let Some(o) = self.operand_of(e) else { return E::Never };
-                self.repeat_fill(o, elem, ty, *n)
+                self.repeat_fill(o, elem, ty, *n, None)
             }
         }
     }

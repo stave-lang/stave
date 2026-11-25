@@ -1,0 +1,217 @@
+// Method lookup on a receiver value of the body checker (types/check, see `typeck`), as stage0's
+// `lookup_method` decides it, at the level the receiver reaches through references:
+// - a generic param: the one trait method of the name its bounds in the body's environment give
+//   (`traits.bound_methods`), `Self` the param;
+// - a struct or enum: the first inherent impl with a head that has the method and applies, else
+//   the one trait impl with a head that has it and applies (impl-applies questions of
+//   `tc_traits`, answered in rounds).
+// The call then infers the method's generic arguments as a generic call (`tc_chain.gen_call`):
+// its bindings row holds the impl's (or the bound trait's) arguments, then the method's own
+// generics unbound; `self` is the receiver, not an argument. A method without generics of its
+// own in an impl with a const param has nothing to infer: its call is a plain call (no bindings
+// row) with the impl's arguments.
+//
+// Not decided here (the call is unknown): an impl without a struct or enum head with the name on
+// a struct or enum receiver (it may come first), two trait impls or bound traits with the name
+// (ambiguous), a const generic param of the method, or of its impl or trait when the method has
+// generics, an impl param the self type does not bind, a method without `self`, a question not
+// answered yet.
+import decls;
+import sigs;
+import tc_rows;
+import tc_traits;
+import types;
+import prims.search;
+import std.vec;
+
+const NONE: u32 = tc_rows.NONE;
+const ERR: u32 = types.ERR;
+
+impl tc_rows.Typeck {
+    // Method s on a receiver whose level is generic param c: (method, `Self`, bindings row), or
+    // NONE three times.
+    pub fn bound_method(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, c: u32, s: u32) -> (u32, u32, u32) {
+        let e = self.tq.env_of(sg, self.sc);
+        let p = sg.cx.tab.a_of(c);
+        self.tq.tr.bound_methods(ds, e, p, s, &mut self.tq.bm);
+        if self.tq.bm.len() != 4 { return (NONE, NONE, NONE); }
+        let tr = self.tq.bm.as_slice()[0];
+        let m = self.tq.bm.as_slice()[1];
+        let off = self.tq.bm.as_slice()[2] as usize;
+        let na = self.tq.bm.as_slice()[3] as usize;
+        if sg.sflags.as_slice()[m as usize] & sigs.SF_SELF_MASK == 0 { return (NONE, NONE, NONE); }
+        if has_const(sg, tr) || has_const(sg, m) { return (NONE, NONE, NONE); }
+        let gl = sg.cx.gens.lo.as_slice();
+        let np = (gl[tr as usize + 1] - gl[tr as usize]) as usize;
+        let own = (gl[m as usize + 1] - gl[m as usize]) as usize;
+        if na != 3 * np { return (NONE, NONE, NONE); }
+        let b = self.binds.len();
+        for i in 0..np {
+            let w = self.tq.tr.env_words(e);
+            let k = w[off + 3 * i];
+            let x = w[off + 3 * i + 1];
+            if k != types.GA_TYPE || x == ERR {
+                self.binds.truncate(b);
+                return (NONE, NONE, NONE);
+            }
+            self.binds.push(x);
+        }
+        for _ in 0..own {
+            self.binds.push(NONE);
+        }
+        return (m, c, b as% u32);
+    }
+
+    // Method s on a receiver whose level is struct or enum type c: (method, `Self`, bindings row),
+    // or NONE three times.
+    pub fn adt_method(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, c: u32, s: u32) -> (u32, u32, u32) {
+        let e = self.tq.env_of(sg, self.sc);
+        let key = search.pair(sg.cx.tab.a_of(c), s);
+        // every candidate is asked in the same round, also after one that waits
+        let mut wait = false;
+        let mut k = search.lower_bound(ds.inh_key.as_slice(), key);
+        let mut prev = NONE;
+        while k < ds.inh_key.len() && ds.inh_key.as_slice()[k] == key {
+            let m = ds.inh_decl.as_slice()[k];
+            let imp = ds.parent.as_slice()[m as usize];
+            k = k + 1;
+            // an impl's first method of the name is the one looked up
+            if imp == prev { continue; }
+            prev = imp;
+            let a = self.tq.applies(sg, e, imp, c);
+            if a == tc_traits.A_WAIT { wait = true; }
+            if a == tc_traits.A_YES && !wait { return self.impl_method(sg, ds, m, c); }
+        }
+        if self.headless_has(s) { return self.waited(wait); }
+        let mut found = NONE;
+        let mut fargs = vec.Vec::<u32>.new();
+        let mut two = false;
+        let mut t = search.lower_bound(ds.tr_key.as_slice(), key);
+        prev = NONE;
+        while t < ds.tr_key.len() && ds.tr_key.as_slice()[t] == key {
+            let m = ds.tr_decl.as_slice()[t];
+            let imp = ds.parent.as_slice()[m as usize];
+            t = t + 1;
+            if imp == prev { continue; }
+            prev = imp;
+            let a = self.tq.applies(sg, e, imp, c);
+            if a == tc_traits.A_WAIT { wait = true; }
+            if a != tc_traits.A_YES { continue; }
+            if found != NONE { two = true; }
+            found = m;
+            fargs.clear();
+            fargs.extend_from_slice(self.tq.qargs.as_slice());
+        }
+        if wait || two || found == NONE { return self.waited(wait); }
+        self.tq.qargs.clear();
+        self.tq.qargs.extend_from_slice(fargs.as_slice());
+        return self.impl_method(sg, ds, found, c);
+    }
+
+    // Method s at level c (a type with no struct or enum head: a built-in type, a reference, a
+    // slice, a tuple) from the impls with no struct or enum head, as stage0's `lookup_at` takes
+    // them: the first inherent impl that has the method and applies, else the one trait impl
+    // that has it and applies. (method, `Self`, bindings row, true) when found; NONE three times
+    // and whether the lookup is open (an answer not given yet, two trait impls, an impl whose
+    // self type did not lower, a method `impl_method` does not take), false when no impl has it.
+    pub fn headless_method(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, c: u32, s: u32) -> (u32, u32, u32, bool) {
+        let lo = search.lower_bound(self.hl_name.as_slice(), s);
+        let mut hi = lo;
+        while hi < self.hl_name.len() && self.hl_name.as_slice()[hi] == s {
+            hi = hi + 1;
+        }
+        if lo == hi { return (NONE, NONE, NONE, false); }
+        let e = self.tq.env_of(sg, self.sc);
+        let mut wait = false;
+        let mut found = NONE;
+        let mut fargs = vec.Vec::<u32>.new();
+        let mut two = false;
+        // inherent impls first, then trait impls; an impl's first method of the name is the one
+        for pass in 0..2usize {
+            let mut prev = NONE;
+            for k in lo..hi {
+                let m = self.hl_m.as_slice()[k];
+                let imp = ds.parent.as_slice()[m as usize];
+                if (ds.impl_trait_ty.as_slice()[imp as usize] == NONE) != (pass == 0) || imp == prev { continue; }
+                prev = imp;
+                let st = sg.cx.ty.as_slice()[imp as usize];
+                if st == NONE || st == ERR { return (NONE, NONE, NONE, true); }
+                let a = self.tq.applies(sg, e, imp, c);
+                if a == tc_traits.A_WAIT { wait = true; }
+                if a != tc_traits.A_YES { continue; }
+                if pass == 0 && !wait {
+                    let (x, y, z) = self.impl_method(sg, ds, m, c);
+                    return (x, y, z, true);
+                }
+                if found != NONE { two = true; }
+                found = m;
+                fargs.clear();
+                fargs.extend_from_slice(self.tq.qargs.as_slice());
+            }
+            if wait {
+                let (x, y, z) = self.waited(true);
+                return (x, y, z, true);
+            }
+            if pass == 0 { found = NONE; }
+        }
+        if two { return (NONE, NONE, NONE, true); }
+        if found == NONE { return (NONE, NONE, NONE, false); }
+        self.tq.qargs.clear();
+        self.tq.qargs.extend_from_slice(fargs.as_slice());
+        let (x, y, z) = self.impl_method(sg, ds, found, c);
+        return (x, y, z, true);
+    }
+
+    // A lookup that is not decided: when it waits for an answer in the last round, the body is
+    // not modeled.
+    fn waited(&mut self, wait: bool) -> (u32, u32, u32) {
+        if wait && self.tq.last { self.bad = true; }
+        return (NONE, NONE, NONE);
+    }
+
+    // Impl method m found at type c, its impl's generic arguments in `tq.qargs`.
+    fn impl_method(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, m: u32, c: u32) -> (u32, u32, u32) {
+        if sg.sflags.as_slice()[m as usize] & sigs.SF_SELF_MASK == 0 { return (NONE, NONE, NONE); }
+        let imp = ds.parent.as_slice()[m as usize];
+        let gl = sg.cx.gens.lo.as_slice();
+        let np = (gl[imp as usize + 1] - gl[imp as usize]) as usize;
+        let own = (gl[m as usize + 1] - gl[m as usize]) as usize;
+        if self.tq.qargs.len() != 3 * np { return (NONE, NONE, NONE); }
+        if has_const(sg, imp) && own == 0 {
+            // nothing to infer: the call is checked with the impl's arguments, the type of the
+            // impl decl with them instantiating it (a type no node has)
+            let tab = &mut sg.cx.tab;
+            tab.begin();
+            for i in 0..np {
+                let q = self.tq.qargs.as_slice();
+                if q[3 * i] == types.GA_ERROR || q[3 * i] == types.GA_TYPE && (q[3 * i + 1] == ERR || q[3 * i + 1] == NONE) { return (NONE, NONE, NONE); }
+                tab.push_garg(q[3 * i], q[3 * i + 1], q[3 * i + 2]);
+            }
+            return (m, tab.intern(types.TK_ADT, imp, 0), NONE);
+        }
+        if has_const(sg, imp) || has_const(sg, m) { return (NONE, NONE, NONE); }
+        let b = self.binds.len();
+        for i in 0..np {
+            let k = self.tq.qargs.as_slice()[3 * i];
+            let x = self.tq.qargs.as_slice()[3 * i + 1];
+            if k != types.GA_TYPE || x == ERR || x == NONE {
+                self.binds.truncate(b);
+                return (NONE, NONE, NONE);
+            }
+            self.binds.push(x);
+        }
+        for _ in 0..own {
+            self.binds.push(NONE);
+        }
+        return (m, c, b as% u32);
+    }
+}
+
+// Whether decl d has a const generic param of its own.
+fn has_const(sg: &sigs.Sigs, d: u32) -> bool {
+    let gl = sg.cx.gens.lo.as_slice();
+    for i in gl[d as usize] as usize..gl[d as usize + 1] as usize {
+        if sg.cx.gens.is_const.as_slice()[i] { return true; }
+    }
+    return false;
+}

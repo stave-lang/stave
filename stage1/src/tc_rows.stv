@@ -1,0 +1,508 @@
+// The body checker's state (types/check, see `typeck`): the node rows every module of the
+// checker reads and writes, the literal groups of the body being checked, and the operations on
+// them the other modules call.
+//
+// Node rows (per global node row): `nty` (the node's value: a type, `NONE` no value, `UNK` not
+// decided, `LIT | g` a pending literal group), `hint` (the context type its parent gave it), `acc`
+// (a parent's running value), `loc` (a binding's type); per `Postfix` row `chain`, `pos`, `pend`
+// (owned by `tc_chain`). Literal groups: union-find by index (`lg_parent`), the type each root is
+// fixed to (`lg_fixed`: `NONE` pending, `UNK` unknown), int or float.
+//
+// Entry points: `resolve`, `force`, `poison`, `fix`, `unite` (literal groups); `coerce` (a
+// coercion site), `coercible`, `unify` (stage0's `unify_operands`); `set_hint`; `known` (a type
+// from the signatures); `err` (a type error: the body prints `?`); `poison_kids`, `unknown` (a
+// form not checked yet); `expr_kid`; `tok_text`, `is_lit`; the calls of the built-ins of
+// `tc_builtins` (`bi_call`, `bi_hint`, `bi_targs`); the methods of impls with no struct or enum
+// head (`headless_impls`, looked up by `tc_method.headless_method`).
+import ast;
+import consteval;
+import decls;
+import generated.terminals;
+import items;
+import lex;
+import sigs;
+import source;
+import tc_builtins;
+import tc_traits;
+import types;
+import prims.sort;
+import std.vec;
+
+pub const NONE: u32 = 4294967295;
+const ERR: u32 = types.ERR;
+// A node, hint, or binding not decided by this stage.
+pub const UNK: u32 = tc_builtins.UNK;
+// `LIT | g`: the value of literal group g.
+pub const LIT: u32 = 2147483648;
+
+pub struct Typeck {
+    // per node row: its type, `NONE` (no value), `UNK`, or `LIT | g` while its body is checked
+    pub nty: vec.Vec<u32>,
+    // per node row: the context type its parent gave it (`NONE`: none, `UNK`: not known)
+    pub hint: vec.Vec<u32>,
+    // per node row: a parent's running value (an operator chain's left operand, a `let` type)
+    pub acc: vec.Vec<u32>,
+    // per binding node row (`Param`, `SelfParam`, `Pattern`): its type (`UNK` until bound)
+    pub loc: vec.Vec<u32>,
+    // literal groups of the body being checked: parent, fixed type (`NONE` pending, `UNK`
+    // unknown), float or int
+    pub lg_parent: vec.Vec<u32>,
+    pub lg_fixed: vec.Vec<u32>,
+    pub lg_float: vec.Vec<bool>,
+    // the return types of the enclosing fn, spawn bodies, and closures
+    pub rets: vec.Vec<u32>,
+    // per `Postfix` row: the chain's state (`S_*`, its value or decl in `acc`), the next token of
+    // the chain, the step waiting for the child being checked (`P_*`); per `Args` row: the callee
+    // in `acc` (NONE: not checked yet), the type whose generic arguments instantiate it in `pos`
+    pub chain: vec.Vec<u8>,
+    pub pos: vec.Vec<u32>,
+    pub pend: vec.Vec<u8>,
+    // the walk: node rows and the next child of each
+    pub st_row: vec.Vec<u32>,
+    pub st_kid: vec.Vec<u32>,
+    // the body being checked: item, its first node row, module, scope, `self` binding row, error
+    // found
+    pub it: u32,
+    pub base: usize,
+    pub module: u32,
+    pub sc: consteval.Scope,
+    pub self_row: u32,
+    pub bad: bool,
+    pub lw: sigs.Lw,
+    // `std.soa.Soa` (NONE without one), its module
+    pub soa: u32,
+    pub soa_mod: u32,
+    pub args: vec.Vec<u32>,
+    // the names of the methods of impls with no struct or enum head, sorted
+    pub headless: vec.Vec<u32>,
+    // the same methods: their names, sorted, and their decls (`headless_impls`)
+    pub hl_name: vec.Vec<u32>,
+    pub hl_m: vec.Vec<u32>,
+    // the pattern walk of `tc_pat`: pattern rows, the type each matches, the binding mode
+    pub pat_row: vec.Vec<u32>,
+    pub pat_ty: vec.Vec<u32>,
+    pub pat_mode: vec.Vec<u8>,
+    // per value `match` row: the type of its arms so far (NONE before the first)
+    pub arm: vec.Vec<u32>,
+    // generic calls (`tc_chain`): the bindings of every call of the body, per `Args` row the start
+    // of its call's (NONE: no generics), per argument or `Args` row whether it waits (an
+    // argument for the second pass; a call: its inference met an unknown type); the scratch
+    // stacks of type matching
+    pub binds: vec.Vec<u32>,
+    pub blo: vec.Vec<u32>,
+    pub waits: vec.Vec<bool>,
+    pub mt_p: vec.Vec<u32>,
+    pub mt_x: vec.Vec<u32>,
+    pub mt_new: vec.Vec<u32>,
+    pub mt_h: vec.Vec<u32>,
+    pub mt_k: vec.Vec<u32>,
+    // the built-in methods and type-relative built-ins
+    pub bt: tc_builtins.Builtins,
+    // the trait questions, asked in rounds (`tc_traits`)
+    pub tq: tc_traits.Tq,
+    // `std.core.Option`, `std.core.Result` (NONE: none in this program)
+    pub opt: u32,
+    pub res: u32,
+    pub t_bool: u32,
+    pub t_char: u32,
+    pub t_unit: u32,
+    pub t_never: u32,
+    pub t_ref_str: u32,
+}
+
+// Whether value v is a literal group's.
+pub fn is_lit(v: u32) -> bool {
+    return v != NONE && v != ERR && v != UNK && v & LIT != 0;
+}
+
+impl Typeck {
+    pub fn new_lit(&mut self, float: bool) -> u32 {
+        let g = self.lg_parent.len() as% u32;
+        self.lg_parent.push(g);
+        self.lg_fixed.push(NONE);
+        self.lg_float.push(float);
+        return LIT | g;
+    }
+
+    fn find(&mut self, g: u32) -> u32 {
+        let mut r = g;
+        loop {
+            let p = self.lg_parent.as_slice()[r as usize];
+            if p == r { break; }
+            r = p;
+        }
+        let mut x = g;
+        loop {
+            let p = self.lg_parent.as_slice()[x as usize];
+            if p == x { break; }
+            self.lg_parent.as_mut_slice()[x as usize] = r;
+            x = p;
+        }
+        return r;
+    }
+
+    // A value with its group's fixed type: a type, `UNK`, or `LIT | root` (pending).
+    pub fn resolve(&mut self, v: u32) -> u32 {
+        if !is_lit(v) { return v; }
+        let r = self.find(v & (LIT - 1));
+        let f = self.lg_fixed.as_slice()[r as usize];
+        return if f == NONE then LIT | r else f;
+    }
+
+    // Makes a pending group of value v unknown.
+    pub fn poison(&mut self, v: u32) {
+        if !is_lit(v) { return; }
+        let r = self.find(v & (LIT - 1));
+        if self.lg_fixed.as_slice()[r as usize] == NONE { self.lg_fixed.as_mut_slice()[r as usize] = UNK; }
+    }
+
+    // Fixes pending group value v to type ty: false (an error) if ty is not of the literal's kind.
+    pub fn fix(&mut self, tab: &types.Table, v: u32, ty: u32) -> bool {
+        let r = self.find(v & (LIT - 1));
+        let f = self.lg_fixed.as_slice()[r as usize];
+        if f != NONE { return f == ty || f == UNK; }
+        let tag = tab.tag_of(ty);
+        let ok = if self.lg_float.as_slice()[r as usize] then tag == types.TK_FLOAT else tag == types.TK_INT;
+        if !ok { return false; }
+        self.lg_fixed.as_mut_slice()[r as usize] = ty;
+        return true;
+    }
+
+    // Unites two pending groups: false (an error) for an int and a float group.
+    pub fn unite(&mut self, a: u32, b: u32) -> bool {
+        let ra = self.find(a & (LIT - 1));
+        let rb = self.find(b & (LIT - 1));
+        if ra == rb { return true; }
+        if self.lg_float.as_slice()[ra as usize] != self.lg_float.as_slice()[rb as usize] { return false; }
+        let lo = if ra < rb then ra else rb;
+        let hi = if ra < rb then rb else ra;
+        self.lg_parent.as_mut_slice()[hi as usize] = lo;
+        return true;
+    }
+
+    // A value that must be a type here (stage0 `force`): a pending group is an error (E0202).
+    pub fn force(&mut self, v: u32) -> u32 {
+        let r = self.resolve(v);
+        if is_lit(r) {
+            self.bad = true;
+            return UNK;
+        }
+        return r;
+    }
+
+    pub fn resolve_at(&mut self, r: usize) -> u32 {
+        let v = self.nty.as_slice()[r];
+        return self.resolve(v);
+    }
+
+    pub fn force_at(&mut self, r: usize) -> u32 {
+        let v = self.nty.as_slice()[r];
+        return self.force(v);
+    }
+
+    pub fn poison_at(&mut self, r: usize) {
+        let v = self.nty.as_slice()[r];
+        self.poison(v);
+    }
+
+    pub fn resolve_acc(&mut self, r: usize) -> u32 {
+        let v = self.acc.as_slice()[r];
+        return self.resolve(v);
+    }
+
+    pub fn set_hint_bool(&mut self, c: usize) {
+        let b = self.t_bool;
+        self.set_hint(c, b);
+    }
+
+    pub fn set_hint_acc(&mut self, c: usize, r: usize) {
+        let v = self.acc.as_slice()[r];
+        self.set_hint(c, v);
+    }
+
+    pub fn coerce_bool(&mut self, tab: &types.Table, e: usize) {
+        let b = self.t_bool;
+        self.coerce(tab, e, b);
+    }
+
+    pub fn coerce_acc(&mut self, tab: &types.Table, e: usize, r: usize) {
+        let v = self.acc.as_slice()[r];
+        self.coerce(tab, e, v);
+    }
+
+    // A type read from the signatures: the error type is not modeled after an error.
+    pub fn known(&mut self, ty: u32) -> u32 {
+        if ty == ERR || ty == NONE {
+            self.bad = true;
+            return UNK;
+        }
+        return ty;
+    }
+
+    pub fn set_hint(&mut self, c: usize, h: u32) {
+        self.hint.as_mut_slice()[c] = h;
+    }
+
+    pub fn expr_kid(&self, tree: &ast.Ast, r: usize) -> u32 {
+        let ks = tree.kids.row(r);
+        for j in 0..ks.len() {
+            let c = self.base + ks[j] as usize;
+            if is_expr(kind(tree, c)) { return c as% u32; }
+        }
+        return NONE;
+    }
+
+    // Makes the literal groups of row r's children unknown: r is a form not checked yet.
+    pub fn poison_kids(&mut self, tree: &ast.Ast, r: usize) {
+        let ks = tree.kids.row(r);
+        for j in 0..ks.len() {
+            let c = self.base + ks[j] as usize;
+            let v = self.nty.as_slice()[c];
+            self.poison(v);
+        }
+    }
+
+    // An unknown node: its children's pending groups become unknown.
+    pub fn unknown(&mut self, tree: &ast.Ast, r: usize) -> u32 {
+        self.poison_kids(tree, r);
+        return UNK;
+    }
+
+    // Checks node e's value against type want at a coercion site (annotation, parameter, return,
+    // assignment): a pending group takes want.
+    pub fn coerce(&mut self, tab: &types.Table, e: usize, want: u32) {
+        let v = self.resolve_at(e);
+        if want == UNK {
+            self.poison(v);
+            return;
+        }
+        if v == UNK { return; }
+        if is_lit(v) {
+            if !self.fix(tab, v, want) { self.bad = true; }
+            return;
+        }
+        if v == want || v == self.t_never { return; }
+        if !self.coercible(tab, v, want) { self.bad = true; }
+    }
+
+    // stage0's implicit coercions this stage knows: `&mut T` to `&T`, `&[T; N]` and
+    // `&[T align A]` to `&[T]` (shared or mut).
+    pub fn coercible(&self, tab: &types.Table, v: u32, want: u32) -> bool {
+        if v == NONE || v == ERR || tab.tag_of(v) != types.TK_REF || tab.tag_of(want) != types.TK_REF { return false; }
+        let vm = tab.a_of(v) == 1;
+        let wm = tab.a_of(want) == 1;
+        if wm && !vm { return false; }
+        let vi = tab.b_of(v);
+        let wi = tab.b_of(want);
+        if !wm && vm && vi == wi { return true; }
+        if tab.tag_of(wi) != types.TK_SLICE || tab.b_of(wi) != 0 { return false; }
+        let vt = tab.tag_of(vi);
+        if vt == types.TK_ARRAY { return tab.a_of(vi) == tab.a_of(wi); }
+        return vt == types.TK_SLICE && tab.b_of(vi) != 0 && tab.a_of(vi) == tab.a_of(wi);
+    }
+
+    // stage0's `unify_operands` on resolved values.
+    pub fn unify(&mut self, tab: &types.Table, lt: u32, rt: u32) -> u32 {
+        if lt == UNK || rt == UNK {
+            self.poison(lt);
+            self.poison(rt);
+            return UNK;
+        }
+        if lt == NONE || rt == NONE {
+            self.bad = true;
+            return UNK;
+        }
+        let ll = is_lit(lt);
+        let rl = is_lit(rt);
+        if !ll && !rl {
+            if lt == rt || rt == self.t_never { return lt; }
+            if lt == self.t_never { return rt; }
+            self.bad = true;
+            return UNK;
+        }
+        if ll && rl {
+            if self.unite(lt, rt) { return self.resolve(lt); }
+            self.bad = true;
+            return UNK;
+        }
+        let g = if ll then lt else rt;
+        let ty = if ll then rt else lt;
+        if ty == self.t_never { return g; }
+        if tab.tag_of(ty) == types.TK_VECTOR || !self.fix(tab, g, ty) {
+            self.bad = true;
+            return UNK;
+        }
+        return ty;
+    }
+
+    pub fn err(&mut self) -> u32 {
+        self.bad = true;
+        return UNK;
+    }
+}
+
+const T_L_PAREN: u8 = terminals.T_L_PAREN as% u8;
+const T_R_PAREN: u8 = terminals.T_R_PAREN as% u8;
+const T_L_BRACKET: u8 = terminals.T_L_BRACKET as% u8;
+const T_COMMA: u8 = terminals.T_COMMA as% u8;
+const T_INT_LIT: u8 = terminals.T_INT_LIT as% u8;
+
+impl Typeck {
+    // A call of built-in callee on c (the receiver, or the type of a type-relative call) with the
+    // arguments of `Args` row args (NONE: none), each checked by its kind; its value.
+    pub fn bi_call(&mut self, tab: &mut types.Table, tree: &ast.Ast, callee: u32, c: u32, args: u32) -> u32 {
+        let np = self.bt.params(callee, c);
+        if np == UNK {
+            if args != NONE { self.poison_kids(tree, args as usize); }
+            return UNK;
+        }
+        let nb = if args == NONE then 0usize else tree.kids.row(args as usize).len();
+        if nb != np as usize { return self.err(); }
+        let mut x = NONE;
+        let mut y = NONE;
+        for j in 0..nb {
+            let a = self.base + tree.kids.row(args as usize)[j] as usize;
+            let kd = self.bt.arg_kind(tab, callee, c, j);
+            if kd == tc_builtins.A_SEL || kd == tc_builtins.A_FREE {
+                let v = if kd == tc_builtins.A_SEL then self.resolve_at(a) else self.force_at(a);
+                if j == 0 { x = v; } else { y = v; }
+                continue;
+            }
+            let want = self.bt.param(tab, callee, c, j);
+            if kd == tc_builtins.A_ALIGNED {
+                let v = self.force_at(a);
+                if v != UNK && !aligned_ok(tab, v, want) { self.bad = true; }
+                continue;
+            }
+            if kd == tc_builtins.A_INDEX {
+                let v = self.force_at(a);
+                if v == UNK || index_ok(tab, v, want) { continue; }
+            }
+            self.coerce(tab, a, want);
+        }
+        if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_SEL { return self.unify(tab, x, y); }
+        if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_FREE {
+            if x == UNK || y == UNK { return UNK; }
+            let r = self.bt.select_ret(tab, c, x, y);
+            return if r == NONE then self.err() else r;
+        }
+        return self.bt.ret(tab, callee, c);
+    }
+
+    // The context of argument j of the call of a built-in at `Args` row r (its callee in `acc`,
+    // the type it is called on in `pos`, the call's context in `hint`).
+    pub fn bi_hint(&mut self, tab: &mut types.Table, tree: &ast.Ast, r: usize, j: usize) -> u32 {
+        let callee = self.acc.as_slice()[r];
+        let c = self.pos.as_slice()[r];
+        let kd = self.bt.arg_kind(tab, callee, c, j);
+        if kd == tc_builtins.A_FREE || kd == tc_builtins.A_ALIGNED { return NONE; }
+        if kd == tc_builtins.A_SEL {
+            // the first operand takes the call's context, the second the first's type
+            let h = self.hint.as_slice()[r];
+            if j == 0 { return h; }
+            let v = self.resolve_at(self.base + tree.kids.row(r)[0] as usize);
+            if v == UNK { return UNK; }
+            if v == NONE || v == self.t_never || is_lit(v) { return h; }
+            return v;
+        }
+        return self.bt.param(tab, callee, c, j);
+    }
+
+    // A built-in method m on c called with generic arguments (`GenericArgs` row ga) and the `()`
+    // right after them: its value; NONE when m is no built-in or the call is not that form (then
+    // an error if m is one).
+    pub fn bi_targs(&mut self, tab: &mut types.Table, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, tree: &ast.Ast, m: u32, c: u32, ga: u32) -> u32 {
+        if !tc_builtins.is_builtin(m) { return NONE; }
+        let q = tree.tok_end.as_slice()[ga as usize];
+        if !self.bt.takes_targs(m) || consteval.tk(t, q) != T_L_PAREN || consteval.tk(t, q + 1) != T_R_PAREN {
+            self.bad = true;
+            return NONE;
+        }
+        // `permute::<[i0, ..]>`: one index per lane, each a plain int literal below the lanes
+        let n = tab.b_of(c);
+        if n == types.LANES_N { return self.bt.ret(tab, m, c); }
+        let ks = tree.kids.row(ga as usize);
+        if ks.len() != 1 { return self.err(); }
+        let a = tree.tok.as_slice()[self.base + ks[0] as usize];
+        if consteval.tk(t, a) != T_L_BRACKET { return self.err(); }
+        let close = cut.mate.as_slice()[a as usize];
+        if close == NONE { return self.err(); }
+        let mut count: u32 = 0;
+        for tok in a + 1..close {
+            let k = consteval.tk(t, tok);
+            if k == T_COMMA { continue; }
+            if k != T_INT_LIT { return self.err(); }
+            let (v, big, suf) = consteval.parse_int(tok_text(t, set, cut, self.it, tok, false));
+            if big || suf != 0 || v >= n as u64 { return self.err(); }
+            count = count + 1;
+        }
+        if count != n { return self.err(); }
+        return self.bt.ret(tab, m, c);
+    }
+}
+
+// The methods of impls with no struct or enum head: their names, sorted (methods of one name in
+// declaration order), and the method decl of each.
+pub fn headless_impls(ds: &decls.Decls) -> (vec.Vec<u32>, vec.Vec<u32>) {
+    let mut xs = vec.Vec::<u32>.new();
+    let mut ps = vec.Vec::<u32>.new();
+    for m in 0..ds.decls() {
+        if ds.kind.as_slice()[m] != decls.DK_METHOD { continue; }
+        let p = ds.parent.as_slice()[m];
+        if p == NONE || ds.kind.as_slice()[p as usize] != decls.DK_IMPL || ds.impl_head.as_slice()[p as usize] != NONE { continue; }
+        xs.push(ds.name.as_slice()[m]);
+        ps.push(m as% u32);
+    }
+    let perm = sort.sort_perm(xs.as_slice());
+    let mut names = vec.Vec::<u32>.with_capacity(xs.len());
+    let mut imps = vec.Vec::<u32>.with_capacity(xs.len());
+    for k in 0..perm.len() {
+        let i = perm.as_slice()[k] as usize;
+        names.push(xs.as_slice()[i]);
+        imps.push(ps.as_slice()[i]);
+    }
+    return (names, imps);
+}
+
+// Whether v (decided) passes as want, `&[T align A]` (`&mut` when want is): a reference of that
+// mutability or `&mut`, to a slice of T aligned to at least A.
+fn aligned_ok(tab: &types.Table, v: u32, want: u32) -> bool {
+    if v == NONE || tab.tag_of(v) != types.TK_REF || (tab.a_of(want) == 1 && tab.a_of(v) != 1) { return false; }
+    let s = tab.b_of(v);
+    let ws = tab.b_of(want);
+    return tab.tag_of(s) == types.TK_SLICE && tab.a_of(s) == tab.a_of(ws) && tab.b_of(s) >= tab.b_of(ws);
+}
+
+// Whether v (decided) is a gather / scatter index for want as it is: a vector of unsigned lanes
+// with want's fixed lane count.
+fn index_ok(tab: &types.Table, v: u32, want: u32) -> bool {
+    if v == NONE || tab.tag_of(v) != types.TK_VECTOR || tab.b_of(want) == types.LANES_N || tab.b_of(v) != tab.b_of(want) { return false; }
+    let l = tab.a_of(v);
+    return tab.tag_of(l) == types.TK_INT && !tab.is_signed(l);
+}
+
+// The source bytes of global token tok of item it, up to the end of its word (letters, digits,
+// `_`; with `float`, also `.` and an exponent sign).
+pub fn tok_text(t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, tok: u32, float: bool) -> &[u8] from set {
+    let f = cut.file.as_slice()[it as usize] as usize;
+    let src = set.file(f);
+    let s = t.start.as_slice()[tok as usize] as usize;
+    let mut e = s;
+    while e < src.len() {
+        let c = src[e];
+        let word = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+        let dot = float && c == 46;
+        let sign = float && (c == 43 || c == 45) && e > s && (src[e - 1] == 101 || src[e - 1] == 69);
+        if !word && !dot && !sign { break; }
+        e = e + 1;
+    }
+    return &src[s..e];
+}
+
+fn kind(tree: &ast.Ast, g: usize) -> u8 {
+    return tree.kind.as_slice()[g];
+}
+
+fn is_expr(k: u8) -> bool {
+    return consteval.is_expr_kind(k);
+}
