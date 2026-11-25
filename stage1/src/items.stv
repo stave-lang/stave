@@ -33,7 +33,7 @@ pub const FILE_UNBALANCED: u8 = 2;
 pub const FILE_TOO_DEEP: u8 = 3;
 
 pub const MAX_DEPTH: i32 = 10000;
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = 0xffff_ffff;
 
 const T_SEMI: u8 = terminals.T_SEMI as% u8;
 const T_R_BRACE: u8 = terminals.T_R_BRACE as% u8;

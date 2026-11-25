@@ -71,13 +71,13 @@ test fn sorted_and_reversed() {
 }
 
 test fn extreme_keys() {
-    let a = [4294967295u32, 0, 4294967295, 1, 0, 2147483648, 4294967294, 255, 256, 65535, 65536];
+    let a = [0xffff_ffffu32, 0, 0xffff_ffff, 1, 0, 0x8000_0000, 0xffff_fffe, 0xff, 0x100, 0xffff, 0x10000];
     check(&a, "u32 extremes");
-    let b = [u64_max(), 0, u64_max(), 1, 0, 9223372036854775808, u64_max() - 1, 255, 256, 4294967295, 4294967296];
+    let b = [u64_max(), 0, u64_max(), 1, 0, 0x8000_0000_0000_0000, u64_max() - 1, 0xff, 0x100, 0xffff_ffff, 0x1_0000_0000];
     check(&b, "u64 extremes");
     let c = [255u8, 0, 255, 128, 1, 0];
     check(&c, "u8");
-    let d = [65535u16, 0, 256, 255, 65535];
+    let d = [0xffffu16, 0, 0x100, 0xff, 0xffff];
     check(&d, "u16");
 }
 

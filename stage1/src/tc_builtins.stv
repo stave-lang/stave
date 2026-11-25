@@ -30,9 +30,9 @@ import types;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = 0xffff_ffff;
 // A type or callee the checker does not decide (printed `?`); `tc_rows.UNK` is this value.
-pub const UNK: u32 = 4294967293;
+pub const UNK: u32 = 0xffff_fffd;
 
 // The kinds of a built-in's argument (see the top).
 pub const A_IS: u8 = 0;
@@ -42,8 +42,8 @@ pub const A_ALIGNED: u8 = 3;
 pub const A_INDEX: u8 = 4;
 
 // Callee ids of the built-ins: `B_BASE + k` for built-in k.
-const B_BASE: u32 = 4294967040;
-const B_END: u32 = 4294967280;
+const B_BASE: u32 = 0xffff_ff00;
+const B_END: u32 = 0xffff_fff0;
 
 // The names the table looks up, in the order of their k. The groups are what the guards below
 // test as ranges.

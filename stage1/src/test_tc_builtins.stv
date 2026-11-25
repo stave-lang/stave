@@ -6,8 +6,8 @@ import types;
 import std.debug;
 import std.mem;
 
-const UNK: u32 = 4294967293;
-const NONE: u32 = 4294967295;
+const UNK: u32 = 0xffff_fffd;
+const NONE: u32 = 0xffff_ffff;
 // The decl of `Option` the tests give the table.
 const OPT: u32 = 7;
 

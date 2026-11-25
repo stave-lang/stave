@@ -41,7 +41,7 @@ import text;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = 0xffff_ffff;
 
 const T_IDENT: u8 = terminals.T_IDENT as% u8;
 const T_DOT: u8 = terminals.T_DOT as% u8;

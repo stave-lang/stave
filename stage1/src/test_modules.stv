@@ -6,7 +6,7 @@ import test_kit;
 import text;
 import std.debug;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = 0xffff_ffff;
 
 // Root package `app`, dependency `geo` (a library), built-in `std`; package ranks by name.
 fn graph(main_src: &str, a_src: &str, ab_src: &str) -> test_kit.Out {

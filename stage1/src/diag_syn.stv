@@ -25,12 +25,12 @@ import std.mem;
 import std.vec;
 
 const W: usize = terminals.NTERM;
-const NT_BIT: u32 = 32768;
+const NT_BIT: u32 = 0x8000;
 const SYM_MASK: u32 = 0xFFFF;
 const PROD_SHIFT: u32 = 16;
 const PROD_MASK: u32 = 0xFFF;
 // A kind no token has and a node-kind value no rule names.
-const NO_KIND: u32 = 65535;
+const NO_KIND: u32 = 0xffff;
 
 const T_BANG: u32 = terminals.T_BANG as u32;
 const T_BANG_EQ: u32 = terminals.T_BANG_EQ as u32;

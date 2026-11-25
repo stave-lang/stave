@@ -5,7 +5,7 @@ import test_util;
 import std.debug;
 import std.vec;
 
-const NO_BIT: usize = 4294967295;
+const NO_BIT: usize = 0xffff_ffff;
 const WIDTHS: [usize; 10] = [1, 63, 64, 65, 127, 128, 129, 191, 320, 321];
 
 // The next member at or after `at`, NO_BIT if none.

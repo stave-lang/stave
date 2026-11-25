@@ -6,7 +6,7 @@ import std.debug;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = 0xffff_ffff;
 
 // The steps of a string of '(' ')' and other characters.
 fn steps_of(b: &[u8]) -> vec.Vec<i8> {

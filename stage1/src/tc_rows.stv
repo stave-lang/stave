@@ -28,12 +28,12 @@ import types;
 import prims.sort;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = 0xffff_ffff;
 const ERR: u32 = types.ERR;
 // A node, hint, or binding not decided by this stage.
 pub const UNK: u32 = tc_builtins.UNK;
 // `LIT | g`: the value of literal group g.
-pub const LIT: u32 = 2147483648;
+pub const LIT: u32 = 0x8000_0000;
 
 pub struct Typeck {
     // per node row: its type, `NONE` (no value), `UNK`, or `LIT | g` while its body is checked

@@ -19,7 +19,7 @@ import std.debug;
 import std.mem;
 import std.vec;
 
-const NONE: u32 = 4294967295;
+const NONE: u32 = 0xffff_ffff;
 
 // Appends bytes with a line feed written `\n`.
 fn push_escaped(out: &mut vec.Vec<u8>, b: &[u8]) {

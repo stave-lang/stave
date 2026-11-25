@@ -26,8 +26,8 @@ import prims.col;
 import prims.ragged;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
-pub const ERR: u32 = 4294967294;
+pub const NONE: u32 = 0xffff_ffff;
+pub const ERR: u32 = 0xffff_fffe;
 
 pub const TK_INT: u8 = 0;
 pub const TK_FLOAT: u8 = 1;

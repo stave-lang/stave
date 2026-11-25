@@ -24,7 +24,7 @@ pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
     let mut ka = col.filled(n, 0u64);
     // the bits that differ between keys: a pass whose byte has none of them is the identity
     let mut any: u64 = 0;
-    let mut all: u64 = 18446744073709551615;
+    let mut all: u64 = 0xffff_ffff_ffff_ffff;
     {
         let kw = ka.as_mut_slice();
         for i in 0..n {
@@ -43,7 +43,7 @@ pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
     let mut pass: u32 = 0;
     while pass < passes {
         let sh = (pass * 8) as u64;
-        if (vary >> sh) & 255 == 0 {
+        if (vary >> sh) & 0xff == 0 {
             pass = pass + 1;
             continue;
         }
@@ -52,7 +52,7 @@ pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
         {
             let ks = ka.as_slice();
             for i in 0..n {
-                let d = ((ks[i] >> sh) & 255) as usize;
+                let d = ((ks[i] >> sh) & 0xff) as usize;
                 count[d] = count[d] + 1;
             }
         }
@@ -64,7 +64,7 @@ pub fn sort_perm<T: word.Word + Copy>(keys: &[T]) -> vec.Vec<u32> {
                 let kd = kb.as_mut_slice();
                 let pd = pb.as_mut_slice();
                 for i in 0..n {
-                    let d = ((ks[i] >> sh) & 255) as usize;
+                    let d = ((ks[i] >> sh) & 0xff) as usize;
                     let o = count[d] as usize;
                     count[d] = count[d] + 1;
                     kd[o] = ks[i];

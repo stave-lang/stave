@@ -47,7 +47,7 @@ pub struct Diags {
 }
 
 // The `find_arg` result for a hole that was not given.
-const NO_ARG: usize = 4294967295;
+const NO_ARG: usize = 0xffff_ffff;
 
 // Whitespace of a `source` hole in one-line text.
 fn is_collapsed_space(c: u8) -> bool {

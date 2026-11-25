@@ -39,7 +39,7 @@ import source;
 import std.mem;
 import std.vec;
 
-pub const NONE: u32 = 4294967295;
+pub const NONE: u32 = 0xffff_ffff;
 
 pub const TAG_DECL: u8 = 0;
 pub const TAG_LOCAL: u8 = 1;
@@ -1383,7 +1383,7 @@ fn unresolved_heads(u: &Uses, ds: &decls.Decls, md: &modules.Modules, cut: &item
     for r in 0..p.len() {
         let q = p.as_slice()[r] as usize;
         let key = keys.as_slice()[q];
-        if r == 0 || keys.as_slice()[p.as_slice()[r - 1] as usize] != key { e = enum_with_variant(ds, md, (key >> 32) as% u32, (key & 4294967295) as% u32); }
+        if r == 0 || keys.as_slice()[p.as_slice()[r - 1] as usize] != key { e = enum_with_variant(ds, md, (key >> 32) as% u32, (key & 0xffff_ffff) as% u32); }
         let k = pend[q] as usize;
         let lo = u.seg_lo.as_slice()[k] as usize;
         let file = cut.file.as_slice()[u.item.as_slice()[k] as usize];
