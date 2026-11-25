@@ -71,6 +71,9 @@ pub const S_TRAIT: u8 = 10;
 pub const S_TCALL: u8 = 11;
 // `old` called in an `ensures` clause: `old(e)` is e's value at entry, of e's type.
 pub const S_OLD: u8 = 12;
+// The method of a generic param's bound named through the param (`T.m`) and not called, as the
+// chain's last step (its decl in `acc`).
+pub const S_BOUND_M: u8 = 13;
 const SELF_VAR: u32 = tc_rows.SELF_VAR;
 
 // The callee of a call through a fn value (on its `Args` row: the fn type in `pos`); no decl or
@@ -407,6 +410,12 @@ impl tc_rows.Typeck {
             let h = self.hint.as_slice()[r];
             return self.fn_item_value(sg, r, d, b, h);
         }
+        // a trait method named through its trait or a bound, not called: E0201 case `not-value`
+        // at the chain, of the error type
+        if self.chain.as_slice()[r] == S_TCALL || self.chain.as_slice()[r] == S_BOUND_M {
+            self.report(201, tc_rows.C_NOT_VALUE, r as% u32, NONE, NONE, NONE);
+            return ERR;
+        }
         if self.chain.as_slice()[r] != S_VAR { return self.chain_value(r); }
         let v = self.acc.as_slice()[r];
         let pre = self.blo.as_slice()[r];
@@ -569,6 +578,15 @@ impl tc_rows.Typeck {
                     return true;
                 }
                 if st != S_VAL {
+                    let ty = self.acc.as_slice()[r];
+                    if st == S_TYPE && q == end && sg.cx.tab.tag_of(ty) == types.TK_PARAM {
+                        let (m, _, _) = self.bound_assoc(sg, ds, ty, nm.tok_str.as_slice()[seg as usize]);
+                        if m != NONE {
+                            self.set_chain(r, S_BOUND_M, m);
+                            p = q;
+                            continue;
+                        }
+                    }
                     let _ = self.chain_value(r);
                     self.set_chain(r, S_ERR, UNK);
                     p = q;

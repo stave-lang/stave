@@ -96,6 +96,9 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
         if code == 201 && case == tc_rows.C_NOT_IN_LOOP {
             d.begin(201, "not-in-loop");
             d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+        } else if code == 201 && case == tc_rows.C_NOT_VALUE {
+            d.begin(201, "not-value");
+            d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
         } else if code == 201 && case == tc_rows.C_TYPE_ARGS {
             // the operand: a built-in method's name (its token in x), else the span's text
             d.begin(201, "type-args");

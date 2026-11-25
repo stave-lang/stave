@@ -162,6 +162,16 @@ test fn float_literals_out_of_range() {
     debug.assert(test_kit.has(ms, "literal `-1_0e400f64` is out of range for `f64`\n"), "a negated literal");
 }
 
+test fn trait_method_is_no_value() {
+    let (d, _, ty) = run("trait Tr {\n    fn m(&self) -> u32;\n}\nfn f<T: Tr>(x: &T) -> u32 {\n    let a = T.m;\n    let b = Tr.m;\n    let c = T.m(x);\n    return c;\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 2, "the two methods named and not called");
+    debug.assert(test_kit.has(ms, "`T.m` is not a value\n"), "a bound's method through its param");
+    debug.assert(test_kit.has(ms, "`Tr.m` is not a value\n"), "a trait method through its trait");
+    debug.assert(decided(ty.as_slice()), "no value is of the error type");
+}
+
 test fn nesting_past_the_limit() {
     let mut s = string.String.from_str("fn f(b: bool) -> bool {\n    return ");
     for _ in 0..20005u32 {

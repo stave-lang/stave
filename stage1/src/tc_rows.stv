@@ -203,6 +203,8 @@ pub const C_FLOAT_RANGE: u8 = 2;
 pub const C_ARITY: u8 = 15;
 // E0201 case `type-args`: a = the generic arguments taken, b = given; the span is the list.
 pub const C_TYPE_ARGS: u8 = 16;
+// E0201 case `not-value`: the chain at node row n names no value.
+pub const C_NOT_VALUE: u8 = 17;
 // An E0201 whose fix is decided at the body's end (`tc_diag.fixes`).
 pub const C_PENDING: u8 = 255;
 
