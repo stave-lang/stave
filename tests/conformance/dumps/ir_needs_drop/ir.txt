@@ -1,10 +1,24 @@
+stave.ir 4 "x86_64-linux-v2" debug checked
+decl d23 struct main.Buf
 type t0 int u 32
 type t1 int s 32
 type t2 bool
 type t3 ref mut t0
 type t4 ref mut t5
 type t5 adt d23 t0
-fn @0 main.pick<t0> {
+shape t5 struct t0 t0
+site 0 "src/main.stv" 27 4 main.pick
+site 1 "src/main.stv" 20 4 main.plain
+site 2 "src/main.stv" 10 4 main.shrink
+site 3 "src/main.stv" 31 4 main.main
+site 4 "src/main.stv" 33 5 main.main
+site 5 "src/main.stv" 34 19 main.main
+site 6 "src/main.stv" 34 21 main.main
+site 7 "src/main.stv" 34 36 main.main
+site 8 "src/main.stv" 34 38 main.main
+site 9 "src/main.stv" 34 61 main.main
+main @3
+fn @0 main.pick<t0>() -> t0 site 0 {
 b0():
   br b1()
 b1():
@@ -12,13 +26,13 @@ b1():
 b2(%0: t0):
   ret %0
 }
-fn @1 main.plain<t0> {
+fn @1 main.plain<t0>() -> t0 site 1 {
 b0():
   br b1()
 b1():
   ret 1
 }
-fn @2 main.shrink<t0> {
+fn @2 main.shrink<t0>(t4, t0) site 2 {
 b0(%0: t4, %1: t0):
   br b1()
 b1():
@@ -35,19 +49,19 @@ b3():
 b4():
   br b2()
 }
-fn @3 main.main {
+fn @3 main.main() -> t1 site 3 {
 b0():
   %0 = slot t4
   %1 = make t5 5 0
   store () %0 %1
-  call () @2 %0 2
+  call () @2 %0 2 !4
   %2 = addr.field t3 %0 0
   %3 = load t0 %2
-  %4 = call t0 @1
-  %5 = add t0 %3 %4
-  %6 = call t0 @0
-  %7 = add t0 %5 %6
+  %4 = call t0 @1 !6
+  %5 = add t0 %3 %4 !5
+  %6 = call t0 @0 !8
+  %7 = add t0 %5 %6 !7
   %8 = cast.wrap t1 %7
-  %9 = sub t1 %8 7
+  %9 = sub t1 %8 7 !9
   ret %9
 }
