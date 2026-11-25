@@ -172,6 +172,13 @@ pub const C_NOT_IN_LOOP: u8 = 12;
 // the wanted fn type, b the arm's).
 pub const C_FN_ARMS: u8 = 13;
 pub const C_FN_ARMS_WANTED: u8 = 14;
+// E0206 cases: `ref-operand` (an operator on a reference), `pattern`, `pattern-str` (a pattern
+// that tests `==` on a type without it, a string's).
+pub const C_REF_OPERAND: u8 = 1;
+pub const C_PATTERN: u8 = 2;
+pub const C_PATTERN_STR: u8 = 3;
+// E0206 base case for indexing (`[]`) a value that is no array or slice.
+pub const C_INDEX: u8 = 4;
 // E0201 case `arity`: a = the arguments taken, b = given, x = the call's first token.
 pub const C_ARITY: u8 = 15;
 // An E0201 whose fix is decided at the body's end (`tc_diag.fixes`).

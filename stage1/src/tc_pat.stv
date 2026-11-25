@@ -69,6 +69,57 @@ impl tc_rows.Typeck {
         }
     }
 
+    // A literal pattern n (its literals the children: one, or a range's two) against a value of
+    // type ty in mode m (a string literal tests the value itself, the others the value behind
+    // its references): E0201 at the first literal if its kind is not the type's, else E0206 if
+    // the type has no `==`.
+    fn lit_pattern(&mut self, tab: &types.Table, t: &lex.Tokens, tree: &ast.Ast, n: usize, ty: u32, m: u8) -> bool {
+        let l0 = self.base + tree.kids.row(n)[0] as usize;
+        let a = tree.tok.as_slice()[l0];
+        let lt = consteval.tk(t, if consteval.tk(t, a) == terminals.T_MINUS then a + 1 else a);
+        let (pt, _) = if lt == terminals.T_STR_LIT then (ty, m) else peel(tab, ty, m);
+        if pt == UNK { return true; }
+        if pt == NONE || pt == ERR { return false; }
+        let tag = tab.tag_of(pt);
+        let mut found = NONE;
+        if lt == terminals.T_INT_LIT {
+            if tag != types.TK_INT { found = tc_rows.LIT_INT; }
+        } else if lt == terminals.T_FLOAT_LIT {
+            if tag != types.TK_FLOAT { found = tc_rows.LIT_FLOAT; }
+        } else if lt == terminals.T_STR_LIT {
+            let str = tag == types.TK_STR || (tag == types.TK_REF && tab.a_of(pt) == 0 && tab.tag_of(tab.b_of(pt)) == types.TK_STR);
+            if !str { found = self.t_ref_str; }
+        } else if lt == terminals.T_CHAR_LIT {
+            if tag != types.TK_CHAR { found = self.t_char; }
+        } else if lt == terminals.T_KW_TRUE || lt == terminals.T_KW_FALSE {
+            if tag != types.TK_BOOL { found = self.t_bool; }
+        } else {
+            return false;
+        }
+        if found != NONE {
+            self.bad = true;
+            self.report(201, tc_rows.C_PENDING, l0 as% u32, pt, found, NONE);
+            return false;
+        }
+        if !scalar_eq(tab, pt) {
+            self.no_eq_pattern(tab, n, pt);
+            return false;
+        }
+        return true;
+    }
+
+    // E0206 case `pattern` (`pattern-str` for a string, through references): pattern n tests
+    // `==` on type ty, which has none.
+    fn no_eq_pattern(&mut self, tab: &types.Table, n: usize, ty: u32) {
+        let mut x = ty;
+        while tab.tag_of(x) == types.TK_REF {
+            x = tab.b_of(x);
+        }
+        let case = if tab.tag_of(x) == types.TK_STR then tc_rows.C_PATTERN_STR else tc_rows.C_PATTERN;
+        self.bad = true;
+        self.report(206, case, n as% u32, ty, NONE, NONE);
+    }
+
     // One pattern node n against a value of type ty bound in mode m: binds its name or pushes its
     // sub-patterns. False: a pattern stage0 rejects.
     fn pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, n: usize, ty: u32, m: u8) -> bool {
@@ -77,7 +128,7 @@ impl tc_rows.Typeck {
         if ft == terminals.T_UNDERSCORE { return true; }
         if ft == terminals.T_KW_MUT { return self.bind(&mut sg.cx.tab, n, ty, m); }
         let ks = tree.kids.row(n);
-        if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL { return true; }
+        if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL { return self.lit_pattern(&sg.cx.tab, t, tree, n, ty, m); }
         if ft == terminals.T_L_PAREN {
             let close = tree.tok_end.as_slice()[n] - 1;
             if ks.len() == 1 && consteval.tk(t, close - 1) != terminals.T_COMMA {
@@ -104,7 +155,15 @@ impl tc_rows.Typeck {
         if lo == hi || sg.cx.uses.tag.as_slice()[hi - 1] != 0 { return false; }
         let d = sg.cx.uses.target.as_slice()[hi - 1];
         let dk = ds.kind.as_slice()[d as usize];
-        if dk == decls.DK_CONST { return !paren && !braces; }
+        if dk == decls.DK_CONST {
+            if paren || braces { return false; }
+            let ct = sg.cx.ty.as_slice()[d as usize];
+            if ct != ERR && !scalar_eq(&sg.cx.tab, ct) {
+                self.no_eq_pattern(&sg.cx.tab, n, ct);
+                return false;
+            }
+            return true;
+        }
         if dk != decls.DK_VARIANT && dk != decls.DK_STRUCT { return false; }
         let adt = if dk == decls.DK_VARIANT then ds.parent.as_slice()[d as usize] else d;
         let (pt, pm) = peel(&sg.cx.tab, ty, m);
@@ -194,4 +253,11 @@ fn field(ds: &decls.Decls, d: u32, s: u32) -> u32 {
     let f = ds.mem_decl.as_slice()[k];
     if ds.kind.as_slice()[f as usize] != decls.DK_FIELD { return NONE; }
     return f;
+}
+
+// Whether type ty has the built-in `==` a pattern tests: ints, floats, `bool`, `char`, raw
+// pointers, fn types.
+fn scalar_eq(tab: &types.Table, ty: u32) -> bool {
+    let tag = tab.tag_of(ty);
+    return tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_PTR || tag == types.TK_FN;
 }

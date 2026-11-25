@@ -91,6 +91,18 @@ test fn mismatches_and_their_fixes() {
     debug.assert(fixes == 4, "`as%` for u32 to u16 and u64 to u32, unwrap for `Option<u32>` to u32, `Some` for u32 to `Option<u32>`");
 }
 
+test fn casts_operators_and_patterns() {
+    let (d, _) = check("struct P { x: u32 }\nfn f(a: u64, b: f32, p: P, q: P, s: &str) {\n    let c = a as u32;\n    let e = b +% b;\n    let g = p == q;\n    let h = a[0];\n    match s {\n        \"x\" => {}\n        _ => {}\n    }\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(d.len() == 5, "one diagnostic per error");
+    debug.assert(has(ms, "`as` from `u64` to `u32` can lose information\n"), "a lossy plain cast");
+    debug.assert(has(ms, "operator `+%` is not defined for `f32`\n"), "a wrapping float operator");
+    debug.assert(has(ms, "operator `==` is not defined for `P`\n"), "`==` on a struct");
+    debug.assert(has(ms, "operator `[]` is not defined for `u64`\n"), "indexing a scalar");
+    debug.assert(has(ms, "this pattern tests `==`, which is not defined for `&str`\n"), "a string pattern");
+}
+
 test fn globals_with_views_or_drop_glue() {
     let (d, _) = check(GLOBALS);
     let m = messages(&d);

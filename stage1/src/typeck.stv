@@ -602,7 +602,7 @@ impl tc_rows.Typeck {
                 let op = tk(t, first_tok(tree, self.base + ks[1] as usize));
                 self.coerce_acc(&sg.cx.tab, rhs, r, lhs as% u32);
                 let lt = self.acc.as_slice()[r];
-                if op != terminals.T_EQ { self.compound(sg, op, lt); }
+                if op != terminals.T_EQ { self.compound(sg, op, lt, first_tok(tree, self.base + ks[1] as usize)); }
             } else {
                 let _ = self.force_at(lhs);
             }
@@ -907,10 +907,7 @@ impl tc_rows.Typeck {
             return UNK;
         }
         if is_lit(ct) {
-            if op == terminals.T_TILDE && self.lg_float.as_slice()[(ct & (LIT - 1)) as usize] {
-                self.bad = true;
-                return UNK;
-            }
+            if op == terminals.T_TILDE && self.lit_kind(ct) == tc_rows.LIT_FLOAT { return self.e0206(tab, a, tc_rows.LIT_FLOAT); }
             return ct;
         }
         let tag = tab.tag_of(ct);
@@ -918,26 +915,18 @@ impl tc_rows.Typeck {
             if tag == types.TK_FLOAT || (tag == types.TK_INT && tab.a_of(ct) == 1) { return ct; }
             if tag == types.TK_VECTOR {
                 if tab.tag_of(tab.a_of(ct)) == types.TK_FLOAT { return ct; }
-                self.bad = true;
-                return UNK;
+                return self.e0206(tab, a, ct);
             }
-            if tag == types.TK_INT || tag == types.TK_BOOL || tag == types.TK_CHAR {
-                self.bad = true;
-                return UNK;
-            }
-            return self.user_op(sg, tc_ops.OP_NEG, ct);
+            if tag == types.TK_INT || tag == types.TK_BOOL || tag == types.TK_CHAR { return self.e0206(tab, a, ct); }
+            return self.user_op(sg, tc_ops.OP_NEG, ct, a);
         }
         if tag == types.TK_INT || tag == types.TK_MASK { return ct; }
         if tag == types.TK_VECTOR {
             if tab.tag_of(tab.a_of(ct)) == types.TK_INT { return ct; }
-            self.bad = true;
-            return UNK;
+            return self.e0206(tab, a, ct);
         }
-        if tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR {
-            self.bad = true;
-            return UNK;
-        }
-        return self.user_op(sg, tc_ops.OP_NOT, ct);
+        if tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR { return self.e0206(tab, a, ct); }
+        return self.user_op(sg, tc_ops.OP_NOT, ct, a);
     }
 
     // The value of `l op r` in a chain: the operator is the token before child row c, the left
@@ -962,57 +951,65 @@ impl tc_rows.Typeck {
                 self.bad = true;
                 return UNK;
             }
-            return self.op_on(tab, op, lt);
+            return self.op_on(tab, op, lt, optok);
         }
         let u = self.unify(tab, lt, rt, c as% u32);
         if u == UNK { return UNK; }
         if is_lit(u) {
-            let float = self.lg_float.as_slice()[(u & (LIT - 1)) as usize];
-            if float && !is_shift(op) && (is_wrap_sat(op) || is_bit(op)) {
-                self.bad = true;
-                return UNK;
-            }
+            let float = self.lit_kind(u) == tc_rows.LIT_FLOAT;
+            if float && !is_shift(op) && (is_wrap_sat(op) || is_bit(op)) { return self.e0206(tab, optok, tc_rows.LIT_FLOAT); }
             return u;
         }
-        if tc_ops.user_ty(tab, u) { return self.user_op(sg, tc_ops.binop_trait(op), u); }
-        return self.op_on(tab, op, u);
+        if tc_ops.user_ty(tab, u) { return self.user_op(sg, tc_ops.binop_trait(op), u, optok); }
+        return self.op_on(tab, op, u, optok);
     }
 
     // `a op= b` with a of type lt, b checked against it (stage0 `compound_assign`): the binary
-    // operator's rule on two operands of type lt.
-    fn compound(&mut self, sg: &mut sigs.Sigs, op: u8, lt: u32) {
+    // operator's rule on two operands of type lt; the operator token optok.
+    fn compound(&mut self, sg: &mut sigs.Sigs, op: u8, lt: u32, optok: u32) {
         if lt == UNK || lt == NONE { return; }
         let bin = compound_op(op);
         if tc_ops.user_ty(&sg.cx.tab, lt) {
-            let _ = self.user_op(sg, tc_ops.binop_trait(bin), lt);
+            let _ = self.user_op(sg, tc_ops.binop_trait(bin), lt, optok);
             return;
         }
-        let _ = self.op_on(&sg.cx.tab, bin, lt);
+        let _ = self.op_on(&sg.cx.tab, bin, lt, optok);
     }
 
-    // stage0's `op_on`: the type of a binary operator on two operands of type ty.
-    fn op_on(&mut self, tab: &types.Table, op: u8, ty: u32) -> u32 {
+    // stage0's `op_on`: the type of a binary operator (token optok) on two operands of type ty.
+    fn op_on(&mut self, tab: &types.Table, op: u8, ty: u32, optok: u32) -> u32 {
         if ty == self.t_never { return ty; }
         let tag = tab.tag_of(ty);
         if tag == types.TK_INT { return ty; }
         if tag == types.TK_FLOAT {
-            if is_wrap_sat(op) || is_bit(op) || is_shift(op) { return self.err(); }
+            if is_wrap_sat(op) || is_bit(op) || is_shift(op) { return self.e0206(tab, optok, ty); }
             return ty;
         }
         if tag == types.TK_BOOL || tag == types.TK_MASK {
             if is_bit(op) { return ty; }
-            return self.err();
+            return self.e0206(tab, optok, ty);
         }
         if tag == types.TK_VECTOR {
             let int_lane = tab.tag_of(tab.a_of(ty)) == types.TK_INT;
             if int_lane {
-                if is_plain(op) || op == terminals.T_SLASH || op == terminals.T_PERCENT { return self.err(); }
+                // E0604, E0607
+                if is_plain(op) || op == terminals.T_SLASH { return self.err(); }
+                if op == terminals.T_PERCENT { return self.e0206(tab, optok, ty); }
                 return ty;
             }
-            if is_wrap_sat(op) || is_bit(op) || is_shift(op) || op == terminals.T_PERCENT { return self.err(); }
+            if is_wrap_sat(op) || is_bit(op) || is_shift(op) || op == terminals.T_PERCENT { return self.e0206(tab, optok, ty); }
             return ty;
         }
         // a user type: its operator trait (not checked yet)
+        return UNK;
+    }
+
+    // E0206: operator token tok on a value of type ty (`LIT_FLOAT`: a float literal), which has
+    // no such operator; on a reference the fix names the value behind it.
+    fn e0206(&mut self, tab: &types.Table, tok: u32, ty: u32) -> u32 {
+        self.bad = true;
+        let r = ty != tc_rows.LIT_FLOAT && tab.tag_of(ty) == types.TK_REF;
+        self.report_span(206, if r then tc_rows.C_REF_OPERAND else 0u8, tok, tok, NONE, ty, NONE, NONE);
         return UNK;
     }
 
@@ -1185,7 +1182,7 @@ impl tc_rows.Typeck {
             return tab.key(types.TK_MASK, w, tab.b_of(u));
         }
         if tag == types.TK_MASK && eq_only { return u; }
-        return self.err();
+        return self.e0206(tab, first_tok(tree, opn), u);
     }
 
     fn range(&mut self, sg: &mut sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> u32 {
@@ -1216,7 +1213,13 @@ impl tc_rows.Typeck {
             if to == ERR || to == NONE { return self.err(); }
             if acc == UNK || acc == NONE { return UNK; }
             if op != terminals.T_KW_AS && op != terminals.T_AS_PERCENT && op != terminals.T_AS_PIPE && op != terminals.T_AS_TILDE && op != terminals.T_AS_QUESTION { return UNK; }
-            if !tc_rows.cast_ok(&sg.cx.tab, op, acc, to) { return self.err(); }
+            if !tc_rows.cast_ok(&sg.cx.tab, op, acc, to) {
+                // E0204 from the operator through the type
+                self.bad = true;
+                let e = tree.tok_end.as_slice()[tn];
+                self.report_span(204, 0, first_tok(tree, tn) - 1, e - 1, NONE, acc, to, NONE);
+                return UNK;
+            }
             acc = if op == terminals.T_AS_QUESTION then self.option_of(&mut sg.cx.tab, to) else to;
             if acc == UNK { return UNK; }
         }

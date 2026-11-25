@@ -1526,7 +1526,13 @@ impl tc_rows.Typeck {
         if base == NONE { return self.err(); }
         let inner = peel_refs(tab, base);
         let tag = tab.tag_of(inner);
-        if tag != types.TK_ARRAY && tag != types.TK_SLICE { return self.err(); }
+        if tag != types.TK_ARRAY && tag != types.TK_SLICE {
+            // E0206 `[]` at the `[`
+            self.bad = true;
+            let at = tree.tok.as_slice()[e] - 1;
+            self.report_span(206, tc_rows.C_INDEX, at, at, NONE, base, NONE, NONE);
+            return UNK;
+        }
         let elem = tab.a_of(inner);
         if kind(tree, e) == K_RANGE { return tab.key(types.TK_SLICE, elem, 0); }
         return elem;
