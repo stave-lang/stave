@@ -259,7 +259,8 @@ pub const C_ARITY_PAT: u8 = 18;
 // case `alternative` (why: the covering pattern row, NONE none); E0302: a = the name's token, why
 // = the first alternative. E0105 case `pattern-field` (C_PATTERN): b = the struct or variant, x =
 // the first naming token; E0106 case `pattern`: a = the struct, b = its first private field;
-// E0208 case `pattern-missing-field`: a = the type, x = the list in `miss`.
+// E0208 case `pattern-missing-field` (C_PATTERN): a = the type, x = the list in `miss`; E0208
+// (case 0) at a pattern's field name: a = the type.
 pub const C_LET: u8 = 1;
 pub const C_LIMIT: u8 = 2;
 pub const C_LIMIT_SPLIT: u8 = 3;

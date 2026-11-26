@@ -317,7 +317,12 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
             d.arg("module", diag_names.module_text(md, ds.module.as_slice()[fd as usize]).as_slice());
             let (df, dsp, dz) = decls.span(ds, md, lx, set, t, fd);
             d.role("decl", df, dsp, dz);
-        } else if code == 208 {
+        } else if code == 208 && case == 0 {
+            d.begin(208, "");
+            d.arg("name", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("type", buf.as_slice());
+        } else if code == 208 && case == tc_rows.C_PATTERN {
             d.begin(208, "pattern-missing-field");
             ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
             d.arg("type", buf.as_slice());

@@ -15,7 +15,9 @@
 # given twice in a struct literal: E0105; a private field or column: E0106; a view argument for a
 # param without `view`: E0414 outside its `drop` case). The shapes with a message of their
 # own (LATER) are cut from stage0's lines; a private field or method reached by a value has
-# E0106's plain message, so the E0106 lines of stage1 need only be among stage0's.
+# E0106's plain message, so the E0106 lines of stage1 need only be among stage0's. Likewise
+# E0208 for a field a pattern names that its type lacks has the plain message of the member
+# lookups stage1 does not report yet: the plain E0208 lines of stage1 need only be among stage0's.
 #
 # Every root's `sigs.txt` and `kinds.txt` must be stage0's.
 #
@@ -63,7 +65,7 @@ S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E001
 # value of unknown type, or with a const pattern of a type the evaluator gives no value (`char`,
 # float, pointer, fn); it reports neither there.
 # Shapes of codes outside S1_CODES that stage1 has (E0208's pattern that leaves fields out; its
-# other shapes are member lookups').
+# plain shape, shared with member lookups, is compared as a subset below).
 S1_SHAPES='"code":"E0208".*"message":"a pattern of `'
 # Messages of the shapes of those codes that later stages raise.
 LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is given twice in one struct literal"|"code":"E0106".*"message":"column `|"code":"E0414".*"message":"[^"]*is a view, (but|and) '
@@ -162,16 +164,22 @@ if [ "${1:-}" = "--one" ]; then
     grep -E "^\{\"kind\":\"diagnostic\",(\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)|$S1_SHAPES)" "$d/0/diags.txt" | grep -vE "$LATER" > "$d/0/diags.in" || true
     priv='^{"kind":"diagnostic","code":"E0106"'
     grep -v "$priv" "$d/0/diags.in" > "$d/0/diags.rest" || true
-    grep -v "$priv" "$d/1/diags.txt" > "$d/1/diags.rest" || true
+    plain='^{"kind":"diagnostic","code":"E0208","severity":"error","message":"no method or field `'
+    grep -v "$priv" "$d/1/diags.txt" | grep -v "$plain" > "$d/1/diags.rest" || true
     grep "$priv" "$d/0/diags.in" > "$d/0/diags.priv" || true
     grep "$priv" "$d/1/diags.txt" > "$d/1/diags.priv" || true
     extra=$(grep -cvxFf "$d/0/diags.priv" "$d/1/diags.priv" || true)
+    grep "$plain" "$d/0/diags.txt" > "$d/0/diags.plain" || true
+    grep "$plain" "$d/1/diags.txt" > "$d/1/diags.plain" || true
+    extra_plain=$(grep -cvxFf "$d/0/diags.plain" "$d/1/diags.plain" || true)
     ours=$(wc -l < "$d/1/diags.txt")
     all=$(wc -l < "$d/0/diags.txt")
     if ! cmp -s "$d/0/diags.rest" "$d/1/diags.rest"; then
       echo "DIFF diags $root $* (first: $(cmp "$d/0/diags.rest" "$d/1/diags.rest" 2>&1 | head -1))"
     elif [ "$extra" -gt 0 ]; then
       echo "DIFF diags E0106 of stage1 not among stage0's: $root $*"
+    elif [ "$extra_plain" -gt 0 ]; then
+      echo "DIFF diags plain E0208 of stage1 not among stage0's: $root $*"
     elif [ "$s1" != "$([ "$ours" -gt 0 ] && echo 1 || echo 0)" ]; then
       echo "FAIL stage1 exit $s1 with $ours diagnostics: $root $*"
     elif [ "$ours" -gt 0 ] && [ "$ours" = "$all" ] && [ "$s0" != "$s1" ]; then

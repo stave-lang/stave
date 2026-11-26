@@ -17,9 +17,8 @@
 // Errors: E0201 (a literal of another kind, a tuple or struct pattern for another type, a payload
 // of another arity, a path naming no value, a const of another type), E0203 (a malformed literal,
 // an int literal out of its type's range), E0206 (`==` missing), E0105 (a field named twice),
-// E0106 (a struct with a private field taken apart outside its module), E0208 case
-// `pattern-missing-field` (stage0's E0208 for a field the type lacks shares its message with the
-// member lookups and is left to them: the pattern is still faulty), E0300, E0301, E0302.
+// E0106 (a struct with a private field taken apart outside its module), E0208 (a field the type
+// lacks; case `pattern-missing-field`: a field left out), E0300, E0301, E0302.
 //
 // Not decided here: a pattern under a value of unknown type (its names stay `UNK`, every use
 // prints `?`), a const pattern whose value the evaluator does not give (a `char`, float, pointer
@@ -307,8 +306,9 @@ impl tc_rows.Typeck {
                 }
                 continue;
             }
-            // a field the type lacks (stage0's E0208, see the header), or one named again: `P.{ a,
-            // a }` binds the name twice, which is reported as that
+            // a field the type lacks (E0208 at the name, not beside E0106), or one named again:
+            // `P.{ a, a }` binds the name twice, which is reported as that
+            if fi == NONE && !hidden { self.report_span(208, 0, fa, fa, n as% u32, pt, NONE, NONE); }
             if fi != NONE && !hidden && !(self.fs_bind.as_slice()[fi as usize] && sp == NONE) {
                 self.report_span(105, tc_rows.C_PATTERN, fa, fa, n as% u32, NONE, d, NONE);
                 let first = self.fs_tok.as_slice()[fi as usize];
