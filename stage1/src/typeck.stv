@@ -178,7 +178,18 @@ impl tc_rows.Typeck {
             let tk0 = self.known(ty);
             self.acc.as_mut_slice()[g] = tk0;
         }
+        self.lw.clear_type_args();
         self.walk(sg, ds, nm, set, t, cut, tree, g);
+        // E0201 `type-args` once per type path the body's written types lowered
+        for j in 0..self.lw.type_args_len() {
+            let (tlo, thi, count, given) = self.lw.type_args_at(j);
+            let mut seen = false;
+            for q in 0..j {
+                let (qlo, _, _, _) = self.lw.type_args_at(q);
+                if qlo == tlo { seen = true; }
+            }
+            if !seen { self.report_span(201, tc_rows.C_TYPE_ARGS, tlo, thi, NONE, count, given, NONE); }
+        }
         self.fixes(sg);
         // a `div_const` divisor is a const-expr of its lane type: what fails an operation of it
         // is reported by the evaluator (the rest, where the checker typed it)

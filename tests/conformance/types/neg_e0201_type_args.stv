@@ -36,6 +36,19 @@ fn member_tail(x: S.Nope, y: f32x4.Foo<u8>, z: u32.Foo) -> u32 { //~ ERROR E0201
     return 0;
 }
 
+fn generic<T>() -> u32 {
+    return 0;
+}
+
+fn in_body() -> u32 {
+    let x: vec.Vec<u8> = 0; //~ ERROR E0201
+    //~^ ERROR E0101
+    let y: S = S.{ a: 1u32 }; //~ ERROR E0201
+    let z = 3u32 as u32.X<u8>; //~ ERROR E0201
+    //~^ ERROR E0101
+    return generic::<S>(); //~ ERROR E0201
+}
+
 fn main() -> i32 {
     return 0;
 }

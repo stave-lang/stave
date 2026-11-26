@@ -477,6 +477,23 @@ impl Lw {
         self.ta_given.push(given as% u32);
         self.vals.push(ERR);
     }
+
+    pub fn type_args_len(&self) -> usize {
+        return self.ta_lo.len();
+    }
+
+    // Record k of `type_args`: (first token, last token, count, given).
+    pub fn type_args_at(&self, k: usize) -> (u32, u32, u32, u32) {
+        return (self.ta_lo.as_slice()[k], self.ta_hi.as_slice()[k], self.ta_count.as_slice()[k], self.ta_given.as_slice()[k]);
+    }
+
+    pub fn clear_type_args(&mut self) {
+        self.ta_it.clear();
+        self.ta_lo.clear();
+        self.ta_hi.clear();
+        self.ta_count.clear();
+        self.ta_given.clear();
+    }
 }
 
 fn tk(t: &lex.Tokens, tok: u32) -> u8 {
