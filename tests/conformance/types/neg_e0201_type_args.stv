@@ -1,0 +1,41 @@
+//~ CHECK-ONLY
+// A written type takes exactly the generic arguments its type declares. A path whose tail does
+// not resolve is named by its last segment that does: a built-in type name has no members, so
+// `vec.Vec<u8>` without `import std.vec;` is the built-in `vec` given one argument, `u32.X<u8>`
+// is `u32` given one, beside the E0101 at the segment that does not resolve.
+struct S<T> {
+    a: T,
+}
+
+fn arity(x: S) -> u32 { //~ ERROR E0201
+    return 0;
+}
+
+fn builtin_args(x: u32<u8>) -> u32 { //~ ERROR E0201
+    return 0;
+}
+
+fn unimported(x: vec.Vec<u8>) -> u32 { //~ ERROR E0201
+    //~^ ERROR E0101
+    return 0;
+}
+
+fn tails(x: u32.X<u8, u8>, y: mask.M<u32>) -> Option.Foo { //~ ERROR E0201
+    //~^ ERROR E0101
+    //~^^ ERROR E0201
+    //~^^^ ERROR E0101
+    //~^^^^ ERROR E0201
+    //~^^^^^ ERROR E0101
+    return tails(x, y);
+}
+
+fn member_tail(x: S.Nope, y: f32x4.Foo<u8>, z: u32.Foo) -> u32 { //~ ERROR E0201
+    //~^ ERROR E0101
+    //~^^ ERROR E0101
+    //~^^^ ERROR E0101
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

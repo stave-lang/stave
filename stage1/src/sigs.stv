@@ -252,6 +252,8 @@ pub fn scalar_ty(tab: &mut types.Table, s: u32) -> u32 {
 
 // Diagnostic codes signature building raises (code numbers).
 pub const D_E0201: u16 = 201;
+// E0201 case `type-args` (a row code of its own: the code printed is 201)
+pub const D_E0201_ARGS: u16 = 0x8000 | 201;
 pub const D_E0203: u16 = 203;
 pub const D_E0410: u16 = 410;
 pub const D_E0413: u16 = 413;
@@ -274,6 +276,8 @@ pub const W_RUNTIME: u32 = 5;
 // The diagnostics of signature building, as rows: the code, the item, the first and last global
 // token of the primary span, and by code:
 // - E0201 (case `const-param-type`): a = the const generic param's row, `ty` its type;
+// - E0201 case `type-args` (`D_E0201_ARGS`): the span is the type path, a = the number of generic
+//   arguments its type takes, b = the number written;
 // - E0203: the span is a const generic argument's int literal, `ty` its param's type;
 // - E0413: b = the const or static, `ty` its type;
 // - E0410: a = the field's name token (NONE: a tuple payload element, `_`), b = the struct or
@@ -435,11 +439,18 @@ pub struct Lw {
     ev_it: vec.Vec<u32>,
     ev_tok: vec.Vec<u32>,
     ev_ty: vec.Vec<u32>,
+    // E0201 `type-args` met while lowering: a type path (item, first and last token) given
+    // another number of generic arguments than its type takes (that number, the number given)
+    ta_it: vec.Vec<u32>,
+    ta_lo: vec.Vec<u32>,
+    ta_hi: vec.Vec<u32>,
+    ta_count: vec.Vec<u32>,
+    ta_given: vec.Vec<u32>,
 }
 
 impl Lw {
     pub fn new() -> Lw {
-        return Lw.{ op: vec.Vec::<u8>.new(), row: vec.Vec::<u32>.new(), fx: vec.Vec::<u32>.new(), fy: vec.Vec::<u32>.new(), vals: vec.Vec::<u32>.new(), gas: vec.Vec::<u32>.new(), tmp: vec.Vec::<u32>.new(), prim: vec.Vec::<u32>.new(), ev_it: vec.Vec::<u32>.new(), ev_tok: vec.Vec::<u32>.new(), ev_ty: vec.Vec::<u32>.new() };
+        return Lw.{ op: vec.Vec::<u8>.new(), row: vec.Vec::<u32>.new(), fx: vec.Vec::<u32>.new(), fy: vec.Vec::<u32>.new(), vals: vec.Vec::<u32>.new(), gas: vec.Vec::<u32>.new(), tmp: vec.Vec::<u32>.new(), prim: vec.Vec::<u32>.new(), ev_it: vec.Vec::<u32>.new(), ev_tok: vec.Vec::<u32>.new(), ev_ty: vec.Vec::<u32>.new(), ta_it: vec.Vec::<u32>.new(), ta_lo: vec.Vec::<u32>.new(), ta_hi: vec.Vec::<u32>.new(), ta_count: vec.Vec::<u32>.new(), ta_given: vec.Vec::<u32>.new() };
     }
 
     fn frame(&mut self, op: u8, row: usize, x: u32, y: u32) {
@@ -453,6 +464,18 @@ impl Lw {
         self.gas.push(k);
         self.gas.push(x);
         self.gas.push(y);
+    }
+
+    // The type path at row g of item it is given `given` generic arguments, its type takes
+    // `count`: an E0201 `type-args`, and the type is the error type.
+    fn type_args(&mut self, tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, it: u32, g: usize, count: u32, given: usize) {
+        let (lo, hi) = span_of(tree, t, cut, g);
+        self.ta_it.push(it);
+        self.ta_lo.push(lo);
+        self.ta_hi.push(hi);
+        self.ta_count.push(count);
+        self.ta_given.push(given as% u32);
+        self.vals.push(ERR);
     }
 }
 
@@ -521,8 +544,11 @@ fn path_res(cx: &consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Inter
     let (lo, hi) = cx.uses.range(it, (g - base) as% u32);
     if lo == hi {
         let s = nm.tok_str.as_slice()[a as usize];
-        if s == NONE || last != a { return (R_UNRES, NONE); }
+        if s == NONE { return (R_UNRES, NONE); }
+        // A built-in type name has no members: `u32.X` resolves no further, and the head names
+        // the type.
         if ds.is_prim.as_slice()[s as usize] { return (R_PRIM, s); }
+        if last != a { return (R_UNRES, NONE); }
         if ds.builtin.as_slice()[s as usize] != 0 { return (R_BUILTIN, s); }
         return (R_UNRES, NONE);
     }
@@ -691,6 +717,11 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
         let (pk, px, py) = prim_of(nm.tab.text(si));
         if pk == 1 || pk == 2 || pk == 3 {
             if pk == 1 && gargs != NONE {
+                let n = tree.kids.row(gargs as usize).len();
+                if n != 0 {
+                    lw.type_args(tree, t, cut, it, g, 0, n);
+                    return;
+                }
                 lw.vals.push(ERR);
                 return;
             }
@@ -720,7 +751,7 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
             // `vec<T, N>` / `mask<W, N>` (always E0609)
             let n = if gargs == NONE then 0usize else tree.kids.row(gargs as usize).len();
             if n != 2 {
-                lw.vals.push(ERR);
+                lw.type_args(tree, t, cut, it, g, 2, n);
                 return;
             }
             let us = cx.tab.usize_t();
@@ -746,7 +777,7 @@ fn visit(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm:
         let ghi = cx.gens.lo.as_slice()[id as usize + 1];
         let n = if gargs == NONE then 0usize else tree.kids.row(gargs as usize).len();
         if n != (ghi - glo) as usize {
-            lw.vals.push(ERR);
+            lw.type_args(tree, t, cut, it, g, ghi - glo, n);
             return;
         }
         let rpbit: u32 = if rp then 0x8000_0000u32 else 0u32;
@@ -1841,6 +1872,16 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
         if a == last { continue; }
         last = a;
         sg.rows.add(D_E0203, lw.ev_it.as_slice()[x], a, a, NONE, NONE, lw.ev_ty.as_slice()[x], consteval.no_scope());
+    }
+    // E0201 `type-args` once per type path the signatures lowered
+    let tperm = sort.sort_perm(lw.ta_lo.as_slice());
+    let mut tlast = NONE;
+    for j in 0..tperm.len() {
+        let x = tperm.as_slice()[j] as usize;
+        let a = lw.ta_lo.as_slice()[x];
+        if a == tlast { continue; }
+        tlast = a;
+        sg.rows.add(D_E0201_ARGS, lw.ta_it.as_slice()[x], a, lw.ta_hi.as_slice()[x], lw.ta_count.as_slice()[x], lw.ta_given.as_slice()[x], ERR, consteval.no_scope());
     }
     return sg;
 }
