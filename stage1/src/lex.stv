@@ -30,8 +30,8 @@ import std.mem;
 import std.vec;
 
 pub const KIND_ERROR: u8 = terminals.NTERM as% u8;
-// no terminal (keyword lookup miss)
-const NO_KIND: u8 = 255;
+// A value no token kind has: the keyword lookup's miss, and the kind of a token that is not there.
+pub const NO_KIND: u8 = 255;
 
 // Lexical diagnostics, by code number (E0001 is 1).
 pub const E_INVALID_UTF8: u16 = 1;
