@@ -18,6 +18,20 @@
 //! So no type that lowering, layout, or the IR sees nests deeper than the limit, and every
 //! recursion over type structure in the checker (trait queries, `size_of`, drop analysis,
 //! substitution) bounds itself by the same limit and answers the rejecting side past it.
+//!
+//! **Types that hold themselves by value** (E0423). The parts held by value (struct fields, enum
+//! payloads, tuple, array, range, and vector elements, after substitution) form a graph; the walk
+//! that measures depth finds its strongly connected components (Tarjan's algorithm on the same
+//! explicit stack). A type in a component with a cycle holds itself by value: it has no depth and
+//! no layout. Every struct and enum declaration is a root with its params as args, used or not.
+//! Every component with a cycle that any walk closes is reported ([`holds_itself`]): at the
+//! first declaration in source order that writes, in a field, a type of the component (`D<u32>`
+//! in `struct D<T> { n: Option<D<u32>> }`; not `Option`, whose field is its bare param), else at
+//! the first declaration with an instance in it; once per declaration, and not again for a
+//! component holding an instance of a declaration already reported (the same cycle at other
+//! args). A component with no struct or enum in it (none exists) is E0005 where the walk met it. So a type that only
+//! reaches a cycle (a struct with a field of it) is not reported itself, nor is any type on or
+//! above a cycle too deep (E0005): it has no depth, and its cycle has its report.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::{Diagnostic, Span};
@@ -58,6 +72,19 @@ struct Walk<'a, 'g> {
     cyclic: FxHashSet<TypeId>,
     /// The depth being computed met a type in progress or a cyclic type.
     met_cycle: bool,
+    /// Tarjan's algorithm over the parts graph: the preorder number of each type measured by a
+    /// [`Measure`] frame, the types whose component is still open (in preorder), the next number.
+    index: FxHashMap<TypeId, u32>,
+    open: Vec<TypeId>,
+    is_open: FxHashSet<TypeId>,
+    next_index: u32,
+    /// The types on a by-value cycle: the preorder number of their component's root.
+    on_cycle: FxHashMap<TypeId, u32>,
+    /// The components with a cycle, as closed: the root's number, the members, and the place
+    /// whose walk closed it ([`Walk::site`]).
+    components: Vec<(u32, Vec<TypeId>, Option<Span>)>,
+    /// The place being measured (a declaration, a body node, a call site).
+    site: Option<Span>,
 }
 
 /// One type of [`Walk::depth`] whose parts are being measured.
@@ -72,6 +99,11 @@ struct Measure {
     parts: Vec<TypeId>,
     /// The next part to measure.
     next: usize,
+    /// Preorder number of `t` and the smallest one reachable from it through open types.
+    index: u32,
+    low: u32,
+    /// A part of `t` is `t`.
+    self_part: bool,
 }
 
 impl Measure {
@@ -95,6 +127,13 @@ impl<'a, 'g> Walk<'a, 'g> {
             tall_part: false,
             cyclic: FxHashSet::default(),
             met_cycle: false,
+            index: FxHashMap::default(),
+            open: Vec::new(),
+            is_open: FxHashSet::default(),
+            next_index: 0,
+            on_cycle: FxHashMap::default(),
+            components: Vec::new(),
+            site: None,
         }
     }
 
@@ -139,6 +178,23 @@ impl<'a, 'g> Walk<'a, 'g> {
             TypeKind::Array { elem, .. } | TypeKind::Range { elem, .. } => vec![elem],
             TypeKind::Vector { lane, .. } => vec![lane],
             TypeKind::Tuple(ts) => ts.to_vec(),
+            // a pointee, slice element, or fn signature is not held by value; the rest have no
+            // components (listed one by one: a new kind must decide what it holds)
+            TypeKind::Ref { .. }
+            | TypeKind::Ptr { .. }
+            | TypeKind::Slice { .. }
+            | TypeKind::Fn { .. }
+            | TypeKind::Int { .. }
+            | TypeKind::Float(_)
+            | TypeKind::Bool
+            | TypeKind::Char
+            | TypeKind::Str
+            | TypeKind::Mask { .. }
+            | TypeKind::Param(_)
+            | TypeKind::ConstParam(_)
+            | TypeKind::Never
+            | TypeKind::SelfTy
+            | TypeKind::Error => Vec::new(),
             TypeKind::Adt { def, args } => {
                 let Some(adt) = self.sigs.adt(def) else { return Vec::new() };
                 let fields: Vec<TypeId> =
@@ -153,7 +209,6 @@ impl<'a, 'g> Walk<'a, 'g> {
                 }
                 out
             }
-            _ => Vec::new(),
         }
     }
 
@@ -172,6 +227,12 @@ impl<'a, 'g> Walk<'a, 'g> {
             let Some(top) = frames.last_mut() else { return 0 };
             if let Some(&p) = top.parts.get(top.next) {
                 top.next += 1;
+                if self.is_open.contains(&p)
+                    && let Some(&pi) = self.index.get(&p)
+                {
+                    top.low = top.low.min(pi);
+                    top.self_part |= p == top.t;
+                }
                 match self.enter(p) {
                     Ok(pd) => top.add_part(pd),
                     Err(f) => frames.push(f),
@@ -179,9 +240,13 @@ impl<'a, 'g> Walk<'a, 'g> {
                 continue;
             }
             let Some(f) = frames.pop() else { return 0 };
+            let low = f.low;
             let d = self.leave(f);
             match frames.last_mut() {
-                Some(top) => top.add_part(d),
+                Some(top) => {
+                    top.low = top.low.min(low);
+                    top.add_part(d);
+                }
                 None => return d,
             }
         }
@@ -212,20 +277,54 @@ impl<'a, 'g> Walk<'a, 'g> {
         if std::mem::take(&mut self.tall_part) {
             d = MAX_TYPE_DEPTH + 1;
         }
-        Err(Measure { t, d, part_too_deep: false, outer_met, parts, next: 0 })
+        let index = self.next_index;
+        self.next_index += 1;
+        self.index.insert(t, index);
+        self.open.push(t);
+        self.is_open.insert(t);
+        Err(Measure {
+            t,
+            d,
+            part_too_deep: false,
+            outer_met,
+            parts,
+            next: 0,
+            index,
+            low: index,
+            self_part: false,
+        })
     }
 
     /// Ends the measure of `f.t` once every part is measured: records its depth, and whether it
     /// is too deep by itself or reaches a type holding itself by value.
     fn leave(&mut self, f: Measure) -> u32 {
-        let Measure { t, d, part_too_deep, outer_met, .. } = f;
+        let Measure { t, d, part_too_deep, outer_met, index, low, self_part, .. } = f;
         self.active.remove(&t);
+        if low == index {
+            // `t` roots a component: the open types from `t` on
+            let at = self.open.iter().rposition(|&u| u == t).unwrap_or(self.open.len());
+            let members = self.open.split_off(at);
+            let cycle = self_part || members.len() > 1;
+            for &u in &members {
+                self.is_open.remove(&u);
+                if cycle {
+                    self.on_cycle.insert(u, index);
+                }
+            }
+            if cycle {
+                self.components.push((index, members, self.site));
+            }
+        }
         self.depth.insert(t, d);
         if self.met_cycle {
             self.cyclic.insert(t);
         }
+        let cyclic = self.met_cycle;
         self.met_cycle |= outer_met;
-        if d > MAX_TYPE_DEPTH {
+        // a type that reaches a by-value cycle has no depth, whatever its chain of parts
+        // measured on the way: the walk closed that cycle's component, and every closed
+        // component is reported ([`holds_itself`])
+        if d > MAX_TYPE_DEPTH && !cyclic {
             if !part_too_deep {
                 self.causes.insert(t);
             }
@@ -251,9 +350,10 @@ impl<'a, 'g> Walk<'a, 'g> {
         }
     }
 
-    /// Measures `t` and everything it reaches. True if it reaches a type too deep whose parts
-    /// and components are not, and no earlier check found that type.
-    fn check(&mut self, t: TypeId) -> bool {
+    /// Measures `t` and everything it reaches, from the place `at`. True if it reaches a type
+    /// too deep whose parts and components are not, and no earlier check found that type.
+    fn check(&mut self, t: TypeId, at: Span) -> bool {
+        self.site = Some(at);
         let before = self.causes.len();
         self.queue.push(t);
         while let Some(u) = self.queue.pop() {
@@ -285,7 +385,111 @@ pub(crate) fn depths(sigs: &Sigs, table: &TypeTable, ts: &[TypeId]) -> Vec<Optio
         .collect()
 }
 
-/// E0005 case `type` diagnostics (module docs). `bodies` sorted by decl.
+/// The written types of a field held by value that name types directly: the field type, then
+/// through tuple, array, and range elements and ADT type arguments (not through a pointer,
+/// reference, slice, or fn type).
+fn written_parts(w: &mut Walk<'_, '_>, ft: TypeId) -> Vec<TypeId> {
+    let mut out = Vec::new();
+    let mut stack = vec![ft];
+    while let Some(x) = stack.pop() {
+        if out.contains(&x) {
+            continue;
+        }
+        out.push(x);
+        match w.cx.kind(x).clone() {
+            TypeKind::Array { elem, .. } | TypeKind::Range { elem, .. } => stack.push(elem),
+            TypeKind::Tuple(ts) => stack.extend(ts.iter().copied()),
+            TypeKind::Adt { args, .. } => stack.extend(args.iter().filter_map(|g| match g {
+                GArg::Type(t) => Some(*t),
+                GArg::Const(_) => None,
+            })),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The declaration a component is reported at: its name, the declaration, and the field label.
+type Report = (Span, DeclId, Option<Span>);
+
+/// E0423 for every component with a cycle the walk closed (module docs), once per declaration;
+/// E0005 case `type` where the walk met a component without a struct or enum.
+fn holds_itself(prog: &Program, sigs: &Sigs, w: &mut Walk<'_, '_>) -> Vec<Diagnostic> {
+    let comps = std::mem::take(&mut w.components);
+    // per component: whether a field of the declaration writes a member (it is the one to
+    // change), the report, and the place whose walk closed the component
+    let mut picks: Vec<(bool, Option<Report>, Option<Span>)> = Vec::new();
+    for (c, members, site) in &comps {
+        let mut best: Option<(bool, Span, DeclId, Option<Span>)> = None;
+        for &m in members {
+            let TypeKind::Adt { def, args } = w.cx.kind(m).clone() else { continue };
+            let (Some(decl), Some(adt)) = (prog.decl(def), sigs.adt(def)) else { continue };
+            let fields: Vec<(Span, TypeId)> =
+                adt.variants.iter().flat_map(|v| v.fields.iter().map(|f| (f.span, f.ty))).collect();
+            let (mut writes, mut field) = (false, None);
+            for (span, ft) in fields {
+                if crate::types::subst_height(&w.cx, ft, &args) > MAX_TYPE_DEPTH {
+                    continue;
+                }
+                let st = w.cx.subst(ft, &args, None);
+                if w.on_cycle.get(&st) != Some(c) {
+                    continue;
+                }
+                let named = written_parts(w, ft).iter().any(|x| w.on_cycle.get(x) == Some(c));
+                if field.is_none() || (named && !writes) {
+                    field = Some(span);
+                    writes |= named;
+                }
+                if writes {
+                    break;
+                }
+            }
+            let cand = (writes, decl.name_span, def, field);
+            let better = match &best {
+                None => true,
+                Some((bw, bs, bd, _)) => (!writes, decl.name_span, def.0) < (!*bw, *bs, bd.0),
+            };
+            if better {
+                best = Some(cand);
+            }
+        }
+        picks.push(match best {
+            Some((writes, at, def, field)) => (writes, Some((at, def, field)), *site),
+            None => (false, None, *site),
+        });
+    }
+    // components a declaration writes first, then by the place of the report: a component
+    // with an instance of a declaration already reported is a form of that declaration's cycle
+    // (its instance with other args)
+    let mut order: Vec<usize> = (0..picks.len()).collect();
+    order.sort_by_key(|&i| (!picks[i].0, picks[i].1.map(|(at, d, _)| (at, d.0))));
+    let mut done: FxHashSet<DeclId> = FxHashSet::default();
+    let mut out = Vec::new();
+    for i in order {
+        match picks[i] {
+            (_, Some((at, def, field)), _) => {
+                let covered = comps[i]
+                    .1
+                    .iter()
+                    .any(|&m| matches!(w.cx.kind(m), TypeKind::Adt { def: d, .. } if done.contains(d)));
+                if covered || !done.insert(def) {
+                    continue;
+                }
+                let name = prog.decl_path(def);
+                let roles: Vec<(&str, Span)> = field.map(|f| ("field", f)).into_iter().collect();
+                out.extend(mk("E0423", None, &[("name", &name)], at, &roles));
+            }
+            (_, None, site) => {
+                if let Some(at) = site {
+                    out.extend(mk("E0005", Some("type"), &[], at, &[]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// E0005 case `type` and E0423 diagnostics (module docs). `bodies` sorted by decl.
 pub(crate) fn check(
     prog: &Program,
     sigs: &Sigs,
@@ -298,7 +502,8 @@ pub(crate) fn check(
     let mut out = Vec::new();
     let mut report = |at: Span| out.extend(mk("E0005", Some("type"), &[], at, &[]));
 
-    // Declarations, in source order; one report per declaration.
+    // Declarations, in source order; one report per declaration. The type of each struct and
+    // enum declaration (its params as args) is its first root.
     let mut roots: Vec<(Span, u32, TypeId)> = Vec::new();
     for (k, d) in prog.decls.iter().enumerate() {
         if !prog.item(d.item).is_some_and(|it| it.ok) {
@@ -335,7 +540,7 @@ pub(crate) fn check(
     roots.sort();
     let mut reported: FxHashSet<u32> = FxHashSet::default();
     for (at, k, t) in roots {
-        if !t.is_none() && !reported.contains(&k) && w.check(t) {
+        if !t.is_none() && !reported.contains(&k) && w.check(t, at) {
             reported.insert(k);
             report(at);
         }
@@ -362,7 +567,7 @@ pub(crate) fn check(
             continue;
         };
         for (t, n) in body_types(b) {
-            if w.check(t) {
+            if w.check(t, icx.node_span(n)) {
                 report(icx.node_span(n));
                 break;
             }
@@ -414,15 +619,16 @@ pub(crate) fn check(
                     }
                 }
                 for t in roots {
-                    if w.check(t) {
+                    if w.check(t, at) {
                         report(at);
                         break;
                     }
                 }
             }
-            NodeKind::Glue { ty } if w.check(*ty) => report(at),
+            NodeKind::Glue { ty } if w.check(*ty, at) => report(at),
             _ => {}
         }
     }
+    out.extend(holds_itself(prog, sigs, &mut w));
     out
 }

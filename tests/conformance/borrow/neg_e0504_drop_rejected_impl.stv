@@ -1,0 +1,54 @@
+//~ CHECK-ONLY
+// A rejected `Drop` impl (no `drop` method, only another method, a `drop` beside another method,
+// a `drop` of the wrong signature) still gives its type a destructor, on every instance it
+// applies to: moving a part out is E0504 in a generic body and at a concrete instance alike.
+struct N { x: u32 }
+
+struct Empty<T> { t: T }
+
+impl<T> Drop for Empty<T> {} //~ ERROR E0906
+
+fn empty_g<T>(w: Empty<T>) -> T { let Empty.{ t } = w; return t; } //~ ERROR E0504
+
+fn empty_c(w: Empty<N>) -> N { let Empty.{ t } = w; return t; } //~ ERROR E0504
+
+struct Other<T> { t: T }
+
+impl<T> Drop for Other<T> { //~ ERROR E0906
+    fn foo(&mut self) {} //~ ERROR E0906
+}
+
+fn other_g<T>(w: Other<T>) -> T { let Other.{ t } = w; return t; } //~ ERROR E0504
+
+fn other_c(w: Other<N>) -> N { let Other.{ t } = w; return t; } //~ ERROR E0504
+
+struct Both<T> { t: T }
+
+impl<T> Drop for Both<T> {
+    fn foo(&mut self) {} //~ ERROR E0906
+    fn drop(&mut self) {}
+}
+
+fn both_g<T>(w: Both<T>) -> T { let Both.{ t } = w; return t; } //~ ERROR E0504
+
+fn both_c(w: Both<N>) -> N { let Both.{ t } = w; return t; } //~ ERROR E0504
+
+struct Shared<T> { t: T }
+
+impl<T> Drop for Shared<T> {
+    fn drop(&self) {} //~ ERROR E0905
+}
+
+fn shared_g<T>(w: Shared<T>) -> T { let Shared.{ t } = w; return t; } //~ ERROR E0504
+
+fn shared_c(w: Shared<N>) -> N { let Shared.{ t } = w; return t; } //~ ERROR E0504
+
+struct Plain { n: N }
+
+impl Drop for Plain {} //~ ERROR E0906
+
+fn plain(p: Plain) -> N { let Plain.{ n } = p; return n; } //~ ERROR E0504
+
+fn main() -> i32 {
+    return 0;
+}

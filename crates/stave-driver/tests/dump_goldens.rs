@@ -14,7 +14,9 @@
 //! `--dump=opt`). A case whose input has an error diagnostic has none of them, and none may be
 //! written for it. Every `ir_` case also has the `sigs.txt` and `kinds.txt` of a check.
 //!
-//! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!).
+//! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!). A
+//! library file in `diags.txt` is named relative to the repository root
+//! (`tests/conformance/dumps/_lib/std/core.stv`), never by a path of this machine.
 //!
 //! `ir_part_stores` is also checked by op count: an assignment to a part of a local writes it in
 //! place (no `set`), and the only whole-aggregate `load` is the copy its source writes.
@@ -24,6 +26,8 @@ use std::path::{Path, PathBuf};
 
 #[path = "../../../tests/support/checked_ir.rs"]
 mod checked_ir;
+#[path = "../../../tests/support/golden_paths.rs"]
+mod golden_paths;
 
 use stave_driver::dump::{DumpStage, emit_text, render_to_vec, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
@@ -120,8 +124,12 @@ fn goldens() {
             assert!(l.ends_with(" - - -"), "{case}: stage0 has no rounds/fallbacks/peak_bytes: {l:?}");
         }
         for s in COMPARED {
-            let got = read(&dir.join(s.file_name()));
+            let got = golden_paths::neutral(&read(&dir.join(s.file_name())), &repo());
             check_lines(&format!("{case}/{}", s.file_name()), &got);
+            if let Some(why) = golden_paths::host_path(&got, &repo()) {
+                failures.push(format!("{case}/{}: the golden {why}", s.file_name()));
+                continue;
+            }
             let want_path = dumps_dir(case).join(s.file_name());
             if bless {
                 std::fs::write(&want_path, &got).unwrap();
@@ -138,6 +146,30 @@ fn goldens() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// No file below `tests/` (goldens, expected outputs, sources) holds a path of the machine the
+/// suite runs on: a golden blessed elsewhere would fail here, and one blessed here would leak it.
+#[test]
+fn no_golden_holds_a_host_path() {
+    let mut stack = vec![repo().join("tests")];
+    let mut found = Vec::new();
+    let mut files = 0;
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if let Ok(text) = std::fs::read_to_string(&p) {
+                files += 1;
+                if let Some(why) = golden_paths::host_path(&text, &repo()) {
+                    found.push(format!("{}: {why}", p.display()));
+                }
+            }
+        }
+    }
+    assert!(files > 1000, "{files} files read below tests/");
+    assert!(found.is_empty(), "{}", found.join("\n"));
 }
 
 /// Contract properties the goldens must show, checked independently of the golden text.
@@ -1047,6 +1079,29 @@ fn deep_types_on_a_small_stack() {
     };
     let added = types(&kinds_shapes(stage(&dumps, DumpStage::Kinds))) - types(&base_kinds);
     assert_eq!(added, 0, "tall_terms: no type added");
+
+    // A cycle of structs as long, each holding the next by value: one E0423 (at the first), no
+    // E0005, and every one of them has no depth and no layout.
+    let cycle: String =
+        (0..CHAIN).map(|k| format!("struct C{k} {{ pub a: C{} }}\n", (k + 1) % CHAIN)).collect();
+    let (out, dumps) = deep_program("by_value_cycle", &cycle);
+    let codes: Vec<&str> = out.diagnostics.iter().map(|d| d.code()).collect();
+    assert_eq!(codes, ["E0423"], "by_value_cycle");
+    let none = |d: &[(DumpStage, String)]| {
+        stage(d, DumpStage::Kinds).lines().filter(|l| l.ends_with(" depth - size none")).count()
+    };
+    assert_eq!(none(&dumps) - none(&base), CHAIN, "by_value_cycle: types without depth");
+    // The same cycle through raw pointers is a valid program; its trait queries go around the
+    // whole cycle.
+    let cycle: String =
+        (0..CHAIN).map(|k| format!("struct Q{k} {{ pub a: *const Q{} }}\n", (k + 1) % CHAIN)).collect();
+    let (out, dumps) = deep_program("by_ptr_cycle", &cycle);
+    assert!(!out.has_errors(), "by_ptr_cycle: {:?}", out.diagnostics.first());
+    let held = stage(&dumps, DumpStage::Kinds)
+        .lines()
+        .filter(|l| l.ends_with(" sized,frozen depth 3 size 8 align 8 fields[0]"))
+        .count();
+    assert!(held >= CHAIN, "by_ptr_cycle: {held} structs, each a raw pointer");
 
     // The conformance programs that walk such types, with the shipped std: `&P<u32>` of a
     // polymorphic recursion past the height limit (its pointee is in no signature), and

@@ -22,7 +22,7 @@
 //!
 //! **Flat** is derived, never implemented (an impl is E1408 and is not consulted): a type is
 //! Flat iff it holds no reference, view, raw pointer, fn value, `std.cell.UnsafeCell`, or ADT
-//! with a `Drop` impl, recursively through struct fields, enum payloads, the type arguments of
+//! with a `Drop` impl ([`crate::mono::adt_drop_impl`]), recursively through struct fields, enum payloads, the type arguments of
 //! an ADT instance, and array, tuple, and range elements. `str` and slices are not Flat
 //! (unsized); a generic param is Flat only through a `Flat` bound. Recursive types are Flat
 //! coinductively, like Send/Sync.
@@ -1175,7 +1175,7 @@ impl<'a> World<'a> {
                 if self.adt_view(def) {
                     return Err(NotFlat::View);
                 }
-                if lang.drop.is_some() && self.has_impl_for_head(cx, def, lang.drop) {
+                if crate::mono::adt_drop_impl(self, def) {
                     return Err(NotFlat::Drop);
                 }
                 let Some(adt) = self.sigs.adt(def) else { return Err(NotFlat::Unknown) };

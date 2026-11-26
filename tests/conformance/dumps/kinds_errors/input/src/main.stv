@@ -1,10 +1,10 @@
 //~ CHECK-ONLY
 // Dump golden (kinds): impls and types with errors. A type that holds itself by value has no
-// depth and no layout, nor does one holding it (no diagnostic: no value of it is made); an impl
-// of an unresolved trait (an inherent impl of `u16`), an impl for an unresolved type (no head: a
-// candidate for every type, applying to none), overlapping impls (both apply), and an impl with
-// a param its self type does not bind are all in the impl table.
-struct Loop { next: Loop, n: u32 }
+// depth and no layout, nor does one holding it (only the declaration on the cycle is reported,
+// used or not); an impl of an unresolved trait (an inherent impl of `u16`), an impl for an
+// unresolved type (no head: a candidate for every type, applying to none), overlapping impls
+// (both apply), and an impl with a param its self type does not bind are all in the impl table.
+struct Loop { next: Loop, n: u32 } //~ ERROR E0423
 
 struct Outer { l: Loop }
 
@@ -39,7 +39,14 @@ impl Area for Nope { //~ ERROR E0101
     }
 }
 
-fn f(o: &Outer, x: u32) -> u32 {
+// A rejected `Drop` impl (no `drop` method) has one effect on every instance: `Held<T>` and
+// `Held<u32>` both have it (`drop-impl`).
+struct Held<T> { v: T }
+
+impl<T> Drop for Held<T> { //~ ERROR E0906
+}
+
+fn f(o: &Outer, x: u32, h: &Held<u32>) -> u32 {
     return x;
 }
 

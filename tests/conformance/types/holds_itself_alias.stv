@@ -1,0 +1,23 @@
+//~ CHECK-ONLY
+// E0423 case `alias`: a type alias whose target names the alias, directly, through another
+// alias, or behind a pointer, has no finite expansion; once per cycle, at its first alias. An
+// alias that names a struct holding the alias is a struct cycle (plain E0423 at the struct).
+type Pair = (u8, Pair); //~ ERROR E0423
+
+type Ptr = *const Ptr; //~ ERROR E0423
+
+type First = (u8, Second); //~ ERROR E0423
+
+type Second = [First; 2];
+
+type Held = (u8, Holder);
+
+struct Holder { h: Held } //~ ERROR E0423
+
+fn f(p: &Pair, q: Ptr, s: &Second) -> u8 {
+    return p.0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

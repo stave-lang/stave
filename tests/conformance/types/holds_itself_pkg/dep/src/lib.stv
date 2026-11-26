@@ -1,0 +1,3 @@
+pub struct W<T> { pub t: T }
+
+pub struct D<T> { pub a: T, pub n: Option<D<u32>> } //~ ERROR E0423

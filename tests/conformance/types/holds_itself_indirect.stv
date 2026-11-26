@@ -1,0 +1,32 @@
+//~ EXIT 3
+// A type may refer to itself through an indirection: a raw pointer, a slice behind a pointer, a
+// reference in a view, or a `vec.Vec` (it holds a raw pointer). None of these is E0423, and
+// values of them are built and dropped as usual.
+import std.vec;
+
+struct Tree { kids: vec.Vec<Tree>, n: u32 }
+
+struct Node { next: *const Node, all: *mut [Node], n: u32 }
+
+enum List { Nil, Cons(u32, *mut List) }
+
+view struct Chain { next: &Chain, n: u32 }
+
+struct Ptr<T> { p: *const T }
+
+struct ViaPtr { p: Ptr<ViaPtr>, n: u32 }
+
+fn count(t: &Tree) -> usize {
+    return t.kids.len();
+}
+
+fn main() -> i32 {
+    let mut t = Tree.{ kids: vec.Vec::<Tree>.new(), n: 1 };
+    t.kids.push(Tree.{ kids: vec.Vec::<Tree>.new(), n: 2 });
+    t.kids.push(Tree.{ kids: vec.Vec::<Tree>.new(), n: 3 });
+    t.kids.push(Tree.{ kids: vec.Vec::<Tree>.new(), n: 4 });
+    if count(&t) == 3 {
+        return 3;
+    }
+    return 0;
+}

@@ -4,7 +4,8 @@
 //!   and so do the lock-rank tests `rank_*.stv`;
 //! - related-span goldens: `--diagnostics json` of every negative there equals
 //!   `tests/conformance/borrow/_json/<name>.json` (only the diagnostics located in the test file;
-//!   `STAVE_BLESS=1` rewrites them; a missing one is written and fails the run once);
+//!   `STAVE_BLESS=1` rewrites them; a missing one is written and fails the run once; a library
+//!   file is named relative to the repository root, never by a path of this machine);
 //! - no valid program of the other suites gets an E05xx (no false positives);
 //! - diagnostics are identical with 1 and 8 threads;
 //! - the 100k-line corpus has no borrow error, and the `borrowck` stage time is printed
@@ -16,6 +17,9 @@ use stave_driver::conformance::stage0::{Stage0, registry_codes};
 use stave_driver::conformance::{Config, Outcome, Report, run_suite};
 use stave_driver::pipeline::{self, Goal, Options, Output, Stage};
 use stave_driver::shipped::Library;
+
+#[path = "../../../tests/support/golden_paths.rs"]
+mod golden_paths;
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -115,8 +119,12 @@ fn related_span_goldens() {
     for f in negatives() {
         let name = f.file_name().unwrap().to_str().unwrap().to_string();
         let out = check(&f, 2);
-        let got = json_of(&out, &name);
+        let got = golden_paths::neutral(&json_of(&out, &name), &repo());
         assert!(got.contains("\"code\":\"E05"), "{name}: no borrow diagnostic\n{got}");
+        if let Some(why) = golden_paths::host_path(&got, &repo()) {
+            diffs.push(format!("{name}: the golden {why}"));
+            continue;
+        }
         let path = gdir.join(name.replace(".stv", ".json"));
         if bless {
             std::fs::create_dir_all(&gdir).unwrap();

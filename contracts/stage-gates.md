@@ -128,7 +128,7 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
       an `impl Copy`), `view`, `send`, `sync` (an explicit impl decides for its ADT, else
       structural), `sized` (not `str` or a slice), `flat`, `frozen` (derived), `drop-impl` (an
       ADT type whose `Drop` impl, declared in the ADT's package, applies; with params: the ADT
-      has one), `drop` (needs drop glue: a `drop-impl` type or a non-Copy generic param reached
+      has one; an impl the checker rejects, E0905 E0906, counts alike), `drop` (needs drop glue: a `drop-impl` type or a non-Copy generic param reached
       by value through fields, payloads, tuple and array elements), `lock` (a
       `std.sync.MutexGuard` reached by value through fields, payloads, tuple and array elements,
       or through the pointee of an ADT's raw-pointer field).

@@ -82,13 +82,6 @@ pub struct Kinds {
     pub ap_impls: ragged.Ragged<u32>,
 }
 
-fn own_package(ds: &decls.Decls, md: &modules.Modules, a: u32, b: u32) -> bool {
-    let ma = ds.module.as_slice()[a as usize];
-    let mb = ds.module.as_slice()[b as usize];
-    if ma == NONE || mb == NONE { return ma == mb; }
-    return md.mod_pkg.as_slice()[ma as usize] == md.mod_pkg.as_slice()[mb as usize];
-}
-
 // The methods of every impl in declaration order: (sorted keys (impl, index), method decls).
 fn impl_methods(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
     let mut keys = vec.Vec::<u64>.new();
@@ -186,7 +179,8 @@ fn build_in(tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.Decls, fl: &files.
         }
     }
     // the `Drop` impl of each ADT instance of the closure: without params, the first applying
-    // impl (queries); with params, any impl of its ADT in its package
+    // impl of its ADT's package (queries); with params, whether its ADT has one (`adt_drop`).
+    // An impl the checker rejects counts alike: one effect on every instance.
     let drop_k = tr.im.trait_pos(tr.lang.drop);
     let nt0 = tab.len();
     let mut dimpl = col.filled(nt0, false);
@@ -196,13 +190,8 @@ fn build_in(tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.Decls, fl: &files.
     for j in 0..w.len() {
         let t = w.as_slice()[j];
         if tab.tag_of(t) != types.TK_ADT || drop_k == NONE { continue; }
-        let d = tab.a_of(t);
         if tr.comp.hasp.as_slice()[t as usize] {
-            let is = tr.im.of(drop_k);
-            for x in 0..is.len() {
-                let i = is[x];
-                if tr.im.head_of.as_slice()[i as usize] == traits.head(tab, t) && own_package(ds, md, i, d) { dimpl.as_mut_slice()[t as usize] = true; }
-            }
+            dimpl.as_mut_slice()[t as usize] = tr.adt_drop.as_slice()[tab.a_of(t) as usize];
             continue;
         }
         tr.candidates_at(tab, drop_k, t, &mut cands);
@@ -223,10 +212,8 @@ fn build_in(tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.Decls, fl: &files.
         let qs = dq.row(j);
         let is = dq_i.row(j);
         for x in 0..qs.len() {
-            if !tr.holds(qs[x]) { continue; }
-            let i = is[x];
-            let (lo, hi) = run_of(mk.as_slice(), i);
-            dimpl.as_mut_slice()[t as usize] = own_package(ds, md, i, tab.a_of(t)) && hi > lo;
+            if !tr.holds(qs[x]) || !traits.own_package(ds, md, is[x], tab.a_of(t)) { continue; }
+            dimpl.as_mut_slice()[t as usize] = true;
             break;
         }
     }

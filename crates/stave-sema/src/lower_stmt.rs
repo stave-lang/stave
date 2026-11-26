@@ -967,9 +967,16 @@ impl<'a> FnCx<'a> {
         };
         let w = self.g.world();
         let glue = crate::drops::glue(&w, &mut self.tys, t);
-        if let Some(k) = glue.method {
-            let f = self.req(Req::Inst(k));
-            self.f.b.call(f, None, &[p]);
+        match glue.method {
+            Some(k) => {
+                let f = self.req(Req::Inst(k));
+                self.f.b.call(f, None, &[p]);
+            }
+            // a `Drop` impl without its `drop` method is E0906: no accepted program has one
+            None if crate::mono::drop_impl(&w, &mut self.tys, t) => {
+                self.fail_at(None, "drop glue of a type whose `Drop` impl has no `drop` method");
+            }
+            None => {}
         }
         match glue.parts {
             crate::drops::Parts::None => {}

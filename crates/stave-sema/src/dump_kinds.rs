@@ -25,7 +25,15 @@ const KIND_NAMES: [&str; 10] =
 
 /// The `kinds` dump: one `t<T>` line per `sigs` table type, by T; one `impl` line per impl, by
 /// (trait, head, item); one `apply` line per (type, trait) with a candidate impl, by (T, trait).
+///
+/// Runs on the big-stack workers ([`crate::pool`]), as the checker's own trait queries do: a
+/// query on a type of a cycle (through pointers, or by value, E0423) recurses through every
+/// type of the cycle not answered yet, which [`Warm::parts_first`] cannot order away.
 pub fn dump_kinds(prog: &Program, tc: &Typeck) -> String {
+    crate::pool::on_big_stacks(|| dump_kinds_here(prog, tc))
+}
+
+fn dump_kinds_here(prog: &Program, tc: &Typeck) -> String {
     let table = TypeRank::of(prog, tc);
     let sigs = &tc.sigs;
     let w = World { prog, sigs };

@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+import dep;
+
+struct L { w: dep.W<L> } //~ ERROR E0423
+
+struct K { w: dep.W<(u8, K)> } //~ ERROR E0423
+
+fn f(d: &dep.D<u32>, l: &L) -> u32 {
+    return d.a;
+}
+
+fn main() -> i32 {
+    return 0;
+}
