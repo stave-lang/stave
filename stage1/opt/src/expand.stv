@@ -1,0 +1,544 @@
+// The expansion X (contracts/opt-passes.md X1-X7) of the round's canonical input under its
+// stored decision: every accepted row is replaced by its callee's expanded body `F(g)`. Nothing
+// is decided here: a row is expanded iff its verdict is `inline`.
+//
+// Count, scan, write. The plan counts, per fn by level ascending, the rows of `F(f)` in every
+// body column, and places each input block, each accepted row's continuation, its fresh values,
+// and its copied constant pool inside `F(f)`. An exclusive scan of the counts gives every fn its
+// segment of the output columns; each fn then writes its segment alone, reading the input module
+// only, so fns are independent of each other and of the order they are written in.
+//
+// A fn is written by walking the tree of the copies it holds: `F(g)` inside `F(f)` is `g`'s input
+// body walked under a context, its accepted rows walked in turn, and the result is the copy of
+// `F(g)` that X1 asks for. A context maps the callee's ids into the output fn, all affine:
+//   - value u: a param of the callee's entry (u < np) is its argument, an operand of the output
+//     fn; any other value is `vb + u - np`;
+//   - pool entry c: `cb + c` (each copy brings its callee's pool; `canon` merges equal entries);
+//   - position p of a block of `F(g)`: `bb + p - 1`, so position 0 (the entry) is the block the
+//     call was split from (X3);
+//   - `k`, `kres`: the continuation block and its param (X5), NONE in the fn itself.
+// The fn itself is the context np = 0, vb = 0, cb = 0, bb = 1. Inside `F(g)` the values are `g`'s,
+// then per accepted row in (b, k) order the copy's values other than its entry params; the pool is
+// `g`'s, then each copy's; the blocks are per input block its first piece, then per accepted row of
+// the block the copy's blocks other than its entry and the continuation.
+import facts;
+import decide;
+import ir.canon;
+import ir.generated.ir_text_terminals;
+import ir.model;
+import prims.col;
+import prims.scan;
+import prims.sort;
+import std.debug;
+import std.idx;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+// Per fn, the row counts of its expanded body `F(f)` (0 without a body), and the places of the
+// input's blocks and accepted rows inside it.
+struct Plan {
+    nb: vec.Vec<u32>,
+    nv: vec.Vec<u32>,
+    nc: vec.Vec<u32>,
+    ni: vec.Vec<u32>,
+    no: vec.Vec<u32>,
+    nt: vec.Vec<u32>,
+    // per fn of the input body: its `ret` terminators, its entry's leading slots
+    nret: vec.Vec<u32>,
+    nslot: vec.Vec<u32>,
+    // per input block: the position of its first piece in its fn's `F(f)`
+    bpos: vec.Vec<u32>,
+    // per input instruction: the accepted row it is, else NONE
+    arow: vec.Vec<u32>,
+    // per site row: its instruction when accepted, else NONE; the rows of fn f are
+    // `row_off[f]..row_off[f + 1]`
+    ri: vec.Vec<u32>,
+    row_off: vec.Vec<u32>,
+    // per accepted row: the position of the block its call stands in, and where its copy's
+    // values and pool start, all inside the caller's `F(f)`
+    q: vec.Vec<u32>,
+    vbr: vec.Vec<u32>,
+    cbr: vec.Vec<u32>,
+}
+
+fn entry_params(m: &model.Module, g: usize) -> u32 {
+    return m.blk_param_n.as_slice()[m.fn_blk_lo.as_slice()[g] as usize];
+}
+
+fn plan(m: &model.Module, fx: &facts.Facts, d: &decide.Decision) -> Plan {
+    let nf = m.fns();
+    let nr = fx.site_f.len();
+    let mut p = Plan.{
+        nb: col.filled(nf, 0u32),
+        nv: col.filled(nf, 0u32),
+        nc: col.filled(nf, 0u32),
+        ni: col.filled(nf, 0u32),
+        no: col.filled(nf, 0u32),
+        nt: col.filled(nf, 0u32),
+        nret: col.filled(nf, 0u32),
+        nslot: col.filled(nf, 0u32),
+        bpos: col.filled(m.blk_tkind.len(), NONE),
+        arow: col.filled(m.ins_op.len(), NONE),
+        ri: col.filled(nr, NONE),
+        row_off: vec.Vec::<u32>.new(),
+        q: col.filled(nr, NONE),
+        vbr: col.filled(nr, NONE),
+        cbr: col.filled(nr, NONE),
+    };
+    p.row_off.extend_from_slice(fx.site_off.as_slice());
+    for f in 0..nf {
+        if m.has_body(f) { p.input_counts(m, f); }
+    }
+    let order = sort.sort_perm(fx.level.as_slice());
+    for j in 0..nf {
+        let f = order.as_slice()[j] as usize;
+        if m.has_body(f) { p.place(m, fx, d, f); }
+    }
+    return p;
+}
+
+impl Plan {
+    // The counts of f's input body: its instructions, operand rows, targets, rets, leading slots.
+    fn input_counts(&mut self, m: &model.Module, f: usize) {
+        let blo = m.fn_blk_lo.as_slice()[f] as usize;
+        let mut ni: u32 = 0;
+        let mut no: u32 = 0;
+        let mut nt: u32 = 0;
+        let mut nret: u32 = 0;
+        for b in blo..blo + m.fn_blk_n.as_slice()[f] as usize {
+            let il = m.blk_ins_lo.as_slice()[b] as usize;
+            let inn = m.blk_ins_n.as_slice()[b];
+            ni = ni + inn;
+            for i in il..il + inn as usize {
+                no = no + m.ins_opnd_n.as_slice()[i];
+            }
+            let top = m.blk_topnd.as_slice()[b];
+            if top != NONE { no = no + 1; }
+            if m.blk_tkind.as_slice()[b] == model.TM_RET { nret = nret + 1; }
+            let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+            let tn = m.blk_tgt_n.as_slice()[b];
+            nt = nt + tn;
+            for t in tl..tl + tn as usize {
+                no = no + m.tgt_opnd_n.as_slice()[t];
+            }
+        }
+        let il = m.blk_ins_lo.as_slice()[blo] as usize;
+        let mut ns: u32 = 0;
+        while ns < m.blk_ins_n.as_slice()[blo] && m.ins_op.as_slice()[il + ns as usize] == ir_text_terminals.IR_T_KW_SLOT {
+            ns = ns + 1;
+        }
+        self.ni.as_mut_slice()[f] = ni;
+        self.no.as_mut_slice()[f] = no;
+        self.nt.as_mut_slice()[f] = nt;
+        self.nret.as_mut_slice()[f] = nret;
+        self.nslot.as_mut_slice()[f] = ns;
+    }
+
+    // The places in `F(f)` of f's blocks and accepted rows, and the counts of `F(f)`; every
+    // accepted callee lies in a lower level (D5), so its counts are final.
+    fn place(&mut self, m: &model.Module, fx: &facts.Facts, d: &decide.Decision, f: usize) {
+        let blo = m.fn_blk_lo.as_slice()[f] as usize;
+        let hi = fx.site_off.as_slice()[f + 1] as usize;
+        let mut r = fx.site_off.as_slice()[f] as usize;
+        let mut pos: u32 = 0;
+        let mut nv = m.fn_val_n.as_slice()[f];
+        let mut nc = m.fn_const_n.as_slice()[f];
+        let mut ni = self.ni.as_slice()[f];
+        let mut no = self.no.as_slice()[f];
+        let mut nt = self.nt.as_slice()[f];
+        for b in 0..m.fn_blk_n.as_slice()[f] as usize {
+            self.bpos.as_mut_slice()[blo + b] = pos;
+            let mut cur = pos;
+            pos = pos + 1;
+            while r < hi && fx.site_b.as_slice()[r] as usize == b {
+                if d.verdict.as_slice()[r] == facts.V_INLINE {
+                    let g = fx.site_g.as_slice()[r] as usize;
+                    let i = m.blk_ins_lo.as_slice()[blo + b] as usize + fx.site_k.as_slice()[r] as usize;
+                    let ib = self.nb.as_slice()[g];
+                    self.ri.as_mut_slice()[r] = i as% u32;
+                    self.arow.as_mut_slice()[i] = r as% u32;
+                    self.q.as_mut_slice()[r] = cur;
+                    self.vbr.as_mut_slice()[r] = nv;
+                    self.cbr.as_mut_slice()[r] = nc;
+                    nv = nv + self.nv.as_slice()[g] - entry_params(m, g);
+                    nc = nc + self.nc.as_slice()[g];
+                    cur = cur + ib;
+                    pos = pos + ib;
+                    ni = ni + self.ni.as_slice()[g] - 1;
+                    no = no + self.no.as_slice()[g] - m.ins_opnd_n.as_slice()[i];
+                    nt = nt + self.nt.as_slice()[g] + self.nret.as_slice()[g];
+                }
+                r = r + 1;
+            }
+        }
+        self.nb.as_mut_slice()[f] = pos;
+        self.nv.as_mut_slice()[f] = nv;
+        self.nc.as_mut_slice()[f] = nc;
+        self.ni.as_mut_slice()[f] = ni;
+        self.no.as_mut_slice()[f] = no;
+        self.nt.as_mut_slice()[f] = nt;
+    }
+}
+
+// The map of one copy of a fn's input body into the output fn (see the file comment). The entry
+// params' arguments are `args_lo..args_lo + np` of the writer's argument stack.
+struct Ctx {
+    g: u32,
+    np: u32,
+    args_lo: u32,
+    vb: u32,
+    cb: u32,
+    bb: u32,
+    k: u32,
+    kres: u32,
+}
+
+impl Copy for Ctx {}
+
+// The output body columns sized by the plan, the segment starts of every fn (an exclusive scan
+// of the counts), the cursors of the fn being written (absolute rows), and the argument stack of
+// its open copies.
+struct Writer {
+    o: model.Module,
+    io: vec.Vec<u32>,
+    oo: vec.Vec<u32>,
+    to: vec.Vec<u32>,
+    vlo: usize,
+    clo: usize,
+    blo: usize,
+    cb: usize,
+    ci: usize,
+    co: usize,
+    ct: usize,
+    ak: vec.Vec<u8>,
+    ai: vec.Vec<u32>,
+}
+
+fn writer(p: &Plan) -> Writer {
+    let nf = p.nb.len();
+    let bo = scan.offsets(p.nb.as_slice());
+    let vo = scan.offsets(p.nv.as_slice());
+    let co = scan.offsets(p.nc.as_slice());
+    let mut w = Writer.{ o: model.Module.new(), io: scan.offsets(p.ni.as_slice()), oo: scan.offsets(p.no.as_slice()), to: scan.offsets(p.nt.as_slice()), vlo: 0, clo: 0, blo: 0, cb: 0, ci: 0, co: 0, ct: 0, ak: vec.Vec::<u8>.new(), ai: vec.Vec::<u32>.new() };
+    let nb = bo.as_slice()[nf] as usize;
+    let nv = vo.as_slice()[nf] as usize;
+    let nc = co.as_slice()[nf] as usize;
+    let ni = w.io.as_slice()[nf] as usize;
+    let nop = w.oo.as_slice()[nf] as usize;
+    let nt = w.to.as_slice()[nf] as usize;
+    let o = &mut w.o;
+    o.fn_blk_lo.extend_from_slice(&bo.as_slice()[0..nf]);
+    o.fn_blk_n.extend_from_slice(p.nb.as_slice());
+    o.fn_val_lo.extend_from_slice(&vo.as_slice()[0..nf]);
+    o.fn_val_n.extend_from_slice(p.nv.as_slice());
+    o.fn_const_lo.extend_from_slice(&co.as_slice()[0..nf]);
+    o.fn_const_n.extend_from_slice(p.nc.as_slice());
+    o.blk_val_lo = col.filled(nb, 0u32);
+    o.blk_param_n = col.filled(nb, 0u32);
+    o.blk_ins_lo = col.filled(nb, 0u32);
+    o.blk_ins_n = col.filled(nb, 0u32);
+    o.blk_tkind = col.filled(nb, 0u8);
+    o.blk_topnd = col.filled(nb, NONE);
+    o.blk_tgt_lo = col.filled(nb, 0u32);
+    o.blk_tgt_n = col.filled(nb, 0u32);
+    o.val_ty = col.filled(nv, NONE);
+    o.ins_op = col.filled(ni, 0u16);
+    o.ins_intr = col.filled(ni, NONE);
+    o.ins_ty = col.filled(ni, NONE);
+    o.ins_res = col.filled(ni, NONE);
+    o.ins_opnd_lo = col.filled(ni, 0u32);
+    o.ins_opnd_n = col.filled(ni, 0u32);
+    o.ins_site = col.filled(ni, NONE);
+    o.opnd_kind = col.filled(nop, 0u8);
+    o.opnd_id = col.filled(nop, 0u32);
+    o.tgt_blk = col.filled(nt, 0u32);
+    o.tgt_opnd_lo = col.filled(nt, 0u32);
+    o.tgt_opnd_n = col.filled(nt, 0u32);
+    o.tgt_case = col.filled(nt, NONE);
+    o.const_kind = col.filled(nc, 0u8);
+    o.const_bits = col.filled(nc, 0u64);
+    return w;
+}
+
+impl Writer {
+    // Writes `F(f)` into f's segments: the entry with its params, the slots of the fn and of
+    // every copy (X7), then the walk; every segment comes out exactly full.
+    fn body(&mut self, m: &model.Module, p: &Plan, f: usize) {
+        self.blo = self.o.fn_blk_lo.as_slice()[f] as usize;
+        self.vlo = self.o.fn_val_lo.as_slice()[f] as usize;
+        self.clo = self.o.fn_const_lo.as_slice()[f] as usize;
+        self.cb = self.blo;
+        self.ci = self.io.as_slice()[f] as usize;
+        self.co = self.oo.as_slice()[f] as usize;
+        self.ct = self.to.as_slice()[f] as usize;
+        self.ak.clear();
+        self.ai.clear();
+        let top = Ctx.{ g: f as% u32, np: 0, args_lo: 0, vb: 0, cb: 0, bb: 1, k: NONE, kres: NONE };
+        self.pool(m, top);
+        let b0 = m.fn_blk_lo.as_slice()[f] as usize;
+        self.open(m, top, 0, 0, m.blk_param_n.as_slice()[b0]);
+        self.slots(m, p, top);
+        self.walk(m, p, top);
+        debug.assert(self.cb == self.blo + p.nb.as_slice()[f] as usize, "the blocks of F(f) are as counted");
+        debug.assert(self.ci == self.io.as_slice()[f + 1] as usize, "the instructions of F(f) are as counted");
+        debug.assert(self.co == self.oo.as_slice()[f + 1] as usize, "the operands of F(f) are as counted");
+        debug.assert(self.ct == self.to.as_slice()[f + 1] as usize, "the targets of F(f) are as counted");
+    }
+
+    // The constant pool of c's fn, at c's pool start.
+    fn pool(&mut self, m: &model.Module, c: Ctx) {
+        let lo = m.fn_const_lo.as_slice()[c.g as usize] as usize;
+        let at = self.clo + c.cb as usize;
+        for j in 0..m.fn_const_n.as_slice()[c.g as usize] as usize {
+            self.o.const_kind.as_mut_slice()[at + j] = m.const_kind.as_slice()[lo + j];
+            self.o.const_bits.as_mut_slice()[at + j] = m.const_bits.as_slice()[lo + j];
+        }
+    }
+
+    // The context of the copy of accepted row r (instruction i) of c's fn: the call's arguments
+    // under c become the entry params' (pushed on the argument stack).
+    fn child(&mut self, m: &model.Module, p: &Plan, c: Ctx, r: usize, i: usize) -> Ctx {
+        let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+        let n = m.ins_opnd_n.as_slice()[i] as usize;
+        let h = m.opnd_id.as_slice()[ol] as usize;
+        let np = entry_params(m, h);
+        debug.assert(n == np as usize + 1, "a call passes one argument per param of its callee's entry");
+        let args_lo = self.ak.len() as% u32;
+        for x in ol + 1..ol + n {
+            let (k, id) = self.map(m, c, x);
+            self.ak.push(k);
+            self.ai.push(id);
+        }
+        let q = p.q.as_slice()[r];
+        let res = m.ins_res.as_slice()[i];
+        let kres = if res == NONE then NONE else c.vb + res - c.np;
+        return Ctx.{ g: h as% u32, np: np, args_lo: args_lo, vb: c.vb + p.vbr.as_slice()[r] - c.np, cb: c.cb + p.cbr.as_slice()[r], bb: c.bb + q, k: c.bb + q + p.nb.as_slice()[h] - 1, kres: kres };
+    }
+
+    // Operand row x of c's fn under c.
+    fn map(&self, m: &model.Module, c: Ctx, x: usize) -> (u8, u32) {
+        let kind = m.opnd_kind.as_slice()[x];
+        let id = m.opnd_id.as_slice()[x];
+        if kind == model.O_VALUE {
+            if id < c.np {
+                let a = (c.args_lo + id) as usize;
+                return (self.ak.as_slice()[a], self.ai.as_slice()[a]);
+            }
+            return (model.O_VALUE, c.vb + id - c.np);
+        }
+        if kind == model.O_CONST { return (model.O_CONST, c.cb + id); }
+        return (kind, id);
+    }
+
+    fn operand(&mut self, m: &model.Module, c: Ctx, x: usize) {
+        let (k, id) = self.map(m, c, x);
+        self.o.opnd_kind.as_mut_slice()[self.co] = k;
+        self.o.opnd_id.as_mut_slice()[self.co] = id;
+        self.co = self.co + 1;
+    }
+
+    // Defines output value v with the type of value u of c's fn.
+    fn define(&mut self, m: &model.Module, c: Ctx, v: u32, u: u32) {
+        let t = m.val_ty.as_slice()[m.fn_val_lo.as_slice()[c.g as usize] as usize + u as usize];
+        self.o.val_ty.as_mut_slice()[self.vlo + v as usize] = t;
+    }
+
+    // Opens output block x (the next one) with the n params that values u.. of c's fn become.
+    fn open(&mut self, m: &model.Module, c: Ctx, x: u32, u: u32, n: u32) {
+        debug.assert(self.cb == self.blo + x as usize, "blocks are written in their stored order");
+        let v0 = if n == 0 then 0u32 else c.vb + u - c.np;
+        for j in 0..n {
+            self.define(m, c, v0 + j, u + j);
+        }
+        self.o.blk_val_lo.as_mut_slice()[self.cb] = v0;
+        self.o.blk_param_n.as_mut_slice()[self.cb] = n;
+        self.o.blk_ins_lo.as_mut_slice()[self.cb] = self.ci as% u32;
+    }
+
+    // Instruction i of c's fn under c, appended to the open block; its site is kept (X6).
+    fn ins(&mut self, m: &model.Module, c: Ctx, i: usize) {
+        let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+        let n = m.ins_opnd_n.as_slice()[i];
+        self.o.ins_opnd_lo.as_mut_slice()[self.ci] = self.co as% u32;
+        for x in ol..ol + n as usize {
+            self.operand(m, c, x);
+        }
+        let r = m.ins_res.as_slice()[i];
+        let mut res = NONE;
+        if r != NONE {
+            res = c.vb + r - c.np;
+            self.define(m, c, res, r);
+        }
+        let at = self.ci;
+        self.o.ins_op.as_mut_slice()[at] = m.ins_op.as_slice()[i];
+        self.o.ins_intr.as_mut_slice()[at] = m.ins_intr.as_slice()[i];
+        self.o.ins_ty.as_mut_slice()[at] = m.ins_ty.as_slice()[i];
+        self.o.ins_res.as_mut_slice()[at] = res;
+        self.o.ins_opnd_n.as_mut_slice()[at] = n;
+        self.o.ins_site.as_mut_slice()[at] = m.ins_site.as_slice()[i];
+        self.ci = at + 1;
+    }
+
+    // The terminator of input block b of c's fn under c closes the open block. In a copy a `ret`
+    // becomes `br K(..)`, its operand the continuation's argument when the call has a result (X5).
+    fn term(&mut self, m: &model.Module, p: &Plan, c: Ctx, b: usize) {
+        let x = self.cb;
+        let kind = m.blk_tkind.as_slice()[b];
+        let top = m.blk_topnd.as_slice()[b];
+        self.o.blk_ins_n.as_mut_slice()[x] = (self.ci as% u32) - self.o.blk_ins_lo.as_slice()[x];
+        self.o.blk_tgt_lo.as_mut_slice()[x] = self.ct as% u32;
+        if kind == model.TM_RET && c.k != NONE {
+            self.o.blk_tkind.as_mut_slice()[x] = model.TM_BR;
+            self.o.blk_topnd.as_mut_slice()[x] = NONE;
+            self.o.blk_tgt_n.as_mut_slice()[x] = 1;
+            let t = self.ct;
+            self.o.tgt_blk.as_mut_slice()[t] = c.k;
+            self.o.tgt_opnd_lo.as_mut_slice()[t] = self.co as% u32;
+            self.o.tgt_case.as_mut_slice()[t] = NONE;
+            // a call has a result exactly when its callee returns a value (checked-ir.md)
+            debug.assert((c.kres != NONE) == (top != NONE), "a ret returns a value exactly when its call has a result");
+            let mut n: u32 = 0;
+            if top != NONE {
+                self.operand(m, c, top as usize);
+                n = 1;
+            }
+            self.o.tgt_opnd_n.as_mut_slice()[t] = n;
+            self.ct = t + 1;
+        } else {
+            self.o.blk_tkind.as_mut_slice()[x] = kind;
+            if top == NONE {
+                self.o.blk_topnd.as_mut_slice()[x] = NONE;
+            } else {
+                self.o.blk_topnd.as_mut_slice()[x] = self.co as% u32;
+                self.operand(m, c, top as usize);
+            }
+            let gb = m.fn_blk_lo.as_slice()[c.g as usize] as usize;
+            let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+            let tn = m.blk_tgt_n.as_slice()[b];
+            self.o.blk_tgt_n.as_mut_slice()[x] = tn;
+            for g in tl..tl + tn as usize {
+                let t = self.ct;
+                let y = m.tgt_blk.as_slice()[g] as usize;
+                self.o.tgt_blk.as_mut_slice()[t] = c.bb + p.bpos.as_slice()[gb + y] - 1;
+                self.o.tgt_case.as_mut_slice()[t] = m.tgt_case.as_slice()[g];
+                self.o.tgt_opnd_lo.as_mut_slice()[t] = self.co as% u32;
+                let ol = m.tgt_opnd_lo.as_slice()[g] as usize;
+                let on = m.tgt_opnd_n.as_slice()[g];
+                for z in ol..ol + on as usize {
+                    self.operand(m, c, z);
+                }
+                self.o.tgt_opnd_n.as_mut_slice()[t] = on;
+                self.ct = t + 1;
+            }
+        }
+        self.cb = x + 1;
+    }
+
+    // X7: the entry's leading slots of the fn, then of every copy in preorder of the tree of
+    // copies (rows in (b, k) order, each copy's own slots before those of its copies).
+    fn slots(&mut self, m: &model.Module, p: &Plan, top: Ctx) {
+        let mut fr = vec.Vec::<Ctx>.new();
+        let mut next = vec.Vec::<u32>.new();
+        self.leading_slots(m, p, top);
+        fr.push(top);
+        next.push(p.row_off.as_slice()[top.g as usize]);
+        while fr.len() > 0 {
+            let t = fr.len() - 1;
+            let c = fr.as_slice()[t];
+            let r = next.as_slice()[t] as usize;
+            if r == p.row_off.as_slice()[c.g as usize + 1] as usize {
+                fr.truncate(t);
+                next.truncate(t);
+                self.ak.truncate(c.args_lo as usize);
+                self.ai.truncate(c.args_lo as usize);
+                continue;
+            }
+            next.as_mut_slice()[t] = (r + 1) as% u32;
+            let i = p.ri.as_slice()[r];
+            if i == NONE { continue; }
+            let cc = self.child(m, p, c, r, i as usize);
+            self.leading_slots(m, p, cc);
+            fr.push(cc);
+            next.push(p.row_off.as_slice()[cc.g as usize]);
+        }
+    }
+
+    fn leading_slots(&mut self, m: &model.Module, p: &Plan, c: Ctx) {
+        let b0 = m.fn_blk_lo.as_slice()[c.g as usize] as usize;
+        let il = m.blk_ins_lo.as_slice()[b0] as usize;
+        for i in il..il + p.nslot.as_slice()[c.g as usize] as usize {
+            self.ins(m, c, i);
+        }
+    }
+
+    // X2-X6: the blocks of the fn and of its copies in stored order. A frame is a copy and its
+    // place in its input body (block, next instruction). An accepted row opens a frame that goes
+    // on writing into the open block (X3); when the copy ends, its continuation opens (X5).
+    fn walk(&mut self, m: &model.Module, p: &Plan, top: Ctx) {
+        let mut fr = vec.Vec::<Ctx>.new();
+        let mut fb = vec.Vec::<u32>.new();
+        let mut fk = vec.Vec::<u32>.new();
+        fr.push(top);
+        fb.push(0);
+        fk.push(0);
+        loop {
+            let t = fr.len() - 1;
+            let c = fr.as_slice()[t];
+            let b = fb.as_slice()[t] as usize;
+            let k = fk.as_slice()[t];
+            let blk = m.fn_blk_lo.as_slice()[c.g as usize] as usize + b;
+            if k < m.blk_ins_n.as_slice()[blk] {
+                fk.as_mut_slice()[t] = k + 1;
+                if b == 0 && k < p.nslot.as_slice()[c.g as usize] { continue; }
+                let i = m.blk_ins_lo.as_slice()[blk] as usize + k as usize;
+                let r = p.arow.as_slice()[i];
+                if r == NONE {
+                    self.ins(m, c, i);
+                    continue;
+                }
+                let cc = self.child(m, p, c, r as usize, i);
+                self.pool(m, cc);
+                fr.push(cc);
+                fb.push(0);
+                fk.push(0);
+                continue;
+            }
+            self.term(m, p, c, blk);
+            if b + 1 < m.fn_blk_n.as_slice()[c.g as usize] as usize {
+                fb.as_mut_slice()[t] = (b + 1) as% u32;
+                fk.as_mut_slice()[t] = 0;
+                let x = c.bb + p.bpos.as_slice()[blk + 1] - 1;
+                self.open(m, c, x, m.blk_val_lo.as_slice()[blk + 1], m.blk_param_n.as_slice()[blk + 1]);
+                continue;
+            }
+            fr.truncate(t);
+            fb.truncate(t);
+            fk.truncate(t);
+            self.ak.truncate(c.args_lo as usize);
+            self.ai.truncate(c.args_lo as usize);
+            if t == 0 { break; }
+            // the continuation; its param is the call's result in the caller
+            let pc = fr.as_slice()[t - 1];
+            if c.kres == NONE {
+                self.open(m, pc, c.k, 0, 0);
+            } else {
+                let pb = m.fn_blk_lo.as_slice()[pc.g as usize] as usize + fb.as_slice()[t - 1] as usize;
+                let i = m.blk_ins_lo.as_slice()[pb] as usize + fk.as_slice()[t - 1] as usize - 1;
+                self.open(m, pc, c.k, m.ins_res.as_slice()[i], 1);
+            }
+        }
+    }
+}
+
+// X on m under the decision d on its facts fx: every body becomes its expanded body `F(f)`, and
+// the module is at level `opt`. The result is not canonical: `canon` numbers it (P1).
+pub fn run(m: &mut model.Module, fx: &facts.Facts, d: &decide.Decision) {
+    let p = plan(&*m, fx, d);
+    let mut w = writer(&p);
+    for f in 0..m.fns() {
+        if m.has_body(f) { w.body(&*m, &p, f); }
+    }
+    canon.take_bodies(m, &mut w.o);
+    m.level = model.LEVEL_OPT;
+}

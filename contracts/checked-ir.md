@@ -315,7 +315,11 @@ step stops before the next.
    a body to be a prefix of `b0` (every level), a `switch` scrutinee to be a value except at
    level `opt`, where it may also be an int constant (its case values are then checked only for
    duplicates; the release passes write one only between inlining and the branch folding that
-   removes it, opt-passes.md P4), and a `known` fn to have its item's signature; against the
+   removes it, opt-passes.md P4), the array index of a `get` or `set` to be an unsigned int
+   value or an int constant below the array's length, except at level `opt`, where it may also
+   be an int constant in `0 ..= 2^64 - 1` at or past the length (the access then traps `Bounds`
+   where it stands, as a value out of range does; opt-passes.md P4), and a `known` fn to have
+   its item's signature; against the
    header, every intrinsic must be built for the target's arch (intrinsics.md, the rule E0704
    applies to a declaration). The verifier checks the mutability of pointers ("Mutability").
 4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds
@@ -395,7 +399,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `select` | `c a b` | `c ? a : b`: `c` is `bool`, `a` and `b` have the result type (any type, aggregates included). Both operands are already computed; a backend emits no branch on `c` and no memory access whose address depends on `c` (a conditional move per scalar or per 8-byte word). A mask `c` with vector operands of its shape is the lane-wise form, verified when vector lowering lands |
 | `cast cast.wrap cast.sat cast.round cast.try` | `x` | `as as% as\| as~ as?` (allowed pairs: below); `cast.try` yields the `Option` instance |
 | `make` | elems.. | tuple, struct, or array value (SSA aggregate) |
-| `get` † / `set` † | `agg idx` / `agg idx v` | field (constant index) or array element; `set` yields the updated aggregate; a dynamic array index traps `Bounds` |
+| `get` † / `set` † | `agg idx` / `agg idx v` | field (constant index) or array element; `set` yields the updated aggregate; an array index that is no constant below the length is checked: out of range it traps `Bounds` |
 | `enum.make` / `enum.tag` / `enum.get` | `v fields..` / `e` / `e v f` | enum value of variant `v` (constant) with its fields; its variant index (result `u32`; the verifier accepts any int type holding the variant count); field `f` of variant `v` |
 | `slot` | — | `%k = slot t<ref mut T>`: a stack slot for a local of type T that lives in memory (SSA rule), result `&mut T` |
 | `load` / `store` | `p` / `p v` | memory read / write (`store` has no result); a `bool` byte read from memory is `1` iff nonzero |

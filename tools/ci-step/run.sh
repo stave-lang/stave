@@ -40,6 +40,10 @@ case "$step" in
   stage1-gate) sh tools/ci-step/stage1-gate.sh ;;
   # stage1's IR library against stage0's IR text: round trip of every dumped text, mutant verdicts.
   stage1-ir-gate) sh tools/ci-step/stage1-ir-gate.sh ;;
+  # stage1 optimizing itself: `ir emit --release`, `stage1 ir opt`, `ir build` make `stage1-fast`; its
+  # output is the normal stage1's, and the conformance run programs built through the optimizer behave
+  # as the plain release builds. Prints counts and times; not part of `check`.
+  stage1-opt-gate) sh tools/ci-step/stage1-opt-gate.sh ;;
   # The unit tests of the stage1 library packages and of stage1 itself.
   stage1-test) cargo run -q --locked -p stave-cli -- test stage1/prims/seq && cargo run -q --locked -p stave-cli -- test stage1/ir && cargo run -q --locked -p stave-cli -- test stage1/opt && cargo run -q --locked -p stave-cli -- test stage1 ;;
   lang-budget)
@@ -70,5 +74,5 @@ case "$step" in
              --work target/agent-eval/work "$@" ;;
   bench)   sh bench/run.sh "$@" ;;
   cargo)   cargo "$@" ;;
-  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|stage1-gate|stage1-ir-gate|stage1-test|gen|gen-check|lang-budget|dup-gate|check|check-test|check-gates|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
+  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|stage1-gate|stage1-ir-gate|stage1-opt-gate|stage1-test|gen|gen-check|lang-budget|dup-gate|check|check-test|check-gates|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
 esac

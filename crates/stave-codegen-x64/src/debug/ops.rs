@@ -8,6 +8,7 @@
 //! is unchanged by normalization.
 
 use stave_ir::arith::IntTy;
+use stave_ir::ir::const_elem;
 use stave_ir::layout::Shape;
 use stave_ir::{FloatBits, Op, Operand, PanicKind, TypeId, TypeKey, Value};
 
@@ -30,10 +31,11 @@ fn int_max(t: IntTy) -> i64 {
 }
 
 /// Never traps and has no effect besides its result (skipped when the result is unused).
-fn pure(op: Op, float: bool, const_idx: bool) -> bool {
+/// `fixed`: a `get`/`set` that cannot trap (stave-ir `Body::access_may_trap`).
+fn pure(op: Op, float: bool, fixed: bool) -> bool {
     match op {
         Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem | Op::Neg => float,
-        Op::Get | Op::Set => const_idx,
+        Op::Get | Op::Set => fixed,
         Op::AddWrap
         | Op::SubWrap
         | Op::MulWrap
@@ -96,8 +98,8 @@ impl Cg<'_, '_> {
             && !self.an.used.get(v.index()).copied().unwrap_or(true)
         {
             let float = ty.and_then(|t| self.sk(t)).is_some_and(|k| matches!(k, Sk::Float(_)));
-            let const_idx = args.get(1).is_some_and(|o| self.int_const(*o).is_some());
-            if pure(op, float, const_idx) {
+            let fixed = matches!(op, Op::Get | Op::Set) && !b.access_may_trap(&self.cx.m.types, i);
+            if pure(op, float, fixed) {
                 return Ok(());
             }
         }
@@ -1330,10 +1332,8 @@ impl Cg<'_, '_> {
         let l = self.layout(et)?;
         match &l.shape {
             Shape::Array { elem, stride, len } => {
-                if let Some(k) = self.int_const(idx) {
-                    if k < 0 || k as u128 >= u128::from(*len) {
-                        return Err(bad("get: constant index out of range"));
-                    }
+                // any other index, a constant past the length too, is checked here
+                if let Some(k) = const_elem(self.int_const(idx), *len) {
                     let off = i64::try_from(*stride)
                         .ok()
                         .and_then(|s| s.checked_mul(i64::try_from(k).ok()?))
@@ -1362,10 +1362,7 @@ impl Cg<'_, '_> {
         let (dst, ft) = match &l.shape {
             Shape::Array { elem, stride, len } => {
                 let (stride, len, elem) = (*stride, *len, *elem);
-                if let Some(k) = self.int_const(idx) {
-                    if k < 0 || k as u128 >= u128::from(len) {
-                        return Err(bad("set: constant index out of range"));
-                    }
+                if let Some(k) = const_elem(self.int_const(idx), len) {
                     let d = self.def_mem(v)?;
                     self.copy_mem(d, src, size)?;
                     (disp(d, k as i64 * stride as i64)?, elem)

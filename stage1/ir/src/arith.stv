@@ -222,8 +222,15 @@ pub fn int_count(op: u16, t: IntTy, a: u64) -> Result<u64, u8> {
 pub fn int_cmp(op: u16, t: IntTy, a: u64, b: u64) -> Result<u64, u8> {
     let na = t.norm(a);
     let nb = t.norm(b);
-    let lt = if t.signed then (na as% i64) < (nb as% i64) else na < nb;
-    let eq = na == nb;
+    return compared(op, if t.signed then (na as% i64) < (nb as% i64) else na < nb, na == nb);
+}
+
+// A compare of two mathematical values, whatever their types: the compare of two int constants.
+pub fn wide_cmp(op: u16, a: I128, b: I128) -> Result<u64, u8> {
+    return compared(op, less(a, b), same(a, b));
+}
+
+fn compared(op: u16, lt: bool, eq: bool) -> Result<u64, u8> {
     let mut r = false;
     if op == ops.IR_T_KW_EQ {
         r = eq;

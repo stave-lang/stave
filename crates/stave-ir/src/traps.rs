@@ -94,10 +94,6 @@ pub fn trap_of(m: &Module, b: &Body, i: u32) -> Option<PanicKind> {
         _ => None,
     };
     let result_ty = b.insts.ty.get(i as usize).copied().flatten();
-    let value_ty = |o: Option<&Operand>| match o {
-        Some(Operand::Value(v)) => b.values.get(v.index()).map(|d| d.ty),
-        _ => None,
-    };
     match op {
         Op::Panic(PanicKind::StackOverflow) => None,
         Op::Panic(k) => Some(k),
@@ -117,16 +113,7 @@ pub fn trap_of(m: &Module, b: &Body, i: u32) -> Option<PanicKind> {
                 _ => Some(PanicKind::Overflow),
             }
         }
-        Op::Get | Op::Set => {
-            let len = match value_ty(args.first()).and_then(|t| m.types.key(t)) {
-                Some(TypeKey::Array { len, .. }) => *len,
-                _ => return None,
-            };
-            match konst(args.get(1)) {
-                Some(c) if (0..i128::from(len)).contains(&c) => None,
-                _ => Some(PanicKind::Bounds),
-            }
-        }
+        Op::Get | Op::Set => b.access_may_trap(&m.types, i).then_some(PanicKind::Bounds),
         Op::Vec(v) => v.trap_kinds().iter().copied().find(|&k| k != PanicKind::StackOverflow),
         Op::Call => match args.first() {
             Some(Operand::Func(f)) => {

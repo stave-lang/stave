@@ -1,0 +1,99 @@
+// Tests of `ir_cmd.optimize`, the round loop of `stage1 ir opt`: the phase modules it checks
+// (contracts/opt-passes.md P4: the printed one always, with --verify-phases every phase of every
+// round), seen through a fault put into one phase module by the `after` hook.
+import ir_cmd;
+import text;
+import ir.load;
+import ir.model;
+import opt.decide;
+import std.debug;
+import std.mem;
+import std.string;
+import std.vec;
+
+// `at(a, 4)` on a `[u32; 4]`: after X the index of the `get` is the constant 4, past the length.
+fn input() -> vec.Vec<u8> {
+    let mut o = vec.Vec::<u8>.new();
+    let lines = [
+        "stave.ir 4 \"x86_64-linux-v2\" release checked",
+        "type t0 int u 32",
+        "type t1 int u size",
+        "type t2 int s 32",
+        "type t3 array t0 4",
+        "site 0 \"src/main.stv\" 1 4 main.at",
+        "site 1 \"src/main.stv\" 1 47 main.at",
+        "site 2 \"src/main.stv\" 3 4 main.main",
+        "site 3 \"src/main.stv\" 5 12 main.main",
+        "main @1",
+        "fn @0 main.at(t3, t1) -> t0 site 0 {",
+        "b0(%0: t3, %1: t1):",
+        "  %2 = get t0 %0 %1 !1",
+        "  ret %2",
+        "}",
+        "fn @1 main.main() -> t2 site 2 {",
+        "b0():",
+        "  %0 = make t3 1 2 3 4",
+        "  %1 = call t0 @0 %0 4 !3",
+        "  %2 = cast.wrap t2 %1",
+        "  ret %2",
+        "}",
+    ];
+    for i in 0..lines.len() {
+        o.extend_from_slice(mem.str_bytes(lines[i]));
+        o.push(10);
+    }
+    return o;
+}
+
+// `optimize` on input() under `rounds` rounds, printing `show`, with --verify-phases iff `verify`,
+// the return type of `main` changed after phase `ph` of round `r` (none when r is 99): its exit,
+// output, and faults.
+fn run(rounds: u64, show: u8, verify: bool, r: u64, ph: u8) -> (i32, vec.Vec<u8>, vec.Vec<u8>) {
+    let src = input();
+    let mut ld = load.load(src.as_slice());
+    debug.assert(ld.ok(), "the input loads");
+    let mut lim = decide.Limits.table();
+    debug.assert(lim.set(mem.str_bytes("rounds"), rounds), "rounds is a limit");
+    let mut out = vec.Vec::<u8>.new();
+    let mut err = vec.Vec::<u8>.new();
+    let file = text.string_of(mem.str_bytes("t.ir"));
+    let corrupt = fn(m: &mut model.Module, at: u64, after: u8) {
+        if at != r || after != ph { return; }
+        let f = m.main as usize;
+        let t = m.fn_ret.as_slice()[f];
+        m.fn_ret.as_mut_slice()[f] = if t == 0 then 1u32 else 0u32;
+    };
+    let code = ir_cmd.optimize(&file, &mut ld.m, &lim, lim.rounds, show, verify, corrupt, &mut out, &mut err);
+    return (code, out, err);
+}
+
+fn says(err: &[u8], want: &str) -> bool {
+    return text.starts_with(err, mem.str_bytes(want));
+}
+
+test fn a_constant_index_past_the_length_passes_every_phase() {
+    let shows = [ir_cmd.SHOW_INLINE, ir_cmd.SHOW_CLEAN, ir_cmd.SHOW_OUTPUT];
+    for k in 0..shows.len() {
+        for rounds in 1..3u64 {
+            let (code, out, err) = run(rounds, shows[k], true, 99, 0);
+            debug.assert(code == 0 && err.len() == 0 && out.len() > 0, "verified at every phase");
+        }
+    }
+}
+
+test fn verify_phases_checks_every_phase_of_every_round() {
+    let (code, out, err) = run(2, ir_cmd.SHOW_CLEAN, true, 1, ir_cmd.SHOW_CLEAN);
+    debug.assert(code == 3 && out.len() == 0, "a fault after C* of round 1 of 2 stops the rounds");
+    debug.assert(says(err.as_slice(), "t.ir: internal error: clean: @1: "), "named as phase clean of the fn");
+    let (code, _, err) = run(2, ir_cmd.SHOW_CLEAN, true, 1, ir_cmd.SHOW_INLINE);
+    debug.assert(code == 3 && says(err.as_slice(), "t.ir: internal error: inline: @1: "), "after X of round 1");
+    let (code, _, err) = run(2, ir_cmd.SHOW_OUTPUT, true, 2, ir_cmd.SHOW_INLINE);
+    debug.assert(code == 3 && says(err.as_slice(), "t.ir: internal error: inline: @1: "), "after X of round 2");
+}
+
+test fn the_printed_module_is_checked_without_verify_phases() {
+    let (code, out, err) = run(2, ir_cmd.SHOW_INLINE, false, 2, ir_cmd.SHOW_INLINE);
+    debug.assert(code == 3 && out.len() == 0 && says(err.as_slice(), "t.ir: internal error: inline: "), "the module after X printed");
+    let (code, _, err) = run(1, ir_cmd.SHOW_OUTPUT, false, 0, ir_cmd.SHOW_OUTPUT);
+    debug.assert(code == 3 && says(err.as_slice(), "t.ir: internal error: base: "), "the output");
+}

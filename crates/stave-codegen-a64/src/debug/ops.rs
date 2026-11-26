@@ -1,6 +1,7 @@
 //! Instruction selection for every op of the stave-ir op table (crates/stave-ir/src/ir.rs).
 
 use stave_ir::arith::{self, CastTy, IntTy};
+use stave_ir::ir::const_elem;
 use stave_ir::layout::{Layout, Shape};
 use stave_ir::types::FloatBits;
 use stave_ir::{CastKind, Const, Op, Operand, PanicKind, Site, TypeId, TypeKey, Value};
@@ -1395,16 +1396,17 @@ impl<'a, 'm> Gen<'a, 'm> {
         let size = l.size as u32;
         let ha = self.home(av);
         let hv = self.home(v);
-        let (off, ft, dynamic) = match (&l.shape, self.b.int_const(idx)) {
+        let k = self.b.int_const(idx);
+        let (off, ft, dynamic) = match (&l.shape, k) {
             (Shape::Fields(fs), Some(k)) => {
                 let f = usize::try_from(k).ok().and_then(|k| fs.get(k)).ok_or_else(|| bad("field"))?;
                 (f.0 as i64, f.1, None)
             }
-            (Shape::Array { elem, stride, len }, Some(k)) => {
-                let k = u64::try_from(k).ok().filter(|k| k < len).ok_or_else(|| bad("constant index"))?;
-                ((k * stride) as i64, *elem, None)
-            }
-            (Shape::Array { elem, stride, len }, None) => (0, *elem, Some((*stride, *len))),
+            // any other index, a constant past the length too, is checked when it runs
+            (Shape::Array { elem, stride, len }, _) => match const_elem(k, *len) {
+                Some(k) => ((k * stride) as i64, *elem, None),
+                None => (0, *elem, Some((*stride, *len))),
+            },
             _ => return Err(bad("get/set index")),
         };
         let ft = self.cg.ty(ft);

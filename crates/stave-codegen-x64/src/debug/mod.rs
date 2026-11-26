@@ -191,7 +191,8 @@ pub struct Options {
     /// Run the IR verifier first, by the rules of this level (codegen assumes verified IR;
     /// unverified input still never panics but may give a less precise error). `None`: the
     /// caller verified the module. The module does not carry its level, so a caller that passes
-    /// an `opt` module names `Level::Opt` (a `switch` on a constant is legal only there).
+    /// an `opt` module names `Level::Opt` (a `switch` on a constant and an array index constant
+    /// past the length are legal only there).
     pub verify: Option<Level>,
     /// Worker threads for per-function codegen (0 = available parallelism).
     pub threads: usize,

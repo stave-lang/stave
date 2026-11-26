@@ -1,0 +1,280 @@
+// Batched edits of one body for the base passes: delete instructions, insert new ones, and
+// replace values; `apply` then writes the body's instructions once.
+//
+// Instructions are numbered locally in print order (block by block); `row` and `blk` give each
+// one's model row and block. A new instruction goes at a block's start, directly before, or
+// directly after an instruction of that numbering, also one deleted by the same edit (its old
+// position). New instructions at one place keep the order they were inserted in.
+//
+// `apply` writes the body's instructions as new rows at the end of the model's instruction
+// columns and points its blocks at them; the old rows are then read by nothing, and `canon`
+// drops them. Values keep their local ids; a new value gets the next id after the fn's values
+// (the value segment moves to the end of the column when it grows). Operands are rewritten in
+// place: a deleted value reads its replacement, followed to the end of a chain of replacements.
+import ir.model;
+import prims.col;
+import std.idx;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+pub struct Edit {
+    pub f: usize,
+    pub blo: usize,
+    pub nb: usize,
+    pub nv: u32,
+    // per local instruction: its model row and block; block b's instructions are
+    // `first[b]..first[b + 1]`
+    pub row: vec.Vec<u32>,
+    pub blk: vec.Vec<u32>,
+    pub first: vec.Vec<u32>,
+    rm: vec.Vec<bool>,
+    rep: vec.Vec<u32>,
+    // new instructions: place (a block b at its start is b; before local instruction k is
+    // nb + 2k, after it nb + 2k + 1), and the model columns of the row
+    n_at: vec.Vec<u32>,
+    n_op: vec.Vec<u16>,
+    n_intr: vec.Vec<u32>,
+    n_ty: vec.Vec<u32>,
+    n_res: vec.Vec<u32>,
+    n_olo: vec.Vec<u32>,
+    n_on: vec.Vec<u32>,
+    n_site: vec.Vec<u32>,
+    // types of the new values
+    new_ty: vec.Vec<u32>,
+    changed: bool,
+}
+
+impl Edit {
+    pub fn new(m: &model.Module, f: usize) -> Edit {
+        let blo = m.fn_blk_lo.as_slice()[f] as usize;
+        let nb = m.fn_blk_n.as_slice()[f] as usize;
+        let nv = m.fn_val_n.as_slice()[f];
+        let mut e = Edit.{
+            f: f,
+            blo: blo,
+            nb: nb,
+            nv: nv,
+            row: vec.Vec::<u32>.new(),
+            blk: vec.Vec::<u32>.new(),
+            first: vec.Vec::<u32>.with_capacity(nb + 1),
+            rm: vec.Vec::<bool>.new(),
+            rep: vec.Vec::<u32>.new(),
+            n_at: vec.Vec::<u32>.new(),
+            n_op: vec.Vec::<u16>.new(),
+            n_intr: vec.Vec::<u32>.new(),
+            n_ty: vec.Vec::<u32>.new(),
+            n_res: vec.Vec::<u32>.new(),
+            n_olo: vec.Vec::<u32>.new(),
+            n_on: vec.Vec::<u32>.new(),
+            n_site: vec.Vec::<u32>.new(),
+            new_ty: vec.Vec::<u32>.new(),
+            changed: false,
+        };
+        for b in 0..nb {
+            e.first.push(col.ids(e.row.len()));
+            let il = m.blk_ins_lo.as_slice()[blo + b];
+            for i in il..il + m.blk_ins_n.as_slice()[blo + b] {
+                e.row.push(i);
+                e.blk.push(b as% u32);
+            }
+        }
+        e.first.push(col.ids(e.row.len()));
+        e.rm = col.filled(e.row.len(), false);
+        e.rep = col.filled(nv as usize, NONE);
+        return e;
+    }
+
+    pub fn len(&self) -> usize {
+        return self.row.len();
+    }
+
+    pub fn changed(&self) -> bool {
+        return self.changed;
+    }
+
+    // A fresh value of type ty, for an inserted instruction to define.
+    pub fn value(&mut self, ty: u32) -> u32 {
+        self.new_ty.push(ty);
+        return self.nv + col.ids(self.new_ty.len()) - 1;
+    }
+
+    pub fn remove(&mut self, k: usize) {
+        self.rm.as_mut_slice()[k] = true;
+        self.changed = true;
+    }
+
+    pub fn removed(&self, k: usize) -> bool {
+        return self.rm.as_slice()[k];
+    }
+
+    // Every use of value v reads value by instead.
+    pub fn replace(&mut self, v: u32, by: u32) {
+        if v >= self.nv { return; }
+        self.rep.as_mut_slice()[v as usize] = by;
+        self.changed = true;
+    }
+
+    // The place at the start of block b, before local instruction k, after it.
+    pub fn at_start(&self, b: usize) -> u32 {
+        return b as% u32;
+    }
+
+    pub fn before(&self, k: usize) -> u32 {
+        return (self.nb + 2 * k) as% u32;
+    }
+
+    pub fn after(&self, k: usize) -> u32 {
+        return (self.nb + 2 * k + 1) as% u32;
+    }
+
+    // Inserts the instruction (op, intr, ty, operand rows olo..olo + on, site) defining res
+    // (NONE: no result) at place at.
+    pub fn insert(&mut self, at: u32, op: u16, intr: u32, ty: u32, olo: u32, on: u32, site: u32, res: u32) {
+        self.n_at.push(at);
+        self.n_op.push(op);
+        self.n_intr.push(intr);
+        self.n_ty.push(ty);
+        self.n_res.push(res);
+        self.n_olo.push(olo);
+        self.n_on.push(on);
+        self.n_site.push(site);
+        self.changed = true;
+    }
+
+    // Value v after its replacements; the bound only keeps a malformed edit from looping.
+    fn subst(&self, v: u32) -> u32 {
+        let mut x = v;
+        let mut steps: u32 = 0;
+        while steps < 16 && x < self.nv {
+            let y = self.rep.as_slice()[x as usize];
+            if y == NONE { break; }
+            x = y;
+            steps = steps + 1;
+        }
+        return x;
+    }
+
+    fn rewrite(&self, m: &mut model.Module, lo: u32, n: u32) {
+        for x in lo as usize..(lo + n) as usize {
+            if m.opnd_kind.as_slice()[x] != model.O_VALUE { continue; }
+            let v = m.opnd_id.as_slice()[x];
+            let w = self.subst(v);
+            if w != v { m.opnd_id.as_mut_slice()[x] = w; }
+        }
+    }
+
+    fn operands(&self, m: &mut model.Module) {
+        for k in 0..self.row.len() {
+            let r = self.row.as_slice()[k] as usize;
+            let lo = m.ins_opnd_lo.as_slice()[r];
+            let n = m.ins_opnd_n.as_slice()[r];
+            self.rewrite(m, lo, n);
+        }
+        for j in 0..self.n_at.len() {
+            self.rewrite(m, self.n_olo.as_slice()[j], self.n_on.as_slice()[j]);
+        }
+        for b in self.blo..self.blo + self.nb {
+            let top = m.blk_topnd.as_slice()[b];
+            if top != NONE { self.rewrite(m, top, 1); }
+            let tl = m.blk_tgt_lo.as_slice()[b] as usize;
+            for t in tl..tl + m.blk_tgt_n.as_slice()[b] as usize {
+                let lo = m.tgt_opnd_lo.as_slice()[t];
+                let n = m.tgt_opnd_n.as_slice()[t];
+                self.rewrite(m, lo, n);
+            }
+        }
+    }
+
+    fn values(&self, m: &mut model.Module) {
+        if self.new_ty.len() == 0 { return; }
+        let f = self.f;
+        let vlo = m.fn_val_lo.as_slice()[f] as usize;
+        let lo = col.ids(m.val_ty.len());
+        for v in vlo..vlo + self.nv as usize {
+            let t = m.val_ty.as_slice()[v];
+            m.val_ty.push(t);
+        }
+        m.val_ty.extend_from_slice(self.new_ty.as_slice());
+        m.fn_val_lo.as_mut_slice()[f] = lo;
+        m.fn_val_n.as_mut_slice()[f] = self.nv + col.ids(self.new_ty.len());
+    }
+
+    fn put_old(&self, m: &mut model.Module, k: usize) {
+        let r = self.row.as_slice()[k] as usize;
+        let op = m.ins_op.as_slice()[r];
+        let intr = m.ins_intr.as_slice()[r];
+        let ty = m.ins_ty.as_slice()[r];
+        let res = m.ins_res.as_slice()[r];
+        let olo = m.ins_opnd_lo.as_slice()[r];
+        let on = m.ins_opnd_n.as_slice()[r];
+        let site = m.ins_site.as_slice()[r];
+        put_row(m, op, intr, ty, res, olo, on, site);
+    }
+
+    fn put_new(&self, m: &mut model.Module, j: usize) {
+        put_row(m, self.n_op.as_slice()[j], self.n_intr.as_slice()[j], self.n_ty.as_slice()[j], self.n_res.as_slice()[j], self.n_olo.as_slice()[j], self.n_on.as_slice()[j], self.n_site.as_slice()[j]);
+    }
+
+    // Writes the new instructions of place p, in insertion order.
+    fn put_at(&self, m: &mut model.Module, head: &[u32], next: &[u32], p: usize) {
+        let mut j = head[p];
+        while j != NONE {
+            self.put_new(m, j as usize);
+            j = next[j as usize];
+        }
+    }
+
+    pub fn apply(&self, m: &mut model.Module) {
+        if !self.changed { return; }
+        self.values(m);
+        self.operands(m);
+        // per place, its new instructions as a list in insertion order
+        let places = self.nb + 2 * self.row.len();
+        let mut head = col.filled(places, NONE);
+        let mut last = col.filled(places, NONE);
+        let mut next = col.filled(self.n_at.len(), NONE);
+        for j in 0..self.n_at.len() {
+            let p = self.n_at.as_slice()[j] as usize;
+            let t = last.as_slice()[p];
+            if t == NONE {
+                head.as_mut_slice()[p] = j as% u32;
+            } else {
+                next.as_mut_slice()[t as usize] = j as% u32;
+            }
+            last.as_mut_slice()[p] = j as% u32;
+        }
+        let hs = head.as_slice();
+        let ns = next.as_slice();
+        for b in 0..self.nb {
+            let lo = col.ids(m.ins_op.len());
+            self.put_at(m, hs, ns, b);
+            for k in self.first.as_slice()[b] as usize..self.first.as_slice()[b + 1] as usize {
+                self.put_at(m, hs, ns, self.nb + 2 * k);
+                if !self.rm.as_slice()[k] { self.put_old(m, k); }
+                self.put_at(m, hs, ns, self.nb + 2 * k + 1);
+            }
+            let n = col.ids(m.ins_op.len()) - lo;
+            m.blk_ins_lo.as_mut_slice()[self.blo + b] = lo;
+            m.blk_ins_n.as_mut_slice()[self.blo + b] = n;
+        }
+    }
+}
+
+fn put_row(m: &mut model.Module, op: u16, intr: u32, ty: u32, res: u32, olo: u32, on: u32, site: u32) {
+    m.ins_op.push(op);
+    m.ins_intr.push(intr);
+    m.ins_ty.push(ty);
+    m.ins_res.push(res);
+    m.ins_opnd_lo.push(olo);
+    m.ins_opnd_n.push(on);
+    m.ins_site.push(site);
+}
+
+// Appends operand rows: one value operand v.
+pub fn value_operand(m: &mut model.Module, v: u32) -> u32 {
+    let at = col.ids(m.opnd_kind.len());
+    m.opnd_kind.push(model.O_VALUE);
+    m.opnd_id.push(v);
+    return at;
+}

@@ -23,7 +23,8 @@
 #   weight     the instruction weight
 #   removable  when clean-up and dead-code removal may delete an unused result:
 #              `yes`, `no`, `float` (the result type is a float type), `const-index` (operand 1
-#              is a constant), `lanes` (the vector or mask op neither traps nor accesses memory)
+#              is a constant field index or an array index constant below the length), `lanes`
+#              (the vector or mask op neither traps nor accesses memory)
 #   fold       `int`: folded when every operand is an int constant (a trapping op only when it
 #              does not trap); `cond`: folded when the condition (operand 0) is a constant;
 #              `no`: never folded

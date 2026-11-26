@@ -1,0 +1,872 @@
+// The clean-up `C*` of the release passes (contracts/opt-passes.md section 5): per body, rounds of
+// C1, C2, C3, C4, C5, C6, each to its normal form or fixpoint, until a round changes nothing.
+//
+// A body is taken out of the module into a `Body` (ids local to the fn: blocks in stored order,
+// values and constant rows as the model numbers them), cleaned, and written back as new segments
+// of the module's columns when a round changed it. The rows it held before are then referenced by
+// nothing; `canon`, which runs after `C*` (P1), rebuilds the columns without them.
+//
+// - C1 and C2 replace a value by an operand through one replacement per value, followed to its
+//   end when operands are rewritten, so a substitution of all blocks at once is one rewrite.
+// - K2's `removable` and `fold` are looked up once per op of the grammar and per intrinsic name of
+//   the module; an op without a row neither folds nor goes.
+// - Fold values are `ir.arith`'s; an outcome it refuses (a trap, an op or a type it does not fold)
+//   keeps the instruction.
+import facts;
+import ir.arith;
+import ir.generated.ir_text_terminals as term;
+import ir.generated.opt_table;
+import ir.grammar;
+import ir.model;
+import ir.vtypes;
+import prims.col;
+import prims.scan;
+import std.debug;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+const ONES: u64 = 0xffff_ffff_ffff_ffff;
+
+// `rk` of a value without a replacement.
+const NO_REP: u8 = 255;
+
+// K2 per op: its `removable` class (a `lanes` row resolved to yes or no) and its `fold` class, by
+// terminal id and by row of the module's intrinsic table.
+struct Classes {
+    rm: vec.Vec<u8>,
+    fold: vec.Vec<u8>,
+    intr_rm: vec.Vec<u8>,
+    intr_fold: vec.Vec<u8>,
+}
+
+fn row_fold(r: u32) -> u8 {
+    if r == NONE { return opt_table.FOLD_NO; }
+    let fd = opt_table.OPT_OP_FOLD;
+    return fd[r as usize];
+}
+
+fn classes(m: &model.Module) -> Classes {
+    let g = grammar.Grammar.new();
+    let mut c = Classes.{ rm: vec.Vec::<u8>.new(), fold: vec.Vec::<u8>.new(), intr_rm: vec.Vec::<u8>.new(), intr_fold: vec.Vec::<u8>.new() };
+    for t in 0..g.nterm() {
+        let r = facts.op_row(g.spell(t as% u32));
+        c.rm.push(facts.removable_class(r, t as% u16));
+        c.fold.push(row_fold(r));
+    }
+    let mut name = vec.Vec::<u8>.new();
+    for i in 0..m.intr.rows() {
+        name.clear();
+        name.extend_from_slice(mem.str_bytes("intrinsic."));
+        name.extend_from_slice(m.intr.row(i));
+        let r = facts.op_row(name.as_slice());
+        c.intr_rm.push(facts.removable_class(r, term.IR_T_INTR));
+        c.intr_fold.push(row_fold(r));
+    }
+    return c;
+}
+
+impl Classes {
+    // The class of op `op` (`intr` its intrinsic row) in `ops` or, for an intrinsic, `intrs`; an
+    // id outside them has the class 0 (`no` in both columns).
+    fn of(op: u16, intr: u32, ops: &[u8], intrs: &[u8]) -> u8 {
+        if op == term.IR_T_INTR { return if (intr as usize) < intrs.len() then intrs[intr as usize] else 0u8; }
+        return if (op as usize) < ops.len() then ops[op as usize] else 0u8;
+    }
+
+    fn removable_of(&self, op: u16, intr: u32) -> u8 {
+        return Classes.of(op, intr, self.rm.as_slice(), self.intr_rm.as_slice());
+    }
+
+    fn fold_of(&self, op: u16, intr: u32) -> u8 {
+        return Classes.of(op, intr, self.fold.as_slice(), self.intr_fold.as_slice());
+    }
+}
+
+// One body under clean-up.
+struct Body {
+    // operand rows: kind and id (a value of the fn, a row of `ck`/`cb`, or the model's id)
+    ok: vec.Vec<u8>,
+    oi: vec.Vec<u32>,
+    // the constant pool: the fn's, then the fold results (an int's bits are its wide-int row)
+    ck: vec.Vec<u8>,
+    cb: vec.Vec<u64>,
+    // instructions: as the model, their operands rows `i_lo .. i_lo + i_n`; `i_live` false once
+    // deleted
+    i_op: vec.Vec<u16>,
+    i_intr: vec.Vec<u32>,
+    i_ty: vec.Vec<u32>,
+    i_res: vec.Vec<u32>,
+    i_lo: vec.Vec<u32>,
+    i_n: vec.Vec<u32>,
+    i_site: vec.Vec<u32>,
+    i_live: vec.Vec<bool>,
+    // blocks: params `pv[p_lo ..]`, instructions `il[l_lo ..]`, terminator kind, its tested or
+    // returned operand row (NONE: none), targets `g_lo .. g_lo + g_n`; `live` false once deleted
+    p_lo: vec.Vec<u32>,
+    p_n: vec.Vec<u32>,
+    pv: vec.Vec<u32>,
+    l_lo: vec.Vec<u32>,
+    l_n: vec.Vec<u32>,
+    il: vec.Vec<u32>,
+    tk: vec.Vec<u8>,
+    top: vec.Vec<u32>,
+    g_lo: vec.Vec<u32>,
+    g_n: vec.Vec<u32>,
+    live: vec.Vec<bool>,
+    // targets: block, argument rows, the switch case's wide-int row (NONE: none)
+    t_blk: vec.Vec<u32>,
+    t_lo: vec.Vec<u32>,
+    t_n: vec.Vec<u32>,
+    t_case: vec.Vec<u32>,
+    // per value: the operand that replaces it (`rk` NO_REP: none)
+    rk: vec.Vec<u8>,
+    ri: vec.Vec<u32>,
+    // the row of value 0 in the model's value types (C* adds no value)
+    vlo: usize,
+}
+
+// The body of fn f.
+fn take(m: &model.Module, f: usize) -> Body {
+    let nv = m.fn_val_n.as_slice()[f] as usize;
+    let clo = m.fn_const_lo.as_slice()[f] as usize;
+    let nc = m.fn_const_n.as_slice()[f] as usize;
+    let mut b = Body.{
+        ok: vec.Vec::<u8>.new(),
+        oi: vec.Vec::<u32>.new(),
+        ck: vec.Vec::<u8>.new(),
+        cb: vec.Vec::<u64>.new(),
+        i_op: vec.Vec::<u16>.new(),
+        i_intr: vec.Vec::<u32>.new(),
+        i_ty: vec.Vec::<u32>.new(),
+        i_res: vec.Vec::<u32>.new(),
+        i_lo: vec.Vec::<u32>.new(),
+        i_n: vec.Vec::<u32>.new(),
+        i_site: vec.Vec::<u32>.new(),
+        i_live: vec.Vec::<bool>.new(),
+        p_lo: vec.Vec::<u32>.new(),
+        p_n: vec.Vec::<u32>.new(),
+        pv: vec.Vec::<u32>.new(),
+        l_lo: vec.Vec::<u32>.new(),
+        l_n: vec.Vec::<u32>.new(),
+        il: vec.Vec::<u32>.new(),
+        tk: vec.Vec::<u8>.new(),
+        top: vec.Vec::<u32>.new(),
+        g_lo: vec.Vec::<u32>.new(),
+        g_n: vec.Vec::<u32>.new(),
+        live: vec.Vec::<bool>.new(),
+        t_blk: vec.Vec::<u32>.new(),
+        t_lo: vec.Vec::<u32>.new(),
+        t_n: vec.Vec::<u32>.new(),
+        t_case: vec.Vec::<u32>.new(),
+        rk: col.filled(nv, NO_REP),
+        ri: col.filled(nv, 0u32),
+        vlo: m.fn_val_lo.as_slice()[f] as usize,
+    };
+    b.ck.extend_from_slice(&m.const_kind.as_slice()[clo..clo + nc]);
+    b.cb.extend_from_slice(&m.const_bits.as_slice()[clo..clo + nc]);
+    let blo = m.fn_blk_lo.as_slice()[f] as usize;
+    for x in blo..blo + m.fn_blk_n.as_slice()[f] as usize {
+        b.p_lo.push(col.ids(b.pv.len()));
+        let pn = m.blk_param_n.as_slice()[x];
+        let v0 = m.blk_val_lo.as_slice()[x];
+        for j in 0..pn {
+            b.pv.push(v0 + j);
+        }
+        b.p_n.push(pn);
+        b.l_lo.push(col.ids(b.il.len()));
+        let ilo = m.blk_ins_lo.as_slice()[x] as usize;
+        let inn = m.blk_ins_n.as_slice()[x];
+        for i in ilo..ilo + inn as usize {
+            b.il.push(col.ids(b.i_op.len()));
+            b.i_op.push(m.ins_op.as_slice()[i]);
+            b.i_intr.push(m.ins_intr.as_slice()[i]);
+            b.i_ty.push(m.ins_ty.as_slice()[i]);
+            b.i_res.push(m.ins_res.as_slice()[i]);
+            let on = m.ins_opnd_n.as_slice()[i];
+            let at = b.copy_rows(m, m.ins_opnd_lo.as_slice()[i], on);
+            b.i_lo.push(at);
+            b.i_n.push(on);
+            b.i_site.push(m.ins_site.as_slice()[i]);
+            b.i_live.push(true);
+        }
+        b.l_n.push(inn);
+        b.tk.push(m.blk_tkind.as_slice()[x]);
+        let t = m.blk_topnd.as_slice()[x];
+        let top = if t == NONE then NONE else b.copy_rows(m, t, 1);
+        b.top.push(top);
+        b.g_lo.push(col.ids(b.t_blk.len()));
+        let tl = m.blk_tgt_lo.as_slice()[x] as usize;
+        let tn = m.blk_tgt_n.as_slice()[x];
+        for g in tl..tl + tn as usize {
+            b.t_blk.push(m.tgt_blk.as_slice()[g]);
+            let an = m.tgt_opnd_n.as_slice()[g];
+            let at = b.copy_rows(m, m.tgt_opnd_lo.as_slice()[g], an);
+            b.t_lo.push(at);
+            b.t_n.push(an);
+            b.t_case.push(m.tgt_case.as_slice()[g]);
+        }
+        b.g_n.push(tn);
+        b.live.push(true);
+    }
+    return b;
+}
+
+// Whether instruction op `op` is one of the six compares.
+fn is_compare(op: u16) -> bool {
+    return op == term.IR_T_KW_EQ || op == term.IR_T_KW_NE || op == term.IR_T_KW_LT || op == term.IR_T_KW_LE || op == term.IR_T_KW_GT || op == term.IR_T_KW_GE;
+}
+
+fn is_shift(op: u16) -> bool {
+    return op == term.IR_T_KW_SHL || op == term.IR_T_KW_SHR || op == term.IR_T_SHL_DOT_WRAP;
+}
+
+fn fits(t: arith.IntTy, v: arith.I128) -> bool {
+    return vtypes.fits(t.signed, t.bits as u32, v.hi, v.lo);
+}
+
+// The mathematical value of an outcome of `arith` in type t: its bits are normalized to t.
+fn value_of(t: arith.IntTy, r: Result<u64, u8>) -> Option<arith.I128> {
+    return match r {
+        Result.Ok(v) => Option.Some(arith.I128.{ hi: if t.signed && (v >> 63) == 1 then ONES else 0, lo: v }),
+        Result.Err(_) => Option.None,
+    };
+}
+
+// C2 `cast cast.wrap cast.sat` of int constant a to type ty: `cast` to an int type or `char`, the
+// others to an int type. A constant has no type of its own. The verifier lets `cast` take one
+// exactly when the target type holds it (`const_converts`), so `cast` reads it in the target type;
+// `cast.wrap` and `cast.sat` read it as the verifier does, a 64-bit int signed iff it is negative.
+fn cast_value(m: &model.Module, op: u16, ty: u32, a: arith.I128) -> Option<arith.I128> {
+    let ck = vtypes.cast_kind(op);
+    let c = vtypes.classify(m, ty);
+    if !vtypes.fits_word(a.hi, a.lo) { return Option.None; }
+    if c.k == vtypes.K_INT {
+        let t = arith.IntTy.new(c.bits as% u8, c.signed);
+        let dst = arith.CastTy.int(t);
+        if ck == vtypes.C_EXACT {
+            if !vtypes.const_converts(a.hi, a.lo, c) { return Option.None; }
+            return value_of(t, arith.int_cast(op, dst, dst, a.lo));
+        }
+        if ck == vtypes.C_WRAP || ck == vtypes.C_SAT {
+            let src = arith.CastTy.int(arith.IntTy.new(64, vtypes.is_neg(a.hi)));
+            return value_of(t, arith.int_cast(op, src, dst, a.lo));
+        }
+        return Option.None;
+    }
+    if c.k == vtypes.K_CHAR && ck == vtypes.C_EXACT && vtypes.const_converts(a.hi, a.lo, c) {
+        let dst = arith.CastTy.of_class(arith.CT_CHAR);
+        return value_of(dst.ty, arith.int_cast(op, dst, dst, a.lo));
+    }
+    return Option.None;
+}
+
+// The C2 value of `fold` `int` op `op` with result type ty on the n int constants a (and b), or
+// None: undefined (the op would trap), or an op, a type, or an operand outside C2's list.
+// - Compares: on the two mathematical values (a constant of a compare has no type of its own).
+// - The others: in the result type (`bool` one bit), whose range holds every operand but a shift
+//   amount (any value: one outside 0 .. bits is the trap or the mask of `arith`).
+fn evaluate(m: &model.Module, op: u16, ty: u32, a: arith.I128, b: arith.I128, n: usize) -> Option<arith.I128> {
+    if vtypes.cast_kind(op) != 255 {
+        if n != 1 { return Option.None; }
+        return cast_value(m, op, ty, a);
+    }
+    if is_compare(op) {
+        if n != 2 || !vtypes.is_bool(m, ty) { return Option.None; }
+        return value_of(arith.IntTy.new(1, false), arith.wide_cmp(op, a, b));
+    }
+    let c = vtypes.classify(m, ty);
+    let mut t = arith.IntTy.new(1, false);
+    if c.k == vtypes.K_INT {
+        t = arith.IntTy.new(c.bits as% u8, c.signed);
+    } else if c.k != vtypes.K_BOOL {
+        return Option.None;
+    }
+    if !fits(t, a) || (n == 2 && !is_shift(op) && !fits(t, b)) { return Option.None; }
+    if n == 1 { return value_of(t, arith.fold_unary(op, t, a.lo)); }
+    if n == 2 { return value_of(t, arith.fold_binary(op, t, a.lo, b)); }
+    return Option.None;
+}
+
+impl Body {
+    // Copies the model's operand rows lo .. lo + n; returns where they start here.
+    fn copy_rows(&mut self, m: &model.Module, lo: u32, n: u32) -> u32 {
+        let at = col.ids(self.ok.len());
+        let a = lo as usize;
+        for x in a..a + n as usize {
+            self.ok.push(m.opnd_kind.as_slice()[x]);
+            self.oi.push(m.opnd_id.as_slice()[x]);
+        }
+        return at;
+    }
+
+    // Operand (k, i) through the replacements, followed to their end. No chain is a cycle; one
+    // longer than the values is cut there.
+    fn resolve(&self, k: u8, i: u32) -> (u8, u32) {
+        let mut rk = k;
+        let mut ri = i;
+        let mut steps: usize = 0;
+        while rk == model.O_VALUE && (ri as usize) < self.rk.len() && steps <= self.rk.len() {
+            let v = ri as usize;
+            if self.rk.as_slice()[v] == NO_REP { break; }
+            rk = self.rk.as_slice()[v];
+            ri = self.ri.as_slice()[v];
+            steps = steps + 1;
+        }
+        return (rk, ri);
+    }
+
+    // Rewrites operand rows lo .. lo + n through the replacements.
+    fn rewrite(&mut self, lo: usize, n: usize) {
+        for x in lo..lo + n {
+            let (k, i) = self.resolve(self.ok.as_slice()[x], self.oi.as_slice()[x]);
+            self.ok.as_mut_slice()[x] = k;
+            self.oi.as_mut_slice()[x] = i;
+        }
+    }
+
+    fn rewrite_all(&mut self) {
+        let n = self.ok.len();
+        self.rewrite(0, n);
+    }
+
+    fn replace(&mut self, v: u32, k: u8, i: u32) {
+        self.rk.as_mut_slice()[v as usize] = k;
+        self.ri.as_mut_slice()[v as usize] = i;
+    }
+
+    fn is_int_const(&self, x: usize) -> bool {
+        return self.ok.as_slice()[x] == model.O_CONST && self.ck.as_slice()[self.oi.as_slice()[x] as usize] == model.C_INT;
+    }
+
+    // Operand row x as an int constant: (is one, hi, lo).
+    fn int_const(&self, m: &model.Module, x: usize) -> (bool, u64, u64) {
+        if !self.is_int_const(x) { return (false, 0, 0); }
+        let w = self.cb.as_slice()[self.oi.as_slice()[x] as usize] as usize;
+        return (true, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
+    }
+
+    // The same operand (opt-passes.md section 0) in rows x and y.
+    fn same_operand(&self, x: usize, y: usize) -> bool {
+        let k = self.ok.as_slice()[x];
+        if k != self.ok.as_slice()[y] { return false; }
+        let a = self.oi.as_slice()[x] as usize;
+        let b = self.oi.as_slice()[y] as usize;
+        if k != model.O_CONST { return a == b; }
+        return self.ck.as_slice()[a] == self.ck.as_slice()[b] && self.cb.as_slice()[a] == self.cb.as_slice()[b];
+    }
+
+    // The target rows of the edges into each block from live blocks, with multiplicity: rows
+    // `off[x] .. off[x + 1]` of the second vector, in target order of the blocks in stored order.
+    fn edges_into(&self) -> (vec.Vec<u32>, vec.Vec<u32>) {
+        let nb = self.live.len();
+        let mut cnt = col.filled(nb, 0u32);
+        for b in 0..nb {
+            if !self.live.as_slice()[b] { continue; }
+            let lo = self.g_lo.as_slice()[b] as usize;
+            for g in lo..lo + self.g_n.as_slice()[b] as usize {
+                let x = self.t_blk.as_slice()[g] as usize;
+                let c = cnt.as_slice()[x] + 1;
+                cnt.as_mut_slice()[x] = c;
+            }
+        }
+        let off = scan.offsets(cnt.as_slice());
+        let mut at = vec.Vec::<u32>.with_capacity(nb);
+        at.extend_from_slice(&off.as_slice()[0..nb]);
+        let mut rows = col.filled(off.as_slice()[nb] as usize, 0u32);
+        for b in 0..nb {
+            if !self.live.as_slice()[b] { continue; }
+            let lo = self.g_lo.as_slice()[b] as usize;
+            for g in lo..lo + self.g_n.as_slice()[b] as usize {
+                let x = self.t_blk.as_slice()[g] as usize;
+                let a = at.as_slice()[x];
+                rows.as_mut_slice()[a as usize] = g as% u32;
+                at.as_mut_slice()[x] = a + 1;
+            }
+        }
+        return (off, rows);
+    }
+
+    // C1: every block but b0 with one edge in loses its params to that edge's arguments, all at
+    // once.
+    fn single_edge_params(&mut self) -> bool {
+        let (off, rows) = self.edges_into();
+        let mut changed = false;
+        for x in 1..self.live.len() {
+            let pn = self.p_n.as_slice()[x] as usize;
+            let e = off.as_slice()[x] as usize;
+            if !self.live.as_slice()[x] || off.as_slice()[x + 1] as usize != e + 1 || pn == 0 { continue; }
+            let g = rows.as_slice()[e] as usize;
+            debug.assert(self.t_n.as_slice()[g] as usize == pn, "an edge passes one argument per param");
+            let plo = self.p_lo.as_slice()[x] as usize;
+            let alo = self.t_lo.as_slice()[g] as usize;
+            for j in 0..pn {
+                let v = self.pv.as_slice()[plo + j];
+                let k = self.ok.as_slice()[alo + j];
+                let i = self.oi.as_slice()[alo + j];
+                self.replace(v, k, i);
+            }
+            self.p_n.as_mut_slice()[x] = 0;
+            self.t_n.as_mut_slice()[g] = 0;
+            changed = true;
+        }
+        if changed { self.rewrite_all(); }
+        return changed;
+    }
+
+    // Whether instruction i folds (C2), and the operand its result becomes.
+    fn fold(&mut self, m: &mut model.Module, cl: &Classes, i: usize) -> (bool, u8, u32) {
+        let op = self.i_op.as_slice()[i];
+        let f = cl.fold_of(op, self.i_intr.as_slice()[i]);
+        let lo = self.i_lo.as_slice()[i] as usize;
+        let n = self.i_n.as_slice()[i] as usize;
+        if f == opt_table.FOLD_COND {
+            if n != 3 { return (false, 0, 0); }
+            let (c, hi, v) = self.int_const(&*m, lo);
+            if !c || hi != 0 || v > 1 { return (false, 0, 0); }
+            let x = if v == 1 then lo + 1 else lo + 2;
+            return (true, self.ok.as_slice()[x], self.oi.as_slice()[x]);
+        }
+        if f != opt_table.FOLD_INT || n == 0 || n > 2 { return (false, 0, 0); }
+        let (ca, ah, al) = self.int_const(&*m, lo);
+        let mut cb = true;
+        let mut b = arith.I128.{ hi: 0, lo: 0 };
+        if n == 2 {
+            let (c, bh, bl) = self.int_const(&*m, lo + 1);
+            cb = c;
+            b = arith.I128.{ hi: bh, lo: bl };
+        }
+        if !ca || !cb { return (false, 0, 0); }
+        let r = evaluate(&*m, op, self.i_ty.as_slice()[i], arith.I128.{ hi: ah, lo: al }, b, n);
+        let (ok, v) = match r {
+            Option.Some(x) => (true, x),
+            Option.None => (false, b),
+        };
+        if !ok { return (false, 0, 0); }
+        let w = m.wide.intern(v.hi, v.lo);
+        let at = col.ids(self.ck.len());
+        self.ck.push(model.C_INT);
+        self.cb.push(w as u64);
+        return (true, model.O_CONST, at);
+    }
+
+    // C2: folds until no instruction folds; each sweep reads operands through the replacements
+    // so far.
+    fn fold_constants(&mut self, m: &mut model.Module, cl: &Classes) -> bool {
+        let mut changed = false;
+        loop {
+            let mut more = false;
+            for b in 0..self.live.len() {
+                if !self.live.as_slice()[b] { continue; }
+                let lo = self.l_lo.as_slice()[b] as usize;
+                for j in lo..lo + self.l_n.as_slice()[b] as usize {
+                    let i = self.il.as_slice()[j] as usize;
+                    let r = self.i_res.as_slice()[i];
+                    if !self.i_live.as_slice()[i] || r == NONE { continue; }
+                    let olo = self.i_lo.as_slice()[i] as usize;
+                    let on = self.i_n.as_slice()[i] as usize;
+                    self.rewrite(olo, on);
+                    let (folds, k, id) = self.fold(m, cl, i);
+                    if !folds { continue; }
+                    self.i_live.as_mut_slice()[i] = false;
+                    self.replace(r, k, id);
+                    more = true;
+                }
+            }
+            if !more { break; }
+            changed = true;
+        }
+        if changed { self.rewrite_all(); }
+        return changed;
+    }
+
+    // The target a `switch` on int constant (hi, lo) takes: the first case of that value, else the
+    // default (NONE: no default).
+    fn case_of(&self, m: &model.Module, glo: usize, gn: usize, hi: u64, lo: u64) -> u32 {
+        let mut dflt = NONE;
+        for g in glo..glo + gn {
+            let w = self.t_case.as_slice()[g];
+            if w == NONE {
+                dflt = g as% u32;
+            } else if m.wide.hi.as_slice()[w as usize] == hi && m.wide.lo.as_slice()[w as usize] == lo {
+                return g as% u32;
+            }
+        }
+        return dflt;
+    }
+
+    // Whether target rows g and h name one block with the same operands, position by position.
+    fn same_target(&self, g: usize, h: usize) -> bool {
+        let n = self.t_n.as_slice()[g] as usize;
+        if self.t_blk.as_slice()[g] != self.t_blk.as_slice()[h] || self.t_n.as_slice()[h] as usize != n { return false; }
+        let a = self.t_lo.as_slice()[g] as usize;
+        let b = self.t_lo.as_slice()[h] as usize;
+        for j in 0..n {
+            if !self.same_operand(a + j, b + j) { return false; }
+        }
+        return true;
+    }
+
+    // C3: a `cbr` on an int constant, a `switch` on one, and a `cbr` with two equal targets become
+    // a `br`; the target keeps its arguments.
+    fn fold_branches(&mut self, m: &model.Module) -> bool {
+        let mut changed = false;
+        for b in 0..self.live.len() {
+            if !self.live.as_slice()[b] { continue; }
+            let k = self.tk.as_slice()[b];
+            let glo = self.g_lo.as_slice()[b] as usize;
+            let gn = self.g_n.as_slice()[b] as usize;
+            let top = self.top.as_slice()[b];
+            let mut to = NONE;
+            if k == model.TM_CBR && gn == 2 && top != NONE {
+                let (c, hi, lo) = self.int_const(m, top as usize);
+                if c && hi == 0 && lo == 1 {
+                    to = glo as% u32;
+                } else if c && hi == 0 && lo == 0 {
+                    to = (glo + 1) as% u32;
+                } else if !c && self.same_target(glo, glo + 1) {
+                    to = glo as% u32;
+                }
+            } else if k == model.TM_SWITCH && top != NONE {
+                let (c, hi, lo) = self.int_const(m, top as usize);
+                if c { to = self.case_of(m, glo, gn, hi, lo); }
+            }
+            if to == NONE { continue; }
+            self.tk.as_mut_slice()[b] = model.TM_BR;
+            self.top.as_mut_slice()[b] = NONE;
+            self.g_lo.as_mut_slice()[b] = to;
+            self.g_n.as_mut_slice()[b] = 1;
+            changed = true;
+        }
+        return changed;
+    }
+
+    // C4: the blocks not reachable from b0 go.
+    fn drop_unreachable(&mut self) -> bool {
+        let nb = self.live.len();
+        let mut seen = col.filled(nb, false);
+        let mut work = vec.Vec::<u32>.new();
+        seen.as_mut_slice()[0] = true;
+        work.push(0);
+        while work.len() > 0 {
+            let top = work.len() - 1;
+            let x = work.as_slice()[top] as usize;
+            work.truncate(top);
+            let lo = self.g_lo.as_slice()[x] as usize;
+            for g in lo..lo + self.g_n.as_slice()[x] as usize {
+                let y = self.t_blk.as_slice()[g] as usize;
+                if !seen.as_slice()[y] {
+                    seen.as_mut_slice()[y] = true;
+                    work.push(y as% u32);
+                }
+            }
+        }
+        let mut changed = false;
+        for b in 0..nb {
+            if self.live.as_slice()[b] && !seen.as_slice()[b] {
+                self.live.as_mut_slice()[b] = false;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    // C5: a block X other than b0 whose one edge in is `br X()` of a block P != X joins P: P takes
+    // X's instructions after its own and X's terminator, and stands where it stood. Merging keeps
+    // every other block's count of edges in, so the counts are taken once.
+    fn merge_blocks(&mut self) -> bool {
+        let (off, rows) = self.edges_into();
+        let mut changed = false;
+        for p in 0..self.live.len() {
+            if !self.live.as_slice()[p] { continue; }
+            while self.tk.as_slice()[p] == model.TM_BR {
+                let g = self.g_lo.as_slice()[p] as usize;
+                let x = self.t_blk.as_slice()[g] as usize;
+                let one = off.as_slice()[x + 1] == off.as_slice()[x] + 1;
+                if x == 0 || x == p || !one || self.t_n.as_slice()[g] != 0 || self.p_n.as_slice()[x] != 0 { break; }
+                debug.assert(rows.as_slice()[off.as_slice()[x] as usize] as usize == g, "the one edge into X is P's");
+                let at = col.ids(self.il.len());
+                let plo = self.l_lo.as_slice()[p] as usize;
+                let pn = self.l_n.as_slice()[p] as usize;
+                for j in plo..plo + pn {
+                    let i = self.il.as_slice()[j];
+                    self.il.push(i);
+                }
+                let xlo = self.l_lo.as_slice()[x] as usize;
+                let xn = self.l_n.as_slice()[x] as usize;
+                for j in xlo..xlo + xn {
+                    let i = self.il.as_slice()[j];
+                    self.il.push(i);
+                }
+                self.l_lo.as_mut_slice()[p] = at;
+                self.l_n.as_mut_slice()[p] = (pn + xn) as% u32;
+                let (k, top, glo, gn) = (self.tk.as_slice()[x], self.top.as_slice()[x], self.g_lo.as_slice()[x], self.g_n.as_slice()[x]);
+                self.tk.as_mut_slice()[p] = k;
+                self.top.as_mut_slice()[p] = top;
+                self.g_lo.as_mut_slice()[p] = glo;
+                self.g_n.as_mut_slice()[p] = gn;
+                self.live.as_mut_slice()[x] = false;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    // Whether instruction i may go when its result is not live (K2).
+    fn removable(&self, m: &model.Module, cl: &Classes, i: usize) -> bool {
+        let r = cl.removable_of(self.i_op.as_slice()[i], self.i_intr.as_slice()[i]);
+        if r == opt_table.REMOVABLE_YES { return true; }
+        if r == opt_table.REMOVABLE_FLOAT { return vtypes.classify(m, self.i_ty.as_slice()[i]).k == vtypes.K_FLOAT; }
+        if r != opt_table.REMOVABLE_CONST_INDEX || self.i_n.as_slice()[i] < 2 { return false; }
+        let x = self.i_lo.as_slice()[i] as usize;
+        let (k, hi, lo) = self.int_const(m, x + 1);
+        let at = if self.ok.as_slice()[x] == model.O_VALUE then m.val_ty.as_slice()[self.vlo + self.oi.as_slice()[x] as usize] else NONE;
+        return vtypes.fixed_index(m, at, k, hi, lo);
+    }
+
+    // Marks live the values among operand rows lo .. lo + n.
+    fn mark(&self, lo: usize, n: usize, lv: &mut [bool], work: &mut vec.Vec<u32>) {
+        for x in lo..lo + n {
+            let v = self.oi.as_slice()[x] as usize;
+            if self.ok.as_slice()[x] == model.O_VALUE && v < lv.len() && !lv[v] {
+                lv[v] = true;
+                work.push(v as% u32);
+            }
+        }
+    }
+
+    // Keeps, of the rows lo .. lo + n of `ok`/`oi` (an edge's arguments) or of `pv` (`params`),
+    // those whose position `keep` marks, in order; returns how many.
+    fn compact(&mut self, lo: usize, n: usize, keep: &[bool], params: bool) -> u32 {
+        let mut k = lo;
+        for j in 0..n {
+            if !keep[j] { continue; }
+            if params {
+                let v = self.pv.as_slice()[lo + j];
+                self.pv.as_mut_slice()[k] = v;
+            } else {
+                let a = self.ok.as_slice()[lo + j];
+                let b = self.oi.as_slice()[lo + j];
+                self.ok.as_mut_slice()[k] = a;
+                self.oi.as_mut_slice()[k] = b;
+            }
+            k = k + 1;
+        }
+        return (k - lo) as% u32;
+    }
+
+    // C6: the live values (a least fixpoint over the uses), then the removable instructions
+    // whose result is not live and the params of blocks other than b0 that are not live go, a
+    // param with the argument at its position on every edge into its block.
+    fn drop_dead(&mut self, m: &model.Module, cl: &Classes) -> bool {
+        let nb = self.live.len();
+        let nv = self.rk.len();
+        let mut def = col.filled(nv, NONE);
+        let mut pblk = col.filled(nv, NONE);
+        let mut ppos = col.filled(nv, 0u32);
+        let mut lv = col.filled(nv, false);
+        let mut work = vec.Vec::<u32>.new();
+        for b in 0..nb {
+            if !self.live.as_slice()[b] { continue; }
+            let plo = self.p_lo.as_slice()[b] as usize;
+            for j in 0..self.p_n.as_slice()[b] as usize {
+                let v = self.pv.as_slice()[plo + j] as usize;
+                pblk.as_mut_slice()[v] = b as% u32;
+                ppos.as_mut_slice()[v] = j as% u32;
+            }
+            let lo = self.l_lo.as_slice()[b] as usize;
+            for j in lo..lo + self.l_n.as_slice()[b] as usize {
+                let i = self.il.as_slice()[j] as usize;
+                if !self.i_live.as_slice()[i] { continue; }
+                let r = self.i_res.as_slice()[i];
+                if r != NONE { def.as_mut_slice()[r as usize] = i as% u32; }
+                if !self.removable(m, cl, i) { self.mark(self.i_lo.as_slice()[i] as usize, self.i_n.as_slice()[i] as usize, lv.as_mut_slice(), &mut work); }
+            }
+            let k = self.tk.as_slice()[b];
+            let top = self.top.as_slice()[b];
+            if top != NONE && (k == model.TM_CBR || k == model.TM_SWITCH || k == model.TM_RET) { self.mark(top as usize, 1, lv.as_mut_slice(), &mut work); }
+        }
+        let (off, rows) = self.edges_into();
+        while work.len() > 0 {
+            let t = work.len() - 1;
+            let v = work.as_slice()[t] as usize;
+            work.truncate(t);
+            let d = def.as_slice()[v];
+            if d != NONE {
+                self.mark(self.i_lo.as_slice()[d as usize] as usize, self.i_n.as_slice()[d as usize] as usize, lv.as_mut_slice(), &mut work);
+                continue;
+            }
+            let x = pblk.as_slice()[v];
+            if x == NONE { continue; }
+            let j = ppos.as_slice()[v] as usize;
+            for e in off.as_slice()[x as usize] as usize..off.as_slice()[x as usize + 1] as usize {
+                let g = rows.as_slice()[e] as usize;
+                if j < self.t_n.as_slice()[g] as usize { self.mark(self.t_lo.as_slice()[g] as usize + j, 1, lv.as_mut_slice(), &mut work); }
+            }
+        }
+        let mut changed = false;
+        let mut keep = vec.Vec::<bool>.new();
+        for b in 0..nb {
+            if !self.live.as_slice()[b] { continue; }
+            let lo = self.l_lo.as_slice()[b] as usize;
+            for j in lo..lo + self.l_n.as_slice()[b] as usize {
+                let i = self.il.as_slice()[j] as usize;
+                let r = self.i_res.as_slice()[i];
+                if !self.i_live.as_slice()[i] || (r != NONE && lv.as_slice()[r as usize]) || !self.removable(m, cl, i) { continue; }
+                self.i_live.as_mut_slice()[i] = false;
+                changed = true;
+            }
+            let pn = self.p_n.as_slice()[b] as usize;
+            if b == 0 || pn == 0 { continue; }
+            let plo = self.p_lo.as_slice()[b] as usize;
+            keep.clear();
+            let mut all = true;
+            for j in 0..pn {
+                let l = lv.as_slice()[self.pv.as_slice()[plo + j] as usize];
+                keep.push(l);
+                if !l { all = false; }
+            }
+            if all { continue; }
+            let n = self.compact(plo, pn, keep.as_slice(), true);
+            self.p_n.as_mut_slice()[b] = n;
+            for e in off.as_slice()[b] as usize..off.as_slice()[b + 1] as usize {
+                let g = rows.as_slice()[e] as usize;
+                let an = self.t_n.as_slice()[g] as usize;
+                debug.assert(an == pn, "an edge passes one argument per param");
+                let alo = self.t_lo.as_slice()[g] as usize;
+                let k = self.compact(alo, an, keep.as_slice(), false);
+                self.t_n.as_mut_slice()[g] = k;
+            }
+            changed = true;
+        }
+        return changed;
+    }
+
+    // Appends operand rows lo .. lo + n to m, values renumbered by `vnum`; returns where they start.
+    fn put_operands(&self, m: &mut model.Module, vnum: &[u32], lo: u32, n: u32) -> u32 {
+        let at = col.ids(m.opnd_kind.len());
+        let a = lo as usize;
+        for x in a..a + n as usize {
+            let k = self.ok.as_slice()[x];
+            let mut id = self.oi.as_slice()[x];
+            if k == model.O_VALUE {
+                id = if (id as usize) < vnum.len() then vnum[id as usize] else NONE;
+                debug.assert(id != NONE, "a kept operand names a value a kept block defines");
+            }
+            m.opnd_kind.push(k);
+            m.opnd_id.push(id);
+        }
+        return at;
+    }
+
+    // Writes the body as fn f's new segments of m's columns: the live blocks in order, their live
+    // instructions, values numbered per block (params, then results), the constant pool as it
+    // stands.
+    fn put(&self, m: &mut model.Module, f: usize) {
+        let nb = self.live.len();
+        let vlo = m.fn_val_lo.as_slice()[f] as usize;
+        let val0 = m.val_ty.len();
+        let mut bnum = col.filled(nb, NONE);
+        let mut vnum = col.filled(self.rk.len(), NONE);
+        let mut first = col.filled(nb, 0u32);
+        let mut kept: u32 = 0;
+        let mut next: u32 = 0;
+        for b in 0..nb {
+            if !self.live.as_slice()[b] { continue; }
+            bnum.as_mut_slice()[b] = kept;
+            kept = kept + 1;
+            first.as_mut_slice()[b] = next;
+            let plo = self.p_lo.as_slice()[b] as usize;
+            for j in plo..plo + self.p_n.as_slice()[b] as usize {
+                let v = self.pv.as_slice()[j] as usize;
+                vnum.as_mut_slice()[v] = next;
+                next = next + 1;
+                let t = m.val_ty.as_slice()[vlo + v];
+                m.val_ty.push(t);
+            }
+            let lo = self.l_lo.as_slice()[b] as usize;
+            for j in lo..lo + self.l_n.as_slice()[b] as usize {
+                let i = self.il.as_slice()[j] as usize;
+                let r = self.i_res.as_slice()[i];
+                if !self.i_live.as_slice()[i] || r == NONE { continue; }
+                vnum.as_mut_slice()[r as usize] = next;
+                next = next + 1;
+                let t = m.val_ty.as_slice()[vlo + r as usize];
+                m.val_ty.push(t);
+            }
+        }
+        let c0 = col.ids(m.const_kind.len());
+        m.const_kind.extend_from_slice(self.ck.as_slice());
+        m.const_bits.extend_from_slice(self.cb.as_slice());
+        let blk0 = col.ids(m.blk_tkind.len());
+        for b in 0..nb {
+            if !self.live.as_slice()[b] { continue; }
+            m.blk_val_lo.push(first.as_slice()[b]);
+            m.blk_param_n.push(self.p_n.as_slice()[b]);
+            m.blk_ins_lo.push(col.ids(m.ins_op.len()));
+            let mut n: u32 = 0;
+            let lo = self.l_lo.as_slice()[b] as usize;
+            for j in lo..lo + self.l_n.as_slice()[b] as usize {
+                let i = self.il.as_slice()[j] as usize;
+                if !self.i_live.as_slice()[i] { continue; }
+                let olo = self.put_operands(m, vnum.as_slice(), self.i_lo.as_slice()[i], self.i_n.as_slice()[i]);
+                let r = self.i_res.as_slice()[i];
+                m.ins_op.push(self.i_op.as_slice()[i]);
+                m.ins_intr.push(self.i_intr.as_slice()[i]);
+                m.ins_ty.push(self.i_ty.as_slice()[i]);
+                m.ins_res.push(if r == NONE then NONE else vnum.as_slice()[r as usize]);
+                m.ins_opnd_lo.push(olo);
+                m.ins_opnd_n.push(self.i_n.as_slice()[i]);
+                m.ins_site.push(self.i_site.as_slice()[i]);
+                n = n + 1;
+            }
+            m.blk_ins_n.push(n);
+            m.blk_tkind.push(self.tk.as_slice()[b]);
+            let top = self.top.as_slice()[b];
+            let t = if top == NONE then NONE else self.put_operands(m, vnum.as_slice(), top, 1);
+            m.blk_topnd.push(t);
+            m.blk_tgt_lo.push(col.ids(m.tgt_blk.len()));
+            let glo = self.g_lo.as_slice()[b] as usize;
+            for g in glo..glo + self.g_n.as_slice()[b] as usize {
+                let olo = self.put_operands(m, vnum.as_slice(), self.t_lo.as_slice()[g], self.t_n.as_slice()[g]);
+                m.tgt_blk.push(bnum.as_slice()[self.t_blk.as_slice()[g] as usize]);
+                m.tgt_opnd_lo.push(olo);
+                m.tgt_opnd_n.push(self.t_n.as_slice()[g]);
+                m.tgt_case.push(self.t_case.as_slice()[g]);
+            }
+            m.blk_tgt_n.push(self.g_n.as_slice()[b]);
+        }
+        m.fn_blk_lo.as_mut_slice()[f] = blk0;
+        m.fn_blk_n.as_mut_slice()[f] = kept;
+        m.fn_val_lo.as_mut_slice()[f] = col.ids(val0);
+        m.fn_val_n.as_mut_slice()[f] = next;
+        m.fn_const_lo.as_mut_slice()[f] = c0;
+        m.fn_const_n.as_mut_slice()[f] = col.ids(self.ck.len());
+    }
+}
+
+// C*: cleans up every body of m, in rounds of C1-C6 until a round changes nothing (C0). Returns
+// the most rounds that changed one body.
+pub fn run(m: &mut model.Module) -> u32 {
+    let cl = classes(&*m);
+    let mut most: u32 = 0;
+    for f in 0..m.fns() {
+        if !m.has_body(f) { continue; }
+        let mut b = take(&*m, f);
+        let mut rounds: u32 = 0;
+        loop {
+            let c1 = b.single_edge_params();
+            let c2 = b.fold_constants(m, &cl);
+            let c3 = b.fold_branches(&*m);
+            let c4 = b.drop_unreachable();
+            let c5 = b.merge_blocks();
+            let c6 = b.drop_dead(&*m, &cl);
+            if !(c1 || c2 || c3 || c4 || c5 || c6) { break; }
+            rounds = rounds + 1;
+        }
+        if rounds > 0 { b.put(m, f); }
+        if rounds > most { most = rounds; }
+    }
+    return most;
+}

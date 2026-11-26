@@ -109,6 +109,25 @@ pub fn is_bool(m: &model.Module, t: u32) -> bool {
     return m.types.tag_of(t) == types.TK_BOOL;
 }
 
+// The length of array type t (0 for any other type).
+pub fn array_len(m: &model.Module, t: u32) -> u64 {
+    if m.types.tag_of(t) != types.TK_ARRAY { return 0; }
+    let xs = m.types.x(t);
+    return ((xs[1] as u64) << 32) | (xs[2] as u64);
+}
+
+// Whether a `get` / `set` of aggregate type `at` whose index is the int constant (hi, lo) (`c`:
+// it is one) fixes its element, so it cannot trap: a field of a tuple or ADT, or an array element
+// below the length. Every other array index is checked as the access runs and traps `Bounds` out
+// of range; a constant at or past the length is such an index, legal only at level `opt`. Any
+// other `at` fixes nothing.
+pub fn fixed_index(m: &model.Module, at: u32, c: bool, hi: u64, lo: u64) -> bool {
+    if !c { return false; }
+    let tag = m.types.tag_of(at);
+    if tag == types.TK_ARRAY { return hi == 0 && lo < array_len(m, at); }
+    return tag == types.TK_TUPLE || tag == types.TK_ADT;
+}
+
 // The shape row of each type (NONE: no shape).
 pub fn shape_rows(m: &model.Module) -> vec.Vec<u32> {
     let mut out = vec.Vec::<u32>.with_capacity(m.types.len());

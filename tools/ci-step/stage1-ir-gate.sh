@@ -16,9 +16,20 @@
 # only by the bounds audit, a step stage1 does not have), refused in lines or structure (an
 # `error:` line), or refused by the verifier (a `verify:` line).
 #
-# Optimizer goldens: `stage1 ir opt --dump=inline` on every tests/opt case with an `inline.txt`,
-# under the case's `limits` (each line one `--limit`), on its input and on the input's
-# `stage1 ir fmt` text: both equal `inline.txt` byte for byte.
+# Optimizer goldens, each run under the case's `limits` (one `--limit` per line), on `input.ir`
+# and on its `stage1 ir fmt` text, both byte-equal to the expected file: `--dump=inline` against
+# `inline.txt`; `--dump-phase=inline --verify-phases` against `inline.ir`; and on every case without
+# a `passes` file `--dump-phase=clean --verify-phases` against `clean.ir`, else `output.ir` (a
+# decision-only case has neither: its module is verified, and the two runs must agree). On the same
+# cases the plain run (all passes, no phase flag) equals `output.ir` the same way. stage0's
+# `stave ir check` loads every module after a phase and every output. No case is skipped. The
+# command line: usage errors exit 2, an input other than a `release checked` module exits 1, each
+# with its message. (Exit 3, a phase module the verifier refuses, is `stave test stage1`'s, by a
+# fault put into one phase.)
+#
+# Pipeline: `stage1 ir opt --dump-phase=clean --verify-phases` on every release `checked` text of
+# the round trip, under the table's limits and under `rounds=3 threshold=100 cap=20000`: exit 0,
+# and stage0 loads the module.
 #
 # Corpus: the roots of the stage1 gate (every package and other `.stv` file below
 # tests/conformance), the bench programs, and the stage1 package itself (the largest text: its
@@ -72,30 +83,16 @@ if [ "$PROFILE" = release ]; then cargo build -q --locked --release -p stave-cli
 mkdir -p "$OUT"
 "$S0" build "$ROOT/stage1" -o "$S1" >"$OUT/build.log" 2>&1 || { cat "$OUT/build.log"; exit 1; }
 
+# Optimizer goldens (opt-passes.md "Gates").
 fail=0
+lims_of() { if [ -f "$1/limits" ]; then sed 's/^/--limit /' "$1/limits" | tr '\n' ' '; fi; }
 ocases=0
 osame=0
-orounds=0
 for c in "$ROOT"/tests/opt/*/; do
   [ -f "$c/inline.txt" ] || continue
   ocases=$((ocases + 1))
-  lims=""
-  if [ -f "$c/limits" ]; then lims=$(sed 's/^/--limit /' "$c/limits" | tr '\n' ' '); fi
+  lims=$(lims_of "$c")
   o="$OUT/opt-$(basename "$c")"
-  # Only round 1 is built: a case with `rounds` above 1 is skipped, and only when stage1 refuses
-  # it for that reason (exit 2 and the one-round message).
-  if [ -f "$c/limits" ] && grep -Eq '^rounds=0*([2-9]|[1-9][0-9]+)$' "$c/limits"; then
-    st=0
-    # shellcheck disable=SC2086
-    "$S1" ir opt --dump=inline $lims "$c/input.ir" > "$o.inline" 2> "$o.err" || st=$?
-    if [ "$st" = 2 ] && grep -q 'only --dump=inline of one round is built' "$o.err"; then
-      orounds=$((orounds + 1))
-    else
-      echo "OPT SKIP $(basename "$c") (exit $st: $(head -c 200 "$o.err"))"
-      fail=1
-    fi
-    continue
-  fi
   # shellcheck disable=SC2086
   if "$S1" ir opt --dump=inline $lims "$c/input.ir" > "$o.inline" 2> "$o.err" &&
      "$S1" ir fmt "$c/input.ir" > "$o.fmt" &&
@@ -107,7 +104,131 @@ for c in "$ROOT"/tests/opt/*/; do
     fail=1
   fi
 done
-echo "stage1-ir-gate: opt inline dumps $osame / $ocases equal, $orounds need more rounds"
+echo "stage1-ir-gate: opt inline dumps $osame / $ocases equal"
+
+# phase_ok CASE PHASE WANT: the module after PHASE of the last round, verified by stage1, on the
+# input and on its fmt text, equals WANT (empty: the run on the input); stage0 loads it.
+phase_ok() {
+  lims=$(lims_of "$1")
+  o="$OUT/opt-$(basename "$1").$2"
+  exp="${3:-$o.ir}"
+  # shellcheck disable=SC2086
+  "$S1" ir opt --dump-phase="$2" --verify-phases $lims "$1/input.ir" > "$o.ir" 2> "$o.err" &&
+    "$S1" ir fmt "$1/input.ir" > "$o.fmt" &&
+    "$S1" ir opt --dump-phase="$2" --verify-phases $lims "$o.fmt" > "$o.fmt.ir" 2>> "$o.err" &&
+    cmp -s "$exp" "$o.ir" && cmp -s "$exp" "$o.fmt.ir" &&
+    "$S0" ir check "$o.ir" 2>> "$o.err"
+}
+phase_fail() {
+  echo "OPT $2 DIFF $(basename "$1") ($(diff "$3" "$OUT/opt-$(basename "$1").$2.ir" 2>&1 | head -3 | tr '\n' ' ')$(head -c 200 "$OUT/opt-$(basename "$1").$2.err"))"
+}
+xcases=0
+xsame=0
+ccases=0
+csame=0
+cver=0
+for c in "$ROOT"/tests/opt/*/; do
+  if [ -f "$c/inline.ir" ]; then
+    xcases=$((xcases + 1))
+    if phase_ok "$c" inline "$c/inline.ir"; then xsame=$((xsame + 1)); else phase_fail "$c" inline "$c/inline.ir"; fail=1; fi
+  fi
+  [ -f "$c/passes" ] && continue
+  ccases=$((ccases + 1))
+  want=""
+  if [ -f "$c/clean.ir" ]; then want="$c/clean.ir"; elif [ -f "$c/output.ir" ]; then want="$c/output.ir"; fi
+  if phase_ok "$c" clean "$want"; then
+    if [ -n "$want" ]; then csame=$((csame + 1)); else cver=$((cver + 1)); fi
+  else
+    phase_fail "$c" clean "${want:-/dev/null}"
+    fail=1
+  fi
+done
+echo "stage1-ir-gate: opt modules after X $xsame / $xcases equal, verified, loaded by stage0"
+echo "stage1-ir-gate: opt modules after C* $csame / $((ccases - cver)) equal, $cver of $ccases without an expected text verified, all loaded by stage0"
+
+# plain_ok CASE: the plain output (every pass, rule P1), verified by stage1, on the input and on its
+# fmt text, equals output.ir (none: the two runs agree); stage0 loads it.
+plain_ok() {
+  lims=$(lims_of "$1")
+  o="$OUT/opt-$(basename "$1").plain"
+  exp="$o.ir"
+  [ -f "$1/output.ir" ] && exp="$1/output.ir"
+  # shellcheck disable=SC2086
+  "$S1" ir opt $lims "$1/input.ir" > "$o.ir" 2> "$o.err" &&
+    "$S1" ir fmt "$1/input.ir" > "$o.fmt" &&
+    "$S1" ir opt $lims "$o.fmt" > "$o.fmt.ir" 2>> "$o.err" &&
+    cmp -s "$exp" "$o.ir" && cmp -s "$exp" "$o.fmt.ir" &&
+    "$S0" ir check "$o.ir" 2>> "$o.err"
+}
+pcases=0
+psame=0
+pnone=0
+for c in "$ROOT"/tests/opt/*/; do
+  [ -f "$c/passes" ] && continue
+  pcases=$((pcases + 1))
+  if plain_ok "$c"; then
+    if [ -f "$c/output.ir" ]; then psame=$((psame + 1)); else pnone=$((pnone + 1)); fi
+  else
+    o="$OUT/opt-$(basename "$c").plain"
+    echo "OPT plain DIFF $(basename "$c") ($(diff "$c/output.ir" "$o.ir" 2>&1 | head -3 | tr '\n' ' ')$(head -c 200 "$o.err"))"
+    fail=1
+  fi
+done
+echo "stage1-ir-gate: opt plain outputs $psame / $((pcases - pnone)) equal output.ir, $pnone of $pcases without one verified, all loaded by stage0"
+
+# The command line of `stage1 ir opt` (cli-stage1.md): each case `EXIT|MESSAGE|ARGS` exits EXIT
+# with MESSAGE in its stderr (none: empty stderr, a dump on stdout). @IN@ is a `release checked`
+# case input, @OPT@ a `release opt` text, @DIR@ holds that input relabelled `debug checked` and
+# `release lowered`, a text that does not load, and no file `none.ir`.
+CLI="$OUT/cli"
+mkdir -p "$CLI"
+cin="$ROOT/tests/opt/10.1/input.ir"
+sed '1s/ release checked$/ debug checked/' "$cin" > "$CLI/debug.ir"
+sed '1s/ release checked$/ release lowered/' "$cin" > "$CLI/lowered.ir"
+printf 'stave.ir 4 "x86_64-linux-v2" release checked\nfn @0\n' > "$CLI/bad.ir"
+rm -f "$CLI/none.ir"
+clicases=0
+cliok=0
+while IFS='|' read -r want msg args; do
+  clicases=$((clicases + 1))
+  args=$(echo "$args" | sed "s|@IN@|$cin|g; s|@OPT@|$ROOT/tests/opt/10.1/inline.ir|g; s|@DIR@|$CLI|g")
+  got=0
+  # shellcheck disable=SC2086
+  "$S1" ir opt $args > "$CLI/out" 2> "$CLI/err" < /dev/null || got=$?
+  if [ "$got" = "$want" ] && { if [ -n "$msg" ]; then grep -qF -- "$msg" "$CLI/err"; else [ ! -s "$CLI/err" ] && [ -s "$CLI/out" ]; fi; }; then
+    cliok=$((cliok + 1))
+  else
+    echo "OPT CLI DIFF \`ir opt $args\`: exit $got, want $want with \`$msg\` ($(head -c 200 "$CLI/err" | tr '\n' ' '))"
+    fail=1
+  fi
+done <<'EOF'
+2|bad --limit `rounds=0`|--limit rounds=0 @IN@
+2|bad --limit `call_saved=4`|--limit call_saved=4 @IN@
+0||--limit call_saved=3 --limit rounds=1 --limit threshold=0 --dump=inline @IN@
+0||--limit cap=18446744073709551615 --limit slot_callee=0 --limit slot_caller=0 --dump=inline @IN@
+2|bad --limit `threshold=-1`|--limit threshold=-1 @IN@
+2|bad --limit `threshold=+1`|--limit threshold=+1 @IN@
+2|bad --limit `cap=18446744073709551616`|--limit cap=18446744073709551616 @IN@
+2|bad --limit `depth=3`|--limit depth=3 @IN@
+2|bad --limit `THRESHOLD=3`|--limit THRESHOLD=3 @IN@
+2|bad --limit `cap`|--limit cap @IN@
+2|unknown or repeated flag `--limit`|--limit @IN@
+2|--dump and --dump-phase exclude each other|--dump=inline --dump-phase=clean @IN@
+2|unknown or repeated flag `--dump-phase=inline`|--dump-phase=clean --dump-phase=inline @IN@
+2|--passes=base runs no decision|--passes=base --dump=inline @IN@
+2|--passes=base runs no decision|--passes=base --dump-phase=clean @IN@
+2|unknown or repeated flag `--passes=full`|--passes=base --passes=full @IN@
+2|unknown or repeated flag `--passes=none`|--passes=none @IN@
+2|unknown or repeated flag `--verify`|--verify @IN@
+2|stage1: usage: stage1 ir opt|--verify-phases
+2|unknown or repeated flag `|@IN@ @IN@
+2|cannot read|@DIR@/none.ir
+1|error: ir opt reads a `release checked` module|@DIR@/debug.ir
+1|error: ir opt reads a `release checked` module|@DIR@/lowered.ir
+1|error: ir opt reads a `release checked` module|--passes=base @OPT@
+1|bad.ir:|@DIR@/bad.ir
+EOF
+echo "stage1-ir-gate: opt command line $cliok / $clicases cases exit and report as cli-stage1.md says"
 
 LIST="$OUT/roots.txt"
 CONF="$ROOT/tests/conformance"
@@ -146,6 +267,71 @@ same=$(grep -c '^SAME' "$OUT/result.txt" || true)
 bytes=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
 echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots, $((end - start)) s; $empty empty files stage0 wrote (no text)"
 if grep -v '^SAME\|^EMPTY' "$OUT/result.txt"; then fail=1; fi
+
+# Base passes (opt-passes.md section 9 "Base"): `stage1 ir opt --passes=base` on every `release`
+# `ir` text of the round trip that has stage0's `opt` dump beside it equals that dump byte for
+# byte; on every tests/opt case with a `passes` file it equals the case's `output.ir`.
+find "$OUT/w" -path '*-release/ir.txt' -size +0 | sort > "$OUT/base-inputs.txt"
+xargs -P "$(nproc)" -I F sh -c '
+  o="$(dirname "$2")/opt.txt"
+  [ -s "$o" ] || exit 0
+  t=$(basename "$(dirname "$2")" | sed "s/-release\$//")
+  if "$1" ir opt --passes=base "$2" > "$2.base" 2> "$2.base.err"; then
+    if cmp -s "$o" "$2.base"; then echo "SAME $t $(wc -c < "$2") $2"; else echo "DIFF $t $2 (first: $(cmp "$o" "$2.base" 2>&1 | head -1))"; fi
+  else
+    echo "FAIL $t $2 ($(head -c 300 "$2.base.err"))"
+  fi' sh "$S1" F < "$OUT/base-inputs.txt" > "$OUT/base.txt"
+bcases=0
+bsame=0
+for c in "$ROOT"/tests/opt/*/; do
+  [ -f "$c/passes" ] || continue
+  bcases=$((bcases + 1))
+  o="$OUT/base-$(basename "$c").ir"
+  if grep -qx base "$c/passes" && "$S1" ir opt --passes=base "$c/input.ir" > "$o" 2>&1 && cmp -s "$c/output.ir" "$o"; then
+    bsame=$((bsame + 1))
+  else
+    echo "BASE DIFF $(basename "$c") ($(diff "$c/output.ir" "$o" 2>&1 | head -3 | tr '\n' ' '))"
+    fail=1
+  fi
+done
+for t in x86_64-linux aarch64-linux; do
+  n=$(awk -v t="$t" '$2 == t' "$OUT/base.txt" | wc -l)
+  s=$(awk -v t="$t" '$1 == "SAME" && $2 == t' "$OUT/base.txt" | wc -l)
+  echo "stage1-ir-gate: base passes $t: $s / $n release texts equal stage0's opt dump"
+done
+echo "stage1-ir-gate: base passes cases $bsame / $bcases equal output.ir"
+if grep -v '^SAME' "$OUT/base.txt"; then fail=1; fi
+bbig=$(awk '$1 == "SAME" { print $3, $4 }' "$OUT/base.txt" | sort -n | tail -1 | cut -d' ' -f2)
+if [ -n "$bbig" ]; then
+  t0=$(date +%s%N)
+  "$S0" ir opt "$bbig" > "$OUT/bbig.s0" 2>/dev/null || true
+  t1=$(date +%s%N)
+  "$S1" ir opt --passes=base "$bbig" > "$OUT/bbig.s1"
+  t2=$(date +%s%N)
+  echo "stage1-ir-gate: base passes on the largest release text $(wc -c < "$bbig") bytes ($bbig): stage0 ir opt $(( (t1 - t0) / 1000000 )) ms, stage1 ir opt --passes=base $(( (t2 - t1) / 1000000 )) ms"
+fi
+
+# Pipeline on the corpus (opt-passes.md section 9 "Gates"): `stage1 ir opt --dump-phase=clean
+# --verify-phases` on every `release` `checked` text of the round trip, under the table's limits
+# and under a second set that inlines more and over several rounds, exits 0 and its module loads
+# in stage0 (`stave ir check`).
+for set in table "rounds=3 threshold=100 cap=20000"; do
+  lims=""
+  if [ "$set" != table ]; then for l in $set; do lims="$lims --limit $l"; done; fi
+  start=$(date +%s)
+  xargs -P "$(nproc)" -I F sh -c '
+    o="$2.pipe"
+    # shellcheck disable=SC2086
+    if "$1" ir opt --dump-phase=clean --verify-phases $4 "$2" > "$o" 2> "$o.err" && "$3" ir check "$o" 2>> "$o.err"; then
+      echo "OK $2"
+    else
+      echo "FAIL $2 ($(head -c 300 "$o.err" | tr "\n" " "))"
+    fi
+    rm -f "$o"' sh "$S1" F "$S0" "$lims" < "$OUT/base-inputs.txt" > "$OUT/pipe.txt"
+  end=$(date +%s)
+  echo "stage1-ir-gate: opt pipeline ($set limits) on the corpus: $(grep -c '^OK' "$OUT/pipe.txt" || true) / $(wc -l < "$OUT/base-inputs.txt") release texts exit 0, verified at every phase, loaded by stage0, $((end - start)) s"
+  if grep -v '^OK' "$OUT/pipe.txt"; then fail=1; fi
+done
 
 # the largest text: stage1 read + print against stage0's
 big=$(awk '$1 == "SAME" { print $5, $6 }' "$OUT/result.txt" | sort -n | tail -1 | cut -d' ' -f2)

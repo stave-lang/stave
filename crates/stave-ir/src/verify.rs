@@ -17,6 +17,7 @@ use crate::arith::{self, CastTy, IntTy};
 use crate::intrinsics::{self, ITy, Kind};
 use crate::ir::{
     Block, Body, CastKind, Const, Func, FuncId, Module, Op, Operand, Site, Target, Term, Value, ValueDef,
+    const_elem,
 };
 use crate::known;
 use crate::text::Level;
@@ -56,7 +57,7 @@ pub fn verify_module(m: &Module) -> Result<(), Vec<VerifyError>> {
 }
 
 /// Verifies the whole module by the rules of `level` (contracts/checked-ir.md "Loading" step 3:
-/// only level `opt` differs, in the `switch` scrutinee).
+/// only level `opt` differs, in the `switch` scrutinee and the array index of `get`/`set`).
 pub fn verify_module_at(m: &Module, level: Level) -> Result<(), Vec<VerifyError>> {
     let mut errs = verify_types(m)?;
     for fi in 0..m.funcs.len() {
@@ -1082,8 +1083,14 @@ impl<'a> FnVerifier<'a> {
                 self.check_operand(b, args[0], at)?;
                 let ft = match self.key(at) {
                     Some(TypeKey::Array { elem, len }) => {
-                        match (b.int_const(args[1]), self.operand_cls(b, args[1])) {
-                            (Some(k), _) if k >= 0 && (k as u128) < *len as u128 => {}
+                        // At level `opt` an int constant at or past the length (a 64-bit unsigned
+                        // value) may stand here: inlining and the clean-up substitute constants
+                        // for params and folded values. The access then traps `Bounds` when it
+                        // runs, as a dynamic index out of range does.
+                        let k = b.int_const(args[1]);
+                        match (k, self.operand_cls(b, args[1])) {
+                            (Some(_), _) if const_elem(k, *len).is_some() => {}
+                            (Some(k), _) if u64::try_from(k).is_ok() && self.level == Level::Opt => {}
                             (Some(_), _) => return Err("array index constant out of range".into()),
                             (None, Some(Cls::Int(it))) if !it.signed => {}
                             _ => return Err("array index must be an unsigned int".into()),

@@ -3,14 +3,22 @@
 // `FILE:LINE:COL: error: MSG` or `FILE:LINE: verify: MSG` on stderr (at most 100) and exits 1;
 // an unreadable FILE or a bad command line exits 2.
 //
-// `stage1 ir opt --dump=inline [--limit NAME=N]... FILE` (contracts/cli-stage1.md): the decision
-// tables of the release passes' one round on a `release checked` FILE. The expansion and the
-// clean-up are not built: every other form of `ir opt` is a usage error.
+// `stage1 ir opt [--passes=base|full] [--dump=inline] [--dump-phase=inline|clean|base]
+// [--verify-phases] [--limit NAME=N]... FILE` (contracts/cli-stage1.md): on a `release checked`
+// FILE, canonicalized before the first round, the rounds of rule P1, each `canon(C*(X(D(M'))))`,
+// then the base passes and `canon`: the module at level `opt`, or the decision tables of every
+// round, or the canonical module after X, after C*, or after B. With `--passes=base` the rounds
+// are left out (rule P3). The stage1 verifier checks the module printed and, with
+// `--verify-phases`, the canonical module after every phase of every round (a fault: exit 3).
 import ir.canon;
 import ir.load;
 import ir.model;
 import ir.print;
+import opt.base;
+import opt.clean;
 import opt.decide;
+import opt.expand;
+import opt.facts;
 import text;
 import std.env;
 import std.io;
@@ -31,7 +39,7 @@ pub fn run() -> i32 {
     let a = args.as_slice();
     if n > 2 && text.eq_str(a[2].as_bytes(), "opt") { return opt_run(a); }
     if n != 4 {
-        io.eprint("stage1: usage: stage1 ir check|fmt FILE, stage1 ir opt --dump=inline [--limit NAME=N]... FILE\n");
+        io.eprint("stage1: usage: stage1 ir check|fmt FILE, stage1 ir opt [--passes=base|full] [--dump=inline|--dump-phase=inline|clean|base] [--verify-phases] [--limit NAME=N]... FILE\n");
         return 2;
     }
     let verb = a[2].as_bytes();
@@ -69,14 +77,39 @@ fn read_into(file: &string.String, src: &mut vec.Vec<u8>) -> bool {
     return true;
 }
 
+// What `ir opt` prints: the `inline` dump, the module after X or after C* of the last round, or
+// the output (after the base passes). The last three also name the phases X, C*, and B.
+pub const SHOW_DUMP: u8 = 0;
+pub const SHOW_INLINE: u8 = 1;
+pub const SHOW_CLEAN: u8 = 2;
+pub const SHOW_OUTPUT: u8 = 3;
+
 fn opt_run(a: &[string.String]) -> i32 {
     let mut lim = decide.Limits.table();
+    let mut show = SHOW_OUTPUT;
     let mut dump = false;
+    let mut only_base = false;
+    let mut passed = false;
+    let mut verify = false;
+    let mut phased = false;
     let mut k: usize = 3;
     while k + 1 < a.len() {
         let f = a[k].as_bytes();
         if text.eq_str(f, "--dump=inline") {
             dump = true;
+        } else if text.eq_str(f, "--dump-phase=inline") && !phased {
+            show = SHOW_INLINE;
+            phased = true;
+        } else if text.eq_str(f, "--dump-phase=clean") && !phased {
+            show = SHOW_CLEAN;
+            phased = true;
+        } else if text.eq_str(f, "--dump-phase=base") && !phased {
+            phased = true;
+        } else if (text.eq_str(f, "--passes=base") || text.eq_str(f, "--passes=full")) && !passed {
+            only_base = text.eq_str(f, "--passes=base");
+            passed = true;
+        } else if text.eq_str(f, "--verify-phases") {
+            verify = true;
         } else if text.eq_str(f, "--limit") && k + 2 < a.len() {
             k = k + 1;
             if !set_limit(&mut lim, a[k].as_bytes()) {
@@ -86,23 +119,28 @@ fn opt_run(a: &[string.String]) -> i32 {
             }
         } else {
             let s = &a[k];
-            io.eprint(f"stage1: ir opt: unknown flag `{s}`\n");
+            io.eprint(f"stage1: ir opt: unknown or repeated flag `{s}`\n");
             return 2;
         }
         k = k + 1;
     }
     if k + 1 != a.len() || text.starts_with(a[k].as_bytes(), mem.str_bytes("--")) {
-        io.eprint("stage1: usage: stage1 ir opt --dump=inline [--limit NAME=N]... FILE\n");
+        io.eprint("stage1: usage: stage1 ir opt [--passes=base|full] [--dump=inline|--dump-phase=inline|clean|base] [--verify-phases] [--limit NAME=N]... FILE\n");
         return 2;
     }
-    if !dump || lim.rounds != 1 {
-        io.eprint("stage1: ir opt: only --dump=inline of one round is built (no expansion or clean-up yet)\n");
+    if dump && phased {
+        io.eprint("stage1: ir opt: --dump and --dump-phase exclude each other\n");
         return 2;
     }
+    if only_base && (dump || show == SHOW_INLINE || show == SHOW_CLEAN) {
+        io.eprint("stage1: ir opt: --passes=base runs no decision, expansion, or clean-up: --dump=inline and --dump-phase=inline|clean need --passes=full\n");
+        return 2;
+    }
+    if dump { show = SHOW_DUMP; }
     let file = &a[k];
     let mut src = vec.Vec::<u8>.new();
     if !read_into(file, &mut src) { return 2; }
-    let ld = load.load(src.as_slice());
+    let mut ld = load.load(src.as_slice());
     if !ld.ok() {
         let out = ld.errs.render(file.as_bytes());
         let _ = io.write_all(2, out.as_slice());
@@ -112,9 +150,90 @@ fn opt_run(a: &[string.String]) -> i32 {
         io.eprint(f"{file}: error: ir opt reads a `release checked` module\n");
         return 1;
     }
-    let out = decide.inline_dump(&ld.m, &lim);
-    let _ = io.write_all(1, out.as_slice());
+    let mut out = vec.Vec::<u8>.new();
+    let mut err = vec.Vec::<u8>.new();
+    let n = if only_base then 0 else lim.rounds;
+    let code = optimize(file, &mut ld.m, &lim, n, show, verify, fn(m: &mut model.Module, r: u64, ph: u8) {}, &mut out, &mut err);
+    let _ = io.write_all(2, err.as_slice());
+    if code == 0 { let _ = io.write_all(1, out.as_slice()); }
+    return code;
+}
+
+// `ir opt` on the loaded `release checked` module m of FILE: canonical, then n rounds of rule P1,
+// then (show SHOW_OUTPUT) the base passes and `canon` at level `opt`. Exit 0 with what `show`
+// names in out, or exit 3 with the stage1 verifier's faults of the first phase module that fails
+// in err. The printed module is always checked; with `verify` also the canonical module after
+// every phase of every round (P4). `after(m, r, ph)` runs on the canonical module after phase ph
+// (SHOW_INLINE, SHOW_CLEAN, SHOW_OUTPUT) of round r (0 for B) before it is checked; the command
+// passes one that does nothing.
+pub fn optimize(file: &string.String, m: &mut model.Module, lim: &decide.Limits, n: u64, show: u8, verify: bool, after: fn(&mut model.Module, u64, u8), out: &mut vec.Vec<u8>, err: &mut vec.Vec<u8>) -> i32 {
+    canon.canon(m);
+    let mut txt = vec.Vec::<u8>.new();
+    let mut r: u64 = 1;
+    while r <= n {
+        let last = r == n;
+        let fx = facts.build(&*m);
+        let d = decide.decide(&*m, &fx, lim);
+        if show == SHOW_DUMP {
+            decide.dump(&*m, &fx, &d, r as% u32, out);
+            if last { return 0; }
+        }
+        expand.run(m, &fx, &d);
+        canon.canon(m);
+        after(m, r, SHOW_INLINE);
+        if (verify || (last && show == SHOW_INLINE)) && !phase_text(file, "inline", &*m, &mut txt, err) { return 3; }
+        if last && show == SHOW_INLINE {
+            out.extend_from_slice(txt.as_slice());
+            return 0;
+        }
+        let _ = clean.run(m);
+        canon.canon(m);
+        after(m, r, SHOW_CLEAN);
+        if (verify || (last && show == SHOW_CLEAN)) && !phase_text(file, "clean", &*m, &mut txt, err) { return 3; }
+        r = r + 1;
+    }
+    if show == SHOW_OUTPUT {
+        base.run(m);
+        canon.canon(m);
+        m.level = model.LEVEL_OPT;
+        after(m, 0, SHOW_OUTPUT);
+        if !phase_text(file, "base", &*m, &mut txt, err) { return 3; }
+    }
+    if show != SHOW_DUMP { out.extend_from_slice(txt.as_slice()); }
     return 0;
+}
+
+// The text of m after phase `ph` into out, checked by the stage1 verifier on its reload (false: a
+// fault, reported in err). A printed module is always checked (P4).
+fn phase_text(file: &string.String, ph: &str, m: &model.Module, out: &mut vec.Vec<u8>, err: &mut vec.Vec<u8>) -> bool {
+    *out = print.print(m);
+    return phase_verified(file, ph, out.as_slice(), err);
+}
+
+// The stage1 verifier on t, the printed module after phase `ph`: each fault appends
+// `FILE: internal error: PH: @<inst>: MSG` to err, `<inst>` the fn whose lines hold it.
+fn phase_verified(file: &string.String, ph: &str, t: &[u8], err: &mut vec.Vec<u8>) -> bool {
+    let ld = load.load(t);
+    if ld.ok() { return true; }
+    for j in 0..ld.errs.len() {
+        err.extend_from_slice(file.as_bytes());
+        err.extend_from_slice(mem.str_bytes(": internal error: "));
+        err.extend_from_slice(mem.str_bytes(ph));
+        err.extend_from_slice(mem.str_bytes(": "));
+        let line = ld.errs.line.as_slice()[j];
+        let mut at = ld.fn_line.len();
+        for f in 0..ld.fn_line.len() {
+            if ld.fn_line.as_slice()[f] <= line { at = f; }
+        }
+        if at < ld.m.fn_inst.rows() {
+            err.push(64);
+            print.push_inst(err, ld.m.fn_inst.row(at));
+            err.extend_from_slice(mem.str_bytes(": "));
+        }
+        err.extend_from_slice(ld.errs.msg.row(j));
+        err.push(10);
+    }
+    return false;
 }
 
 // `NAME=N` into lim.

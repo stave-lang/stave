@@ -503,11 +503,23 @@ fn generate(
     }
 }
 
-/// The release passes on the canonical module `m`: element pointer types, the optimizer on
-/// every body, then the canonical numbering again (the passes keep every function), the IR
-/// verifier and the bounds audit on the result. The module the release backends compile and
-/// the `opt` dump prints.
+/// The release passes on the canonical module `m`: [`base_passes`], then the bounds audit on
+/// the result. The module the release backends compile and the `opt` dump prints.
 pub fn release_passes(m: &Module) -> Result<Module, Failure> {
+    let c = base_passes(m)?;
+    // The audit is stage0's self-check of its base passes: every element access, those
+    // `split_elem_addrs` put behind `slice.ptr` included, still has its check or a proof. Level
+    // `opt` itself does not require it, and loading `opt` text skips it.
+    audited(&c, Stage::Opt)?;
+    prof::mark("opt-audit");
+    Ok(c)
+}
+
+/// The base passes (opt-passes.md rule P3) on the canonical module `m`, at level `lowered`,
+/// `checked`, or `opt`: element pointer types, the optimizer on every body, then the canonical
+/// numbering again (the passes keep every function) and the IR verifier at level `opt` on the
+/// result.
+pub fn base_passes(m: &Module) -> Result<Module, Failure> {
     let mut c = m.clone();
     stave_opt::slices::declare_elem_pointers(&mut c.types);
     let types = &c.types;
@@ -519,14 +531,8 @@ pub fn release_passes(m: &Module) -> Result<Module, Failure> {
         return Err(Failure::Internal { stage: Stage::Opt, message });
     }
     prof::mark("opt-canonical");
-    // The optimizer's output must be valid IR at level `opt`. The audit after it is stage0's
-    // self-check of its base passes: every element access, those `split_elem_addrs` put behind
-    // `slice.ptr` included, still has its check or a proof. Level `opt` itself does not require
-    // it, and loading `opt` text skips it.
     verified(&c, Stage::Opt, Level::Opt)?;
     prof::mark("opt-verify");
-    audited(&c, Stage::Opt)?;
-    prof::mark("opt-audit");
     Ok(c)
 }
 
