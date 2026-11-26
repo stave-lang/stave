@@ -4,9 +4,9 @@
 // `canon` after them, is the caller's (rule P1, P3).
 //
 // - Bodies are independent: a body's passes read only that body, the type table, and the op
-//   table, and write only that body. The `ptr mut T` types B2 reads are interned before any body,
-//   one per slice type of the table, in type order, so no body writes the table (a type B2 adds
-//   comes after every input type).
+//   table, and write only that body. The `ptr const T` and `ptr mut T` types B2 reads are interned
+//   before any body, both per slice type of the table, in type order, so no body writes the table
+//   (a type B2 adds comes after every input type).
 // - The control flow (cfg.stv) is computed once per body: B moves no terminator.
 // - Each pass reads the body the one before wrote (edits.stv): values by their ids in B's input,
 //   new values after them; instructions in print order.
@@ -118,13 +118,14 @@ fn int_const(m: &model.Module, f: usize, x: usize) -> (bool, u64, u64) {
     return (true, m.wide.hi.as_slice()[w], m.wide.lo.as_slice()[w]);
 }
 
-// Interns `ptr mut T` for the element T of every slice type, in type order.
+// Interns `ptr const T` and `ptr mut T` for the element T of every slice type, in type order.
 fn elem_pointers(m: &mut model.Module) {
     let n = m.types.len();
     for t in 0..n {
         let id = t as% u32;
         if m.types.tag_of(id) != types.TK_SLICE { continue; }
         let e = m.types.a_of(id);
+        let _ = m.types.mk_ptr(false, e);
         let _ = m.types.mk_ptr(true, e);
     }
 }
@@ -277,8 +278,9 @@ fn unify(m: &mut model.Module, f: usize, g: &cfg.Cfg, kind: u8) -> bool {
     return changed;
 }
 
-// The `ptr mut T` of a value of type t that B2 rewrites (a `ref` or `ptr` to `slice T`, T neither
-// an array nor a slice), else NONE.
+// The element pointer of a value of type t that B2 rewrites (a `ref` or `ptr` to `slice T`, T
+// neither an array nor a slice), else NONE: `ptr mut T` when t is mutable, else `ptr const T`, the
+// mutability the verifier requires of a pointer made from t.
 fn elem_ptr(m: &model.Module, t: u32) -> u32 {
     let tag = m.types.tag_of(t);
     if tag != types.TK_REF && tag != types.TK_PTR { return NONE; }
@@ -287,7 +289,7 @@ fn elem_ptr(m: &model.Module, t: u32) -> u32 {
     let el = m.types.a_of(inner);
     let et = m.types.tag_of(el);
     if et == types.TK_ARRAY || et == types.TK_SLICE { return NONE; }
-    return m.types.find(types.TK_PTR, 1, el, vec.Vec::<u32>.new().as_slice());
+    return m.types.find(types.TK_PTR, m.types.a_of(t), el, vec.Vec::<u32>.new().as_slice());
 }
 
 // B2: `slice.ptr` before every element access through a slice reference, which then reads it.
