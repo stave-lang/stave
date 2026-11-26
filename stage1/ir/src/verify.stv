@@ -430,7 +430,8 @@ impl V {
         }
         if k == model.O_STR {
             let tag = m.types.tag_of(want);
-            if (tag == types.TK_REF || tag == types.TK_PTR) && m.types.tag_of(m.types.b_of(want)) == types.TK_STR { return true; }
+            // a string's bytes are read-only data: only a shared pointer to them
+            if (tag == types.TK_REF || tag == types.TK_PTR) && m.types.a_of(want) != 1 && m.types.tag_of(m.types.b_of(want)) == types.TK_STR { return true; }
             return self.fail_t(m, "string operand cannot have type ", want);
         }
         if k == model.O_FUNC {
@@ -619,7 +620,7 @@ impl V {
         for b in self.blo..self.blo + nb {
             let il = m.blk_ins_lo.as_slice()[b] as usize;
             for i in il..il + m.blk_ins_n.as_slice()[b] as usize {
-                if !self.check_inst(m, b - self.blo, i) { er.add(errs.K_VERIFY, ln_i[i], 0, self.msg.as_slice()); }
+                if !self.check_inst(m, b - self.blo, i) || !self.check_mutability(m, i) { er.add(errs.K_VERIFY, ln_i[i], 0, self.msg.as_slice()); }
             }
             if !self.check_term(m, b) { er.add(errs.K_VERIFY, ln_t[b], 0, self.msg.as_slice()); }
         }
@@ -1345,6 +1346,44 @@ impl V {
         }
         if op == ir_text_terminals.IR_T_INTR { return self.check_intrinsic(m, i, ol, n, ty); }
         return self.check_vec(m, op, ty, ol, n);
+    }
+
+    // Operand o as a pointer: (is a pointer, mutable, raw). A string is a shared reference (its
+    // bytes are read-only data).
+    fn opnd_access(&self, m: &model.Module, o: usize) -> (bool, bool, bool) {
+        let k = m.opnd_kind.as_slice()[o];
+        if k == model.O_STR { return (true, false, false); }
+        if k != model.O_VALUE { return (false, false, false); }
+        return vtypes.access(m, self.opnd_ty(m, o));
+    }
+
+    // Instruction i, already well typed, against the mutability rule (contracts/checked-ir.md
+    // "Mutability"): every write goes through a mutable pointer, and no instruction makes a
+    // mutable pointer from a shared one. Exempt: a call's arguments and an intrinsic's operands
+    // (the result has the callee's or the signature's type), a `load` (it reads a stored pointer,
+    // which points elsewhere), and a cast to or from a raw pointer or of an int. Every other
+    // instruction with a mutable pointer result and a shared pointer operand is refused.
+    fn check_mutability(&mut self, m: &model.Module, i: usize) -> bool {
+        let op = m.ins_op.as_slice()[i];
+        let ol = m.ins_opnd_lo.as_slice()[i] as usize;
+        let n = m.ins_opnd_n.as_slice()[i] as usize;
+        if op == ir_text_terminals.IR_T_KW_STORE || op == ir_text_terminals.IR_T_MEM_DOT_STORE_STREAM {
+            let (p, mutable, _) = if n > 0 then self.opnd_access(m, ol) else (false, false, false);
+            if p && mutable { return true; }
+            return self.fail(if op == ir_text_terminals.IR_T_KW_STORE then "store through a shared pointer" else "mem.store_stream through a shared pointer");
+        }
+        let ty = m.ins_ty.as_slice()[i];
+        if ty == NONE { return true; }
+        let (rp, rmut, rraw) = vtypes.access(m, ty);
+        if !rp || !rmut { return true; }
+        if op == ir_text_terminals.IR_T_KW_CALL || op == ir_text_terminals.IR_T_CALL_DOT_IND || op == ir_text_terminals.IR_T_INTR || op == ir_text_terminals.IR_T_KW_LOAD { return true; }
+        let (fp, _, fraw) = if n > 0 then self.opnd_access(m, ol) else (false, false, false);
+        if vtypes.cast_kind(op) != 255 && (rraw || !fp || fraw) { return true; }
+        for o in ol..ol + n {
+            let (p, mutable, _) = self.opnd_access(m, o);
+            if p && !mutable { return self.fail("mutable pointer from a shared pointer operand"); }
+        }
+        return true;
     }
 
     fn prefix(&mut self, p: &str) -> bool {

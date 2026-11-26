@@ -331,8 +331,10 @@ step is that instruction's old position.
 **B2. Element addresses.** Every `addr.elem s i`, `vec.load s i`, and `vec.store s i v` (exactly
 those operand counts) whose operand 0 is a value `s` of type `ref` or `ptr` (`mut` or `const`)
 `slice T` (with or without `align`), with `T` neither an array nor a slice, gets
-`%p = slice.ptr t<ptr mut T> s` directly before it, with the access's site, and reads `%p` as
-operand 0. The type `ptr mut T` is added to the type table when the module lacks it. [N: pointwise.]
+`%p = slice.ptr t<P> s` directly before it, with the access's site, and reads `%p` as
+operand 0: P is `ptr mut T` when `s` is mutable (`ref mut`, `ptr mut`), else `ptr const T` (the
+verifier's "Mutability", checked-ir.md). The types `ptr const T` and `ptr mut T` are added to the
+type table when the module lacks them. [N: pointwise.]
 
 **B2'.** Only when B2 changed the body: B1 with `slice.ptr` in place of `slice.len`.
 
@@ -1304,8 +1306,9 @@ b3():
 Loop depth (B7): the edge `b2 -> b1` is a back edge, so `b1` and `b2` have depth 1. B1: group `%0`
 has two parts (`%4`, `%9`) and moves: `%4` goes before the first non-slot instruction of `b0`,
 `%9` is deleted and reads `%4`; group `%1` has one part at depth 0 and stays. B2: `%10`'s slice
-operand gets `slice.ptr` of the new type `ptr mut t0` before it. B2': its one part is at depth 1,
-so it moves to the same place as `%4` and goes before it (an earlier step's insertion). B3: `%5`,
+operand gets `slice.ptr` of the new type `ptr const t0` (`%0` is a shared slice) before it. B2':
+its one part is at depth 1, so it moves to the same place as `%4` and goes before it (an earlier
+step's insertion). B3: `%5`,
 `%6` form one group and move to directly after `%4`; `%6` reads `%5`. B4: in `b2`, `%16` has the
 key of `%14`, only branch arguments read it, and the search from `b2` pops `b1`, `b3`, then `b2`:
 it reads `%14`. B5 deletes `%15` and `%3`. Output, whole:
@@ -1318,7 +1321,7 @@ type t2 bool
 type t3 ref t0
 type t4 ref t7
 type t5 ref mut t0
-type t6 ptr mut t0
+type t6 ptr const t0
 type t7 slice t0
 fn @0 main.sum(t4, t4) -> t0 {
 b0(%0: t4, %1: t4):

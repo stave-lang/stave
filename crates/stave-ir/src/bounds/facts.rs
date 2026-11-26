@@ -24,6 +24,8 @@
 //!   of one. A strict unsigned comparison with `n -| c` (`sub.sat`, constant `c`) also gives
 //!   `x + c < n` (`x < n -| c`) or `x + c >= n` (its negation): `n -| c` is `max(n - c, 0)`.
 //!   A contract check's branch is such a branch: its true side is the only way past it.
+//! - a check, after it: `check.bounds x (n -| c)` gives `x + c < n`, as the strict comparison
+//!   with `n -| c` above (a check on another length is read by the `Dominated` proof alone).
 //! - an asserting call: `call @f .. c ..` where every `ret` of `f` is reached only through a branch
 //!   on that parameter being true (`std.debug.assert`); `c` holds after the call.
 //! - a bit op on unsigned values, after it: `v = and x y` gives `v <= x` and `v <= y`;
@@ -457,6 +459,11 @@ impl Cx<'_> {
                 }
             }
         }
+        for i in 0..self.b.insts.len() as u32 {
+            if self.b.insts.op[i as usize] == Op::BoundsCheck && self.reachable_inst(i) {
+                self.check_facts(&mut g, i);
+            }
+        }
         for d in 0..self.b.insts.len() as u32 {
             if matches!(self.b.insts.op[d as usize], Op::And | Op::Rem | Op::Shr) && self.reachable_inst(d) {
                 self.bit_facts(&mut g, d);
@@ -507,6 +514,22 @@ impl Cx<'_> {
         // query tries them in.
         g.facts.sort_by_key(|f| f.from);
         g
+    }
+
+    /// The fact a `check.bounds x (n -| c)` states after it: `x < n -| c`, so `x + c < n`
+    /// (`n -| c` is `max(n - c, 0)`, and `x < 0` is false for an unsigned `x`). A check on any
+    /// other length is no fact here: the `Dominated` proof reads it.
+    fn check_facts(&self, g: &mut Graph, i: u32) {
+        let &[x, y] = self.b.args(i) else { return };
+        // `check.bounds` compares unsigned (its operands are unsigned values or constants ≥ 0)
+        if let Operand::Value(xv) = x
+            && !self.unsigned(xv)
+        {
+            return;
+        }
+        let Some((n, c)) = self.sat_bound(y) else { return };
+        let at = Region { block: self.block_of[i as usize], after: Some(i) };
+        self.add_le(g, at, Source::Check { inst: i }, (Some(x), Some(n), -c - 1), None);
     }
 
     /// The facts a returned `call @f ..` states by `f`'s summary: its `post` rows about the

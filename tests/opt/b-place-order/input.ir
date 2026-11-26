@@ -3,7 +3,7 @@ type t0 int u 64
 type t1 int u size
 type t2 bool
 type t3 ref t0
-type t4 ref t6
+type t4 ref mut t6
 type t5 ptr const t0
 type t6 slice t0
 fn @0 main.f(t4, t1) -> t0 {

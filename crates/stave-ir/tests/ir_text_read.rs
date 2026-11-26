@@ -1319,7 +1319,7 @@ b0(%0: t2):
 }
 
 /// `body` after a release header of `level` and the types of the element pointer cases: `t3` a
-/// `&[u64]`, `t4` its element pointer `*mut u64`, `t5` a `&u64`. The fn header is line 8.
+/// `&[u64]`, `t4` its element pointer `*const u64`, `t5` a `&u64`. The fn header is line 8.
 fn elem_ptr_module(level: &str, body: &str) -> String {
     format!(
         "stave.ir 4 \"x86_64-linux-v2\" release {level}
@@ -1327,7 +1327,7 @@ type t0 int u size
 type t1 int u 64
 type t2 slice t1
 type t3 ref t2
-type t4 ptr mut t1
+type t4 ptr const t1
 type t5 ref t1
 {body}"
     )
@@ -1476,9 +1476,11 @@ b0(%0: t3):
         ),
         (
             "a store",
-            "fn @0 main.put(t3, t1) {
-b0(%0: t3, %1: t1):
-  %2 = slice.ptr t4 %0
+            "type t6 ref mut t2
+type t7 ptr mut t1
+fn @0 main.put(t6, t1) {
+b0(%0: t6, %1: t1):
+  %2 = slice.ptr t7 %0
   store () %2 %1
   ret
 }
@@ -1551,7 +1553,7 @@ type t0 int u 64
 type t1 tuple t0 t0
 type t2 slice t1
 type t3 ref t2
-type t4 ptr mut t1
+type t4 ptr const t1
 type t5 ref t0
 fn @0 main.get(t3) -> t0 {
 b0(%0: t3):
@@ -1665,7 +1667,7 @@ fn an_access_through_the_element_pointer_of_a_slice_of_arrays_is_refused() {
     let types = "type t6 array t1 4
 type t7 slice t6
 type t8 ref t7
-type t9 ptr mut t6
+type t9 ptr const t6
 type t10 ref t6
 type t11 vec t1 4
 ";
@@ -1887,13 +1889,17 @@ b0(%0: t4):
 "
         )
     };
-    let refused = [
-        rebuild("t4", "t5"),
-        rebuild("t4", "t11"),
-        rebuild("t4", "t9"),
-        align_to("8", "%8", "%9"),
-        align_to("16", "%9", "%8"),
-    ];
+    // a mutable slice from a shared one's element pointer: the verifier's mutability rule, at
+    // every level
+    for to in ["t11", "t9"] {
+        let body = rebuild("t4", to);
+        for level in LEVELS {
+            let src = module(level, &body);
+            let line = line_of(&src, "slice.make");
+            rejects(&src, &format!("t.ir:{line}: verify: mutable pointer from a shared pointer operand"));
+        }
+    }
+    let refused = [rebuild("t4", "t5"), align_to("8", "%8", "%9"), align_to("16", "%9", "%8")];
     for body in &refused {
         load(&module("opt", body));
         for level in AUDITED {
@@ -2063,4 +2069,162 @@ fn an_intrinsic_of_another_arch_is_an_error_on_aarch64() {
     let want = "t.ir:7: verify: `intrinsic.xgetbv` is not built for the target arch AArch64";
     let es = rejects(&arch_text("aarch64-linux"), want);
     assert_eq!(es.len(), 1, "{}", render(&es));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mutability (checked-ir.md "Mutability")
+
+/// `body` after a release header of `level` and pointer types of both mutabilities: `t3`/`t4`
+/// `&[u32; 4]`/`&mut [u32; 4]`, `t6`/`t7` `&[u32]`/`&mut [u32]`, `t8`/`t9` `*const u32`/`*mut u32`,
+/// `t10`/`t11` `&u32`/`&mut u32`, `t13`/`t14` `&str`/`&mut str`, `t16`/`t17` `*const u8`/`*mut u8`,
+/// `t18`/`t19`/`t20` a `&mut u32` behind `&mut`/`&`/`*const`, `t22`/`t23`
+/// `&(u32, u32)`/`&mut (u32, u32)`, `t25` `&mut [u8]`.
+fn mut_module(level: &str, body: &str) -> String {
+    format!(
+        "stave.ir 4 \"x86_64-linux-v2\" release {level}
+type t0 int u size
+type t1 int u 32
+type t2 array t1 4
+type t3 ref t2
+type t4 ref mut t2
+type t5 slice t1
+type t6 ref t5
+type t7 ref mut t5
+type t8 ptr const t1
+type t9 ptr mut t1
+type t10 ref t1
+type t11 ref mut t1
+type t12 str
+type t13 ref t12
+type t14 ref mut t12
+type t15 int u 8
+type t16 ptr const t15
+type t17 ptr mut t15
+type t18 ref mut t11
+type t19 ref t11
+type t20 ptr const t11
+type t21 tuple t1 t1
+type t22 ref t21
+type t23 ref mut t21
+type t24 slice t15
+type t25 ref mut t24
+str s0 \"abc\"
+{body}"
+    )
+}
+
+const SHARED_SOURCE: &str = "mutable pointer from a shared pointer operand";
+
+/// Refused at every level, at the first line containing `at`, with `msg`.
+fn refused_for_mutability(body: &str, at: &str, msg: &str) {
+    for level in LEVELS {
+        let src = mut_module(level, body);
+        let es = rejects(&src, &format!("t.ir:{}: verify: {msg}", line_of(&src, at)));
+        assert_eq!(es[0].kind, ErrorKind::Verify, "{level}");
+    }
+}
+
+/// A write through a shared pointer, and a mutable pointer made from a shared one by an address,
+/// slice, cast, or load instruction, are refused at every level.
+#[test]
+fn a_write_needs_a_mutable_pointer() {
+    let cases: [(&str, &str, &str); 11] = [
+        (
+            "fn @0 m.f(t10) {\nb0(%0: t10):\n  store () %0 7\n  ret\n}\n",
+            "store",
+            "store through a shared pointer",
+        ),
+        (
+            "fn @0 m.f(t8) {\nb0(%0: t8):\n  store () %0 7\n  ret\n}\n",
+            "store",
+            "store through a shared pointer",
+        ),
+        (
+            "fn @0 m.f(t10) {\nb0(%0: t10):\n  mem.store_stream () %0 7\n  ret\n}\n",
+            "mem.store_stream",
+            "mem.store_stream through a shared pointer",
+        ),
+        // a `static`'s `&T`, made `&mut` by its element address
+        (
+            "fn @0 m.f(t3) {\nb0(%0: t3):\n  %1 = addr.elem t11 %0 1\n  store () %1 9\n  ret\n}\n",
+            "addr.elem",
+            SHARED_SOURCE,
+        ),
+        (
+            "fn @0 m.f(t22) {\nb0(%0: t22):\n  %1 = addr.field t11 %0 0\n  store () %1 9\n  ret\n}\n",
+            "addr.field",
+            SHARED_SOURCE,
+        ),
+        // the element pointer of a shared slice, stored through
+        (
+            "fn @0 m.f(t6, t0) {\nb0(%0: t6, %1: t0):\n  %2 = slice.len t0 %0\n  check.bounds () %1 %2\n  \
+             %3 = slice.ptr t9 %0\n  %4 = addr.elem t9 %3 %1\n  store () %4 7\n  ret\n}\n",
+            "slice.ptr",
+            SHARED_SOURCE,
+        ),
+        // a `&mut [u8]` made from a `&str`
+        (
+            "fn @0 m.f(t13) -> t25 {\nb0(%0: t13):\n  %1 = slice.ptr t16 %0\n  %2 = slice.len t0 %0\n  \
+             %3 = slice.make t25 %1 %2\n  ret %3\n}\n",
+            "slice.make",
+            SHARED_SOURCE,
+        ),
+        ("fn @0 m.f() -> t17 {\nb0():\n  %0 = slice.ptr t17 s0\n  ret %0\n}\n", "slice.ptr", SHARED_SOURCE),
+        (
+            "fn @0 m.f(t10) {\nb0(%0: t10):\n  %1 = cast t11 %0\n  store () %1 7\n  ret\n}\n",
+            "cast",
+            SHARED_SOURCE,
+        ),
+        (
+            "fn @0 m.f() -> t14 {\nb0():\n  %0 = cast t14 s0\n  ret %0\n}\n",
+            "cast",
+            "cast to t14 (ref mut t12)",
+        ),
+        (
+            "fn @0 m.f(t8) {\nb0(%0: t8):\n  %1 = addr.elem t9 %0 0\n  store () %1 7\n  ret\n}\n",
+            "addr.elem",
+            SHARED_SOURCE,
+        ),
+    ];
+    for (body, at, msg) in cases {
+        refused_for_mutability(body, at, msg);
+    }
+    // a string operand is a shared pointer: no `&mut str` argument
+    let body = "fn @1 m.g(t14)\nfn @0 m.f() {\nb0():\n  call () @1 s0\n  ret\n}\n";
+    refused_for_mutability(body, "call", "argument 0: string operand cannot have type t14 (ref mut t12)");
+}
+
+/// Mutability comes from a slot, a mutable param, a call result, or a raw pointer; addresses and
+/// slices keep or drop it, and the casts `unsafe` code writes are trusted.
+#[test]
+fn a_mutable_pointer_comes_from_a_mutable_source() {
+    let bodies = [
+        "fn @0 m.f() -> t1 {\nb0():\n  %0 = slot t11\n  store () %0 7\n  %1 = load t1 %0\n  ret %1\n}\n",
+        "fn @0 m.f(t4) {\nb0(%0: t4):\n  %1 = addr.elem t11 %0 1\n  store () %1 9\n  ret\n}\n",
+        "fn @0 m.f(t4) -> t1 {\nb0(%0: t4):\n  %1 = addr.elem t10 %0 1\n  %2 = load t1 %1\n  ret %2\n}\n",
+        "fn @0 m.f(t23) {\nb0(%0: t23):\n  %1 = addr.field t11 %0 1\n  store () %1 9\n  ret\n}\n",
+        "fn @0 m.f(t6, t0) -> t1 {\nb0(%0: t6, %1: t0):\n  %2 = slice.len t0 %0\n  check.bounds () %1 %2\n  \
+         %3 = slice.ptr t8 %0\n  %4 = addr.elem t10 %3 %1\n  %5 = load t1 %4\n  ret %5\n}\n",
+        "fn @0 m.f(t7, t0) {\nb0(%0: t7, %1: t0):\n  %2 = slice.len t0 %0\n  check.bounds () %1 %2\n  \
+         %3 = slice.ptr t9 %0\n  %4 = addr.elem t11 %3 %1\n  store () %4 7\n  ret\n}\n",
+        "fn @0 m.f(t7) -> t6 {\nb0(%0: t7):\n  %1 = slice.ptr t9 %0\n  %2 = slice.len t0 %0\n  \
+         %3 = slice.make t6 %1 %2\n  ret %3\n}\n",
+        // `self as *const UnsafeCell<T> as *mut T`, `&mut *p`, an int cast to a pointer
+        "fn @0 m.f(t10) {\nb0(%0: t10):\n  %1 = cast t8 %0\n  %2 = cast t9 %1\n  store () %2 7\n  ret\n}\n",
+        "fn @0 m.f(t9) {\nb0(%0: t9):\n  %1 = cast t11 %0\n  store () %1 7\n  ret\n}\n",
+        "fn @0 m.f(t0) {\nb0(%0: t0):\n  %1 = cast t9 %0\n  store () %1 7\n  ret\n}\n",
+        // a load reads a stored pointer: a `&mut` behind a `&` keeps its type
+        "fn @0 m.f(t19) {\nb0(%0: t19):\n  %1 = load t11 %0\n  store () %1 7\n  ret\n}\n",
+        "fn @0 m.f(t18) {\nb0(%0: t18):\n  %1 = load t11 %0\n  store () %1 7\n  ret\n}\n",
+        "fn @0 m.f(t20) {\nb0(%0: t20):\n  %1 = load t11 %0\n  store () %1 7\n  ret\n}\n",
+        "fn @1 m.g(t10) -> t11\nfn @0 m.f(t10) {\nb0(%0: t10):\n  %1 = call t11 @1 %0\n  store () %1 7\n  ret\n}\n",
+        "fn @1 m.g(t13)\nfn @0 m.f() {\nb0():\n  call () @1 s0\n  ret\n}\n",
+        "fn @0 m.f(t11) -> t1 {\nb0(%0: t11):\n  %1 = cast t10 %0\n  %2 = load t1 %1\n  ret %2\n}\n",
+        "fn @0 m.f(t11) {\nb0(%0: t11):\n  mem.store_stream () %0 7\n  ret\n}\n",
+    ];
+    for body in bodies {
+        for level in LEVELS {
+            load(&mut_module(level, body));
+        }
+    }
 }

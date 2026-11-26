@@ -121,6 +121,26 @@ test fn faults_of_verification() {
     debug.assert(first_has(&load.load(text(&g).as_slice()), "lie past its size"), "data inside its static");
 }
 
+test fn a_write_needs_a_mutable_pointer() {
+    let hdr = "stave.ir 4 \"x86_64-linux-v2\" release lowered";
+    let a = [hdr, "type t0 int u 32", "type t1 ref t0", "fn @0 a.f(t1) {", "b0(%0: t1):", "  store () %0 7", "  ret", "}"];
+    let la = load.load(text(&a).as_slice());
+    debug.assert(!la.ok() && la.errs.line.as_slice()[0] == 6 && first_has(&la, "store through a shared pointer"), "a store through a ref");
+    let b = [hdr, "type t0 int u 32", "type t1 array t0 4", "type t2 ref t1", "type t3 ref mut t0", "fn @0 a.f(t2) {", "b0(%0: t2):", "  %1 = addr.elem t3 %0 1", "  store () %1 9", "  ret", "}"];
+    let lb = load.load(text(&b).as_slice());
+    debug.assert(!lb.ok() && lb.errs.line.as_slice()[0] == 8 && first_has(&lb, "mutable pointer from a shared pointer operand"), "a ref mut element of a ref array");
+    let c = [hdr, "type t0 int u 32", "type t1 slice t0", "type t2 ref t1", "type t3 ptr mut t0", "fn @0 a.f(t2) -> t3 {", "b0(%0: t2):", "  %1 = slice.ptr t3 %0", "  ret %1", "}"];
+    debug.assert(first_has(&load.load(text(&c).as_slice()), "mutable pointer from a shared pointer operand"), "a mutable element pointer of a shared slice");
+    let d = [hdr, "type t0 int u 8", "type t1 str", "type t2 ref mut t1", "str s0 \"abc\"", "fn @1 a.g(t2)", "fn @0 a.f() {", "b0():", "  call () @1 s0", "  ret", "}"];
+    debug.assert(first_has(&load.load(text(&d).as_slice()), "string operand cannot have type"), "a string is shared");
+    let e = [hdr, "type t0 int u 32", "type t1 ref t0", "type t2 ptr const t0", "type t3 ptr mut t0", "fn @0 a.f(t1) {", "b0(%0: t1):", "  %1 = cast t2 %0", "  %2 = cast t3 %1", "  store () %2 7", "  ret", "}"];
+    debug.assert(load.load(text(&e).as_slice()).ok(), "a cast to a raw pointer is trusted");
+    let f = [hdr, "type t0 int u 32", "type t1 ref t0", "type t2 ref mut t0", "fn @0 a.f(t1) {", "b0(%0: t1):", "  %1 = cast t2 %0", "  store () %1 7", "  ret", "}"];
+    debug.assert(first_has(&load.load(text(&f).as_slice()), "mutable pointer from a shared pointer operand"), "no ref mut cast of a ref");
+    let g = [hdr, "type t0 int u 32", "type t1 ref mut t0", "fn @0 a.f() {", "b0():", "  %0 = slot t1", "  store () %0 7", "  ret", "}"];
+    debug.assert(load.load(text(&g).as_slice()).ok(), "a store to a slot");
+}
+
 test fn slots_are_a_prefix_of_b0() {
     let hdr = "stave.ir 4 \"x86_64-linux-v2\" debug checked";
     let a = [hdr, "type t0 int s 32", "type t1 ref mut t0", "fn @0 a.f(t0) {", "b0(%0: t0):", "  %1 = slot t1", "  %2 = slot t1", "  store () %1 %0", "  ret", "}"];

@@ -3,7 +3,7 @@ type t0 int u 64
 type t1 int u size
 type t2 bool
 type t3 ref t0
-type t4 ref t7
+type t4 ref mut t7
 type t5 ptr const t0
 type t6 ptr mut t0
 type t7 slice t0

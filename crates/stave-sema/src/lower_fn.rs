@@ -356,6 +356,8 @@ pub(crate) struct FnState {
     /// A closure or `spawn` body: the locals it captures. A capture is a reference to a local
     /// of a fn around, which holds its value whenever the body runs.
     pub captures: Vec<usize>,
+    /// The captures of [`FnState::captures`] the body only reads: their slot is a `&`.
+    pub shared_captures: Vec<usize>,
 }
 
 /// The write-back of a `&mut` chunk binding: the vector in `slot` goes to `s[i..i+N]`, only the
@@ -705,9 +707,16 @@ impl<'a> FnCx<'a> {
             return;
         }
         if let Some(p) = self.f.slot.get(l).copied().flatten() {
-            let pt = self.t_ref(true, self.locals[l].ty);
+            let pt = self.slot_ptr_ty(l);
             self.event(kind, p, pt);
         }
+    }
+
+    /// The pointer type of local `l`'s slot: `&mut T`, or `&T` for a capture the body only
+    /// reads.
+    pub(crate) fn slot_ptr_ty(&mut self, l: usize) -> Ty {
+        let shared = self.f.shared_captures.contains(&l);
+        self.t_ref(!shared, self.locals[l].ty)
     }
 
     /// The locals of a scope end, last declared first (after their drops).
@@ -860,10 +869,12 @@ impl<'a> FnCx<'a> {
             return v;
         }
         let Some((inner, _, _)) = self.pointee(want) else { return v };
+        // the element pointer is as mutable as the source: a `&mut` keeps a mutable rebuild valid
+        let mutable = self.pointee(from).is_some_and(|(_, m, _)| m);
         match self.kind(inner) {
             TypeKind::Slice { elem, .. } => {
                 let us = self.t_usize();
-                let ep = self.t_ref(false, elem);
+                let ep = self.t_ref(mutable, elem);
                 let p = self.op1(Op::SlicePtr, ep, v);
                 let n = self.op1(Op::SliceLen, us, v);
                 self.op2(Op::SliceMake, want, p, n)
@@ -871,7 +882,7 @@ impl<'a> FnCx<'a> {
             TypeKind::Str => {
                 let us = self.t_usize();
                 let u8t = self.t_int(false, crate::types::IntBits::B8);
-                let ep = self.t_ref(false, u8t);
+                let ep = self.t_ref(mutable, u8t);
                 let p = self.op1(Op::SlicePtr, ep, v);
                 let n = self.op1(Op::SliceLen, us, v);
                 self.op2(Op::SliceMake, want, p, n)
@@ -902,7 +913,7 @@ impl<'a> FnCx<'a> {
         }
         match self.f.slot.get(l).copied().flatten() {
             Some(p) => {
-                let pt = self.t_ref(true, ty);
+                let pt = self.slot_ptr_ty(l);
                 Place { base: Base::Mem(p, pt), proj: Vec::new(), ty, root: Some(l) }
             }
             None => Place { base: Base::Local(l), proj: Vec::new(), ty, root: Some(l) },
@@ -2197,6 +2208,7 @@ impl FnState {
             ticket: false,
             run: None,
             captures: Vec::new(),
+            shared_captures: Vec::new(),
             ensures_end: None,
         }
     }

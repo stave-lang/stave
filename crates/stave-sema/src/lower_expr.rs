@@ -578,7 +578,7 @@ impl<'a> FnCx<'a> {
             TypeKind::Slice { elem, .. } => Some(self.t_ref(mutable, elem)),
             TypeKind::Str => {
                 let u8t = self.t_int(false, crate::types::IntBits::B8);
-                Some(self.t_ref(false, u8t))
+                Some(self.t_ref(mutable, u8t))
             }
             _ => None,
         };

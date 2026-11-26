@@ -781,8 +781,8 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// The environment type of closure body `k`: `&mut (&mut T0, &mut T1, ..)`, one element per
-    /// capture (crate::closures); `None` without captures.
+    /// The environment type of closure body `k`: `&mut (&T0, &mut T1, ..)`, one element per
+    /// capture by its mode (crate::closures::env_type); `None` without captures.
     pub fn env_type(&mut self, k: usize) -> Option<EnvType> {
         let caps = self.closure_info.get(k)?.captures.clone();
         if caps.is_empty() {
@@ -793,8 +793,8 @@ impl<'a> FnCx<'a> {
         for c in &caps {
             let l = *self.by_node.get(&c.binding)?;
             let t = self.locals[l].ty;
-            tys.push(t);
-            locals.push((l, self.t_ref(true, t)));
+            tys.push((t, c.mode));
+            locals.push((l, self.t_ref(c.mode == crate::closures::CaptureMode::RefMut, t)));
         }
         let (tup, pt) = crate::closures::env_type(&mut self.tys, &tys);
         Some((tup, pt, locals))
@@ -823,6 +823,9 @@ impl<'a> FnCx<'a> {
                 let p = Operand::Value(self.f.b.load(FnCx::ir(rt), a));
                 self.f.slot[l] = Some(p);
                 self.f.captures.push(l);
+                if self.pointee(rt).is_some_and(|(_, m, _)| !m) {
+                    self.f.shared_captures.push(l);
+                }
             }
         }
         self.make_slots(Some(n));
@@ -1170,8 +1173,6 @@ impl<'a> FnCx<'a> {
         let f = self.req(Req::Closure(k as u32));
         let Some((tup, pt, locals)) = self.env_type(k) else { return Some(Operand::Func(f)) };
         let env = self.new_slot(tup);
-        let modes: Vec<crate::closures::CaptureMode> =
-            self.closure_info.get(k).map_or(Vec::new(), |c| c.captures.iter().map(|c| c.mode).collect());
         for (i, &(l, rt)) in locals.iter().enumerate() {
             let Some(p) = self.f.slot.get(l).copied().flatten() else {
                 self.fail(n, "captured local without a slot");
@@ -1180,8 +1181,8 @@ impl<'a> FnCx<'a> {
             let fp = self.t_ref(true, rt);
             let ix = self.int(i as i128);
             let a = self.op2(Op::FieldAddr, fp, env, ix);
-            let shared = modes.get(i) != Some(&crate::closures::CaptureMode::RefMut);
-            let p = self.capture(p, rt, shared);
+            let from = self.slot_ptr_ty(l);
+            let p = self.capture(p, from, rt);
             self.f.b.store(a, p);
         }
         let _ = pt;
@@ -1193,21 +1194,15 @@ impl<'a> FnCx<'a> {
         Some(Operand::Value(fv))
     }
 
-    /// The capture reference a closure literal makes of the local at `p` (an environment
-    /// element of type `rt`, a `&mut`): with the borrow side table on, a borrow of the local,
-    /// `&` when the body only reads it.
-    fn capture(&mut self, p: Operand, rt: Ty, shared: bool) -> Operand {
+    /// The capture reference a closure literal makes of the local at `p` (its slot, of type
+    /// `from`) for an environment element of type `rt`: a `&` when the body only reads the local,
+    /// else a `&mut`. With the borrow side table on, a borrow of the local.
+    fn capture(&mut self, p: Operand, from: Ty, rt: Ty) -> Operand {
+        let p = self.convert_ptr(p, from, rt);
         if !self.g.borrows {
             return p;
         }
-        let Some((inner, _, _)) = self.pointee(rt) else { return p };
-        if !shared {
-            return self.borrowed(p, rt);
-        }
-        let st = self.t_ref(false, inner);
-        let s = self.convert_ptr(p, rt, st);
-        let b = self.borrowed(s, st);
-        self.convert_ptr(b, st, rt)
+        self.borrowed(p, rt)
     }
 
     /// The type of a binding pattern (a single name), for the coercion site of its initializer.

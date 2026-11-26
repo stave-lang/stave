@@ -7,7 +7,7 @@ type t4 ref t0
 type t5 ref t9
 type t6 ref t10
 type t7 ref mut t9
-type t8 ptr mut t0
+type t8 ptr const t0
 type t9 array t0 3
 type t10 slice t0
 site 0 "src/main.stv" 14 4 main.pairs

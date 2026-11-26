@@ -21,7 +21,7 @@ use stave_ir::{Body, Op, Operand, TypeId, TypeKey, TypeTable, Value, VecOp};
 use crate::cfg::{self, Edges, NONE};
 use crate::edit::{At, Edit};
 
-/// Interns the element pointer type `*mut T` of every slice type `[T]`, which
+/// Interns the element pointer types `*const T` and `*mut T` of every slice type `[T]`, which
 /// [`split_elem_addrs`] needs. Call it once before the per-function passes.
 pub fn declare_elem_pointers(types: &mut TypeTable) {
     let elems: Vec<TypeId> = types
@@ -33,6 +33,7 @@ pub fn declare_elem_pointers(types: &mut TypeTable) {
         })
         .collect();
     for e in elems {
+        types.ptr(false, e);
         types.ptr(true, e);
     }
 }
@@ -165,16 +166,17 @@ pub fn split_elem_addrs(types: &TypeTable, b: &mut Body) -> bool {
         if span.len != arity {
             continue;
         }
-        let Some(TypeKey::Ref { inner, .. } | TypeKey::RawPtr { inner, .. }) =
+        let Some(&(TypeKey::Ref { inner, mutable } | TypeKey::RawPtr { inner, mutable })) =
             b.value_ty(s).and_then(|t| types.key(t))
         else {
             continue;
         };
-        let Some(TypeKey::Slice { elem, .. }) = types.key(*inner) else { continue };
+        let Some(TypeKey::Slice { elem, .. }) = types.key(inner) else { continue };
         if matches!(types.key(*elem), Some(TypeKey::Array { .. } | TypeKey::Slice { .. })) {
             continue;
         }
-        let Some(pt) = types.find(&TypeKey::RawPtr { mutable: true, inner: *elem }) else { continue };
+        // the element pointer is as mutable as the slice reference: a shared slice's is `*const T`
+        let Some(pt) = types.find(&TypeKey::RawPtr { mutable, inner: *elem }) else { continue };
         let p = edit.value(pt);
         edit.insert(
             At::Before(i as u32),
