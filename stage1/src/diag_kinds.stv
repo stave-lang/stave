@@ -365,14 +365,6 @@ fn heads_unify(tab: &mut types.Table, sg: &sigs.Sigs, a: u32, b: u32, args: bool
     return true;
 }
 
-// The span (file, start, size) of the name of generic param row r of a decl in item it.
-fn gparam_span(sg: &sigs.Sigs, tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, it: u32, r: usize) -> (u32, u32, u32) {
-    let g = tree.item_node.as_slice()[it as usize] as usize + sg.cx.gens.node.as_slice()[r] as usize;
-    let a = tree.tok.as_slice()[g];
-    let nt = if tk(t, a) == terminals.T_KW_CONST then a + 1 else a;
-    return modules.tok_span(lx, set, t, nt);
-}
-
 // E0905's comparison (stage0's `sig_matches`): method m of impl i against trait method tm, with
 // `Self` the impl's self type, the trait's params its trait arguments (the error type for one not
 // given), and tm's own generics renumbered after the impl's. They match when they have as many
@@ -592,9 +584,6 @@ pub fn impl_diags(d: &mut diag.Diags, sg: &mut sigs.Sigs, ds: &decls.Decls, md: 
     copy_checks(d, sg, ds, md, nm, fl, lx, set, t, tree, texts.as_slice(), t_lo.as_slice(), ok.as_slice());
 }
 
-// The trait operator method names, in `traits` operator order.
-const OP_METHODS: &str = "add wrap_add sat_add sub wrap_sub sat_sub mul wrap_mul sat_mul div rem shl wrap_shl shr bitand bitor bitxor neg not";
-
 // E0415 and E0422 for the impls of list ok (they passed the checks that skip an impl), as stage0
 // raises them: Copy is asked of each field type of a Copy impl's struct or enum (substituted by
 // its self type's arguments; an erroneous one is skipped) and of an operator impl's self type,
@@ -688,27 +677,15 @@ fn copy_checks(d: &mut diag.Diags, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &mo
             // E0422 with the borrowing method that stands in for the operator
             let k = q_k.as_slice()[x] as usize;
             let tr = tq.tr.lang.ops.as_slice()[k];
-            let (a, b) = sigs.word(OP_METHODS, k);
-            let mname = &mem.str_bytes(OP_METHODS)[a..b];
-            let s = modules.lookup(&nm.tab, mname);
-            let key = search.pair(tr, s);
-            let p = search.lower_bound(ds.mem_key.as_slice(), key);
-            let unary = s != NONE && p < ds.mem_key.len() && ds.mem_key.as_slice()[p] == key && sg.params.row(ds.mem_decl.as_slice()[p] as usize).len() == 1;
             d.begin(422, "");
             buf.clear();
             decl_path(&mut buf, ds, md, nm, tr);
             d.arg("trait", buf.as_slice());
             d.arg("type", self_text);
-            buf.clear();
-            buf.extend_from_slice(mem.str_bytes("fn "));
-            buf.extend_from_slice(mname);
-            buf.extend_from_slice(mem.str_bytes(if unary then "(&self) -> Self" else "(&self, rhs: &Self) -> Self"));
+            let mut call = vec.Vec::<u8>.new();
+            diag_tc.op_forms(sg, ds, nm, tr, k, false, &mut buf, &mut call);
             d.arg("sig", buf.as_slice());
-            buf.clear();
-            buf.extend_from_slice(mem.str_bytes("a."));
-            buf.extend_from_slice(mname);
-            buf.extend_from_slice(mem.str_bytes(if unary then "()" else "(&b)"));
-            d.arg("call", buf.as_slice());
+            d.arg("call", call.as_slice());
             d.end(sf, ss, sz);
             continue;
         }
@@ -785,7 +762,7 @@ fn check(d: &mut diag.Diags, tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.D
                 d.begin(421, "");
                 d.arg("param", nm.tab.text(sg.cx.gens.name.as_slice()[r] as usize));
                 d.arg("type", self_text);
-                let (pf, ps, pz) = gparam_span(sg, tree, lx, set, t, it, r);
+                let (pf, ps, pz) = diag_tc.gparam_span(sg, tree, lx, set, t, it, r);
                 d.role("param", pf, ps, pz);
                 d.end(f, s, z);
             }
@@ -986,7 +963,7 @@ fn drop_views(d: &mut diag.Diags, tab: &types.Table, sg: &sigs.Sigs, ds: &decls.
         d.arg("param", nm.tab.text(sg.cx.gens.name.as_slice()[ilo + p] as usize));
         d.arg("type", self_text);
         d.arg("generic", path.as_slice());
-        let (pf, ps, pz) = gparam_span(sg, tree, lx, set, t, it, ilo + p);
+        let (pf, ps, pz) = diag_tc.gparam_span(sg, tree, lx, set, t, it, ilo + p);
         d.role("param", pf, ps, pz);
         d.end(f, s, z);
     }

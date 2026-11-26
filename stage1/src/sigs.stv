@@ -1622,7 +1622,7 @@ fn settle(sg: &mut Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.So
 }
 
 // Whether type ty names a generic param (type or const) or `Self`.
-fn has_params(tab: &types.Table, ty: u32) -> bool {
+pub fn has_params(tab: &types.Table, ty: u32) -> bool {
     let mut stack = vec.Vec::<u32>.new();
     let mut kids = vec.Vec::<u32>.new();
     stack.push(ty);

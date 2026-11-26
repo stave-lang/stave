@@ -2,16 +2,20 @@
 // operator on a type no built-in rule covers (a struct, enum, generic param, reference, tuple,
 // `char`, ..) goes through its operator trait (`traits.OPS`). Its value is the operand type when
 // that type implements the trait and is Copy where the operator is used, both goals of the one
-// solver in the body's environment (a generic param: its bounds); else a type error, left
-// unknown. A goal not answered yet leaves the operator unknown for this round (`tc_traits`).
+// solver in the body's environment (a generic param: its bounds); else the error type, as
+// stage0's: E0206 without an impl, E0422 when the operand is not Copy (a generic param without
+// the operator's bound is stage0's E0901, not reported here). A goal not answered yet leaves the
+// operator unknown for this round (`tc_traits`).
 import generated.terminals;
 import sigs;
 import tc_rows;
 import tc_traits;
 import ir.types;
+import std.vec;
 
 const NONE: u32 = tc_rows.NONE;
 const UNK: u32 = tc_rows.UNK;
+const ERR: u32 = types.ERR;
 
 // The positions of `Neg` and `Not` in `traits.OPS`.
 pub const OP_NEG: usize = 17;
@@ -56,22 +60,54 @@ impl tc_rows.Typeck {
             // no operator trait: E0206
             let r = tab.tag_of(t) == types.TK_REF;
             self.report_span(206, if r then tc_rows.C_REF_OPERAND else 0u8, tok, tok, NONE, t, NONE, NONE);
-            return self.err();
+            return ERR;
         }
         let tr = self.tq.tr.lang.ops.as_slice()[k];
         let cp = self.tq.tr.lang.copy_tr;
-        if cp == NONE { return self.err(); }
+        if cp == NONE { return UNK; }
         let e = self.tq.env_of(sg, self.sc);
         let a = self.tq.holds(sg, e, t, tr);
         let c = self.tq.holds(sg, e, t, cp);
-        // stage0's E0206 (E0901 for a generic param) / E0422: the operator's value is the error
-        // type, the rest of the body is typed as without it
-        if a == tc_traits.A_NO && !param {
+        // stage0's E0206 (E0901 for a generic param, not reported here) / E0422: the operator's
+        // value is the error type, the rest of the body is typed as without it
+        if a == tc_traits.A_NO {
+            if param { return ERR; }
             let r = sg.cx.tab.tag_of(t) == types.TK_REF;
             self.report_span(206, if r then tc_rows.C_REF_OPERAND else 0u8, tok, tok, NONE, t, NONE, NONE);
+            return ERR;
         }
-        if a == tc_traits.A_NO || c == tc_traits.A_NO { return UNK; }
         if a == tc_traits.A_WAIT || c == tc_traits.A_WAIT { return UNK; }
+        if c == tc_traits.A_NO { return self.e0422_operand(sg, e, k, tr, t, tok); }
         return t;
+    }
+
+    // E0422 at operator token tok of trait k (decl tr) whose operand type t implements tr but
+    // is not Copy where it is used: a generic param names its declaration (case `operand`, x the
+    // param's row of `Gens`); any other type the impl the operator goes through (x), case
+    // `operand-args` when t names params, else `operand-type`.
+    fn e0422_operand(&mut self, sg: &mut sigs.Sigs, e: u32, k: usize, tr: u32, t: u32, tok: u32) -> u32 {
+        let mut case = tc_rows.C_OPERAND;
+        let mut x = NONE;
+        if sg.cx.tab.tag_of(t) == types.TK_PARAM {
+            x = self.sc.row(sg.cx.tab.a_of(t));
+        } else {
+            case = if sigs.has_params(&sg.cx.tab, t) then tc_rows.C_OPERAND_ARGS else tc_rows.C_OPERAND_TYPE;
+            let mut cands = vec.Vec::<u32>.new();
+            let pos = self.tq.tr.im.trait_pos(tr);
+            if pos != NONE { self.tq.tr.candidates_at(&sg.cx.tab, pos, t, &mut cands); }
+            for j in 0..cands.len() {
+                let i = cands.as_slice()[j];
+                let ap = self.tq.applies(sg, e, i, t);
+                if ap == tc_traits.A_WAIT { return UNK; }
+                if ap == tc_traits.A_YES {
+                    x = i;
+                    break;
+                }
+            }
+        }
+        self.report_span(422, case, tok, tok, NONE, t, k as% u32, NONE);
+        let r = self.dg.x.len() - 1;
+        self.dg.x.as_mut_slice()[r] = x;
+        return ERR;
     }
 }

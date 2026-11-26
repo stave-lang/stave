@@ -6,6 +6,7 @@ import ast;
 import decls;
 import diag;
 import diag_sigs;
+import generated.terminals;
 import intern;
 import lex;
 import modules;
@@ -13,6 +14,8 @@ import sigs;
 import source;
 import tc_rows;
 import text;
+import ir.types;
+import prims.search;
 import std.debug;
 import std.idx;
 import std.mem;
@@ -49,6 +52,76 @@ fn ty_text(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.
     } else {
         diag_sigs.display(out, sg, ds, nm, sc, ty);
     }
+}
+
+// The span (file, start, size) of the name of generic param row r of a decl in item it.
+pub fn gparam_span(sg: &sigs.Sigs, tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, it: u32, r: usize) -> (u32, u32, u32) {
+    let g = tree.item_node.as_slice()[it as usize] as usize + sg.cx.gens.node.as_slice()[r] as usize;
+    let a = tree.tok.as_slice()[g];
+    let nt = if tk(t, a) == terminals.T_KW_CONST then a + 1 else a;
+    return modules.tok_span(lx, set, t, nt);
+}
+
+// The trait operator method names, in `traits` operator order.
+const OP_METHODS: &str = "add wrap_add sat_add sub wrap_sub sat_sub mul wrap_mul sat_mul div rem shl wrap_shl shr bitand bitor bitxor neg not";
+
+// The borrowing method that stands in for operator trait position k (decl tr), as stage0's
+// `op_forms`: its signature into sig, its call into call (`compound`: the call that replaces
+// `a op= b`). It is unary exactly when the trait's method takes `self` alone.
+pub fn op_forms(sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, tr: u32, k: usize, compound: bool, sig: &mut vec.Vec<u8>, call: &mut vec.Vec<u8>) {
+    let (a, b) = sigs.word(OP_METHODS, k);
+    let mname = &mem.str_bytes(OP_METHODS)[a..b];
+    let s = modules.lookup(&nm.tab, mname);
+    let key = search.pair(tr, s);
+    let p = search.lower_bound(ds.mem_key.as_slice(), key);
+    let unary = s != NONE && p < ds.mem_key.len() && ds.mem_key.as_slice()[p] == key && sg.params.row(ds.mem_decl.as_slice()[p] as usize).len() == 1;
+    sig.clear();
+    sig.extend_from_slice(mem.str_bytes("fn "));
+    sig.extend_from_slice(mname);
+    sig.extend_from_slice(mem.str_bytes(if unary then "(&self) -> Self" else "(&self, rhs: &Self) -> Self"));
+    call.clear();
+    if compound && !unary { call.extend_from_slice(mem.str_bytes("a = ")); }
+    call.extend_from_slice(mem.str_bytes("a."));
+    call.extend_from_slice(mname);
+    call.extend_from_slice(mem.str_bytes(if unary then "()" else "(&b)"));
+}
+
+// stage0's `copy_bounds_of`: `` `A: Copy`, `B: Copy` `` for the generic params type ty names, in
+// the order of the generics in scope sc; a general form when it names none.
+fn copy_bounds(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, nm: &intern.Interned, sc: &[u32], ty: u32) {
+    let tab = &sg.cx.tab;
+    let mut seen = vec.Vec::<bool>.new();
+    let mut st = vec.Vec::<u32>.new();
+    let mut ks = vec.Vec::<u32>.new();
+    st.push(ty);
+    while st.len() > 0 {
+        let x = st.as_slice()[st.len() - 1];
+        st.truncate(st.len() - 1);
+        if tab.tag_of(x) == types.TK_PARAM {
+            let p = tab.a_of(x) as usize;
+            while seen.len() <= p { seen.push(false); }
+            seen.as_mut_slice()[p] = true;
+        }
+        tab.kids(x, &mut ks);
+        st.extend_from_slice(ks.as_slice());
+    }
+    out.clear();
+    let np = sc[1] - sc[0];
+    for p in 0..seen.len() {
+        if !seen.as_slice()[p] { continue; }
+        let i = p as% u32;
+        let r = if i < np then sc[0] + i else if i - np < sc[3] - sc[2] then sc[2] + i - np else NONE;
+        if r == NONE { continue; }
+        if out.len() > 0 { out.extend_from_slice(mem.str_bytes(", ")); }
+        out.push(96);
+        out.extend_from_slice(nm.tab.text(sg.cx.gens.name.as_slice()[r as usize] as usize));
+        out.extend_from_slice(mem.str_bytes(": Copy`"));
+    }
+    if out.len() == 0 { out.extend_from_slice(mem.str_bytes("`P: Copy` for each param `P`")); }
+}
+
+fn tk(t: &lex.Tokens, tok: u32) -> u8 {
+    return t.kind.as_slice()[tok as usize] as% u8;
 }
 
 // Hole `hole` of the open diagnostic: decimal v.
@@ -192,6 +265,36 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
             buf.clear();
             text.push_u64(&mut buf, if tab.a_of(x) == 1 then (1u64 << (bits - 1) as u64) - 1 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1);
             d.arg("max", buf.as_slice());
+        } else if code == 422 {
+            d.begin(422, if case == tc_rows.C_OPERAND then "operand" else if case == tc_rows.C_OPERAND_ARGS then "operand-args" else "operand-type");
+            let op = &set.file(f as usize)[s as usize..(s + z) as usize];
+            d.arg("op", op);
+            let ty = g.a.as_slice()[k];
+            ty_text(&mut buf, sg, ds, nm, sc, ty);
+            d.arg("type", buf.as_slice());
+            let kk = g.b.as_slice()[k] as usize;
+            let tr = tc.tq.tr.lang.ops.as_slice()[kk];
+            let x = g.x.as_slice()[k];
+            if case == tc_rows.C_OPERAND {
+                d.arg("bound", nm.tab.text(ds.name.as_slice()[tr as usize] as usize));
+                if x != NONE {
+                    let (pf, ps, pz) = gparam_span(sg, tree, lx, set, t, ds.item.as_slice()[dd as usize], x as usize);
+                    d.role("param", pf, ps, pz);
+                }
+            } else {
+                let mut call = vec.Vec::<u8>.new();
+                op_forms(sg, ds, nm, tr, kk, op[op.len() - 1] == 61, &mut buf, &mut call);
+                d.arg("sig", buf.as_slice());
+                d.arg("call", call.as_slice());
+                if case == tc_rows.C_OPERAND_ARGS {
+                    copy_bounds(&mut buf, sg, nm, sc, ty);
+                    d.arg("example", buf.as_slice());
+                }
+                if x != NONE {
+                    let (xf, xs, xz) = decls.span(ds, md, lx, set, t, x);
+                    d.role("impl", xf, xs, xz);
+                }
+            }
         } else if code == 204 {
             d.begin(204, "");
             ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
