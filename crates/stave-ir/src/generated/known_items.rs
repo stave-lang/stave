@@ -128,3 +128,14 @@ fn abi_table(k: Known) -> Option<(&'static [ITy], ITy)> {
         _ => None,
     }
 }
+
+// The param of an item that a site row is passed in.
+fn site_table(k: Known) -> Option<usize> {
+    match k {
+        Known::EnsuresFailed => Some(0),
+        Known::SetUserSite => Some(0),
+        Known::ErrtracePush => Some(0),
+        Known::ErrtraceRestart => Some(0),
+        _ => None,
+    }
+}

@@ -9,7 +9,9 @@
 # argument list of their own (absent: none), each a type of `usize isize u32 u64 unit u32x4
 # mut_ptr_u8 const_ptr_u8 const_ptr_usize`. `inline = true`: the release optimizer inlines the
 # item like an ordinary fn (contracts/opt-passes.md rule F8); it never inlines any other known
-# item. An item with `ret` or `report` is never `inline`.
+# item. An item with `ret` or `report` is never `inline`. `site_param`: the index of the param
+# that lowering passes a site row in, as an int constant (absent: none); in an item with `ret`, a
+# `u32` of `params`.
 
 [[item]]
 variant = "Option"
@@ -346,12 +348,14 @@ variant = "EnsuresFailed"
 module = "runtime.panic"
 name = "ensures_failed"
 report = true
+site_param = 0
 
 [[item]]
 variant = "SetUserSite"
 module = "runtime.panic"
 name = "set_user_site"
 inline = true
+site_param = 0
 
 [[item]]
 variant = "TestInput"
@@ -367,11 +371,13 @@ name = "test_skip"
 variant = "ErrtracePush"
 module = "runtime.errtrace"
 name = "push"
+site_param = 0
 
 [[item]]
 variant = "ErrtraceRestart"
 module = "runtime.errtrace"
 name = "restart"
+site_param = 0
 
 [[item]]
 variant = "ErrtraceSave"

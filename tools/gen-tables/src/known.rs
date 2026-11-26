@@ -1,7 +1,8 @@
 //! The compiler-known items (`crates/stave-ir/tables/known.toml`): stave-ir's `Known` table
 //! (`crates/stave-ir/src/generated/known_items.rs`, included by `known.rs`) and stage1's
 //! (`stage1/ir/src/generated/known_items.stv`), so both compilers read one list of paths, panic
-//! report entries, ABI signatures, and the items the release optimizer inlines.
+//! report entries, ABI signatures, and the items the release optimizer inlines. The params that
+//! take a site row are written for stave-ir alone.
 
 use std::fmt::Write;
 
@@ -46,6 +47,8 @@ pub struct Item {
     pub ret: Option<String>,
     #[serde(default)]
     pub inline: bool,
+    #[serde(default)]
+    pub site_param: Option<u8>,
 }
 
 impl Item {
@@ -63,7 +66,8 @@ fn ity(name: &str) -> Result<usize, String> {
 
 /// Parses and checks the table: unique variants and paths, Rust-identifier variants, known ABI
 /// types, `params` only with `ret`, `inline` on no item with `ret` or `report` (the optimizer
-/// inlines only items that IR calls alone reach and that run on the caller's stack).
+/// inlines only items that IR calls alone reach and that run on the caller's stack), `site_param`
+/// a param index that, in an item with `ret`, names a `u32` param (the type of a site row).
 pub fn parse(text: &str) -> Result<Vec<Item>, String> {
     let t: RawTable = toml::from_str(text).map_err(|e| format!("{TABLE}: {e}"))?;
     let mut seen_v = std::collections::BTreeSet::new();
@@ -93,6 +97,12 @@ pub fn parse(text: &str) -> Result<Vec<Item>, String> {
         }
         if let Some(r) = &it.ret {
             ity(r)?;
+        }
+        if let Some(s) = it.site_param
+            && it.ret.is_some()
+            && it.params.iter().flatten().nth(usize::from(s)).is_none_or(|p| p != "u32")
+        {
+            return Err(format!("{TABLE}: `{v}` has `site_param = {s}`, which names no `u32` param"));
         }
     }
     Ok(t.item)
@@ -140,6 +150,13 @@ pub fn emit_rust(items: &[Item]) -> Result<String, String> {
             ps.join(", "),
             ITYS[ity(r)?].1
         );
+    }
+    o += "        _ => None,\n    }\n}\n";
+    o += "\n// The param of an item that a site row is passed in.\n";
+    o += "fn site_table(k: Known) -> Option<usize> {\n    match k {\n";
+    for it in items {
+        let Some(s) = it.site_param else { continue };
+        let _ = writeln!(o, "        Known::{} => Some({s}),", it.variant);
     }
     o += "        _ => None,\n    }\n}\n";
     Ok(o)
@@ -273,5 +290,27 @@ inline = true
         let bad = |from: &str, to: &str| parse(&SMALL.replacen(from, to, 1)).err().unwrap();
         assert!(bad("report = true", "report = true\ninline = true").contains("is `inline`"));
         assert!(bad("inline = true", "inline = true\nret = \"unit\"").contains("is `inline`"));
+    }
+
+    #[test]
+    fn the_site_param_column() {
+        let with = |keys: &str| parse(&SMALL.replacen("report = true", keys, 1));
+        let rs = emit_rust(&with("site_param = 1").unwrap()).unwrap();
+        let table = "fn site_table(k: Known) -> Option<usize> {\n    match k {\n";
+        let arms = "        Known::Trap => Some(1),\n        _ => None,\n    }\n}\n";
+        assert!(rs.contains(&format!("{table}{arms}")), "{rs}");
+        // not a param index
+        for v in ["-1", "256", "0.0", "true", "\"0\"", "[0]", "{ at = 0 }", "1979-05-27"] {
+            let e = with(&format!("site_param = {v}")).err();
+            assert!(e.as_ref().is_some_and(|e| e.contains("site_param")), "{v}: {e:?}");
+        }
+        assert!(with("site = 0").err().unwrap().contains("unknown field"));
+        // against a signature: only a `u32` param
+        let sig = |i: u8| format!("ret = \"unit\"\nparams = [\"usize\", \"u32\"]\nsite_param = {i}");
+        assert!(with(&sig(1)).is_ok());
+        for keys in [sig(0), sig(2), "ret = \"unit\"\nsite_param = 0".to_string()] {
+            let e = with(&keys).err();
+            assert!(e.as_ref().is_some_and(|e| e.contains("names no `u32` param")), "{keys}: {e:?}");
+        }
     }
 }

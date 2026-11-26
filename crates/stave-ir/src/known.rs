@@ -112,10 +112,7 @@ pub fn inlined(k: Known) -> bool {
 /// (contracts/intrinsics.md "Paths fixed by the compiler"): the user-site store, the error-trace
 /// hooks, and the failed `ensures` report. `None` for the others.
 pub fn site_param(k: Known) -> Option<usize> {
-    match k {
-        Known::SetUserSite | Known::ErrtracePush | Known::ErrtraceRestart | Known::EnsuresFailed => Some(0),
-        _ => None,
-    }
+    site_table(k)
 }
 
 /// Whether `f` is the fn a failed `requires` check calls.
