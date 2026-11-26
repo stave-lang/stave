@@ -139,6 +139,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn site_param_of_every_item() {
+        let with: Vec<(Known, usize)> =
+            Known::ALL.iter().filter_map(|&k| site_param(k).map(|p| (k, p))).collect();
+        assert_eq!(
+            with,
+            [
+                (Known::EnsuresFailed, 0),
+                (Known::SetUserSite, 0),
+                (Known::ErrtracePush, 0),
+                (Known::ErrtraceRestart, 0),
+            ]
+        );
+    }
+
+    #[test]
     fn inlined_items_have_no_abi_and_no_report() {
         for &k in Known::ALL.iter().filter(|&&k| inlined(k)) {
             assert!(abi_signature(k).is_none(), "{k:?}");
