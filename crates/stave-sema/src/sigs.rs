@@ -345,6 +345,10 @@ pub struct Sigs {
     /// [`Sigs::impls_by_trait`] of its impls with that head, ascending. Only impls with the head
     /// of a type, or with none, can apply to it.
     pub trait_impls_by_head: FxHashMap<(DeclId, Option<TypeHead>), Vec<u32>>,
+    /// Every impl of `Send` and of `Sync` bounds its params by `Send`, `Sync`, `Flat`, and
+    /// `Frozen` only, so a Send or Sync goal reaches no goal of another trait
+    /// ([`crate::traits::World`]: its provisional answers are held).
+    pub markers_closed: bool,
     /// Final trait query answers of the current checking run ([`crate::traits::QueryCache`]).
     pub queries: crate::traits::QueryCache,
 }
@@ -1377,6 +1381,18 @@ impl<'p> SigBuilder<'p> {
                 s.trait_impls_by_head.entry((tr, head)).or_default().push(k as u32);
             }
         }
+        let l = &s.lang;
+        let markers = [l.send, l.sync, l.flat, l.frozen];
+        let marker_bound =
+            |b: &TraitRef| b.args.is_empty() && b.trait_decl.is_some() && markers.contains(&b.trait_decl);
+        s.markers_closed = [l.send, l.sync].iter().all(|tr| {
+            s.impls_by_trait.get(tr).is_none_or(|v| {
+                v.iter().all(|d| match s.decls.get(d.idx()) {
+                    Some(DeclSig::Impl(i)) => i.generics.iter().all(|g| g.bounds.iter().all(marker_bound)),
+                    _ => true,
+                })
+            })
+        });
         (self.tys, s, self.diags)
     }
 
