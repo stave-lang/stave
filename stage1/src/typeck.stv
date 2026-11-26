@@ -830,7 +830,14 @@ impl tc_rows.Typeck {
         let (lo, hi) = sg.cx.uses.range(self.it, n);
         // the uses keyed at the Primary are by offset: the first is its head identifier's
         let off = t.start.as_slice()[first_tok(tree, r) as usize];
-        if lo == hi || sg.cx.uses.off.as_slice()[lo] != off { return if head then NONE else UNK; }
+        if lo == hi || sg.cx.uses.off.as_slice()[lo] != off {
+            if head { return NONE; }
+            // no decl, local, generic param, built-in type, or built-in fn takes the name: the
+            // resolver's E0101 / E0103, a value of the error type
+            let s = nm.tok_str.as_slice()[first_tok(tree, r) as usize];
+            let bare = tree.kids.row(r).len() == 0 && s != NONE && !ds.is_prim.as_slice()[s as usize] && ds.builtin.as_slice()[s as usize] == 0;
+            return if bare then ERR else UNK;
+        }
         let tag = sg.cx.uses.tag.as_slice()[lo];
         let target = sg.cx.uses.target.as_slice()[lo];
         if tag == resolve.TAG_LOCAL {
@@ -1432,7 +1439,7 @@ impl tc_rows.Typeck {
         if !iter { return self.err(); }
         let next = modules.lookup(&nm.tab, mem.str_bytes("next"));
         let (m, inst, b) = self.recv_method(sg, ds, src, next);
-        if m == NONE || tc_builtins.is_builtin(m) { return UNK; }
+        if m == NONE || m == tc_rows.NOT_FOUND || tc_builtins.is_builtin(m) { return UNK; }
         let lo = sg.cx.gens.lo.as_slice()[m as usize];
         let hi = sg.cx.gens.lo.as_slice()[m as usize + 1];
         if sg.sflags.as_slice()[m as usize] & sigs.SF_SELF_MASK != sigs.SF_SELF_MUT || sg.params.row(m as usize).len() != 1 || lo != hi { return self.err(); }

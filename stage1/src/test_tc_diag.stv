@@ -273,3 +273,27 @@ test fn const_operations_that_trap() {
     debug.assert(test_kit.has(ms, "mismatched types: expected `u8`, found `usize`\n"), "a const param of another int type");
     debug.assert(!test_kit.has(ms, "`G as usize`"), "an `if` and an index of a const array have a value");
 }
+
+test fn type_questions_need_a_layout() {
+    let (_, _, ty) = run("struct P { a: u32, b: u8 }\nfn f() -> usize {\n    let a = size_of::<P>();\n    let b = align_of::<[P; 2]>();\n    let c = needs_drop::<P>();\n    let e = size_of::<str>();\n    return a + b;\n}\nfn main() {}\n");
+    let t = ty.as_slice();
+    debug.assert(decided(t), "a struct and an array of it have a layout, `str` has none");
+    debug.assert(test_kit.has(t, " -\n"), "a question on a type without a layout is of the error type");
+}
+
+test fn members_not_found() {
+    let (_, _, ty) = run("struct P { x: u32 }\nfn f(p: P, t: (u8, u8), v: u32) -> u32 {\n    let a = p.nope;\n    let b = t.5;\n    let c = v.nothing(1);\n    let e = v.x;\n    return p.x;\n}\nfn w<T: Copy>(x: T) -> u32 {\n    let a = x.nope(1);\n    return 0;\n}\nfn main() {}\n");
+    debug.assert(decided(ty.as_slice()), "a field, element, or method a type or its bounds do not have is of the error type");
+}
+
+test fn names_that_resolve_to_nothing() {
+    let (_, _, ty) = run("fn f() -> u32 {\n    let a = missing + 1;\n    let b = missing_fn(1).x;\n    let c = u32x4.splat(1u32);\n    return 0;\n}\nfn g(x: u32) -> u32 requires(old(x) > 0) {\n    return x;\n}\nfn main() {}\n");
+    debug.assert(decided(ty.as_slice()), "a name no scope has is of the error type, a built-in type's is not; so is `old` outside `ensures`");
+}
+
+test fn struct_literal_fields_named_twice() {
+    let (_, _, ty) = run("struct P { x: u32, y: u32 }\nfn f() -> P {\n    let a = P.{ x: 1, x: 2, y: 3 };\n    let b = P.{ x: 1, z: 2, y: 3 };\n    return a;\n}\nfn main() {}\n");
+    let t = ty.as_slice();
+    debug.assert(decided(t), "a field named twice or no field is typed without a context, the literal without it");
+    debug.assert(test_kit.has(t, " adt d"), "the literal is of its struct");
+}

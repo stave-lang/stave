@@ -162,6 +162,9 @@ pub struct Typeck {
 }
 
 pub const LIT_INT: u32 = 0xffff_fff0;
+// A method lookup's callee when stage0's lookup finds no method or two (its E0208, E0901, or
+// E0908, not reported here): the call is of the error type.
+pub const NOT_FOUND: u32 = 0xffff_fefa;
 pub const LIT_FLOAT: u32 = 0xffff_fff1;
 pub const WHY_DECL: u32 = 0x8000_0000;
 

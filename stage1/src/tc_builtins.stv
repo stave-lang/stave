@@ -170,11 +170,19 @@ fn lookups(tab: &intern.Table, w: &[u8]) -> vec.Vec<u32> {
 }
 
 impl Builtins {
+    // Whether built-in fn s asks a question of the type in its turbofish (`size_of`,
+    // `align_of`, `needs_drop`): a concrete type must have a layout there.
+    pub fn is_type_query(&self, s: u32) -> bool {
+        if s == NONE { return false; }
+        for k in F_SIZE_OF..F_NEEDS_DROP + 1 {
+            if self.fns.as_slice()[k] == s { return true; }
+        }
+        return false;
+    }
+
     // The call of built-in fn s with the type written in its turbofish (NONE: none written) as a
     // fn type (its parameters and result), as stage0's `call` on `St::Builtin`; ERR for a call
-    // stage0 rejects (a turbofish missing or given to `fence_stream`), UNK for `size_of` /
-    // `align_of` / `needs_drop` of a type that holds no generic param and is not a scalar, a
-    // reference, or a pointer (stage0 asks its layout, E0911 when there is none).
+    // stage0 rejects (a turbofish missing or given to `fence_stream`).
     pub fn fn_type(&self, tab: &mut types.Table, s: u32, ty: u32) -> u32 {
         let mut k: usize = 0;
         while k < self.fns.len() && self.fns.as_slice()[k] != s {
@@ -182,13 +190,6 @@ impl Builtins {
         }
         if s == NONE || k == self.fns.len() { return UNK; }
         if (k == F_FENCE) != (ty == NONE) { return types.ERR; }
-        if (k == F_SIZE_OF || k == F_ALIGN_OF || k == F_NEEDS_DROP) && !has_params(tab, ty) {
-            let tag = tab.tag_of(ty);
-            // `needs_drop` of a struct, enum, array, or tuple is a `bool` whatever its layout
-            let sized = k == F_NEEDS_DROP && (tag == types.TK_ADT || tag == types.TK_ARRAY || tag == types.TK_TUPLE);
-            let laid = sized || tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_REF || tag == types.TK_PTR;
-            if !laid { return UNK; }
-        }
         let us = tab.usize_t();
         let u8t = tab.int(false, types.W_8);
         let ret = if k == F_FENCE || k == F_WRITE then tab.unit() else if k == F_READ then ty else if k == F_NEEDS_DROP then tab.key(types.TK_BOOL, 0, 0) else us;
@@ -207,23 +208,6 @@ impl Builtins {
         let np: u32 = if k == F_READ then 3 else if k == F_WRITE then 4 else 0;
         return tab.intern(types.TK_FN, np, 0);
     }
-}
-
-// Whether type t holds a generic param or `Self` (stage0's `has_params`; a const param shows
-// as a component only where the table keeps it as one).
-fn has_params(tab: &types.Table, t: u32) -> bool {
-    let mut st = vec.Vec::<u32>.new();
-    let mut ks = vec.Vec::<u32>.new();
-    st.push(t);
-    while st.len() > 0 {
-        let x = st.as_slice()[st.len() - 1];
-        st.truncate(st.len() - 1);
-        let tag = tab.tag_of(x);
-        if tag == types.TK_PARAM || tag == types.TK_CONSTPARAM || tag == types.TK_SELF { return true; }
-        tab.kids(x, &mut ks);
-        st.extend_from_slice(ks.as_slice());
-    }
-    return false;
 }
 
 // Whether t is a lane type of a vector: a fixed-width int or a float.

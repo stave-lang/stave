@@ -34,7 +34,8 @@ impl tc_rows.Typeck {
         let e = self.tq.env_of(sg, self.sc);
         let p = sg.cx.tab.a_of(c);
         self.tq.tr.bound_methods(ds, e, p, s, &mut self.tq.bm);
-        if self.tq.bm.len() != 4 { return (NONE, NONE, NONE); }
+        // no bound has the method (stage0's E0901), or two do (E0908)
+        if self.tq.bm.len() != 4 { return (tc_rows.NOT_FOUND, NONE, NONE); }
         let tr = self.tq.bm.as_slice()[0];
         let m = self.tq.bm.as_slice()[1];
         let off = self.tq.bm.as_slice()[2] as usize;
