@@ -16,7 +16,8 @@
 // What fails an operation is reported where the evaluation runs (stage0's E0203 at the
 // operation, `Cx.rep`); any other failure that stage0 reports in its words is kept as the
 // evaluation's one deferred diagnostic (`Cx.dfr`: a mismatch, E0201; a literal out of range,
-// E0203), reported by an owner that does not type the expression itself (`eval_u64`).
+// E0203; a literal without a type, E0202), reported by an owner that does not type the
+// expression itself (`eval_u64`). An expression nested past `MAX_DEPTH` levels has no value.
 //
 // Const items are evaluated in dependency rounds (`round_consts`): a const whose initializer
 // and type name only consts of earlier rounds is in the next round; the consts left over are on
@@ -201,7 +202,9 @@ pub fn evaluable(tab: &types.Table, t: u32) -> bool {
 // - `EV_INDEX` (E0203 cases `index`, `index-empty`): the index at the span is past the end of a
 //   const array of type `ty`, x its length;
 // - `EV_MISMATCH` (E0201 case `no-cast`): the span has type x (`LIT_INT`: an int literal
-//   without a type) where type `ty` is required.
+//   without a type) where type `ty` is required;
+// - `EV_NO_TYPE` (E0202): nothing gives the literal at the span a type;
+// - `EV_INFER` (E0202 case `infer`): nothing gives the array literal `[]` at the span its type.
 pub struct Reports {
     pub code: vec.Vec<u8>,
     pub item: vec.Vec<u32>,
@@ -233,6 +236,8 @@ impl Reports {
 pub const EV_RANGE: u8 = 1;
 pub const EV_INDEX: u8 = 2;
 pub const EV_MISMATCH: u8 = 3;
+pub const EV_NO_TYPE: u8 = 4;
+pub const EV_INFER: u8 = 5;
 pub const LIT_INT: u32 = 0xffff_fff0;
 
 // The first failure of an evaluation that reports nothing, as a `Reports` row (`code` 0: none).
@@ -254,6 +259,9 @@ pub fn no_defer() -> Defer {
 // The most bytes of compile-time data a value of a const-expr may have (stage0's
 // `MAX_DATA_BYTES`; past it, E0904 case `size`).
 const MAX_DATA_BYTES: u64 = 1u64 << 26;
+
+// The most nested levels a const-expr is decided to (stage0's `MAX_DEPTH`).
+const MAX_DEPTH: usize = 2000;
 
 // The status of one integer operation (`arith`): done, its value outside the type (or a division
 // by zero), a shift amount outside the width, no rule.
@@ -543,7 +551,8 @@ fn add_exact(an: bool, am: u64, bn: bool, bm: u64) -> (bool, u64, bool) {
 // type (a T, or a literal group `LIT | g`), for a literal its sign and magnitude, and the value:
 // a scalar (sign, magnitude; a `bool` is 0 or 1), or an array of scalars (`vlo` its first
 // element in the pool `pneg` / `pmag`, NONE for a scalar; `vn` elements, or one repeated `vn`
-// times when `vrep`). `aux`: a comparison's operand type, an index's array type.
+// times when `vrep`). `aux`: a comparison's operand type, an index's array type. `gfirst`: per
+// literal group the row of the literal that made it.
 struct Ev {
     it: u32,
     base: usize,
@@ -562,8 +571,11 @@ struct Ev {
     aux: vec.Vec<u64>,
     gpar: vec.Vec<u32>,
     gfix: vec.Vec<u32>,
+    gfirst: vec.Vec<u32>,
     pneg: vec.Vec<bool>,
     pmag: vec.Vec<u64>,
+    // per node: settled and evaluated already (a repeat count, inline)
+    done: vec.Vec<bool>,
     out: u8,
 }
 
@@ -665,6 +677,13 @@ impl Ev {
             self.defer(cx, tree, EV_MISMATCH, rn, t, LIT_INT);
         }
         return NO_TY;
+    }
+
+    // Group value v has no type (stage0's E0202 at the literal that made its root group).
+    fn no_type(&mut self, cx: &mut Cx, tree: &ast.Ast, v: u64) {
+        let r = self.find((v & 0xffff_ffff) as% u32);
+        let n = self.gfirst.as_slice()[r as usize] as usize;
+        self.defer(cx, tree, EV_NO_TYPE, n, NONE, NONE);
     }
 
     fn hint_of(&mut self, t: u64, outer: u32) -> u32 {
@@ -828,6 +847,8 @@ pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, s
         aux: col.filled(n, NO_TY),
         gpar: vec.Vec::<u32>.new(),
         gfix: vec.Vec::<u32>.new(),
+        gfirst: vec.Vec::<u32>.new(),
+        done: col.filled(n, false),
         pneg: vec.Vec::<bool>.new(),
         pmag: vec.Vec::<u64>.new(),
         out: CV_OK,
@@ -837,6 +858,7 @@ pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, s
     if want != NONE {
         if !ev.coerce(cx, tree, g, top, want) { return (ev.out, types.ERR, false, 0); }
     } else if ev.resolve(top) & LIT != 0 {
+        ev.no_type(cx, tree, top);
         return (CV_FAIL, types.ERR, false, 0);
     }
     if !settle(cx, tree, t, &mut ev, lo, g, 0) { return (ev.out, types.ERR, false, 0); }
@@ -945,6 +967,16 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
             let k = kind(tree, cur);
             let ks = tree.kids.row(cur);
             let a = tree.tok.as_slice()[cur];
+            // stage0 decides a node at the depth of its frames plus one, the head path of an
+            // index without deciding it; past `MAX_DEPTH` it reports E0904 case `depth` (not a
+            // code here) and there is no value
+            let top = fr.node.len();
+            let pf = if top > 0 then fr.node.as_slice()[top - 1] as usize else 0usize;
+            let path_head = top > 0 && kind(tree, pf) == K_POSTFIX && cur == base + tree.kids.row(pf)[0] as usize && k == K_PRIMARY && tk(t, a) == terminals.T_IDENT;
+            if top + 1 > MAX_DEPTH && !path_head {
+                ev.fail(CV_FAIL);
+                continue;
+            }
             if is_chain(k) && ks.len() > 1 {
                 fr.push(cur, hint, NO_TY);
                 cur = base + ks[0] as usize;
@@ -1056,7 +1088,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                     if ks.len() == 0 {
                         // `[]` has the expected type, an array of length 0 (none: E0202 `infer`)
                         if eh == NONE || arr_len(&cx.tab, hint) != 0 {
-                            ev.fail(CV_FAIL);
+                            ev.defer(cx, tree, EV_INFER, cur, NONE, NONE);
                             continue;
                         }
                         if !scalar_elem(&cx.tab, eh) {
@@ -1254,7 +1286,11 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
             if kk == 1 {
                 // the array; then the index, a `usize`
                 let b = ev.resolve(ret);
-                if b & LIT != 0 || cx.tab.tag_of(b as% u32) != types.TK_ARRAY {
+                if b & LIT != 0 {
+                    ev.no_type(cx, tree, b);
+                    return NO_TY;
+                }
+                if cx.tab.tag_of(b as% u32) != types.TK_ARRAY {
                     ev.fail(CV_FAIL);
                     return NO_TY;
                 }
@@ -1281,7 +1317,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 let mut elem = r as% u32;
                 if r & LIT != 0 {
                     if eh == NONE {
-                        ev.fail(CV_FAIL);
+                        ev.no_type(cx, tree, r);
                         return NO_TY;
                     }
                     if !ev.coerce(cx, tree, base + fks[0] as usize, ret, eh) { return NO_TY; }
@@ -1305,6 +1341,9 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 if r != CV_OK {
                     ev.fail(r);
                     return NO_TY;
+                }
+                for x in clo..c + 1 {
+                    ev.done.as_mut_slice()[x - ev.lo] = true;
                 }
                 let at = array_ty(&mut cx.tab, (mark >> 32) as% u32, ev.vmag.as_slice()[c - ev.lo]);
                 if at == types.ERR {
@@ -1333,7 +1372,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                             u = ev.unify(cx, tree, base + fks[j] as usize, u, v);
                             if ev.out != CV_OK { return NO_TY; }
                         }
-                        ev.fail(CV_FAIL);
+                        ev.no_type(cx, tree, u);
                         return NO_TY;
                     }
                     let elem = et as% u32;
@@ -1361,7 +1400,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
             // the operand has no expected type; each step names an int type
             let r = ev.resolve(ret);
             if r & LIT != 0 {
-                ev.fail(CV_FAIL);
+                ev.no_type(cx, tree, r);
                 return NO_TY;
             }
             let mut src = r as% u32;
@@ -1453,6 +1492,7 @@ fn literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Item
         let gid = ev.gpar.len() as% u32;
         ev.gpar.push(gid);
         ev.gfix.push(NONE);
+        ev.gfirst.push(g as% u32);
         if hint != NONE { let _ = ev.fix(&cx.tab, gid, hint); }
         r = LIT | (gid as u64);
     }
@@ -1468,14 +1508,14 @@ fn settle(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize
     for k in g0..ev.gpar.len() {
         let r = ev.find(k as% u32);
         if ev.gfix.as_slice()[r as usize] == NONE {
-            ev.fail(CV_FAIL);
+            ev.no_type(cx, tree, LIT | r as u64);
             return false;
         }
     }
     for row in first..last + 1 {
         let x = row - ev.lo;
         let ty = ev.nty.as_slice()[x];
-        if ty == NO_TY { continue; }
+        if ty == NO_TY || ev.done.as_slice()[x] { continue; }
         let rt = ev.resolve(ty);
         ev.nty.as_mut_slice()[x] = rt;
         if ev.lit.as_slice()[x] == 1 && (ev.lbig.as_slice()[x] || !in_range(&cx.tab, rt as% u32, ev.lneg.as_slice()[x], ev.lmag.as_slice()[x])) {
@@ -1486,7 +1526,7 @@ fn settle(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize
     for row in first..last + 1 {
         let x = row - ev.lo;
         let rt = ev.nty.as_slice()[x];
-        if rt == NO_TY || ev.lit.as_slice()[x] != 0 { continue; }
+        if rt == NO_TY || ev.lit.as_slice()[x] != 0 || ev.done.as_slice()[x] { continue; }
         let k = kind(tree, row);
         let n = tree.kids.row(row).len();
         let tag = cx.tab.tag_of(rt as% u32);
@@ -1525,7 +1565,7 @@ fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize,
         if row < skip { continue; }
         let x = row - ev.lo;
         let ty = ev.nty.as_slice()[x];
-        if ty == NO_TY { continue; }
+        if ty == NO_TY || ev.done.as_slice()[x] { continue; }
         let l = ev.lit.as_slice()[x];
         let k = kind(tree, row);
         let ks = tree.kids.row(row);

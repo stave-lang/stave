@@ -291,6 +291,33 @@ test fn names_that_resolve_to_nothing() {
     debug.assert(decided(ty.as_slice()), "a name no scope has is of the error type, a built-in type's is not; so is `old` outside `ensures`");
 }
 
+// A const `B` of n `!`s before `true`, its value in a repeat count: the dump of the program.
+fn negations(n: u32) -> vec.Vec<u8> {
+    let mut s = string.String.from_str("const B: bool = ");
+    for _ in 0..n {
+        s.push_str("!");
+    }
+    s.push_str("true;\nfn f() {\n    let x = [0u8; if B then 1 else 2];\n}\nfn main() {}\n");
+    let (_, _, ty) = run(s.as_str());
+    return ty;
+}
+
+test fn const_expressions_past_the_depth_limit() {
+    let near = negations(1990);
+    debug.assert(test_kit.has(near.as_slice(), " array t"), "1990 levels are evaluated");
+    let past = negations(2010);
+    debug.assert(!test_kit.has(past.as_slice(), " array t"), "past 2000 levels a const has no value");
+}
+
+test fn untyped_literals_in_lengths() {
+    let (d, _, _) = run("struct S { a: [u8; [300; 2][0]], b: [u8; (1 + 1) as usize] }\nfn f() {\n    let a = needs_drop::<str>(1);\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(test_kit.has(ms, "literal `300` has no type context\n"), "an array literal's element without a type");
+    debug.assert(test_kit.has(ms, "literal `1` has no type context\n"), "a cast operand without a type");
+    debug.assert(test_kit.has(ms, "takes 0 arguments, found 1\n"), "a type question with arguments: the arity first");
+}
+
 test fn struct_literal_fields_named_twice() {
     let (_, _, ty) = run("struct P { x: u32, y: u32 }\nfn f() -> P {\n    let a = P.{ x: 1, x: 2, y: 3 };\n    let b = P.{ x: 1, z: 2, y: 3 };\n    return a;\n}\nfn main() {}\n");
     let t = ty.as_slice();

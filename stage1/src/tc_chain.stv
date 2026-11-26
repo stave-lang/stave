@@ -212,11 +212,16 @@ impl tc_rows.Typeck {
         }
         if ty != NONE && ty != ERR && self.bt.is_type_query(s) && !sigs.has_params(&sg.cx.tab, ty) && !self.tq.has_layout(&mut sg.cx.tab, ty) {
             // no layout: stage0's E0911 (not reported here), the call `()` is of the error type;
-            // with arguments its arity error comes first (not modeled)
+            // with arguments the arity error comes first (the fn type's call reports it)
             let q = tree.tok_end.as_slice()[ga as usize];
-            let bare = tk(t, q) == terminals.T_L_PAREN && tk(t, q + 1) == terminals.T_R_PAREN;
-            if bare { self.set_chain(r, S_VAL, ERR); } else { self.set_chain(r, S_ERR, UNK); }
-            return;
+            if tk(t, q) != terminals.T_L_PAREN {
+                self.set_chain(r, S_ERR, UNK);
+                return;
+            }
+            if tk(t, q + 1) == terminals.T_R_PAREN {
+                self.set_chain(r, S_VAL, ERR);
+                return;
+            }
         }
         let ft = self.bt.fn_type(&mut sg.cx.tab, s, ty);
         if ft == ERR {

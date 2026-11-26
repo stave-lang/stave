@@ -364,7 +364,10 @@ pub fn eval_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &int
         let src = &set.file(f)[s as usize..e as usize];
         let ty = r.ty.as_slice()[k];
         let x = r.x.as_slice()[k];
-        if code == consteval.EV_MISMATCH {
+        if code == consteval.EV_NO_TYPE || code == consteval.EV_INFER {
+            d.begin(202, if code == consteval.EV_INFER then "infer" else "");
+            d.arg("literal", src);
+        } else if code == consteval.EV_MISMATCH {
             d.begin(201, "no-cast");
             buf.clear();
             display(&mut buf, sg, ds, nm, &sc, ty);
