@@ -39,14 +39,7 @@ impl Area for Nope { //~ ERROR E0101
     }
 }
 
-// A rejected `Drop` impl (no `drop` method) has one effect on every instance: `Held<T>` and
-// `Held<u32>` both have it (`drop-impl`).
-struct Held<T> { v: T }
-
-impl<T> Drop for Held<T> { //~ ERROR E0906
-}
-
-fn f(o: &Outer, x: u32, h: &Held<u32>) -> u32 {
+fn f(o: &Outer, x: u32) -> u32 {
     return x;
 }
 

@@ -14,9 +14,8 @@
 //! `--dump=opt`). A case whose input has an error diagnostic has none of them, and none may be
 //! written for it. Every `ir_` case also has the `sigs.txt` and `kinds.txt` of a check.
 //!
-//! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!). A
-//! library file in `diags.txt` is named relative to the repository root
-//! (`tests/conformance/dumps/_lib/std/core.stv`), never by a path of this machine.
+//! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!). No
+//! case has a diagnostic pointing into a library file ([`golden_paths`]).
 //!
 //! `ir_part_stores` is also checked by op count: an assignment to a part of a local writes it in
 //! place (no `set`), and the only whole-aggregate `load` is the copy its source writes.
@@ -124,10 +123,10 @@ fn goldens() {
             assert!(l.ends_with(" - - -"), "{case}: stage0 has no rounds/fallbacks/peak_bytes: {l:?}");
         }
         for s in COMPARED {
-            let got = golden_paths::neutral(&read(&dir.join(s.file_name())), &repo());
+            let got = read(&dir.join(s.file_name()));
             check_lines(&format!("{case}/{}", s.file_name()), &got);
             if let Some(why) = golden_paths::host_path(&got, &repo()) {
-                failures.push(format!("{case}/{}: the golden {why}", s.file_name()));
+                failures.push(format!("{case}/{}: {why}", s.file_name()));
                 continue;
             }
             let want_path = dumps_dir(case).join(s.file_name());
@@ -149,7 +148,8 @@ fn goldens() {
 }
 
 /// No file below `tests/` (goldens, expected outputs, sources) holds a path of the machine the
-/// suite runs on: a golden blessed elsewhere would fail here, and one blessed here would leak it.
+/// suite runs on ([`golden_paths`]): every reader of a golden compares the same bytes, wherever
+/// the tree is.
 #[test]
 fn no_golden_holds_a_host_path() {
     let mut stack = vec![repo().join("tests")];

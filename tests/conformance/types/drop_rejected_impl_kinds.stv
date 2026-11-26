@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+// A rejected `Drop` impl (no `drop` method, only another method, a `drop` beside another method
+// listed first, a `drop` of the wrong signature) is still the type's `Drop` impl, on every
+// instance it applies to: `Empty<T>` and `Empty<N>` alike have `drop-impl` in the `kinds`
+// dump, which stage0 and stage1 decide by the same rule (the stage1 gate compares them).
+struct N { x: u32 }
+
+struct Empty<T> { t: T }
+
+impl<T> Drop for Empty<T> {} //~ ERROR E0906
+
+struct Other<T> { t: T }
+
+impl<T> Drop for Other<T> { //~ ERROR E0906
+    fn foo(&mut self) {} //~ ERROR E0906
+}
+
+struct Both<T> { t: T }
+
+impl<T> Drop for Both<T> {
+    fn foo(&mut self) {} //~ ERROR E0906
+    fn drop(&mut self) {}
+}
+
+struct Shared<T> { t: T }
+
+impl<T> Drop for Shared<T> {
+    fn drop(&self) {} //~ ERROR E0905
+}
+
+struct Plain { n: N }
+
+impl Drop for Plain {} //~ ERROR E0906
+
+fn holds<T>(e: &Empty<T>, o: &Other<T>, b: &Both<T>, s: &Shared<T>) -> u32 {
+    return 0;
+}
+
+fn concrete(e: &Empty<N>, o: &Other<N>, b: &Both<N>, s: &Shared<N>, p: &Plain) -> u32 {
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}
