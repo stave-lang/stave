@@ -324,3 +324,77 @@ test fn struct_literal_fields_named_twice() {
     debug.assert(decided(t), "a field named twice or no field is typed without a context, the literal without it");
     debug.assert(test_kit.has(t, " adt d"), "the literal is of its struct");
 }
+
+// The number of times needle occurs in hay.
+fn occurrences(hay: &[u8], needle: &str) -> u32 {
+    let n = mem.str_bytes(needle);
+    let mut k: u32 = 0;
+    if n.len() > hay.len() { return 0; }
+    for i in 0..hay.len() - n.len() + 1 {
+        if hay[i..i + n.len()].eq(n) { k = k + 1; }
+    }
+    return k;
+}
+
+test fn matches_exhaustive_and_reachable() {
+    let (d, _) = check("enum Tok { Plus, Minus, Num(u32), Pair(bool, bool) }\nfn a(t: Tok) -> u32 {\n    return match t {\n        Tok.Plus | Tok.Minus => 1,\n        Tok.Num(_) => 2,\n        Tok.Pair(true, _) => 3,\n    };\n}\nfn b(t: Tok) -> u32 {\n    return match t {\n        _ => 1,\n        Tok.Plus => 2,\n    };\n}\nfn c(t: Tok, g: bool) -> u32 {\n    return match t {\n        Tok.Plus | Tok.Plus => 1,\n        Tok.Minus if g => 2,\n        Tok.Minus => 3,\n        Tok.Num(_) | Tok.Pair(_, _) => 4,\n    };\n}\nfn e(x: u8) -> u32 {\n    return match x {\n        0..=9 | 20..=29 => 1,\n        10..20 => 2,\n        30..=254 => 3,\n    };\n}\nfn f(x: u8) -> u32 {\n    return match x {\n        0..=127 => 1,\n        128..=255 => 2,\n        5 => 3,\n    };\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(occurrences(ms, "non-exhaustive match on `Tok`\n") == 1, "`Tok.Pair(false, _)` is left in `a` only");
+    debug.assert(occurrences(ms, "non-exhaustive match on `u8`\n") == 1, "255 is left in `e`, `f` covers every byte");
+    debug.assert(occurrences(ms, "unreachable match arm\n") == 2, "the arm after `_`, the `5` after the two ranges");
+    debug.assert(occurrences(ms, "unreachable alternative of a match arm\n") == 1, "`Tok.Plus` again in its own arm");
+    debug.assert(d.len() == 5, "a guarded arm covers nothing");
+}
+
+test fn let_patterns_cover_every_value() {
+    let (d, _) = check("enum Empty {}\nstruct H { e: Empty }\nstruct P { x: u32, y: bool }\nfn f(o: Option<u32>, t: (u32, bool), p: P, h: H) -> u32 {\n    let Option.Some(v) = o;\n    let (n, true) = t;\n    let (a, b) = t;\n    let P.{ x, y } = p;\n    let H.{ e } = h;\n    return v;\n}\nfn g(xs: &[(u32, bool)]) {\n    for (a, false) in xs {\n    }\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(test_kit.has(ms, "pattern does not cover every value of `Option<u32>`\n"), "`let` of a variant");
+    debug.assert(occurrences(ms, "pattern does not cover every value of `(u32, bool)`\n") == 1, "`let` of a literal in a tuple");
+    debug.assert(test_kit.has(ms, "pattern does not cover every value of `&(u32, bool)`\n"), "`for` over references");
+    debug.assert(d.len() == 3, "bindings, a struct taken apart, and an uninhabited field cover every value");
+}
+
+test fn or_pattern_bindings() {
+    let (d, _) = check("enum Tok { Num(u32), Wide(u64), Name(u32), Eof }\nfn f(t: Tok) -> u32 {\n    return match t {\n        Tok.Num(n) | Tok.Name(n) => n,\n        Tok.Wide(n) | Tok.Num(n) => 1,\n        Tok.Eof | Tok.Name(k) => 2,\n    };\n}\nfn g(t: Tok) -> u32 {\n    return match t {\n        Tok.Num(mut n) | Tok.Name(n) => 1,\n        _ => 2,\n    };\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(occurrences(ms, "`n` is not bound the same way in every alternative of this pattern\n") == 2, "`u64` against `u32`, `mut` in one alternative");
+    debug.assert(occurrences(ms, "`k` is not bound the same way in every alternative of this pattern\n") == 1, "a name only a later alternative binds");
+    debug.assert(test_kit.has(ms, "unreachable alternative of a match arm\n"), "`Tok.Num(n)` after the first arm");
+}
+
+test fn pattern_errors() {
+    let (d, _) = check("enum Tok { Plus, Num(u32) }\nstruct S { a: u32, b: bool, c: u8 }\nfn h() -> u32 {\n    return 0;\n}\nfn f(t: Tok, x: u32, s: S) -> u32 {\n    let a = match t {\n        Tok.Num(a, b) => 1,\n        Tok.Plus(z) => 2,\n        _ => 3,\n    };\n    let (p, q) = x;\n    let Tok.Plus = s;\n    let c = match x {\n        300 => 1,\n        0x => 2,\n        main.h => 3,\n        _ => 4,\n    };\n    let S.{ a } = s;\n    let S.{ a: _, a: y, b: _, c: _ } = s;\n    return 0;\n}\nfn main() {}\n");
+    let m = messages(&d);
+    let ms = m.as_slice();
+    debug.assert(test_kit.has(ms, "`Tok.Num(a, b)` takes 1 arguments, found 2\n"), "a payload of another arity");
+    debug.assert(test_kit.has(ms, "`Tok.Plus(z)` takes 0 arguments, found 1\n"), "a payload on a unit variant");
+    debug.assert(test_kit.has(ms, "mismatched types: expected `u32`, found `(T1000, T1001)`\n"), "a tuple pattern for an int");
+    debug.assert(test_kit.has(ms, "mismatched types: expected `S`, found `Tok`\n"), "a variant pattern for a struct");
+    debug.assert(test_kit.has(ms, "`main.h` is not a value\n"), "a path naming a fn");
+    debug.assert(test_kit.has(ms, "literal `0x` is malformed\n"), "a malformed literal");
+    debug.assert(test_kit.has(ms, "literal `300` is out of range for `u32`\n") == false, "300 fits a `u32`");
+    debug.assert(test_kit.has(ms, "a pattern of `S` leaves fields out: `b, c`\n"), "a record pattern naming one of three fields");
+    debug.assert(test_kit.has(ms, "field `a` of `main.S` is named twice in one pattern\n"), "a field named twice");
+}
+
+test fn search_limits() {
+    // 24 `bool` columns, one arm testing each: past the step limit, a final `_` is no help
+    let mut s = string.String.from_str("fn pick(x: (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool)) -> u32 {\n    match x {\n");
+    for i in 0..24u32 {
+        s.push_str("        (");
+        for j in 0..24u32 {
+            if j > 0 { s.push_str(", "); }
+            s.push_str(if i == j then "true" else "_");
+        }
+        s.push_str(") => { return 1; }\n");
+    }
+    s.push_str("        _ => { return 2; }\n    }\n    return 3;\n}\nfn main() {}\n");
+    let (d, _) = check(s.as_str());
+    let m = messages(&d);
+    debug.assert(test_kit.has(m.as_slice(), "pattern on `(bool, bool,"), "E0300 `limit-split`");
+    debug.assert(d.len() == 1, "the limit alone: no arm reported unreachable");
+}

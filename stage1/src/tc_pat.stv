@@ -1,29 +1,53 @@
-// Pattern bindings of the body checker (types/check, see `typeck`): the types of the names a
-// pattern binds, given the type of the value it matches, as stage0's `patterns.rs` gives them
-// (`let`, `for`, `match` arms; every pattern starts by value).
+// Patterns of the body checker (types/check, see `typeck`), as stage0's `patterns.rs` checks
+// them: the types of the names a pattern binds (`let`, `for`, `match` arms; every pattern starts
+// by value), the errors stage0 reports in a pattern, the lowered pattern (`tc_useful.Pats`) of
+// each, and the checks over them: a `let` or `for` pattern covers every value, a match is
+// exhaustive and has no unreachable arm (`tc_useful`), the alternatives of an or-pattern bind
+// alike (E0302).
 //
-// Forms: `_`; a binding `x` / `mut x` (the value whole); a literal or const pattern (no names);
-// parentheses; a tuple; a struct or variant by path with a payload `(p, ..)`, fields `.{ f: p, g }`
-// (a shorthand field binds the `FieldPat`), or none. A constructor or tuple pattern matched
-// against a reference peels it, and the names below bind by reference (`&F`, or `&mut F` when
-// every peeled reference is `&mut`). A pattern stage0 rejects (wrong constructor, arity, field,
-// a field named twice) leaves the names below it unknown. A value of the error type binds as
-// stage0's (`err_pattern`).
+// Forms: `_`; a binding `x` / `mut x` (the value whole); a literal or literal range; a const by
+// path; parentheses; a tuple; a struct or variant by path with a payload `(p, ..)`, fields
+// `.{ f: p, g }` (a shorthand field binds the `FieldPat`), or none. A constructor or tuple pattern
+// matched against a reference peels it, and the names below bind by reference (`&F`, or `&mut F`
+// when every peeled reference is `&mut`). A pattern stage0 rejects is lowered as rejected
+// (`P_ERR`: a check over it is skipped) and its sub-patterns are checked against the error type,
+// so their names bind as stage0's. A name bound by reference to the error type stays unknown
+// (stage0's `&-` has no key here).
 //
-// Owns: the `loc` rows of binding nodes inside patterns, and the pattern stack `pat_*` of
-// `tc_rows.Typeck`. Entry point: `bind_pattern`. A pattern under a value of unknown type leaves
-// its bindings `UNK` (their default), so every use of them prints `?`.
+// Errors: E0201 (a literal of another kind, a tuple or struct pattern for another type, a payload
+// of another arity, a path naming no value, a const of another type), E0203 (a malformed literal,
+// an int literal out of its type's range), E0206 (`==` missing), E0105 (a field named twice),
+// E0106 (a struct with a private field taken apart outside its module), E0208 case
+// `pattern-missing-field` (stage0's E0208 for a field the type lacks shares its message with the
+// member lookups and is left to them: the pattern is still faulty), E0300, E0301, E0302.
+//
+// Not decided here: a pattern under a value of unknown type (its names stay `UNK`, every use
+// prints `?`), a const pattern whose value the evaluator does not give (a `char`, float, pointer
+// or fn const): the checks over such a pattern are not made.
+//
+// Owns: the `loc` rows of binding nodes inside patterns; the pattern stack `pat_*`, the lowered
+// patterns `pats`, the match rows `mr_*` and open matches `ms_*` of `tc_rows.Typeck`. Entry
+// points: `let_pattern`, `match_open`, `arm_patterns`, `match_close`.
 import ast;
 import consteval;
 import decls;
 import generated.node_kinds;
 import generated.terminals;
 import intern;
+import items;
+import layout;
 import lex;
+import resolve;
 import sigs;
+import source;
 import tc_rows;
+import tc_useful;
 import ir.types;
+import prims.col;
+import prims.perm;
 import prims.search;
+import prims.sort;
+import std.vec;
 
 const NONE: u32 = tc_rows.NONE;
 const ERR: u32 = types.ERR;
@@ -38,66 +62,434 @@ const M_MOVE: u8 = 0;
 const M_REF: u8 = 1;
 const M_MUT: u8 = 2;
 
+// Variant shapes.
+const S_UNIT: u8 = 0;
+const S_TUPLE: u8 = 1;
+const S_RECORD: u8 = 2;
+
+// Literal kinds (stage0's `lit_value`).
+const L_INT: u8 = 0;
+const L_FLOAT: u8 = 1;
+const L_STR: u8 = 2;
+const L_CHAR: u8 = 3;
+const L_BOOL: u8 = 4;
+
+// Match row flags.
+const R_GUARDED: u8 = 1;
+const R_ALT: u8 = 2;
+const R_ERR: u8 = 4;
+
+// `i128::MAX` as a magnitude's high word.
+const I128_MAX_HI: u64 = 0x7fff_ffff_ffff_ffff;
+
 impl tc_rows.Typeck {
-    // Binds the names of pattern row p (a `Pattern`) to the parts of a value of type ty.
-    pub fn bind_pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, p: usize, ty: u32) {
-        // the pattern's nesting is at most its node count: a pattern that may pass the nesting
-        // limit is not modeled
-        if self.depth as usize + tree.size.as_slice()[p] as usize + 1 > tc_rows.MAX_DEPTH as usize { return; }
-        if ty == UNK || ty == NONE { return; }
+    // Binds the names of pattern row p (a `Pattern`) to the parts of a value of type ty, reports
+    // what stage0 reports in it, and lowers it: its row in `pats`, `NONE` when undecided.
+    pub fn bind_pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, p: usize, ty: u32) -> u32 {
+        self.ob_node.clear();
+        self.ob_ty.clear();
+        self.ob_mode.clear();
+        self.pat_err = false;
+        self.pat_unk = false;
+        if ty == UNK || ty == NONE {
+            self.pat_unk = true;
+            return NONE;
+        }
+        let root = self.pats.alloc(1);
         self.pat_row.clear();
         self.pat_ty.clear();
         self.pat_mode.clear();
-        self.pat_row.push(p as% u32);
-        self.pat_ty.push(ty);
-        self.pat_mode.push(M_MOVE);
+        self.pat_slot.clear();
+        self.pat_lvl.clear();
+        // a pattern node is one nesting level below its parent (stage0's `enter`)
+        self.push_pat(p, ty, M_MOVE, root, self.depth + 1);
         while self.pat_row.len() > 0 {
             let top = self.pat_row.len() - 1;
             let n = self.pat_row.as_slice()[top] as usize;
             let pt = self.pat_ty.as_slice()[top];
             let m = self.pat_mode.as_slice()[top];
+            let slot = self.pat_slot.as_slice()[top];
+            let lvl = self.pat_lvl.as_slice()[top];
             self.pat_row.truncate(top);
             self.pat_ty.truncate(top);
             self.pat_mode.truncate(top);
-            if !self.pattern(sg, ds, nm, t, tree, n, pt, m) {
+            self.pat_slot.truncate(top);
+            self.pat_lvl.truncate(top);
+            self.pattern(sg, ds, nm, set, t, cut, tree, n, pt, m, slot, lvl);
+        }
+        return if self.pat_unk then NONE else root;
+    }
+
+    // One pattern node n against a value of type ty bound in mode m, lowered into row slot
+    // (`NONE`: a pattern whose lowering stage0 discards) at nesting level lvl.
+    fn pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, n: usize, ty: u32, m: u8, slot: u32, lvl: u32) {
+        // past the nesting limit the pattern is rejected (E0005 case `expr`, a later stage's)
+        if lvl > tc_rows.MAX_DEPTH {
+            self.rejected(slot);
+            return;
+        }
+        let a = tree.tok.as_slice()[n];
+        let ft = consteval.tk(t, a);
+        if ft == terminals.T_UNDERSCORE { return; }
+        if ft == terminals.T_KW_MUT {
+            self.bind(&mut sg.cx.tab, n, ty, m);
+            return;
+        }
+        let ks = tree.kids.row(n);
+        if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL {
+            self.lit_pattern(&sg.cx.tab, set, t, cut, tree, n, ty, m, slot);
+            return;
+        }
+        if ft == terminals.T_L_PAREN {
+            let close = tree.tok_end.as_slice()[n] - 1;
+            if ks.len() == 1 && consteval.tk(t, close - 1) != terminals.T_COMMA {
+                self.push_pat(self.base + ks[0] as usize, ty, m, slot, lvl + 1);
+                return;
+            }
+            if ty != ERR {
+                let (pt, pm) = peel(&sg.cx.tab, ty, m);
+                if sg.cx.tab.tag_of(pt) == types.TK_TUPLE && sg.cx.tab.x(pt).len() == ks.len() {
+                    let sub = self.ctor(slot, tc_useful.C_SINGLE, 0, ks.len());
+                    let mut j = ks.len();
+                    while j > 0 {
+                        j = j - 1;
+                        let e = sg.cx.tab.x(pt)[j];
+                        self.push_pat(self.base + ks[j] as usize, e, pm, sub_slot(sub, j), lvl + 1);
+                    }
+                    return;
+                }
+                let found = self.tuple_placeholder(&mut sg.cx.tab, ks.len());
+                self.mismatch_pat(n, found, ty);
+            }
+            self.kids_against_err(tree, n, m, lvl);
+            self.rejected(slot);
+            return;
+        }
+        if ft != terminals.T_IDENT {
+            self.rejected(slot);
+            return;
+        }
+        let e = chain_end(t, a);
+        let paren = consteval.tk(t, e + 1) == terminals.T_L_PAREN;
+        let braces = consteval.tk(t, e + 1) == terminals.T_DOT_L_BRACE;
+        if e == a && !paren && !braces {
+            self.bind(&mut sg.cx.tab, n, ty, m);
+            return;
+        }
+        let (lo, hi) = sg.cx.uses.range(self.it, (n - self.base) as% u32);
+        let d = if lo == hi || sg.cx.uses.tag.as_slice()[hi - 1] != resolve.TAG_DECL then NONE else sg.cx.uses.target.as_slice()[hi - 1];
+        if d == NONE || d as usize >= ds.decls() {
+            self.sub_err(tree, n, slot, lvl);
+            return;
+        }
+        let dk = ds.kind.as_slice()[d as usize];
+        if dk == decls.DK_VARIANT || dk == decls.DK_STRUCT {
+            // the path's second-to-last step names a module
+            let through = hi - lo >= 2 && sg.cx.uses.tag.as_slice()[hi - 2] == resolve.TAG_DECL && is_module(ds, sg.cx.uses.target.as_slice()[hi - 2]);
+            self.adt_pattern(sg, ds, nm, tree, n, d, ty, m, slot, lvl, e, paren, braces, through);
+            return;
+        }
+        if dk == decls.DK_CONST {
+            self.const_pattern(sg, n, d, ty, m, slot);
+            return;
+        }
+        if dk != decls.DK_ERROR { self.report(201, tc_rows.C_NOT_VALUE, n as% u32, NONE, NONE, NONE); }
+        self.sub_err(tree, n, slot, lvl);
+    }
+
+    // A struct or variant pattern n naming decl d (path end token e) against type ty in mode m.
+    fn adt_pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, tree: &ast.Ast, n: usize, d: u32, ty: u32, m: u8, slot: u32, lvl: u32, e: u32, paren: bool, braces: bool, through: bool) {
+        let variant = ds.kind.as_slice()[d as usize] == decls.DK_VARIANT;
+        let adt = if variant then ds.parent.as_slice()[d as usize] else d;
+        let sk = self.tq.sh.kind_of(adt);
+        let vi = if variant then ds.index.as_slice()[d as usize] else 0u32;
+        let nv = if sk == layout.SK_NONE then 0u32 else self.tq.sh.v_lo.as_slice()[adt as usize + 1] - self.tq.sh.v_lo.as_slice()[adt as usize];
+        if vi >= nv {
+            self.sub_err(tree, n, slot, lvl);
+            return;
+        }
+        let (pt, pm) = peel(&sg.cx.tab, ty, m);
+        if pt == ERR {
+            self.sub_err(tree, n, slot, lvl);
+            return;
+        }
+        if sg.cx.tab.tag_of(pt) != types.TK_ADT || sg.cx.tab.a_of(pt) != adt {
+            let found = self.adt_generic(sg, adt);
+            self.mismatch_pat(n, found, ty);
+            self.sub_err(tree, n, slot, lvl);
+            return;
+        }
+        let mut ftys = vec.Vec::<u32>.new();
+        tc_useful.adt_fields(&mut sg.cx.tab, &self.tq.sh, &mut self.tq.pa, pt, vi, &mut ftys);
+        let nf = ftys.len();
+        let fl = ds.flags.as_slice()[d as usize];
+        let shape = if !variant || fl & decls.F_RECORD != 0 then S_RECORD else if fl & decls.F_TUPLE != 0 then S_TUPLE else S_UNIT;
+        let c = if variant then tc_useful.C_VARIANT else tc_useful.C_SINGLE;
+        let ks = tree.kids.row(n);
+        if braces {
+            if shape != S_RECORD {
+                self.arity_pat(tree, n, nf, ks.len(), slot, lvl);
+                return;
+            }
+            self.record_pattern(sg, ds, nm, tree, n, d, pt, pm, slot, lvl, e, through, c, vi, ftys.as_slice());
+            return;
+        }
+        if paren {
+            if shape != S_TUPLE || ks.len() != nf {
+                self.arity_pat(tree, n, nf, ks.len(), slot, lvl);
+                return;
+            }
+            let sub = self.ctor(slot, c, vi as u64, nf);
+            let mut j = nf;
+            while j > 0 {
+                j = j - 1;
+                self.push_pat(self.base + ks[j] as usize, ftys.as_slice()[j], pm, sub_slot(sub, j), lvl + 1);
+            }
+            return;
+        }
+        if shape != S_UNIT {
+            self.arity_pat(tree, n, nf, 0, slot, lvl);
+            return;
+        }
+        let _ = self.ctor(slot, c, vi as u64, 0);
+    }
+
+    // A record pattern n `P.{ f: p, g }` of struct or record variant d (fields ftys) against the
+    // peeled type pt in mode pm: every field named once (E0105), and every one named (E0208
+    // `pattern-missing-field`) unless the pattern is faulty already; a struct with a private
+    // field is taken apart only inside its module (E0106 `pattern`, once: not where the path to
+    // a private struct through its module is reported).
+    fn record_pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, tree: &ast.Ast, n: usize, d: u32, pt: u32, pm: u8, slot: u32, lvl: u32, e: u32, through: bool, c: u8, vi: u32, ftys: &[u32]) {
+        let nf = ftys.len();
+        let (flo, fhi) = layout.run_of(self.tq.mem_k.as_slice(), d);
+        let mut hidden = false;
+        if ds.kind.as_slice()[d as usize] == decls.DK_STRUCT {
+            let mut fd = NONE;
+            for k in flo..fhi {
+                let f = self.tq.mem_d.as_slice()[k];
+                if ds.kind.as_slice()[f as usize] == decls.DK_FIELD && ds.flags.as_slice()[f as usize] & decls.F_PUB == 0 && ds.module.as_slice()[f as usize] != self.module {
+                    fd = f;
+                    break;
+                }
+            }
+            if fd != NONE {
+                let reported = through && ds.flags.as_slice()[d as usize] & decls.F_PUB == 0 && ds.module.as_slice()[d as usize] != self.module;
+                if !reported { self.report_span(106, tc_rows.C_PATTERN, e, e, n as% u32, d, fd, NONE); }
+                hidden = true;
+            }
+        }
+        let mut faulty = hidden;
+        let sub = self.ctor(slot, c, vi as u64, nf);
+        self.fs_tok.clear();
+        self.fs_bind.clear();
+        for _ in 0..nf {
+            self.fs_tok.push(NONE);
+            self.fs_bind.push(false);
+        }
+        let ks = tree.kids.row(n);
+        for j in 0..ks.len() {
+            let fp = self.base + ks[j] as usize;
+            if tree.kind.as_slice()[fp] != K_FIELD_PAT { continue; }
+            let fa = tree.tok.as_slice()[fp];
+            let sp = consteval.child(tree, self.base, fp, K_PATTERN);
+            let fi = field_pos(ds, self.tq.mem_k.as_slice(), d, nm.tok_str.as_slice()[fa as usize]);
+            if fi != NONE && self.fs_tok.as_slice()[fi as usize] == NONE {
+                let k = fi as usize;
+                self.fs_tok.as_mut_slice()[k] = fa;
+                self.fs_bind.as_mut_slice()[k] = sp == NONE;
+                if sp == NONE {
+                    self.bind(&mut sg.cx.tab, fp, ftys[k], pm);
+                } else {
+                    self.push_pat(sp as usize, ftys[k], pm, sub_slot(sub, k), lvl + 1);
+                }
+                continue;
+            }
+            // a field the type lacks (stage0's E0208, see the header), or one named again: `P.{ a,
+            // a }` binds the name twice, which is reported as that
+            if fi != NONE && !hidden && !(self.fs_bind.as_slice()[fi as usize] && sp == NONE) {
+                self.report_span(105, tc_rows.C_PATTERN, fa, fa, n as% u32, NONE, d, NONE);
+                let first = self.fs_tok.as_slice()[fi as usize];
+                let last = self.dg.x.len() - 1;
+                self.dg.x.as_mut_slice()[last] = first;
+            }
+            faulty = true;
+            if sp == NONE {
+                self.bind(&mut sg.cx.tab, fp, ERR, M_MOVE);
+            } else {
+                self.push_pat(sp as usize, ERR, pm, NONE, lvl + 1);
+            }
+        }
+        if faulty { return; }
+        let at = self.miss.len();
+        self.miss.push(0);
+        let mut k: usize = 0;
+        for q in flo..fhi {
+            let f = self.tq.mem_d.as_slice()[q];
+            if ds.kind.as_slice()[f as usize] != decls.DK_FIELD { continue; }
+            if k < nf && self.fs_tok.as_slice()[k] == NONE { self.miss.push(f); }
+            k = k + 1;
+        }
+        let missing = self.miss.len() - at - 1;
+        if missing == 0 {
+            self.miss.truncate(at);
+            return;
+        }
+        self.miss.as_mut_slice()[at] = missing as% u32;
+        self.report_span(208, tc_rows.C_PATTERN, e, e, n as% u32, pt, d, NONE);
+        let last = self.dg.x.len() - 1;
+        self.dg.x.as_mut_slice()[last] = at as% u32;
+    }
+
+    // A const pattern n naming const d against type ty in mode m: its type has `==` (E0206), is
+    // the value's (E0201), and its value is the constructor.
+    fn const_pattern(&mut self, sg: &mut sigs.Sigs, n: usize, d: u32, ty: u32, m: u8, slot: u32) {
+        let ct = sg.cx.ty.as_slice()[d as usize];
+        if ct != ERR && !scalar_eq(&sg.cx.tab, ct) {
+            self.no_eq_pattern(&sg.cx.tab, n, ct);
+            self.rejected(slot);
+            return;
+        }
+        let (pt, _) = peel(&sg.cx.tab, ty, m);
+        if pt != ct && ct != ERR && pt != ERR {
+            self.mismatch_pat(n, ct, ty);
+            self.rejected(slot);
+            return;
+        }
+        let cs = &sg.cx.consts;
+        let st = cs.state.as_slice()[d as usize];
+        if st == consteval.CV_FAIL {
+            self.rejected(slot);
+            return;
+        }
+        let tag = sg.cx.tab.tag_of(ct);
+        if st != consteval.CV_OK || (tag != types.TK_INT && tag != types.TK_BOOL) {
+            self.pat_unk = true;
+            return;
+        }
+        let mag = cs.mag.as_slice()[d as usize];
+        if tag == types.TK_BOOL {
+            self.set_ctor(slot, tc_useful.C_BOOL, 0, if mag != 0 then 1u64 else 0u64, 0, 0);
+            return;
+        }
+        let (h, l) = tc_useful.signed(cs.neg.as_slice()[d as usize], 0, mag);
+        self.set_ctor(slot, tc_useful.C_RANGE, h, l, h, l);
+    }
+
+    // A literal pattern n (its literals the children: one, or a range's two) against type ty in
+    // mode m (a string literal tests the value itself, the others the value behind its
+    // references): E0203 at a malformed literal, E0201 at the first one if its kind is not the
+    // type's, E0206 if the type has no `==`, E0203 at an int literal out of the type's range.
+    fn lit_pattern(&mut self, tab: &types.Table, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, n: usize, ty: u32, m: u8, slot: u32) {
+        let ks = tree.kids.row(n);
+        let nl = if ks.len() >= 2 then 2usize else 1usize;
+        let mut kind = [0u8; 2];
+        let mut neg = [false; 2];
+        let mut big = [false; 2];
+        let mut mag = [0u64; 2];
+        let mut vh = [0u64; 2];
+        let mut vl = [0u64; 2];
+        for j in 0..nl {
+            let l = self.base + ks[j] as usize;
+            let a = tree.tok.as_slice()[l];
+            let ng = consteval.tk(t, a) == terminals.T_MINUS;
+            let tok = if ng then a + 1 else a;
+            let lt = consteval.tk(t, tok);
+            neg[j] = ng;
+            let mut ok = true;
+            if lt == terminals.T_INT_LIT {
+                let b = tc_rows.tok_text(t, set, cut, self.it, tok, false);
+                let (mg, bg, suf) = consteval.parse_int(b);
+                ok = suf != 255;
+                let (mh, ml) = if bg then mag128(b) else (0u64, mg);
+                let (ch, cl) = if mh > I128_MAX_HI then (I128_MAX_HI, tc_useful.ONES) else (mh, ml);
+                let (h, l2) = tc_useful.signed(ng, ch, cl);
+                kind[j] = L_INT;
+                mag[j] = mg;
+                big[j] = bg;
+                vh[j] = h;
+                vl[j] = l2;
+            } else if lt == terminals.T_FLOAT_LIT {
+                kind[j] = L_FLOAT;
+                vh[j] = tc_useful.SIGN;
+            } else if lt == terminals.T_STR_LIT {
+                kind[j] = L_STR;
+                vh[j] = tc_useful.SIGN;
+            } else if lt == terminals.T_CHAR_LIT {
+                let b = tc_rows.quoted_text(t, set, cut, self.it, tok);
+                let (cnt, cp) = if b.len() >= 2 then tc_rows.unescape(&b[1..b.len() - 1]) else (NONE, 0u32);
+                ok = cnt == 1;
+                kind[j] = L_CHAR;
+                vh[j] = tc_useful.SIGN;
+                vl[j] = cp as u64;
+            } else if lt == terminals.T_KW_TRUE || lt == terminals.T_KW_FALSE {
+                kind[j] = L_BOOL;
+                vh[j] = tc_useful.SIGN;
+                vl[j] = if lt == terminals.T_KW_TRUE then 1u64 else 0u64;
+            } else {
+                ok = false;
+            }
+            if !ok {
+                self.report(203, tc_rows.C_MALFORMED, l as% u32, NONE, NONE, NONE);
+                self.rejected(slot);
                 return;
             }
         }
-    }
-
-    // A literal pattern n (its literals the children: one, or a range's two) against a value of
-    // type ty in mode m (a string literal tests the value itself, the others the value behind
-    // its references): E0201 at the first literal if its kind is not the type's, else E0206 if
-    // the type has no `==`. Such a pattern binds nothing: the body's types are stage0's.
-    fn lit_pattern(&mut self, tab: &types.Table, t: &lex.Tokens, tree: &ast.Ast, n: usize, ty: u32, m: u8) -> bool {
-        let l0 = self.base + tree.kids.row(n)[0] as usize;
-        let a = tree.tok.as_slice()[l0];
-        let lt = consteval.tk(t, if consteval.tk(t, a) == terminals.T_MINUS then a + 1 else a);
-        let (pt, _) = if lt == terminals.T_STR_LIT then (ty, m) else peel(tab, ty, m);
-        if pt == UNK { return true; }
-        if pt == NONE || pt == ERR { return false; }
+        let l0 = self.base + ks[0] as usize;
+        let (pt, _) = if kind[0] == L_STR then (ty, m) else peel(tab, ty, m);
+        if pt == ERR {
+            self.rejected(slot);
+            return;
+        }
         let tag = tab.tag_of(pt);
+        let k0 = kind[0];
         let mut found = NONE;
-        if lt == terminals.T_INT_LIT {
+        if k0 == L_INT {
             if tag != types.TK_INT { found = tc_rows.LIT_INT; }
-        } else if lt == terminals.T_FLOAT_LIT {
+        } else if k0 == L_FLOAT {
             if tag != types.TK_FLOAT { found = tc_rows.LIT_FLOAT; }
-        } else if lt == terminals.T_STR_LIT {
+        } else if k0 == L_STR {
             let str = tag == types.TK_STR || (tag == types.TK_REF && tab.a_of(pt) == 0 && tab.tag_of(tab.b_of(pt)) == types.TK_STR);
             if !str { found = self.t_ref_str; }
-        } else if lt == terminals.T_CHAR_LIT {
+        } else if k0 == L_CHAR {
             if tag != types.TK_CHAR { found = self.t_char; }
-        } else if lt == terminals.T_KW_TRUE || lt == terminals.T_KW_FALSE {
-            if tag != types.TK_BOOL { found = self.t_bool; }
-        } else {
-            return false;
+        } else if tag != types.TK_BOOL {
+            found = self.t_bool;
         }
         if found != NONE {
             self.report(201, tc_rows.C_PENDING, l0 as% u32, pt, found, NONE);
-            return true;
+            self.rejected(slot);
+            return;
         }
-        if !scalar_eq(tab, pt) { self.no_eq_pattern(tab, n, pt); }
-        return true;
+        if !scalar_eq(tab, pt) {
+            self.no_eq_pattern(tab, n, pt);
+            self.rejected(slot);
+            return;
+        }
+        if k0 == L_INT {
+            for j in 0..nl {
+                if kind[j] == L_INT && !tc_rows.int_fits(tab, pt, mag[j], big[j], neg[j]) { self.report(203, 0, (self.base + ks[j] as usize) as% u32, pt, NONE, NONE); }
+            }
+        }
+        if k0 == L_INT || k0 == L_CHAR {
+            let inclusive = nl == 2 && consteval.tk(t, tree.tok_end.as_slice()[l0]) == terminals.T_DOT_DOT_EQ;
+            let (hh, hl) = if nl == 1 then (vh[0], vl[0]) else if inclusive then (vh[1], vl[1]) else tc_useful.pred(vh[1], vl[1]);
+            if tc_useful.lt(hh, hl, vh[0], vl[0]) {
+                self.set_ctor(slot, tc_useful.C_OPAQUE, 0, tc_useful.ONES, 0, 0);
+            } else {
+                self.set_ctor(slot, tc_useful.C_RANGE, vh[0], vl[0], hh, hl);
+            }
+            return;
+        }
+        if k0 == L_BOOL {
+            self.set_ctor(slot, tc_useful.C_BOOL, 0, vl[0], 0, 0);
+            return;
+        }
+        let (h, known) = node_hash(set, t, cut, self.it, tree, n);
+        if known {
+            self.set_ctor(slot, tc_useful.C_OPAQUE, 0, h, 0, 0);
+        } else {
+            self.pat_unk = true;
+        }
     }
 
     // E0206 case `pattern` (`pattern-str` for a string, through references): pattern n tests
@@ -111,136 +503,410 @@ impl tc_rows.Typeck {
         self.report(206, case, n as% u32, ty, NONE, NONE);
     }
 
-    // One pattern node n against a value of type ty bound in mode m: binds its name or pushes its
-    // sub-patterns. False: a pattern stage0 rejects.
-    fn pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, n: usize, ty: u32, m: u8) -> bool {
-        let a = tree.tok.as_slice()[n];
-        let ft = consteval.tk(t, a);
-        if ft == terminals.T_UNDERSCORE { return true; }
-        if ty == ERR { return self.err_pattern(t, tree, n, m); }
-        if ft == terminals.T_KW_MUT { return self.bind(&mut sg.cx.tab, n, ty, m); }
+    // E0201 case `no-cast` at pattern n: a value of type want, a pattern of type found (none for
+    // a want that holds the error type).
+    fn mismatch_pat(&mut self, n: usize, found: u32, want: u32) {
+        if want == ERR { return; }
+        self.report(201, tc_rows.C_NO_CAST, n as% u32, want, found, NONE);
+    }
+
+    // E0201 case `arity` at pattern n (want fields, got given): rejected.
+    fn arity_pat(&mut self, tree: &ast.Ast, n: usize, want: usize, got: usize, slot: u32, lvl: u32) {
+        self.report(201, tc_rows.C_ARITY_PAT, n as% u32, want as% u32, got as% u32, NONE);
+        self.sub_err(tree, n, slot, lvl);
+    }
+
+    // A rejected pattern n: its sub-patterns (and shorthand fields) against the error type, by
+    // value (stage0's `sub_err`).
+    fn sub_err(&mut self, tree: &ast.Ast, n: usize, slot: u32, lvl: u32) {
         let ks = tree.kids.row(n);
-        if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL { return self.lit_pattern(&sg.cx.tab, t, tree, n, ty, m); }
-        if ft == terminals.T_L_PAREN {
-            let close = tree.tok_end.as_slice()[n] - 1;
-            if ks.len() == 1 && consteval.tk(t, close - 1) != terminals.T_COMMA {
-                self.push_pat(self.base + ks[0] as usize, ty, m);
-                return true;
-            }
-            let (pt, pm) = peel(&sg.cx.tab, ty, m);
-            if sg.cx.tab.tag_of(pt) != types.TK_TUPLE || sg.cx.tab.x(pt).len() != ks.len() { return false; }
-            for j in 0..ks.len() {
-                let e = sg.cx.tab.x(pt)[j];
-                self.push_pat(self.base + ks[j] as usize, e, pm);
-            }
-            return true;
-        }
-        if ft != terminals.T_IDENT { return false; }
-        let mut e = a;
-        while consteval.tk(t, e + 1) == terminals.T_DOT && consteval.tk(t, e + 2) == terminals.T_IDENT {
-            e = e + 2;
-        }
-        let paren = consteval.tk(t, e + 1) == terminals.T_L_PAREN;
-        let braces = consteval.tk(t, e + 1) == terminals.T_DOT_L_BRACE;
-        if e == a && !paren && !braces { return self.bind(&mut sg.cx.tab, n, ty, m); }
-        let (lo, hi) = sg.cx.uses.range(self.it, (n - self.base) as% u32);
-        if lo == hi || sg.cx.uses.tag.as_slice()[hi - 1] != 0 { return false; }
-        let d = sg.cx.uses.target.as_slice()[hi - 1];
-        let dk = ds.kind.as_slice()[d as usize];
-        if dk == decls.DK_CONST {
-            if paren || braces { return false; }
-            let ct = sg.cx.ty.as_slice()[d as usize];
-            if ct != ERR && !scalar_eq(&sg.cx.tab, ct) {
-                self.no_eq_pattern(&sg.cx.tab, n, ct);
-                return true;
-            }
-            return true;
-        }
-        if dk != decls.DK_VARIANT && dk != decls.DK_STRUCT { return false; }
-        let adt = if dk == decls.DK_VARIANT then ds.parent.as_slice()[d as usize] else d;
-        let (pt, pm) = peel(&sg.cx.tab, ty, m);
-        if sg.cx.tab.tag_of(pt) != types.TK_ADT || sg.cx.tab.a_of(pt) != adt { return false; }
-        let fl = ds.flags.as_slice()[d as usize];
-        let tuple = dk == decls.DK_VARIANT && fl & decls.F_TUPLE != 0;
-        let record = dk == decls.DK_STRUCT || fl & decls.F_RECORD != 0;
-        if braces {
-            if !record { return false; }
-            for j in 0..ks.len() {
-                let fp = self.base + ks[j] as usize;
-                if tree.kind.as_slice()[fp] != K_FIELD_PAT { continue; }
-                let s = nm.tok_str.as_slice()[tree.tok.as_slice()[fp] as usize];
-                let f = field(ds, d, s);
-                if f == NONE { return false; }
-                // a field named twice
-                for i in 0..j {
-                    let fq = self.base + ks[i] as usize;
-                    if tree.kind.as_slice()[fq] == K_FIELD_PAT && nm.tok_str.as_slice()[tree.tok.as_slice()[fq] as usize] == s { return false; }
-                }
-                let decl_ty = sg.cx.ty.as_slice()[f as usize];
-                let fty = self.field_ty(sg, decl_ty, pt);
-                if fty == ERR || fty == NONE { return false; }
-                let sub = consteval.child(tree, self.base, fp, K_PATTERN);
-                if sub == NONE {
-                    if !self.bind(&mut sg.cx.tab, fp, fty, pm) { return false; }
+        let mut j = ks.len();
+        while j > 0 {
+            j = j - 1;
+            let k = self.base + ks[j] as usize;
+            let kk = tree.kind.as_slice()[k];
+            if kk == K_PATTERN {
+                self.push_pat(k, ERR, M_MOVE, NONE, lvl + 1);
+            } else if kk == K_FIELD_PAT {
+                let sp = consteval.child(tree, self.base, k, K_PATTERN);
+                if sp == NONE {
+                    self.loc.as_mut_slice()[k] = ERR;
+                    self.note_bind(k, ERR, M_MOVE);
                 } else {
-                    self.push_pat(sub as usize, fty, pm);
+                    self.push_pat(sp as usize, ERR, M_MOVE, NONE, lvl + 1);
                 }
             }
-            return true;
         }
-        if paren {
-            if !tuple || sg.params.row(d as usize).len() != ks.len() { return false; }
-            for j in 0..ks.len() {
-                let payload = sg.params.row(d as usize)[j];
-                let fty = self.field_ty(sg, payload, pt);
-                if fty == ERR || fty == NONE { return false; }
-                self.push_pat(self.base + ks[j] as usize, fty, pm);
-            }
-            return true;
-        }
-        return !tuple && !record;
+        self.rejected(slot);
     }
 
-    // Pattern n (not `_`) against a value of the error type, as stage0's: a name bound by value
-    // is of the error type, parentheses and a tuple's parts take it. The names of any other
-    // form stay unknown.
-    fn err_pattern(&mut self, t: &lex.Tokens, tree: &ast.Ast, n: usize, m: u8) -> bool {
-        let a = tree.tok.as_slice()[n];
-        let ft = consteval.tk(t, a);
+    // The parts of a tuple pattern n against the error type, in mode m.
+    fn kids_against_err(&mut self, tree: &ast.Ast, n: usize, m: u8, lvl: u32) {
         let ks = tree.kids.row(n);
-        if ks.len() > 0 && tree.kind.as_slice()[self.base + ks[0] as usize] == K_LITERAL { return true; }
-        if ft == terminals.T_L_PAREN {
-            for j in 0..ks.len() {
-                self.push_pat(self.base + ks[j] as usize, ERR, m);
-            }
-            return true;
+        let mut j = ks.len();
+        while j > 0 {
+            j = j - 1;
+            self.push_pat(self.base + ks[j] as usize, ERR, m, NONE, lvl + 1);
         }
-        let single = ft == terminals.T_IDENT && !(consteval.tk(t, a + 1) == terminals.T_DOT && consteval.tk(t, a + 2) == terminals.T_IDENT) && consteval.tk(t, a + 1) != terminals.T_L_PAREN && consteval.tk(t, a + 1) != terminals.T_DOT_L_BRACE;
-        if (ft == terminals.T_KW_MUT || single) && m == M_MOVE { self.loc.as_mut_slice()[n] = ERR; }
-        return true;
     }
 
-    // A field or payload type with the arguments of the ADT type adt_ty.
-    fn field_ty(&mut self, sg: &mut sigs.Sigs, fty: u32, adt_ty: u32) -> u32 {
-        if fty == ERR || fty == NONE { return ERR; }
+    // `(T1000, T1001, ..)`: stage0's stand-in for a tuple pattern of k parts.
+    fn tuple_placeholder(&mut self, tab: &mut types.Table, k: usize) -> u32 {
         self.args.clear();
-        self.args.extend_from_slice(sg.cx.tab.x(adt_ty));
-        return sg.cx.tab.subst(fty, self.args.as_slice());
+        for i in 0..k {
+            let p = tab.key(types.TK_PARAM, 1000 + i as% u32, 0);
+            self.args.push(p);
+        }
+        tab.begin();
+        for i in 0..k {
+            tab.push(self.args.as_slice()[i]);
+        }
+        return tab.intern(types.TK_TUPLE, 0, 0);
     }
 
-    fn push_pat(&mut self, n: usize, ty: u32, m: u8) {
+    // `A<T1000, T1001, ..>`: stage0's stand-in for a pattern of struct or enum adt.
+    fn adt_generic(&mut self, sg: &mut sigs.Sigs, adt: u32) -> u32 {
+        let g = &sg.cx.gens;
+        let k = (g.lo.as_slice()[adt as usize + 1] - g.lo.as_slice()[adt as usize]) as usize;
+        let tab = &mut sg.cx.tab;
+        self.args.clear();
+        for i in 0..k {
+            let p = tab.key(types.TK_PARAM, 1000 + i as% u32, 0);
+            self.args.push(p);
+        }
+        tab.begin();
+        for i in 0..k {
+            tab.push_garg(types.GA_TYPE, self.args.as_slice()[i], 0);
+        }
+        return tab.intern(types.TK_ADT, adt, 0);
+    }
+
+    fn push_pat(&mut self, n: usize, ty: u32, m: u8, slot: u32, lvl: u32) {
         self.pat_row.push(n as% u32);
         self.pat_ty.push(ty);
         self.pat_mode.push(m);
+        self.pat_slot.push(slot);
+        self.pat_lvl.push(lvl);
+    }
+
+    // Row slot is constructor c (value v) over k new sub-pattern rows: the first (`NONE` with
+    // slot).
+    fn ctor(&mut self, slot: u32, c: u8, v: u64, k: usize) -> u32 {
+        if slot == NONE { return NONE; }
+        let sub = self.pats.alloc(k);
+        self.pats.set(slot, c, 0, v, 0, 0, sub, k as% u32);
+        return sub;
+    }
+
+    fn set_ctor(&mut self, slot: u32, c: u8, lh: u64, ll: u64, hh: u64, hl: u64) {
+        if slot != NONE { self.pats.set(slot, c, lh, ll, hh, hl, 0, 0); }
+    }
+
+    fn rejected(&mut self, slot: u32) {
+        if slot == NONE { return; }
+        self.pats.set_err(slot);
+        self.pat_err = true;
     }
 
     // Binding node n takes a value of type ty in mode m.
-    fn bind(&mut self, tab: &mut types.Table, n: usize, ty: u32, m: u8) -> bool {
+    fn bind(&mut self, tab: &mut types.Table, n: usize, ty: u32, m: u8) {
         let bt = if m == M_MOVE then ty else tab.mk_ref(m == M_MUT, ty);
-        if bt == ERR { return false; }
-        self.loc.as_mut_slice()[n] = bt;
-        return true;
+        if bt != ERR || m == M_MOVE { self.loc.as_mut_slice()[n] = bt; }
+        self.note_bind(n, bt, m);
     }
+
+    fn note_bind(&mut self, n: usize, bt: u32, m: u8) {
+        self.ob_node.push(n as% u32);
+        self.ob_ty.push(bt);
+        self.ob_mode.push(m);
+    }
+
+    // A `let` or `for` pattern row p against type ty: binds, and covers every value.
+    pub fn let_pattern(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, p: usize, ty: u32) {
+        let mark = self.pats.len();
+        let id = self.bind_pattern(sg, ds, nm, set, t, cut, tree, p, ty);
+        self.irrefutable(&mut sg.cx.tab, p, id, ty);
+        self.pats.truncate(mark);
+    }
+
+    // A `let` or `for` pattern row n (lowered p) against type ty covers every value (E0300 case
+    // `let` at it; `limit-split` past the search limit).
+    fn irrefutable(&mut self, tab: &mut types.Table, n: usize, p: u32, ty: u32) {
+        if p == NONE || ty == ERR || self.pat_err { return; }
+        let tag = tab.tag_of(ty);
+        if self.pats.kind.as_slice()[p as usize] == tc_useful.P_WILD && tag != types.TK_ADT && tag != types.TK_TUPLE { return; }
+        self.srch.begin();
+        self.srch.prev.push(p);
+        let open = self.srch.useful_row(tab, &self.tq.sh, &mut self.tq.pa, &self.pats, 1, 0, ty);
+        if self.srch.exceeded {
+            self.report(300, tc_rows.C_LIMIT_SPLIT, n as% u32, ty, NONE, NONE);
+        } else if open {
+            self.report(300, tc_rows.C_LET, n as% u32, ty, NONE, NONE);
+        }
+    }
+
+    // Before the scrutinee of a `match`: its rows start.
+    pub fn match_open(&mut self) {
+        self.ms_row.push(self.mr_pat.len() as% u32);
+        self.ms_pool.push(self.pats.len() as% u32);
+    }
+
+    // The alternatives of arm pattern c of arm row r against the scrutinee type st: each binds,
+    // is lowered into a row of the match, and binds what the first one binds (E0302).
+    pub fn arm_patterns(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, c: usize, st: u32) {
+        let ps = tree.kids.row(c);
+        let guarded = tree.kids.row(r).len() >= 3;
+        let alt = ps.len() > 1;
+        let first = self.base + ps[0] as usize;
+        for j in 0..ps.len() {
+            let p = self.base + ps[j] as usize;
+            let id = self.bind_pattern(sg, ds, nm, set, t, cut, tree, p, st);
+            let fl = (if guarded then R_GUARDED else 0u8) | (if alt then R_ALT else 0u8) | (if self.pat_err then R_ERR else 0u8);
+            self.mr_pat.push(id);
+            self.mr_node.push(p as% u32);
+            self.mr_arm.push(r as% u32);
+            self.mr_fl.push(fl);
+            if !alt || st == UNK || st == NONE { continue; }
+            if j == 0 {
+                self.of_node.clear();
+                self.of_ty.clear();
+                self.of_mode.clear();
+                self.of_node.extend_from_slice(self.ob_node.as_slice());
+                self.of_ty.extend_from_slice(self.ob_ty.as_slice());
+                self.of_mode.extend_from_slice(self.ob_mode.as_slice());
+            } else {
+                self.same_bindings(nm, t, tree, first, p);
+            }
+        }
+    }
+
+    // E0302 for every name alternative alt does not bind the way the first alternative first
+    // does: a name only one binds (the k-th binding of a name pairs with the first's k-th), one
+    // bound with another type (neither the error type) or mode, `mut` in one only. Once per name.
+    fn same_bindings(&mut self, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, first: usize, alt: usize) {
+        let mut fb = Binds.{ node: vec.Vec::<u32>.new(), tok: vec.Vec::<u32>.new(), mutable: vec.Vec::<bool>.new(), key: vec.Vec::<u64>.new() };
+        let mut ab = Binds.{ node: vec.Vec::<u32>.new(), tok: vec.Vec::<u32>.new(), mutable: vec.Vec::<bool>.new(), key: vec.Vec::<u64>.new() };
+        bindings_of(nm, t, tree, first, &mut fb);
+        bindings_of(nm, t, tree, alt, &mut ab);
+        let fperm = sort.sort_perm(fb.key.as_slice());
+        let fkeys = perm.gather(fb.key.as_slice(), fperm.as_slice());
+        let tf = Typed.of(self.of_node.as_slice());
+        let ta = Typed.of(self.ob_node.as_slice());
+        let mut seen = col.filled(fb.node.len(), false);
+        let mut bad = vec.Vec::<u32>.new();
+        for i in 0..ab.node.len() {
+            let k = search.lower_bound(fkeys.as_slice(), ab.key.as_slice()[i]);
+            if k == fkeys.len() || fkeys.as_slice()[k] != ab.key.as_slice()[i] {
+                bad.push(ab.tok.as_slice()[i]);
+                continue;
+            }
+            let f = fperm.as_slice()[k] as usize;
+            seen.as_mut_slice()[f] = true;
+            let x = ta.find(ab.node.as_slice()[i]);
+            let y = tf.find(fb.node.as_slice()[f]);
+            let mut differs = false;
+            if x != NONE && y != NONE {
+                let bt = self.ob_ty.as_slice()[x as usize];
+                let ft = self.of_ty.as_slice()[y as usize];
+                differs = self.ob_mode.as_slice()[x as usize] != self.of_mode.as_slice()[y as usize] || (bt != ft && bt != ERR && ft != ERR);
+            }
+            if differs || ab.mutable.as_slice()[i] != fb.mutable.as_slice()[f] { bad.push(ab.tok.as_slice()[i]); }
+        }
+        for f in 0..fb.node.len() {
+            if !seen.as_slice()[f] { bad.push(fb.tok.as_slice()[f]); }
+        }
+        let mut names = vec.Vec::<u32>.new();
+        for i in 0..bad.len() {
+            let tok = bad.as_slice()[i];
+            let s = nm.tok_str.as_slice()[tok as usize];
+            let mut again = false;
+            for q in 0..names.len() {
+                if names.as_slice()[q] == s { again = true; }
+            }
+            if again { continue; }
+            names.push(s);
+            self.report(302, 0, alt as% u32, tok, NONE, first as% u32);
+        }
+    }
+
+    // A `match` row r finished: its rows are checked when every one is decided (E0300, E0301),
+    // then dropped.
+    pub fn match_close(&mut self, tab: &mut types.Table, tree: &ast.Ast, r: usize) {
+        let top = self.ms_row.len() - 1;
+        let lo = self.ms_row.as_slice()[top] as usize;
+        let pool = self.ms_pool.as_slice()[top] as usize;
+        self.ms_row.truncate(top);
+        self.ms_pool.truncate(top);
+        let st = self.acc.as_slice()[r];
+        let mut decided = st != UNK && st != NONE && st != ERR;
+        for i in lo..self.mr_pat.len() {
+            if self.mr_pat.as_slice()[i] == NONE || self.mr_fl.as_slice()[i] & R_ERR != 0 { decided = false; }
+        }
+        if decided {
+            let s = self.base + tree.kids.row(r)[0] as usize;
+            self.check_rows(tab, lo, s, st);
+        }
+        self.mr_pat.truncate(lo);
+        self.mr_node.truncate(lo);
+        self.mr_arm.truncate(lo);
+        self.mr_fl.truncate(lo);
+        self.pats.truncate(pool);
+    }
+
+    // stage0's `check_match` over rows lo.. of `mr_*` (scrutinee row s of type st): E0301 at each
+    // alternative earlier rows cover (a guarded arm covers nothing for later arms, its own
+    // alternatives still count), E0300 when some value is left (`limit` / `limit-split` past the
+    // search limit).
+    fn check_rows(&mut self, tab: &mut types.Table, lo: usize, s: usize, st: u32) {
+        self.srch.begin();
+        let hi = self.mr_pat.len();
+        let mut arm_start: usize = 0;
+        for i in lo..hi {
+            let fl = self.mr_fl.as_slice()[i];
+            if i > lo && self.mr_arm.as_slice()[i - 1] != self.mr_arm.as_slice()[i] {
+                if self.mr_fl.as_slice()[i - 1] & R_GUARDED != 0 {
+                    self.srch.prev.truncate(arm_start);
+                    self.srch.prev_node.truncate(arm_start);
+                }
+                arm_start = self.srch.prev.len();
+            }
+            let p = self.mr_pat.as_slice()[i];
+            let k = self.srch.prev.len();
+            if !self.srch.useful_row(tab, &self.tq.sh, &mut self.tq.pa, &self.pats, k, p, st) {
+                let mut cover = if k == 0 then NONE else self.srch.prev_node.as_slice()[k - 1];
+                for j in 0..k {
+                    if !self.srch.useful_row(tab, &self.tq.sh, &mut self.tq.pa, &self.pats, j + 1, p, st) {
+                        cover = self.srch.prev_node.as_slice()[j];
+                        break;
+                    }
+                }
+                let node = self.mr_node.as_slice()[i];
+                self.report(301, if fl & R_ALT != 0 then tc_rows.C_ALTERNATIVE else 0u8, node, NONE, NONE, cover);
+            }
+            if fl & R_GUARDED == 0 || fl & R_ALT != 0 {
+                self.srch.prev.push(p);
+                let node = self.mr_node.as_slice()[i];
+                self.srch.prev_node.push(node);
+            }
+        }
+        if hi > lo && self.mr_fl.as_slice()[hi - 1] & R_GUARDED != 0 {
+            self.srch.prev.truncate(arm_start);
+            self.srch.prev_node.truncate(arm_start);
+        }
+        let k = self.srch.prev.len();
+        let open = self.srch.useful_row(tab, &self.tq.sh, &mut self.tq.pa, &self.pats, k, 0, st);
+        if self.srch.exceeded {
+            let last = if hi > lo then self.mr_pat.as_slice()[hi - 1] else NONE;
+            let ends_wild = last != NONE && self.mr_fl.as_slice()[hi - 1] & R_GUARDED == 0 && self.pats.kind.as_slice()[last as usize] == tc_useful.P_WILD;
+            self.report(300, if ends_wild then tc_rows.C_LIMIT_SPLIT else tc_rows.C_LIMIT, s as% u32, st, NONE, NONE);
+        } else if open {
+            self.report(300, 0, s as% u32, st, NONE, NONE);
+        }
+    }
+}
+
+// The bindings of a pattern, in node order: node, name token, `mut`, and the key (name, its
+// occurrence among the bindings of that name).
+struct Binds {
+    node: vec.Vec<u32>,
+    tok: vec.Vec<u32>,
+    mutable: vec.Vec<bool>,
+    key: vec.Vec<u64>,
+}
+
+// The bindings of pattern row p as stage0's resolver makes them: `mut x`, a bare `x` (one step,
+// no payload or fields), a shorthand field `.{ x }`.
+fn bindings_of(nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, p: usize, out: &mut Binds) {
+    let lo = p - tree.size.as_slice()[p] as usize;
+    let mut names = vec.Vec::<u32>.new();
+    for x in lo..p + 1 {
+        let k = tree.kind.as_slice()[x];
+        let a = tree.tok.as_slice()[x];
+        let ft = consteval.tk(t, a);
+        let mut tok = NONE;
+        let mut mutable = false;
+        if k == K_PATTERN && ft == terminals.T_KW_MUT {
+            if consteval.tk(t, a + 1) == terminals.T_IDENT {
+                tok = a + 1;
+                mutable = true;
+            }
+        } else if k == K_PATTERN && ft == terminals.T_IDENT {
+            let e = chain_end(t, a);
+            let suffix = consteval.tk(t, e + 1) == terminals.T_L_PAREN || consteval.tk(t, e + 1) == terminals.T_DOT_L_BRACE;
+            if e == a && !suffix { tok = a; }
+        } else if k == K_FIELD_PAT && ft == terminals.T_IDENT && consteval.tk(t, a + 1) != terminals.T_COLON {
+            tok = a;
+        }
+        if tok == NONE { continue; }
+        out.node.push(x as% u32);
+        out.tok.push(tok);
+        out.mutable.push(mutable);
+        names.push(nm.tok_str.as_slice()[tok as usize]);
+    }
+    // the occurrence of each name: its rank among the bindings of that name
+    let order = sort.sort_perm(names.as_slice());
+    let mut occ = col.filled(names.len(), 0u32);
+    for j in 1..order.len() {
+        let x = order.as_slice()[j] as usize;
+        let y = order.as_slice()[j - 1] as usize;
+        let o = occ.as_slice()[y] + 1;
+        if names.as_slice()[x] == names.as_slice()[y] { occ.as_mut_slice()[x] = o; }
+    }
+    for j in 0..names.len() {
+        out.key.push(search.pair(names.as_slice()[j], occ.as_slice()[j]));
+    }
+}
+
+// The bindings a pattern typed, by node: their positions sorted by node.
+struct Typed {
+    nodes: vec.Vec<u32>,
+    at: vec.Vec<u32>,
+}
+
+impl Typed {
+    fn of(nodes: &[u32]) -> Typed {
+        let p = sort.sort_perm(nodes);
+        return Typed.{ nodes: perm.gather(nodes, p.as_slice()), at: p };
+    }
+
+    // The position binding node n was typed at, `NONE` if it was not.
+    fn find(&self, n: u32) -> u32 {
+        let k = search.lower_bound(self.nodes.as_slice(), n);
+        if k == self.nodes.len() || self.nodes.as_slice()[k] != n { return NONE; }
+        return self.at.as_slice()[k];
+    }
+}
+
+// Sub-pattern row j of a constructor whose rows start at sub (`NONE`: discarded).
+fn sub_slot(sub: u32, j: usize) -> u32 {
+    return if sub == NONE then NONE else sub + j as% u32;
+}
+
+// The last token of a dotted path starting at token a.
+fn chain_end(t: &lex.Tokens, a: u32) -> u32 {
+    let mut e = a;
+    while consteval.tk(t, e + 1) == terminals.T_DOT && consteval.tk(t, e + 2) == terminals.T_IDENT {
+        e = e + 2;
+    }
+    return e;
+}
+
+fn is_module(ds: &decls.Decls, d: u32) -> bool {
+    return d != NONE && (d as usize) < ds.decls() && ds.kind.as_slice()[d as usize] == decls.DK_MODULE;
+}
+
+// The position of the field named s among the fields of struct or record variant d (members
+// keyed by parent and index), `NONE` if none.
+fn field_pos(ds: &decls.Decls, mem_k: &[u64], d: u32, s: u32) -> u32 {
+    if s == NONE { return NONE; }
+    let key = search.pair(d, s);
+    let k = search.lower_bound(ds.mem_key.as_slice(), key);
+    if k == ds.mem_key.len() || ds.mem_key.as_slice()[k] != key { return NONE; }
+    let f = ds.mem_decl.as_slice()[k];
+    if ds.kind.as_slice()[f as usize] != decls.DK_FIELD { return NONE; }
+    let (lo, _) = layout.run_of(mem_k, d);
+    let at = search.lower_bound(mem_k, search.pair(d, ds.index.as_slice()[f as usize]));
+    return (at - lo) as% u32;
 }
 
 // Type ty with its references peeled, and the mode below them.
@@ -255,20 +921,72 @@ fn peel(tab: &types.Table, ty: u32, m: u8) -> (u32, u8) {
     return (x, mode);
 }
 
-// The field named s of struct or record variant d, or NONE.
-fn field(ds: &decls.Decls, d: u32, s: u32) -> u32 {
-    if s == NONE { return NONE; }
-    let key = search.pair(d, s);
-    let k = search.lower_bound(ds.mem_key.as_slice(), key);
-    if k == ds.mem_key.len() || ds.mem_key.as_slice()[k] != key { return NONE; }
-    let f = ds.mem_decl.as_slice()[k];
-    if ds.kind.as_slice()[f as usize] != decls.DK_FIELD { return NONE; }
-    return f;
-}
-
 // Whether type ty has the built-in `==` a pattern tests: ints, floats, `bool`, `char`, raw
 // pointers, fn types.
 fn scalar_eq(tab: &types.Table, ty: u32) -> bool {
     let tag = tab.tag_of(ty);
     return tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_PTR || tag == types.TK_FN;
+}
+
+// The magnitude of int literal text b (digits after a radix prefix, `_` skipped, up to the
+// suffix) as two words, saturating at `u128::MAX` (stage0's `parse_int`).
+fn mag128(b: &[u8]) -> (u64, u64) {
+    let mut radix: u64 = 10;
+    let mut i: usize = 0;
+    if b.len() >= 2 && b[0] == 48 && (b[1] == 120 || b[1] == 98 || b[1] == 111) {
+        radix = if b[1] == 120 then 16u64 else if b[1] == 98 then 2u64 else 8u64;
+        i = 2;
+    }
+    let mut h: u64 = 0;
+    let mut l: u64 = 0;
+    let mut full = false;
+    while i < b.len() {
+        let c = b[i];
+        i = i + 1;
+        if c == 95 { continue; }
+        let d: u64 = if c >= 48 && c <= 57 then (c - 48) as u64 else if c >= 97 && c <= 102 then (c - 87) as u64 else if c >= 65 && c <= 70 then (c - 55) as u64 else 99u64;
+        if d >= radix { break; }
+        if full { continue; }
+        let nh = (h *% radix) +% l.mul_hi(radix);
+        let over = h.mul_hi(radix) != 0 || nh < h *% radix;
+        let nl = (l *% radix) +% d;
+        let carry = if nl < l *% radix then 1u64 else 0u64;
+        let nh2 = nh +% carry;
+        if over || nh2 < nh {
+            full = true;
+            h = tc_useful.ONES;
+            l = tc_useful.ONES;
+        } else {
+            h = nh2;
+            l = nl;
+        }
+    }
+    return (h, l);
+}
+
+// The FNV-1a hash of the source text of pattern row n (stage0's opaque constructor), and
+// whether its last token is one this reads the end of.
+fn node_hash(set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, it: u32, tree: &ast.Ast, n: usize) -> (u64, bool) {
+    let f = cut.file.as_slice()[it as usize] as usize;
+    let src = set.file(f);
+    let a = tree.tok.as_slice()[n];
+    let z = tree.tok_end.as_slice()[n] - 1;
+    let s = t.start.as_slice()[a as usize] as usize;
+    let zs = t.start.as_slice()[z as usize] as usize;
+    let k = consteval.tk(t, z);
+    let mut e = zs;
+    if k == terminals.T_STR_LIT || k == terminals.T_CHAR_LIT {
+        e = zs + tc_rows.quoted_text(t, set, cut, it, z).len();
+    } else if k == terminals.T_R_PAREN || k == terminals.T_R_BRACE {
+        e = zs + 1;
+    } else if k == terminals.T_IDENT || k == terminals.T_INT_LIT || k == terminals.T_FLOAT_LIT || k == terminals.T_KW_TRUE || k == terminals.T_KW_FALSE {
+        e = zs + tc_rows.tok_text(t, set, cut, it, z, k == terminals.T_FLOAT_LIT).len();
+    } else {
+        return (0, false);
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for i in s..e {
+        h = (h ^ src[i] as u64) *% 0x0100_0000_01b3;
+    }
+    return (h, true);
 }

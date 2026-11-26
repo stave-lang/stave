@@ -28,6 +28,7 @@ import sigs;
 import source;
 import tc_builtins;
 import tc_traits;
+import tc_useful;
 import ir.types;
 import prims.sort;
 import std.idx;
@@ -103,6 +104,39 @@ pub struct Typeck {
     pub pat_mode: vec.Vec<u8>,
     // per value `match` row: the type of its arms so far (NONE before the first)
     pub arm: vec.Vec<u32>,
+    // the pattern walk's rows to lower into (`NONE`: discarded) and nesting levels; whether the
+    // pattern being lowered holds a rejected one, an undecided one (`tc_pat`)
+    pub pat_slot: vec.Vec<u32>,
+    pub pat_lvl: vec.Vec<u32>,
+    pub pat_err: bool,
+    pub pat_unk: bool,
+    // the lowered patterns of the open `let`, `for`, and `match` constructs, and the usefulness
+    // search (`tc_useful`)
+    pub pats: tc_useful.Pats,
+    pub srch: tc_useful.Search,
+    // the bindings the pattern being lowered typed (node, type, mode), and the first
+    // alternative's of an or-pattern
+    pub ob_node: vec.Vec<u32>,
+    pub ob_ty: vec.Vec<u32>,
+    pub ob_mode: vec.Vec<u8>,
+    pub of_node: vec.Vec<u32>,
+    pub of_ty: vec.Vec<u32>,
+    pub of_mode: vec.Vec<u8>,
+    // the alternatives of the arms of the open matches: lowered pattern (`NONE`: undecided),
+    // pattern node row, arm row, flags; per open match its first alternative and the pattern
+    // pool's length before it
+    pub mr_pat: vec.Vec<u32>,
+    pub mr_node: vec.Vec<u32>,
+    pub mr_arm: vec.Vec<u32>,
+    pub mr_fl: vec.Vec<u8>,
+    pub ms_row: vec.Vec<u32>,
+    pub ms_pool: vec.Vec<u32>,
+    // per field of the record pattern being checked: the token naming it first (`NONE`: not
+    // named), whether that is a shorthand binding
+    pub fs_tok: vec.Vec<u32>,
+    pub fs_bind: vec.Vec<bool>,
+    // the fields E0208 `pattern-missing-field` rows name: a count, then the field decls
+    pub miss: vec.Vec<u32>,
     // generic calls (`tc_chain`): the bindings of every call of the body, per `Args` row the start
     // of its call's (NONE: no generics), per argument or `Args` row whether it waits (an
     // argument for the second pass; a call: its inference met an unknown type); the scratch
@@ -219,6 +253,17 @@ pub const C_NOT_VALUE: u8 = 17;
 pub const C_OPERAND: u8 = 1;
 pub const C_OPERAND_ARGS: u8 = 2;
 pub const C_OPERAND_TYPE: u8 = 3;
+// E0201 case `arity` of a pattern: a = the fields taken, b = given; the operand is the pattern.
+pub const C_ARITY_PAT: u8 = 18;
+// E0300 cases (a = the type): `let` (a `let` or `for` pattern), `limit`, `limit-split`; E0301
+// case `alternative` (why: the covering pattern row, NONE none); E0302: a = the name's token, why
+// = the first alternative. E0105 case `pattern-field` (C_PATTERN): b = the struct or variant, x =
+// the first naming token; E0106 case `pattern`: a = the struct, b = its first private field;
+// E0208 case `pattern-missing-field`: a = the type, x = the list in `miss`.
+pub const C_LET: u8 = 1;
+pub const C_LIMIT: u8 = 2;
+pub const C_LIMIT_SPLIT: u8 = 3;
+pub const C_ALTERNATIVE: u8 = 1;
 // An E0201 whose fix is decided at the body's end (`tc_diag.fixes`).
 pub const C_PENDING: u8 = 255;
 
@@ -922,4 +967,86 @@ fn scalar_ok(tab: &types.Table, op: u8, src: u32, dst: u32) -> bool {
         if tk2 == types.TK_CHAR || tfloat { return fint || (ffloat && tfloat); }
     }
     return false;
+}
+
+// The bytes of a string or char literal token (quotes included): from its start to the closing
+// quote on its line.
+pub fn quoted_text(t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, tok: u32) -> &[u8] from set {
+    let f = cut.file.as_slice()[it as usize] as usize;
+    let src = set.file(f);
+    let s = t.start.as_slice()[tok as usize] as usize;
+    let q = src[s];
+    let mut e = s + 1;
+    while e < src.len() && src[e] != q && src[e] != 10 {
+        if src[e] == 92 { e = e + 1; }
+        e = e + 1;
+    }
+    if e >= src.len() { return &src[s..src.len()]; }
+    return &src[s..e + 1];
+}
+
+fn hex(c: u8) -> u32 {
+    if c >= 48 && c <= 57 { return (c - 48) as u32; }
+    if c >= 97 && c <= 102 { return (c - 87) as u32; }
+    if c >= 65 && c <= 70 { return (c - 55) as u32; }
+    return NONE;
+}
+
+// What a literal body unescapes to: its number of chars (UTF-8 lead bytes and escapes), or NONE
+// for an escape stage0 rejects or a `\x` above 0x7F (not one char); and its last char.
+pub fn unescape(b: &[u8]) -> (u32, u32) {
+    let mut n: u32 = 0;
+    let mut cp: u32 = 0;
+    let mut i: usize = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c != 92 {
+            if c & 0xc0 != 0x80 {
+                n = n + 1;
+                cp = if c < 0x80 then c as u32 else if c >= 0xf0 then (c & 0x07) as u32 else if c >= 0xe0 then (c & 0x0f) as u32 else (c & 0x1f) as u32;
+            } else {
+                cp = (cp << 6) | (c & 0x3f) as u32;
+            }
+            i = i + 1;
+            continue;
+        }
+        if i + 1 >= b.len() { return (NONE, 0); }
+        let e = b[i + 1];
+        i = i + 2;
+        n = n + 1;
+        if e == 110 || e == 116 || e == 114 || e == 48 || e == 92 || e == 39 || e == 34 || e == 123 || e == 125 {
+            // `\n` `\t` `\r` `\0`; any other stands for itself
+            cp = if e == 110 then 10u32 else if e == 116 then 9u32 else if e == 114 then 13u32 else if e == 48 then 0u32 else e as u32;
+        } else if e == 120 {
+            if i + 2 > b.len() { return (NONE, 0); }
+            let h = hex(b[i]);
+            let l = hex(b[i + 1]);
+            if h == NONE || l == NONE || h > 7 { return (NONE, 0); }
+            cp = h * 16 + l;
+            i = i + 2;
+        } else if e == 117 {
+            if i >= b.len() || b[i] != 123 { return (NONE, 0); }
+            let mut j = i + 1;
+            let mut u: u32 = 0;
+            while j < b.len() && b[j] != 125 {
+                let d = hex(b[j]);
+                if d == NONE || u > 0x10_ffff { return (NONE, 0); }
+                u = u * 16 + d;
+                j = j + 1;
+            }
+            if j >= b.len() || j == i + 1 || u > 0x10_ffff || (u >= 0xd800 && u <= 0xdfff) { return (NONE, 0); }
+            cp = u;
+            i = j + 1;
+        } else {
+            return (NONE, 0);
+        }
+    }
+    return (n, cp);
+}
+
+// Whether an int literal of magnitude mag (big: above u64) negated when neg fits int type x.
+pub fn int_fits(tab: &types.Table, x: u32, mag: u64, big: bool, neg: bool) -> bool {
+    let bits = tab.int_bits(x);
+    let lim: u64 = if tab.a_of(x) == 1 then (if neg then 1u64 << (bits - 1) as u64 else (1u64 << (bits - 1) as u64) - 1) else if neg then 0u64 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1;
+    return !big && mag <= lim;
 }

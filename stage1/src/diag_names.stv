@@ -40,7 +40,7 @@ fn string_text(nm: &intern.Interned, s: u32) -> vec.Vec<u8> {
     return out;
 }
 
-fn module_text(md: &modules.Modules, m: u32) -> vec.Vec<u8> {
+pub fn module_text(md: &modules.Modules, m: u32) -> vec.Vec<u8> {
     let mut out = vec.Vec::<u8>.new();
     push_escaped(&mut out, md.text(m as usize));
     return out;
@@ -57,7 +57,7 @@ fn join(out: &mut vec.Vec<u8>, name: &[u8]) {
 }
 
 // The scope text of decl d: its module path, then the names of d and its parents, outermost first.
-fn decl_scope(ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, d: u32) -> vec.Vec<u8> {
+pub fn decl_scope(ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, d: u32) -> vec.Vec<u8> {
     let mut chain = vec.Vec::<u32>.new();
     let mut x = d;
     while x != NONE {

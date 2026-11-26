@@ -6,6 +6,7 @@ import ast;
 import consteval;
 import decls;
 import diag;
+import diag_names;
 import diag_sigs;
 import generated.terminals;
 import intern;
@@ -183,6 +184,11 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
             d.arg("operand", &set.file(f as usize)[s0 as usize..(s0 + z0) as usize]);
             num_arg(d, &mut buf, "count", g.a.as_slice()[k]);
             num_arg(d, &mut buf, "given", g.b.as_slice()[k]);
+        } else if code == 201 && case == tc_rows.C_ARITY_PAT {
+            d.begin(201, "arity");
+            d.arg("operand", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            num_arg(d, &mut buf, "count", g.a.as_slice()[k]);
+            num_arg(d, &mut buf, "given", g.b.as_slice()[k]);
         } else if code == 201 && (case == tc_rows.C_FN_ARMS || case == tc_rows.C_FN_ARMS_WANTED) {
             d.begin(201, if case == tc_rows.C_FN_ARMS then "fn-arms" else "fn-arms-wanted");
             ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
@@ -280,6 +286,57 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
                     d.role("impl", xf, xs, xz);
                 }
             }
+        } else if code == 300 {
+            d.begin(300, if case == tc_rows.C_LET then "let" else if case == tc_rows.C_LIMIT then "limit" else if case == tc_rows.C_LIMIT_SPLIT then "limit-split" else "");
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("type", buf.as_slice());
+        } else if code == 301 {
+            d.begin(301, if case == tc_rows.C_ALTERNATIVE then "alternative" else "");
+            let w = g.why.as_slice()[k];
+            if w != NONE {
+                let (cf, cs, cz) = node_span(tree, lx, set, t, w);
+                d.role("covering", cf, cs, cz);
+            }
+        } else if code == 302 {
+            d.begin(302, "");
+            let (_, ns, nz) = tok_range(lx, set, t, g.a.as_slice()[k], g.a.as_slice()[k]);
+            d.arg("name", &set.file(f as usize)[ns as usize..(ns + nz) as usize]);
+            let (ff, fs, fz) = node_span(tree, lx, set, t, g.why.as_slice()[k]);
+            d.role("first", ff, fs, fz);
+        } else if code == 105 {
+            d.begin(105, "pattern-field");
+            d.arg("name", &set.file(f as usize)[s as usize..(s + z) as usize]);
+            d.arg("scope", diag_names.decl_scope(ds, md, nm, g.b.as_slice()[k]).as_slice());
+            let x = g.x.as_slice()[k];
+            let (xf, xs, xz) = tok_range(lx, set, t, x, x);
+            d.role("first", xf, xs, xz);
+        } else if code == 106 {
+            d.begin(106, "pattern");
+            let fd = g.b.as_slice()[k];
+            d.arg("name", nm.tab.text(ds.name.as_slice()[g.a.as_slice()[k] as usize] as usize));
+            d.arg("module", diag_names.module_text(md, ds.module.as_slice()[fd as usize]).as_slice());
+            let (df, dsp, dz) = decls.span(ds, md, lx, set, t, fd);
+            d.role("decl", df, dsp, dz);
+        } else if code == 208 {
+            d.begin(208, "pattern-missing-field");
+            ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);
+            d.arg("type", buf.as_slice());
+            let at = g.x.as_slice()[k] as usize;
+            let n = tc.miss.as_slice()[at] as usize;
+            let mut added = vec.Vec::<u8>.new();
+            buf.clear();
+            for j in 0..n {
+                let name = nm.tab.text(ds.name.as_slice()[tc.miss.as_slice()[at + 1 + j] as usize] as usize);
+                if j > 0 {
+                    buf.extend_from_slice(mem.str_bytes(", "));
+                    added.extend_from_slice(mem.str_bytes(", "));
+                }
+                buf.extend_from_slice(name);
+                added.extend_from_slice(name);
+                added.extend_from_slice(mem.str_bytes(": _"));
+            }
+            d.arg("missing", buf.as_slice());
+            d.arg("added", added.as_slice());
         } else if code == 204 {
             d.begin(204, "");
             ty_text(&mut buf, sg, ds, nm, sc, g.a.as_slice()[k]);

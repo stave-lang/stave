@@ -22,7 +22,6 @@ exact runtime.panic.round_up runtime.start.round_up runtime.thread.round_up
 exact sigs.close_of tc_chain.close_of
 exact tc_builtins.lane_bits typeck.lane_bits
 exact tc_chain.first_tok typeck.first_tok
-exact tc_chain.member tc_pat.field
 self diag_reg.Strs.get intern.Cands.text
 self diag_reg.Strs.len intern.Cands.len
 self diag_reg.Strs.new intern.Cands.new

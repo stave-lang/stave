@@ -7,12 +7,13 @@
 # the two byte for byte, `types.txt` by key (below), and stage1's `diags.txt` with stage0's
 # restricted to the codes of the stages stage1 has (S1_CODES: read, lex, item cut, parse, modules,
 # decls, resolve, manifests, signatures, impl checks, and the body checker's E0201 E0202 E0203
-# E0204 E0206 E0413). Every dump covers the whole program, so each root also compares std,
-# runtime, and the arch package.
+# E0204 E0206 E0413, its pattern checks E0300 E0301 E0302) and the shapes of other codes it has
+# (S1_SHAPES). Every dump covers the whole program, so each root also compares std, runtime, and
+# the arch package.
 #
 # Stage0 raises some of those codes in other stages too (a type or trait expected: E0101; a field
-# given twice in a literal or pattern: E0105; a private field or column: E0106; a view argument
-# for a param without `view`: E0414 outside its `drop` case). The shapes with a message of their
+# given twice in a struct literal: E0105; a private field or column: E0106; a view argument for a
+# param without `view`: E0414 outside its `drop` case). The shapes with a message of their
 # own (LATER) are cut from stage0's lines; a private field or method reached by a value has
 # E0106's plain message, so the E0106 lines of stage1 need only be among stage0's.
 #
@@ -55,11 +56,17 @@ S1="$OUT/stage1"
 export STAVE_STD_DIR="$ROOT"
 # Codes of the stages stage1 has so far; add a stage's codes with its dump. E0005 is stage1's only
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
-TYPES_EXACT_MIN=1072
+TYPES_EXACT_MIN=1074
 TYPES_UNKNOWN_PPM=6
-S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0201|E0202|E0203|E0204|E0206|E0413|E0410|E0414|E0415|E0416|E0419|E0420|E0421|E0422|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0905|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
+S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0201|E0202|E0203|E0204|E0206|E0300|E0301|E0302|E0413|E0410|E0414|E0415|E0416|E0419|E0420|E0421|E0422|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0905|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
+# Deferred cut of E0300 / E0301: stage1 does not decide a match or a `let` / `for` pattern under a
+# value of unknown type, or with a const pattern of a type the evaluator gives no value (`char`,
+# float, pointer, fn); it reports neither there.
+# Shapes of codes outside S1_CODES that stage1 has (E0208's pattern that leaves fields out; its
+# other shapes are member lookups').
+S1_SHAPES='"code":"E0208".*"message":"a pattern of `'
 # Messages of the shapes of those codes that later stages raise.
-LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is (given twice in one struct literal|named twice in one pattern)"|"code":"E0106".*"message":"(column `|struct `)|"code":"E0414".*"message":"[^"]*is a view, (but|and) '
+LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is given twice in one struct literal"|"code":"E0106".*"message":"column `|"code":"E0414".*"message":"[^"]*is a view, (but|and) '
 
 # types_keyed DIR: compares DIR/0/types.txt and DIR/1/types.txt by key (above); writes
 # DIR/types.count (`LINES UNKNOWN EXACT`) and, on a difference, DIR/types.diff (its first line).
@@ -152,7 +159,7 @@ if [ "${1:-}" = "--one" ]; then
     echo "DIFF types $root $* (first: $(head -c 300 "$d/types.diff"))"
   else
     sigs="$(wc -l < "$d/0/sigs.txt") $(wc -l < "$d/0/kinds.txt")"
-    grep -E "^\{\"kind\":\"diagnostic\",\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)" "$d/0/diags.txt" | grep -vE "$LATER" > "$d/0/diags.in" || true
+    grep -E "^\{\"kind\":\"diagnostic\",(\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)|$S1_SHAPES)" "$d/0/diags.txt" | grep -vE "$LATER" > "$d/0/diags.in" || true
     priv='^{"kind":"diagnostic","code":"E0106"'
     grep -v "$priv" "$d/0/diags.in" > "$d/0/diags.rest" || true
     grep -v "$priv" "$d/1/diags.txt" > "$d/1/diags.rest" || true

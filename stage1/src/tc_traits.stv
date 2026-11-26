@@ -31,8 +31,11 @@ pub const A_WAIT: u8 = 2;
 
 pub struct Tq {
     pub tr: traits.Traits,
-    sh: layout.Shapes,
-    pa: layout.Parts,
+    pub sh: layout.Shapes,
+    pub pa: layout.Parts,
+    // the fields and variants of every decl sorted by (parent, index): keys and decls
+    pub mem_k: vec.Vec<u64>,
+    pub mem_d: vec.Vec<u32>,
     // the types `has_layout` answered, and the answers
     lay_t: vec.Vec<u32>,
     lay_ok: vec.Vec<bool>,
@@ -54,10 +57,13 @@ pub struct Tq {
 pub fn new(sg: &sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.Modules, nm: &intern.Interned) -> Tq {
     let nopend = col.filled(ds.decls(), false);
     let sh = layout.shapes(ds, sg.cx.ty.as_slice(), &sg.params, nopend.as_slice());
+    let (mem_k, mem_d) = layout.members(ds);
     return Tq.{
         tr: traits.new(sg, &sg.cx.tab, ds, fl, md, nm),
         sh: sh,
         pa: layout.Parts.new(),
+        mem_k: mem_k,
+        mem_d: mem_d,
         lay_t: vec.Vec::<u32>.new(),
         lay_ok: vec.Vec::<bool>.new(),
         env_ok: false,
