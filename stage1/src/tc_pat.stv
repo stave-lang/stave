@@ -169,23 +169,26 @@ impl tc_rows.Typeck {
             self.rejected(slot);
             return;
         }
-        let e = chain_end(t, a);
+        let e = consteval.path_end(t, a);
         let paren = consteval.tk(t, e + 1) == terminals.T_L_PAREN;
         let braces = consteval.tk(t, e + 1) == terminals.T_DOT_L_BRACE;
         if e == a && !paren && !braces {
             self.bind(&mut sg.cx.tab, n, ty, m);
             return;
         }
-        let (lo, hi) = sg.cx.uses.range(self.it, (n - self.base) as% u32);
-        let d = if lo == hi || sg.cx.uses.tag.as_slice()[hi - 1] != resolve.TAG_DECL then NONE else sg.cx.uses.target.as_slice()[hi - 1];
+        // a path whose walk ended unresolved (the resolver's E0101) is rejected silently
+        let u = sg.cx.uses.last(self.it, (n - self.base) as% u32);
+        let d = if u == NONE || sg.cx.uses.tag.as_slice()[u as usize] != resolve.TAG_DECL then NONE else sg.cx.uses.target.as_slice()[u as usize];
         if d == NONE || d as usize >= ds.decls() {
             self.sub_err(tree, n, slot, lvl);
             return;
         }
         let dk = ds.kind.as_slice()[d as usize];
         if dk == decls.DK_VARIANT || dk == decls.DK_STRUCT {
-            // the path's second-to-last step names a module
-            let through = hi - lo >= 2 && sg.cx.uses.tag.as_slice()[hi - 2] == resolve.TAG_DECL && is_module(ds, sg.cx.uses.target.as_slice()[hi - 2]);
+            // the use before the last names a module
+            let (lo, _) = sg.cx.uses.range(self.it, (n - self.base) as% u32);
+            let x = u as usize;
+            let through = x > lo && sg.cx.uses.tag.as_slice()[x - 1] == resolve.TAG_DECL && is_module(ds, sg.cx.uses.target.as_slice()[x - 1]);
             self.adt_pattern(sg, ds, nm, tree, n, d, ty, m, slot, lvl, e, paren, braces, through);
             return;
         }
@@ -831,7 +834,7 @@ fn bindings_of(nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, p: usize, o
                 mutable = true;
             }
         } else if k == K_PATTERN && ft == terminals.T_IDENT {
-            let e = chain_end(t, a);
+            let e = consteval.path_end(t, a);
             let suffix = consteval.tk(t, e + 1) == terminals.T_L_PAREN || consteval.tk(t, e + 1) == terminals.T_DOT_L_BRACE;
             if e == a && !suffix { tok = a; }
         } else if k == K_FIELD_PAT && ft == terminals.T_IDENT && consteval.tk(t, a + 1) != terminals.T_COLON {
@@ -880,15 +883,6 @@ impl Typed {
 // Sub-pattern row j of a constructor whose rows start at sub (`NONE`: discarded).
 fn sub_slot(sub: u32, j: usize) -> u32 {
     return if sub == NONE then NONE else sub + j as% u32;
-}
-
-// The last token of a dotted path starting at token a.
-fn chain_end(t: &lex.Tokens, a: u32) -> u32 {
-    let mut e = a;
-    while consteval.tk(t, e + 1) == terminals.T_DOT && consteval.tk(t, e + 2) == terminals.T_IDENT {
-        e = e + 2;
-    }
-    return e;
 }
 
 fn is_module(ds: &decls.Decls, d: u32) -> bool {
