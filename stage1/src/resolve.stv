@@ -86,6 +86,10 @@ pub struct Names {
     pub off: vec.Vec<u32>,
     pub tag: vec.Vec<u8>,
     pub target: vec.Vec<u32>,
+    // the (item, key node) pairs, sorted, of the chains whose walk ended at a segment stage0
+    // records as unresolved (a head no scope has, a name a module, trait, or type lacks): such a
+    // chain's last use is none of its lines
+    pub unres: vec.Vec<u64>,
 }
 
 impl Names {
@@ -1204,6 +1208,7 @@ struct Lines {
     off: vec.Vec<u32>,
     tag: vec.Vec<u8>,
     target: vec.Vec<u32>,
+    unres: vec.Vec<u64>,
 }
 
 impl Lines {
@@ -1279,6 +1284,7 @@ fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &
         }
     }
     if r == R_NONE {
+        out.unres.push(search.pair(item, node));
         if ns == NS_ORIGIN {
             rows.add(resdiag.E0101, file, hoff, hlen, hs, 0, NONE);
             return;
@@ -1307,6 +1313,7 @@ fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &
             let d = ds.module_item(sid, s);
             if d == NONE {
                 rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE);
+                out.unres.push(search.pair(item, node));
                 break;
             }
             check_vis(ds, md, lx, set, t, m, d, file, soff, slen, rows);
@@ -1329,6 +1336,7 @@ fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &
         }
         if ds.kind.as_slice()[sid as usize] == decls.DK_TRAIT {
             rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE);
+            out.unres.push(search.pair(item, node));
             break;
         }
         let (meth, ambiguous) = ds.method(sid, s);
@@ -1338,7 +1346,10 @@ fn follow(v: &UseV, bnode: &[u32], ds: &decls.Decls, md: &modules.Modules, nm: &
             st = ST_VALUE;
             continue;
         }
-        if !ambiguous && !search.contains(ds.poisoned.as_slice(), ds.name.as_slice()[sid as usize]) { rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE); }
+        if !ambiguous && !search.contains(ds.poisoned.as_slice(), ds.name.as_slice()[sid as usize]) {
+            rows.add(resdiag.E0101, file, soff, slen, s, 0, NONE);
+            out.unres.push(search.pair(item, node));
+        }
         break;
     }
 }
@@ -1494,7 +1505,7 @@ pub fn build(md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, lx: &
             rows.add(resdiag.E0101, file, su.off.as_slice()[k], su.len.as_slice()[k], NONE, 1, NONE);
         }
     }
-    let mut out = Lines.{ item: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), tag: vec.Vec::<u8>.new(), target: vec.Vec::<u32>.new() };
+    let mut out = Lines.{ item: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new(), off: vec.Vec::<u32>.new(), tag: vec.Vec::<u8>.new(), target: vec.Vec::<u32>.new(), unres: vec.Vec::<u64>.new() };
     let mut pend = vec.Vec::<u32>.new();
     {
         let v = u.slices();
@@ -1541,5 +1552,6 @@ pub fn build(md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, lx: &
         off: perm.gather(out.off.as_slice(), p.as_slice()),
         tag: perm.gather(out.tag.as_slice(), p.as_slice()),
         target: perm.gather(out.target.as_slice(), p.as_slice()),
+        unres: perm.gather(out.unres.as_slice(), sort.sort_perm(out.unres.as_slice()).as_slice()),
     };
 }

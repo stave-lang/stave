@@ -1,0 +1,775 @@
+// Exhaustiveness and reachability (types/check, see `typeck`): the lowered patterns of the body
+// being checked (`Pats`) and the usefulness search over them (`Search`), stage0's `patterns.rs`
+// algorithm with its order and budget.
+//
+// A lowered pattern is a row of `Pats`: the wildcard (row 0, shared by every pattern), a pattern
+// stage0 rejected (`P_ERR`), or a constructor with its sub-patterns in the contiguous rows
+// `sub..sub + n`: an enum variant (its index), the one constructor of a struct or a tuple,
+// `false` / `true`, an inclusive int or char range, or an opaque value (a float or string
+// literal, a const of another type: equal by the FNV-1a hash of its source text; an empty range
+// is the opaque value `u64::MAX`). A range end is stage0's `i128` as two words, the high one with
+// its sign bit flipped, so that the pair compares as unsigned words.
+//
+// `useful` asks whether a vector of patterns matches a value no row of a matrix matches. It is
+// stage0's recursion on an explicit frame stack: a frame lists its candidate constructors (the
+// head's own, every constructor of the column's type, or the default matrix), tries them in
+// order, and answers "useful" at the first useful one, which then is the answer of every frame
+// below it. A frame's matrix, vector, column types and candidates live on stack-ordered arenas,
+// freed when it returns. One check (a match, a `let` or `for` pattern) has stage0's budget:
+// columns nested past `SEARCH_DEPTH` or more than `SEARCH_STEPS` calls make every later call
+// answer "useful" and the check reports the limit (E0300 `limit`).
+//
+// Types: a reference is peeled; an enum's variants and a struct's fields are `layout.Parts`
+// (substituted, `TALL` read as the error type); a tuple's elements; `bool`; an int type's range;
+// `char` as two ranges around the surrogates; any other type is opaque (only a wildcard covers
+// it). Whether a type has a value is decided once per check (`inhabited`, memoised, a type met
+// again while being decided counts as inhabited).
+import layout;
+import ir.types;
+import prims.perm;
+import prims.sort;
+import std.idx;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+
+pub const P_WILD: u8 = 0;
+pub const P_CTOR: u8 = 1;
+pub const P_ERR: u8 = 2;
+
+pub const C_VARIANT: u8 = 0;
+pub const C_SINGLE: u8 = 1;
+pub const C_BOOL: u8 = 2;
+pub const C_RANGE: u8 = 3;
+pub const C_OPAQUE: u8 = 4;
+
+pub const SIGN: u64 = 0x8000_0000_0000_0000;
+pub const ONES: u64 = 0xffff_ffff_ffff_ffff;
+
+// Most nested columns and most `useful` calls of one check (E0300 case `limit`).
+pub const SEARCH_DEPTH: u32 = 2000;
+pub const SEARCH_STEPS: u32 = 1000000;
+
+// Column type descriptions.
+const D_OPAQUE: u8 = 0;
+const D_ENUM: u8 = 1;
+const D_SINGLE: u8 = 2;
+const D_BOOL: u8 = 3;
+const D_INTS: u8 = 4;
+const D_CHAR: u8 = 5;
+
+// What a frame tries: its candidate constructors, the default matrix of every row, of the rows
+// whose head is a wildcard.
+const F_CANDS: u8 = 0;
+const F_ALL: u8 = 1;
+const F_WILD: u8 = 2;
+
+pub struct Pats {
+    pub kind: vec.Vec<u8>,
+    pub ctor: vec.Vec<u8>,
+    // a variant's index, a `bool`, an opaque hash (`lol`); a range's low end (`loh`, `lol`) and
+    // high end (`hih`, `hil`)
+    pub loh: vec.Vec<u64>,
+    pub lol: vec.Vec<u64>,
+    pub hih: vec.Vec<u64>,
+    pub hil: vec.Vec<u64>,
+    pub sub: vec.Vec<u32>,
+    pub n: vec.Vec<u32>,
+}
+
+pub fn pats() -> Pats {
+    let mut p = Pats.{ kind: vec.Vec::<u8>.new(), ctor: vec.Vec::<u8>.new(), loh: vec.Vec::<u64>.new(), lol: vec.Vec::<u64>.new(), hih: vec.Vec::<u64>.new(), hil: vec.Vec::<u64>.new(), sub: vec.Vec::<u32>.new(), n: vec.Vec::<u32>.new() };
+    let _ = p.alloc(1);
+    return p;
+}
+
+impl Pats {
+    pub fn len(&self) -> usize {
+        return self.kind.len();
+    }
+
+    // k new wildcard rows: the first.
+    pub fn alloc(&mut self, k: usize) -> u32 {
+        let at = self.kind.len() as% u32;
+        for _ in 0..k {
+            self.kind.push(P_WILD);
+            self.ctor.push(C_SINGLE);
+            self.loh.push(0);
+            self.lol.push(0);
+            self.hih.push(0);
+            self.hil.push(0);
+            self.sub.push(0);
+            self.n.push(0);
+        }
+        return at;
+    }
+
+    // Drops the rows from `at` on (row 0 stays).
+    pub fn truncate(&mut self, at: usize) {
+        let k = if at < 1 then 1usize else at;
+        self.kind.truncate(k);
+        self.ctor.truncate(k);
+        self.loh.truncate(k);
+        self.lol.truncate(k);
+        self.hih.truncate(k);
+        self.hil.truncate(k);
+        self.sub.truncate(k);
+        self.n.truncate(k);
+    }
+
+    // Row p is constructor c (value words lh, ll, hh, hl) over the k rows from sub.
+    pub fn set(&mut self, p: u32, c: u8, lh: u64, ll: u64, hh: u64, hl: u64, sub: u32, k: u32) {
+        let i = p as usize;
+        self.kind.as_mut_slice()[i] = P_CTOR;
+        self.ctor.as_mut_slice()[i] = c;
+        self.loh.as_mut_slice()[i] = lh;
+        self.lol.as_mut_slice()[i] = ll;
+        self.hih.as_mut_slice()[i] = hh;
+        self.hil.as_mut_slice()[i] = hl;
+        self.sub.as_mut_slice()[i] = sub;
+        self.n.as_mut_slice()[i] = k;
+    }
+
+    pub fn set_err(&mut self, p: u32) {
+        self.kind.as_mut_slice()[p as usize] = P_ERR;
+    }
+
+    // Whether a row of lo..hi is a rejected pattern.
+    pub fn any_err(&self, lo: usize, hi: usize) -> bool {
+        for i in lo..hi {
+            if self.kind.as_slice()[i] == P_ERR { return true; }
+        }
+        return false;
+    }
+
+    fn wild(&self, p: u32) -> bool {
+        return self.kind.as_slice()[p as usize] != P_CTOR;
+    }
+}
+
+// 128-bit values: (high word with its sign bit flipped, low word).
+
+// Whether a < b.
+pub fn lt(ah: u64, al: u64, bh: u64, bl: u64) -> bool {
+    return ah < bh || (ah == bh && al < bl);
+}
+
+// v + 1, saturating at `i128::MAX`.
+fn succ(h: u64, l: u64) -> (u64, u64) {
+    if l != ONES { return (h, l + 1); }
+    if h == ONES { return (h, l); }
+    return (h + 1, 0);
+}
+
+// v - 1 (v above `i128::MIN`).
+pub fn pred(h: u64, l: u64) -> (u64, u64) {
+    if l != 0 { return (h, l - 1); }
+    return (h - 1, ONES);
+}
+
+// The value of magnitude (mh, ml) (at most `i128::MAX`), negated when neg.
+pub fn signed(neg: bool, mh: u64, ml: u64) -> (u64, u64) {
+    if !neg { return (mh ^ SIGN, ml); }
+    let l = 0 -% ml;
+    let h = (~mh) +% (if ml == 0 then 1u64 else 0u64);
+    return (h ^ SIGN, l);
+}
+
+pub struct Search {
+    pub steps: u32,
+    pub exceeded: bool,
+    // per type: the check whose answer `inh_val` is (`inh_gen`)
+    inh_gen: vec.Vec<u32>,
+    inh_val: vec.Vec<bool>,
+    gen: u32,
+    // arenas: pattern rows of matrices and vectors, column types
+    cells: vec.Vec<u32>,
+    tys: vec.Vec<u32>,
+    // candidates: constructor, value words, sub-pattern rows (`NONE`: wildcards)
+    c_ctor: vec.Vec<u8>,
+    c_lh: vec.Vec<u64>,
+    c_ll: vec.Vec<u64>,
+    c_hh: vec.Vec<u64>,
+    c_hl: vec.Vec<u64>,
+    c_sub: vec.Vec<u32>,
+    c_n: vec.Vec<u32>,
+    // frames: matrix (cells offset, rows, width), vector (cells offset), types offset, depth,
+    // what it tries, its candidates, the next one, the arena lengths to free to
+    f_m: vec.Vec<u32>,
+    f_rows: vec.Vec<u32>,
+    f_w: vec.Vec<u32>,
+    f_v: vec.Vec<u32>,
+    f_t: vec.Vec<u32>,
+    f_depth: vec.Vec<u32>,
+    f_mode: vec.Vec<u8>,
+    f_c: vec.Vec<u32>,
+    f_cn: vec.Vec<u32>,
+    f_i: vec.Vec<u32>,
+    f_cells: vec.Vec<u32>,
+    f_tys: vec.Vec<u32>,
+    f_cands: vec.Vec<u32>,
+    // `inhabited` frames: type, the variant, field, and the variant's field offset
+    ih_t: vec.Vec<u32>,
+    ih_i: vec.Vec<u32>,
+    ih_j: vec.Vec<u32>,
+    ih_off: vec.Vec<u32>,
+    // range splitting: the domain, the cuts
+    dom: vec.Vec<u64>,
+    cut_h: vec.Vec<u64>,
+    cut_l: vec.Vec<u64>,
+    // the rows of a check so far (pattern rows), their pattern nodes
+    pub prev: vec.Vec<u32>,
+    pub prev_node: vec.Vec<u32>,
+}
+
+pub fn search() -> Search {
+    return Search.{
+        steps: 0,
+        exceeded: false,
+        inh_gen: vec.Vec::<u32>.new(),
+        inh_val: vec.Vec::<bool>.new(),
+        gen: 0,
+        cells: vec.Vec::<u32>.new(),
+        tys: vec.Vec::<u32>.new(),
+        c_ctor: vec.Vec::<u8>.new(),
+        c_lh: vec.Vec::<u64>.new(),
+        c_ll: vec.Vec::<u64>.new(),
+        c_hh: vec.Vec::<u64>.new(),
+        c_hl: vec.Vec::<u64>.new(),
+        c_sub: vec.Vec::<u32>.new(),
+        c_n: vec.Vec::<u32>.new(),
+        f_m: vec.Vec::<u32>.new(),
+        f_rows: vec.Vec::<u32>.new(),
+        f_w: vec.Vec::<u32>.new(),
+        f_v: vec.Vec::<u32>.new(),
+        f_t: vec.Vec::<u32>.new(),
+        f_depth: vec.Vec::<u32>.new(),
+        f_mode: vec.Vec::<u8>.new(),
+        f_c: vec.Vec::<u32>.new(),
+        f_cn: vec.Vec::<u32>.new(),
+        f_i: vec.Vec::<u32>.new(),
+        f_cells: vec.Vec::<u32>.new(),
+        f_tys: vec.Vec::<u32>.new(),
+        f_cands: vec.Vec::<u32>.new(),
+        ih_t: vec.Vec::<u32>.new(),
+        ih_i: vec.Vec::<u32>.new(),
+        ih_j: vec.Vec::<u32>.new(),
+        ih_off: vec.Vec::<u32>.new(),
+        dom: vec.Vec::<u64>.new(),
+        cut_h: vec.Vec::<u64>.new(),
+        cut_l: vec.Vec::<u64>.new(),
+        prev: vec.Vec::<u32>.new(),
+        prev_node: vec.Vec::<u32>.new(),
+    };
+}
+
+// The description of column type t: (kind, the type described: t with its references peeled).
+fn desc(tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, t: u32) -> (u8, u32) {
+    let mut x = t;
+    while tab.tag_of(x) == types.TK_REF {
+        x = tab.b_of(x);
+    }
+    let tag = tab.tag_of(x);
+    if tag == types.TK_ADT {
+        let k = sh.kind_of(tab.a_of(x));
+        if k == layout.SK_NONE { return (D_OPAQUE, x); }
+        pa.make(tab, sh, x);
+        return (if k == layout.SK_ENUM then D_ENUM else D_SINGLE, x);
+    }
+    if tag == types.TK_TUPLE { return (D_SINGLE, x); }
+    if tag == types.TK_BOOL { return (D_BOOL, x); }
+    if tag == types.TK_INT { return (D_INTS, x); }
+    if tag == types.TK_CHAR { return (D_CHAR, x); }
+    return (D_OPAQUE, x);
+}
+
+// The fields of variant i (0 for the single constructor) of the type x described as dk: (offset
+// among the type's fields, count).
+fn fields_of(tab: &types.Table, pa: &layout.Parts, dk: u8, x: u32, i: u32) -> (u32, u32) {
+    if dk == D_SINGLE {
+        if tab.tag_of(x) == types.TK_TUPLE { return (0, tab.x(x).len() as% u32); }
+        return (0, pa.fields(x).len() as% u32);
+    }
+    if dk != D_ENUM { return (0, 0); }
+    let vs = pa.variants(x);
+    if i as usize >= vs.len() { return (0, 0); }
+    let mut off: u32 = 0;
+    for k in 0..i as usize {
+        off = off + vs[k];
+    }
+    return (off, vs[i as usize]);
+}
+
+// Field k of the type x described as dk (`TALL` read as the error type).
+fn field(tab: &types.Table, pa: &layout.Parts, dk: u8, x: u32, k: u32) -> u32 {
+    if dk == D_SINGLE && tab.tag_of(x) == types.TK_TUPLE { return tab.x(x)[k as usize]; }
+    let f = pa.fields(x)[k as usize];
+    return if f == layout.TALL then types.ERR else f;
+}
+
+// The fields of variant i (0 for a struct) of ADT type x, substituted, into out.
+pub fn adt_fields(tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, x: u32, i: u32, out: &mut vec.Vec<u32>) {
+    out.clear();
+    let (dk, y) = desc(tab, sh, pa, x);
+    if dk != D_ENUM && dk != D_SINGLE { return; }
+    let (off, n) = fields_of(tab, pa, dk, y, i);
+    for k in off..off + n {
+        out.push(field(tab, pa, dk, y, k));
+    }
+}
+
+impl Search {
+    // A new check: its budget and its `inhabited` answers start afresh.
+    pub fn begin(&mut self) {
+        self.steps = 0;
+        self.exceeded = false;
+        self.gen = self.gen + 1;
+        self.prev.clear();
+        self.prev_node.clear();
+    }
+
+    // Whether pattern p matches a value none of the patterns `prev[0..k]` matches, both against
+    // a value of type t (stage0's `useful(prev[..k], [p], [t], 0)`).
+    pub fn useful_row(&mut self, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, ps: &Pats, k: usize, p: u32, t: u32) -> bool {
+        let c0 = self.cells.len();
+        let t0 = self.tys.len();
+        for j in 0..k {
+            let x = self.prev.as_slice()[j];
+            self.cells.push(x);
+        }
+        self.cells.push(p);
+        self.tys.push(t);
+        let r = self.useful(tab, sh, pa, ps, c0 as% u32, k as% u32, (c0 + k) as% u32, t0 as% u32, 1);
+        self.cells.truncate(c0);
+        self.tys.truncate(t0);
+        return r;
+    }
+
+    fn push_frame(&mut self, m: u32, rows: u32, w: u32, v: u32, t: u32, depth: u32, cells: usize, tys: usize) {
+        self.f_m.push(m);
+        self.f_rows.push(rows);
+        self.f_w.push(w);
+        self.f_v.push(v);
+        self.f_t.push(t);
+        self.f_depth.push(depth);
+        self.f_mode.push(F_CANDS);
+        self.f_c.push(NONE);
+        self.f_cn.push(0);
+        self.f_i.push(0);
+        self.f_cells.push(cells as% u32);
+        self.f_tys.push(tys as% u32);
+        self.f_cands.push(self.c_ctor.len() as% u32);
+    }
+
+    // Pops the top frame and frees what it holds.
+    fn pop_frame(&mut self) {
+        let f = self.f_m.len() - 1;
+        self.cells.truncate(self.f_cells.as_slice()[f] as usize);
+        self.tys.truncate(self.f_tys.as_slice()[f] as usize);
+        self.cut_cands(self.f_cands.as_slice()[f] as usize);
+        self.f_m.truncate(f);
+        self.f_rows.truncate(f);
+        self.f_w.truncate(f);
+        self.f_v.truncate(f);
+        self.f_t.truncate(f);
+        self.f_depth.truncate(f);
+        self.f_mode.truncate(f);
+        self.f_c.truncate(f);
+        self.f_cn.truncate(f);
+        self.f_i.truncate(f);
+        self.f_cells.truncate(f);
+        self.f_tys.truncate(f);
+        self.f_cands.truncate(f);
+    }
+
+    fn cut_cands(&mut self, k: usize) {
+        self.c_ctor.truncate(k);
+        self.c_lh.truncate(k);
+        self.c_ll.truncate(k);
+        self.c_hh.truncate(k);
+        self.c_hl.truncate(k);
+        self.c_sub.truncate(k);
+        self.c_n.truncate(k);
+    }
+
+    fn cand(&mut self, c: u8, lh: u64, ll: u64, hh: u64, hl: u64, sub: u32, n: u32) {
+        self.c_ctor.push(c);
+        self.c_lh.push(lh);
+        self.c_ll.push(ll);
+        self.c_hh.push(hh);
+        self.c_hl.push(hl);
+        self.c_sub.push(sub);
+        self.c_n.push(n);
+    }
+
+    // stage0's `useful(rows, v, tys, 0)`: the n rows of width w at cells offset m, the vector
+    // at v, the column types at t.
+    fn useful(&mut self, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, ps: &Pats, m: u32, n: u32, v: u32, t: u32, w: u32) -> bool {
+        let base = self.f_m.len();
+        self.push_frame(m, n, w, v, t, 0, self.cells.len(), self.tys.len());
+        let mut fresh = true;
+        while self.f_m.len() > base {
+            let f = self.f_m.len() - 1;
+            if fresh {
+                fresh = false;
+                self.steps = self.steps + 1;
+                if self.exceeded || self.f_depth.as_slice()[f] > SEARCH_DEPTH || self.steps > SEARCH_STEPS {
+                    self.exceeded = true;
+                    self.unwind(base);
+                    return true;
+                }
+                if self.f_w.as_slice()[f] == 0 {
+                    if self.f_rows.as_slice()[f] == 0 {
+                        self.unwind(base);
+                        return true;
+                    }
+                    self.f_i.as_mut_slice()[f] = self.f_cn.as_slice()[f];
+                } else {
+                    self.start(tab, sh, pa, ps, f);
+                }
+            }
+            if self.f_i.as_slice()[f] >= self.f_cn.as_slice()[f] {
+                self.pop_frame();
+                continue;
+            }
+            let i = self.f_i.as_slice()[f];
+            self.f_i.as_mut_slice()[f] = i + 1;
+            self.child(tab, sh, pa, ps, f, i);
+            fresh = true;
+        }
+        return false;
+    }
+
+    // Frees every frame above base.
+    fn unwind(&mut self, base: usize) {
+        while self.f_m.len() > base {
+            self.pop_frame();
+        }
+    }
+
+    // The candidates of frame f, whose vector's head is h over a column of type t0.
+    fn start(&mut self, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, ps: &Pats, f: usize) {
+        let h = self.cells.as_slice()[self.f_v.as_slice()[f] as usize];
+        let t0 = self.tys.as_slice()[self.f_t.as_slice()[f] as usize];
+        let (dk, x) = desc(tab, sh, pa, t0);
+        let c0 = self.c_ctor.len() as% u32;
+        self.f_c.as_mut_slice()[f] = c0;
+        let hi = h as usize;
+        // a variant or single candidate carries its fields' offset and count in its high words
+        if !ps.wild(h) {
+            let c = ps.ctor.as_slice()[hi];
+            let (lh, ll, hh, hl) = (ps.loh.as_slice()[hi], ps.lol.as_slice()[hi], ps.hih.as_slice()[hi], ps.hil.as_slice()[hi]);
+            if c == C_RANGE {
+                self.domain(tab, dk, x, lh, ll, hh, hl);
+                self.split(ps, f, lh, ll, hh, hl);
+            } else {
+                let ok = (dk == D_ENUM && c == C_VARIANT) || (dk == D_SINGLE && c == C_SINGLE);
+                let (off, n) = if ok then fields_of(tab, pa, dk, x, ll as% u32) else (0u32, 0u32);
+                self.cand(c, 0, ll, off as u64, n as u64, ps.sub.as_slice()[hi], ps.n.as_slice()[hi]);
+            }
+        } else if self.heads_wild(ps, f) && self.inhabited(tab, sh, pa, t0) {
+            self.f_mode.as_mut_slice()[f] = F_ALL;
+            self.cand(C_SINGLE, 0, 0, 0, 0, NONE, 0);
+        } else if dk == D_ENUM {
+            let nv = pa.variants(x).len();
+            let mut off: u64 = 0;
+            for i in 0..nv {
+                let n = pa.variants(x)[i] as u64;
+                self.cand(C_VARIANT, 0, i as u64, off, n, NONE, 0);
+                off = off + n;
+            }
+        } else if dk == D_SINGLE {
+            let (_, n) = fields_of(tab, pa, dk, x, 0);
+            self.cand(C_SINGLE, 0, 0, 0, n as u64, NONE, 0);
+        } else if dk == D_BOOL {
+            self.cand(C_BOOL, 0, 0, 0, 0, NONE, 0);
+            self.cand(C_BOOL, 0, 1, 0, 0, NONE, 0);
+        } else if dk == D_INTS || dk == D_CHAR {
+            self.domain(tab, dk, x, 0, 0, 0, 0);
+            self.split(ps, f, 0, 0, ONES, ONES);
+        } else {
+            self.f_mode.as_mut_slice()[f] = F_WILD;
+            self.cand(C_SINGLE, 0, 0, 0, 0, NONE, 0);
+        }
+        self.f_cn.as_mut_slice()[f] = self.c_ctor.len() as% u32 - c0;
+    }
+
+    // Whether every row of frame f starts with a wildcard.
+    fn heads_wild(&self, ps: &Pats, f: usize) -> bool {
+        let m = self.f_m.as_slice()[f] as usize;
+        let w = self.f_w.as_slice()[f] as usize;
+        for j in 0..self.f_rows.as_slice()[f] as usize {
+            if !ps.wild(self.cells.as_slice()[m + j * w]) { return false; }
+        }
+        return true;
+    }
+
+    // The domain intervals of a column (4 words each) into `dom`: an int type's range, `char`'s
+    // two, else the head's own range (lh, ll)..=(hh, hl).
+    fn domain(&mut self, tab: &types.Table, dk: u8, x: u32, lh: u64, ll: u64, hh: u64, hl: u64) {
+        self.dom.clear();
+        if dk == D_CHAR {
+            self.interval(SIGN, 0, SIGN, 0xd7ff);
+            self.interval(SIGN, 0xe000, SIGN, 0x10_ffff);
+        } else if dk == D_INTS {
+            let bits = tab.int_bits(x) as u64;
+            if tab.is_signed(x) {
+                let m = 1u64 << (bits - 1);
+                let (nh, nl) = signed(true, 0, m);
+                self.interval(nh, nl, SIGN, m - 1);
+            } else {
+                self.interval(SIGN, 0, SIGN, if bits == 64 then ONES else (1u64 << bits) - 1);
+            }
+        } else {
+            self.interval(lh, ll, hh, hl);
+        }
+    }
+
+    fn interval(&mut self, lh: u64, ll: u64, hh: u64, hl: u64) {
+        self.dom.push(lh);
+        self.dom.push(ll);
+        self.dom.push(hh);
+        self.dom.push(hl);
+    }
+
+    // stage0's `split`: the domain intervals restricted to lo..=hi, cut at the boundaries of the
+    // head ranges of frame f's rows, as range candidates in ascending order.
+    fn split(&mut self, ps: &Pats, f: usize, loh: u64, lol: u64, hih: u64, hil: u64) {
+        self.cut_h.clear();
+        self.cut_l.clear();
+        let m = self.f_m.as_slice()[f] as usize;
+        let w = self.f_w.as_slice()[f] as usize;
+        for j in 0..self.f_rows.as_slice()[f] as usize {
+            let r = self.cells.as_slice()[m + j * w] as usize;
+            if ps.kind.as_slice()[r] != P_CTOR || ps.ctor.as_slice()[r] != C_RANGE { continue; }
+            self.cut_h.push(ps.loh.as_slice()[r]);
+            self.cut_l.push(ps.lol.as_slice()[r]);
+            let (sh, sl) = succ(ps.hih.as_slice()[r], ps.hil.as_slice()[r]);
+            self.cut_h.push(sh);
+            self.cut_l.push(sl);
+        }
+        self.sort_cuts();
+        let mut k: usize = 0;
+        while k < self.dom.len() {
+            let (dh, dl, uh, ul) = (self.dom.as_slice()[k], self.dom.as_slice()[k + 1], self.dom.as_slice()[k + 2], self.dom.as_slice()[k + 3]);
+            let (sh, sl) = if lt(dh, dl, loh, lol) then (loh, lol) else (dh, dl);
+            let (eh, el) = if lt(hih, hil, uh, ul) then (hih, hil) else (uh, ul);
+            k = k + 4;
+            if lt(eh, el, sh, sl) { continue; }
+            let mut ch = sh;
+            let mut cl = sl;
+            for j in 0..self.cut_h.len() {
+                let xh = self.cut_h.as_slice()[j];
+                let xl = self.cut_l.as_slice()[j];
+                if lt(ch, cl, xh, xl) && !lt(eh, el, xh, xl) {
+                    let (ph, pl) = pred(xh, xl);
+                    self.cand(C_RANGE, ch, cl, ph, pl, NONE, 0);
+                    ch = xh;
+                    cl = xl;
+                }
+            }
+            self.cand(C_RANGE, ch, cl, eh, el, NONE, 0);
+        }
+    }
+
+    // The cuts sorted ascending, each once (two stable radix sorts: low words, then high).
+    fn sort_cuts(&mut self) {
+        if self.cut_h.len() < 2 { return; }
+        let p1 = sort.sort_perm(self.cut_l.as_slice());
+        let h1 = perm.gather(self.cut_h.as_slice(), p1.as_slice());
+        let l1 = perm.gather(self.cut_l.as_slice(), p1.as_slice());
+        let p2 = sort.sort_perm(h1.as_slice());
+        self.cut_h.clear();
+        self.cut_l.clear();
+        for j in 0..p2.len() {
+            let x = p2.as_slice()[j] as usize;
+            let h = h1.as_slice()[x];
+            let l = l1.as_slice()[x];
+            let n = self.cut_h.len();
+            if n > 0 && self.cut_h.as_slice()[n - 1] == h && self.cut_l.as_slice()[n - 1] == l { continue; }
+            self.cut_h.push(h);
+            self.cut_l.push(l);
+        }
+    }
+
+    // Whether row r's constructor covers candidate c (a range contains it, any other is equal).
+    fn covers(&self, ps: &Pats, r: u32, c: usize) -> bool {
+        let i = r as usize;
+        let rc = ps.ctor.as_slice()[i];
+        let cc = self.c_ctor.as_slice()[c];
+        if rc != cc { return false; }
+        if rc == C_RANGE {
+            return !lt(self.c_lh.as_slice()[c], self.c_ll.as_slice()[c], ps.loh.as_slice()[i], ps.lol.as_slice()[i]) && !lt(ps.hih.as_slice()[i], ps.hil.as_slice()[i], self.c_hh.as_slice()[c], self.c_hl.as_slice()[c]);
+        }
+        return rc == C_SINGLE || ps.lol.as_slice()[i] == self.c_ll.as_slice()[c];
+    }
+
+    // Pushes the frame of frame f's candidate i: its specialized (or default) matrix, vector,
+    // and column types.
+    fn child(&mut self, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, ps: &Pats, f: usize, i: u32) {
+        let cells0 = self.cells.len();
+        let tys0 = self.tys.len();
+        let m = self.f_m.as_slice()[f] as usize;
+        let rows = self.f_rows.as_slice()[f] as usize;
+        let w = self.f_w.as_slice()[f] as usize;
+        let v = self.f_v.as_slice()[f] as usize;
+        let t = self.f_t.as_slice()[f] as usize;
+        let mode = self.f_mode.as_slice()[f];
+        let depth = self.f_depth.as_slice()[f] + 1;
+        if mode != F_CANDS {
+            let mut k: u32 = 0;
+            for j in 0..rows {
+                let r = m + j * w;
+                if mode == F_WILD && !ps.wild(self.cells.as_slice()[r]) { continue; }
+                self.copy_cells(r + 1, r + w);
+                k = k + 1;
+            }
+            let nv = self.cells.len();
+            self.copy_cells(v + 1, v + w);
+            for x in t + 1..t + w {
+                let y = self.tys.as_slice()[x];
+                self.tys.push(y);
+            }
+            self.push_frame(cells0 as% u32, k, (w - 1) as% u32, nv as% u32, tys0 as% u32, depth, cells0, tys0);
+            return;
+        }
+        let c = (self.f_c.as_slice()[f] + i) as usize;
+        let t0 = self.tys.as_slice()[t];
+        let (dk, x) = desc(tab, sh, pa, t0);
+        let ranged = self.c_ctor.as_slice()[c] == C_RANGE;
+        let off = if ranged then 0u32 else self.c_hh.as_slice()[c] as% u32;
+        let arity = if ranged then 0u32 else self.c_hl.as_slice()[c] as% u32;
+        let a = arity as usize;
+        let mut k: u32 = 0;
+        for j in 0..rows {
+            let r = m + j * w;
+            let hd = self.cells.as_slice()[r];
+            if ps.wild(hd) {
+                for _ in 0..a {
+                    self.cells.push(0);
+                }
+            } else if self.covers(ps, hd, c) {
+                self.resized(ps.sub.as_slice()[hd as usize], ps.n.as_slice()[hd as usize] as usize, a);
+            } else {
+                continue;
+            }
+            self.copy_cells(r + 1, r + w);
+            k = k + 1;
+        }
+        let nv = self.cells.len();
+        let sub = self.c_sub.as_slice()[c];
+        if sub == NONE {
+            for _ in 0..a {
+                self.cells.push(0);
+            }
+        } else {
+            self.resized(sub, self.c_n.as_slice()[c] as usize, a);
+        }
+        self.copy_cells(v + 1, v + w);
+        for q in off..off + arity {
+            let ft = field(tab, pa, dk, x, q);
+            self.tys.push(ft);
+        }
+        for y in t + 1..t + w {
+            let z = self.tys.as_slice()[y];
+            self.tys.push(z);
+        }
+        self.push_frame(cells0 as% u32, k, (a + w - 1) as% u32, nv as% u32, tys0 as% u32, depth, cells0, tys0);
+    }
+
+    fn copy_cells(&mut self, lo: usize, hi: usize) {
+        for x in lo..hi {
+            let y = self.cells.as_slice()[x];
+            self.cells.push(y);
+        }
+    }
+
+    // The n sub-pattern rows from sub, padded with wildcards or cut to a.
+    fn resized(&mut self, sub: u32, n: usize, a: usize) {
+        for q in 0..a {
+            self.cells.push(if q < n then sub + q as% u32 else 0u32);
+        }
+    }
+
+    // The answer this check recorded for type t: 0 none, 1 no value, 2 a value.
+    fn memo(&mut self, t: u32) -> u8 {
+        if t >= layout.TALL { return 2; }
+        let i = t as usize;
+        while self.inh_gen.len() <= i {
+            self.inh_gen.push(0);
+            self.inh_val.push(false);
+        }
+        if self.inh_gen.as_slice()[i] != self.gen { return 0; }
+        return if self.inh_val.as_slice()[i] then 2u8 else 1u8;
+    }
+
+    fn remember(&mut self, t: u32, b: bool) {
+        if t >= layout.TALL { return; }
+        let _ = self.memo(t);
+        self.inh_gen.as_mut_slice()[t as usize] = self.gen;
+        self.inh_val.as_mut_slice()[t as usize] = b;
+    }
+
+    // stage0's `inhabited`: whether type t has a value (an enum: a variant whose fields all do; a
+    // struct or tuple: all its fields do; any other type), in stage0's order, short-circuiting
+    // as it does.
+    fn inhabited(&mut self, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, t: u32) -> bool {
+        let known = self.memo(t);
+        if known != 0 { return known == 2; }
+        self.ih_t.clear();
+        self.ih_i.clear();
+        self.ih_j.clear();
+        self.ih_off.clear();
+        self.ih_push(t);
+        let mut b = true;
+        while self.ih_t.len() > 0 {
+            let f = self.ih_t.len() - 1;
+            let tf = self.ih_t.as_slice()[f];
+            let (dk, x) = desc(tab, sh, pa, tf);
+            let mut done = true;
+            b = true;
+            if dk == D_ENUM || dk == D_SINGLE {
+                let i = self.ih_i.as_slice()[f];
+                let nv = if dk == D_ENUM then pa.variants(x).len() as% u32 else 1u32;
+                let j = self.ih_j.as_slice()[f];
+                let (_, single) = fields_of(tab, pa, D_SINGLE, x, 0);
+                let cnt = if i >= nv then 0u32 else if dk == D_ENUM then pa.variants(x)[i as usize] else single;
+                if i >= nv {
+                    b = false;
+                } else if j < cnt {
+                    done = false;
+                    let fty = field(tab, pa, dk, x, self.ih_off.as_slice()[f] + j);
+                    let k = self.memo(fty);
+                    if k == 2 {
+                        self.ih_j.as_mut_slice()[f] = j + 1;
+                    } else if k == 1 && dk == D_SINGLE {
+                        done = true;
+                        b = false;
+                    } else if k == 1 {
+                        self.ih_i.as_mut_slice()[f] = i + 1;
+                        self.ih_j.as_mut_slice()[f] = 0;
+                        let off = self.ih_off.as_slice()[f] + cnt;
+                        self.ih_off.as_mut_slice()[f] = off;
+                    } else {
+                        self.ih_push(fty);
+                    }
+                }
+            }
+            if !done { continue; }
+            self.remember(tf, b);
+            self.ih_t.truncate(f);
+            self.ih_i.truncate(f);
+            self.ih_j.truncate(f);
+            self.ih_off.truncate(f);
+        }
+        return b;
+    }
+
+    fn ih_push(&mut self, t: u32) {
+        self.remember(t, true);
+        self.ih_t.push(t);
+        self.ih_i.push(0);
+        self.ih_j.push(0);
+        self.ih_off.push(0);
+    }
+}

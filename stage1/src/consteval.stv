@@ -90,6 +90,8 @@ pub struct Uses {
     pub off: vec.Vec<u32>,
     pub tag: vec.Vec<u8>,
     pub target: vec.Vec<u32>,
+    // the (item, key node) pairs of the chains that end unresolved (`resolve.Names.unres`)
+    pub unres: vec.Vec<u64>,
 }
 
 impl Uses {
@@ -105,7 +107,9 @@ impl Uses {
         tag.extend_from_slice(r.tag.as_slice());
         let mut target = vec.Vec::<u32>.new();
         target.extend_from_slice(r.target.as_slice());
-        return Uses.{ key: key, off: off, tag: tag, target: target };
+        let mut unres = vec.Vec::<u64>.new();
+        unres.extend_from_slice(r.unres.as_slice());
+        return Uses.{ key: key, off: off, tag: tag, target: target, unres: unres };
     }
 
     // The rows keyed at node n of item i: `lo..hi`.
@@ -114,6 +118,24 @@ impl Uses {
         let lo = search.lower_bound(self.key.as_slice(), k);
         let hi = search.upper_bound(self.key.as_slice(), k);
         return (lo, hi);
+    }
+
+    // The row of the last segment of the path keyed at node n of item i, that segment starting
+    // at byte offset off: the last row keyed there when it is that segment's, else NONE (only a
+    // segment that resolves has a row, so the last row may be an earlier segment's).
+    pub fn at_end(&self, i: u32, n: u32, off: u32) -> u32 {
+        let (lo, hi) = self.range(i, n);
+        if lo == hi || self.off.as_slice()[hi - 1] != off { return NONE; }
+        return (hi - 1) as% u32;
+    }
+
+    // stage0's last use of the chain keyed at node n of item i: its last row, or NONE when it has
+    // none or its walk ended at a segment recorded as unresolved (a walk that stops where the
+    // resolver records nothing keeps its last resolved segment's).
+    pub fn last(&self, i: u32, n: u32) -> u32 {
+        let (lo, hi) = self.range(i, n);
+        if lo == hi || search.contains(self.unres.as_slice(), search.pair(i, n)) { return NONE; }
+        return (hi - 1) as% u32;
     }
 }
 
@@ -759,11 +781,18 @@ fn path_decl(cx: &Cx, tree: &ast.Ast, t: &lex.Tokens, it: u32, base: usize, g: u
         p = p + 2;
     }
     if kind(tree, g) != K_TYPE_BASE && p != end { return (NONE, 2u8); }
-    let (lo, hi) = cx.uses.range(it, (head - base) as% u32);
-    if lo == hi { return (NONE, 1u8); }
-    let off = t.start.as_slice()[last as usize];
-    if cx.uses.off.as_slice()[hi - 1] != off || cx.uses.tag.as_slice()[hi - 1] != resolve.TAG_DECL { return (NONE, 1u8); }
-    return (cx.uses.target.as_slice()[hi - 1], 0u8);
+    let u = cx.uses.at_end(it, (head - base) as% u32, t.start.as_slice()[last as usize]);
+    if u == NONE || cx.uses.tag.as_slice()[u as usize] != resolve.TAG_DECL { return (NONE, 1u8); }
+    return (cx.uses.target.as_slice()[u as usize], 0u8);
+}
+
+// The last identifier of the dotted path starting at token a.
+pub fn path_end(t: &lex.Tokens, a: u32) -> u32 {
+    let mut e = a;
+    while tk(t, e + 1) == terminals.T_DOT && tk(t, e + 2) == terminals.T_IDENT {
+        e = e + 2;
+    }
+    return e;
 }
 
 // The outcome of a postfix chain at row g whose head path names a const: a head const without

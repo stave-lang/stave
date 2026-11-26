@@ -1,0 +1,57 @@
+//~ CHECK-ONLY
+// A pattern path whose last segment names nothing is E0101 at that segment, and only that: the
+// pattern is rejected silently (no E0201 for the segment before it), and the match it is in is
+// not checked for exhaustiveness.
+enum E { A, B(bool) }
+struct S { a: bool }
+
+fn unit(x: E) -> u32 {
+    return match x {
+        E.Zz => 0, //~ ERROR E0101
+        _ => 1,
+    };
+}
+
+fn payload(x: E) -> u32 {
+    return match x {
+        E.Zz(true) => 0, //~ ERROR E0101
+        _ => 1,
+    };
+}
+
+fn record(x: E) -> u32 {
+    return match x {
+        E.Zz.{ a: true } => 0, //~ ERROR E0101
+        _ => 1,
+    };
+}
+
+fn after_struct(x: S) -> u32 {
+    return match x {
+        S.Zz => 0, //~ ERROR E0101
+        _ => 1,
+    };
+}
+
+fn after_option(x: Option<u32>) -> u32 {
+    return match x {
+        Option.Zz(v) => v, //~ ERROR E0101
+        Option.Some(_) => 1,
+    };
+}
+
+fn in_let(x: E) -> u32 {
+    let E.Zz = x; //~ ERROR E0101
+    return 0;
+}
+
+fn in_alternative(x: (E, bool)) -> u32 {
+    return match x {
+        (E.A, true) | (E.Zz, _) => 0, //~ ERROR E0101
+        _ => 1,
+    };
+}
+
+fn main() -> i32 {
+    return 0;
+}

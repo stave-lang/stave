@@ -30,7 +30,7 @@
 // `NONE` (printed `-`): a node that denotes no value (the head of a path naming a module, type,
 // or fn), or that the checker never visits (types, patterns, nodes outside any body).
 //
-// The checker is ten modules, each owning one concern:
+// The checker is eleven modules, each owning one concern:
 // - `typeck` (this one): the walk, statements, primaries, operators, casts, `for` loops, array
 //   literals; the entry point `build` and its rounds.
 // - `tc_rows`: the state (`Typeck`: the node rows and the body's literal groups) and what every
@@ -39,7 +39,9 @@
 //   lookup); the walk calls `chain_start`, `chain_steps`, `chain_apply`, `chain_value`,
 //   `arg_hint`.
 // - `tc_builtins`: the built-in methods and type-relative built-ins, as a table (`Builtins`).
-// - `tc_pat`: pattern bindings (`bind_pattern`).
+// - `tc_pat`: patterns: their bindings and errors, `let` / `for` patterns that cover every value,
+//   match arms (exhaustiveness, reachability, or-pattern bindings).
+// - `tc_useful`: the lowered patterns and the usefulness search over them.
 // - `tc_traits`: the trait questions a body asks of the one solver, in rounds.
 // - `tc_method`: method lookup on a receiver value.
 // - `tc_ops`: user operators through their operator traits.
@@ -66,6 +68,7 @@ import tc_ops;
 import tc_pat;
 import tc_rows;
 import tc_traits;
+import tc_useful;
 import ir.types;
 import prims.col;
 import std.mem;
@@ -148,6 +151,13 @@ impl tc_rows.Typeck {
         self.fc_why.clear();
         self.dc_row.clear();
         self.dc_ty.clear();
+        self.pats.truncate(1);
+        self.mr_pat.clear();
+        self.mr_node.clear();
+        self.mr_arm.clear();
+        self.mr_fl.clear();
+        self.ms_row.clear();
+        self.ms_pool.clear();
         self.cur_d = d;
         self.pass = self.pass + 1;
         self.last_pass.as_mut_slice()[d as usize] = self.pass;
@@ -212,9 +222,7 @@ impl tc_rows.Typeck {
             }
             let x = self.resolve_at(r);
             if x == NONE || x == UNK || x == ERR || is_lit(x) || tab.tag_of(x) != types.TK_INT { continue; }
-            let bits = tab.int_bits(x);
-            let lim: u64 = if tab.a_of(x) == 1 then (if neg then 1u64 << (bits - 1) as u64 else (1u64 << (bits - 1) as u64) - 1) else if neg then 0u64 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1;
-            if big || mag > lim { self.report(203, 0, r as% u32, x, NONE, NONE); }
+            if !tc_rows.int_fits(tab, x, mag, big, neg) { self.report(203, 0, r as% u32, x, NONE, NONE); }
         }
     }
 
@@ -393,7 +401,7 @@ impl tc_rows.Typeck {
             return true;
         }
         if pk == K_MATCH { return self.enter_match(tree, r, k, c); }
-        if pk == K_STMT_ARM || pk == K_EXPR_ARM { return self.enter_arm(sg, ds, nm, t, tree, r, k, c); }
+        if pk == K_STMT_ARM || pk == K_EXPR_ARM { return self.enter_arm(sg, ds, nm, set, t, cut, tree, r, k, c); }
         if pk == K_IF_EXPR {
             if k == 0 {
                 self.set_hint_bool(c);
@@ -668,7 +676,7 @@ impl tc_rows.Typeck {
             return;
         }
         if k == K_STMT {
-            self.finish_stmt(sg, ds, nm, t, tree, r);
+            self.finish_stmt(sg, ds, nm, set, t, cut, tree, r);
             return;
         }
         if k == K_EXPR_STMT {
@@ -691,25 +699,27 @@ impl tc_rows.Typeck {
             self.poison_kids(tree, r);
             return;
         }
+        if k == K_MATCH { self.match_close(&mut sg.cx.tab, tree, r); }
         let v = self.expr_value(sg, ds, nm, set, t, cut, tree, r, k);
         self.nty.as_mut_slice()[r] = v;
     }
 
-    fn finish_stmt(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, r: usize) {
+    fn finish_stmt(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize) {
         let a = tk(t, first_tok(tree, r));
         let ks = tree.kids.row(r);
         if a == terminals.T_KW_LET {
             let pat = self.base + ks[0] as usize;
             let init = self.expr_kid(tree, r);
             let typed = ks.len() >= 3;
-            let mut ty = UNK;
+            // neither a type nor a value: the error type (stage0's `let_stmt`)
+            let mut ty = ERR;
             if typed {
                 ty = self.acc.as_slice()[r];
                 if init != NONE { self.coerce(&sg.cx.tab, init as usize, ty, consteval.child(tree, self.base, r, K_TYPE)); }
             } else if init != NONE {
                 ty = self.force_e_at(init as usize);
             }
-            self.bind_pattern(sg, ds, nm, t, tree, pat, ty);
+            self.let_pattern(sg, ds, nm, set, t, cut, tree, pat, ty);
             return;
         }
         if a == terminals.T_KW_WHILE {
@@ -741,7 +751,10 @@ impl tc_rows.Typeck {
             self.ret_why.truncate(self.ret_why.len() - 1);
             return;
         }
-        if a == terminals.T_KW_MATCH { return; }
+        if a == terminals.T_KW_MATCH {
+            self.match_close(&mut sg.cx.tab, tree, r);
+            return;
+        }
         if (a == terminals.T_KW_BREAK || a == terminals.T_KW_CONTINUE) && !in_loop(sg, t, tree, r) {
             let at = first_tok(tree, r);
             self.report_span(201, tc_rows.C_NOT_IN_LOOP, at, at, NONE, NONE, NONE, NONE);
@@ -798,13 +811,17 @@ impl tc_rows.Typeck {
         if ft == terminals.T_INT_LIT || ft == terminals.T_FLOAT_LIT { return self.literal(&mut sg.cx.tab, set, t, cut, a, false, h); }
         if ft == terminals.T_KW_TRUE || ft == terminals.T_KW_FALSE { return self.t_bool; }
         if ft == terminals.T_CHAR_LIT {
-            let q = quoted_text(t, set, cut, self.it, a);
-            if q.len() < 2 || unescaped_chars(&q[1..q.len() - 1]) != 1 { return UNK; }
+            let q = tc_rows.quoted_text(t, set, cut, self.it, a);
+            if q.len() < 2 { return UNK; }
+            let (nc, _) = tc_rows.unescape(&q[1..q.len() - 1]);
+            if nc != 1 { return UNK; }
             return self.t_char;
         }
         if ft == terminals.T_STR_LIT {
-            let q = quoted_text(t, set, cut, self.it, a);
-            if q.len() < 2 || unescaped_chars(&q[1..q.len() - 1]) == NONE { return UNK; }
+            let q = tc_rows.quoted_text(t, set, cut, self.it, a);
+            if q.len() < 2 { return UNK; }
+            let (nc, _) = tc_rows.unescape(&q[1..q.len() - 1]);
+            if nc == NONE { return UNK; }
             return self.t_ref_str;
         }
         if ft == terminals.T_KW_SELF {
@@ -1122,6 +1139,7 @@ impl tc_rows.Typeck {
     // context, then the arms; the scrutinee's type (kept in `acc`) is decided before the first.
     fn enter_match(&mut self, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
         if k == 0 {
+            self.match_open();
             self.set_hint(c, NONE);
             return true;
         }
@@ -1134,15 +1152,12 @@ impl tc_rows.Typeck {
 
     // Before child c (the k-th) of an arm row r: its patterns bind against the scrutinee's type,
     // a guard is `bool`, a value arm's context is the arms' type so far when the `match` has none.
-    fn enter_arm(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
+    fn enter_arm(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, r: usize, k: usize, c: usize) -> bool {
         let m = sg.cx.parent.as_slice()[r] as usize;
         let ck = kind(tree, c);
         if ck == K_ARM_PATTERN {
             let st = self.acc.as_slice()[m];
-            let ps = tree.kids.row(c);
-            for j in 0..ps.len() {
-                self.bind_pattern(sg, ds, nm, t, tree, self.base + ps[j] as usize, st);
-            }
+            self.arm_patterns(sg, ds, nm, set, t, cut, tree, r, c, st);
             return false;
         }
         let ks = tree.kids.row(r);
@@ -1375,7 +1390,7 @@ impl tc_rows.Typeck {
                 if b == NONE { b = e; }
             }
             let pat = self.base + tree.kids.row(r)[0] as usize;
-            self.bind_pattern(sg, ds, nm, t, tree, pat, b);
+            self.let_pattern(sg, ds, nm, set, t, cut, tree, pat, b);
             return true;
         }
         if ck == node_kinds.KIND_TAIL_CLAUSE {
@@ -1560,73 +1575,6 @@ fn is_shift(op: u8) -> bool {
     return op == terminals.T_LT_LT || op == terminals.T_GT_GT || op == terminals.T_LT_LT_PERCENT;
 }
 
-// The bytes of a string or char literal token (quotes included): from its start to the closing
-// quote on its line.
-fn quoted_text(t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, tok: u32) -> &[u8] from set {
-    let f = cut.file.as_slice()[it as usize] as usize;
-    let src = set.file(f);
-    let s = t.start.as_slice()[tok as usize] as usize;
-    let q = src[s];
-    let mut e = s + 1;
-    while e < src.len() && src[e] != q && src[e] != 10 {
-        if src[e] == 92 { e = e + 1; }
-        e = e + 1;
-    }
-    if e >= src.len() { return &src[s..src.len()]; }
-    return &src[s..e + 1];
-}
-
-fn hex(c: u8) -> u32 {
-    if c >= 48 && c <= 57 { return (c - 48) as u32; }
-    if c >= 97 && c <= 102 { return (c - 87) as u32; }
-    if c >= 65 && c <= 70 { return (c - 55) as u32; }
-    return NONE;
-}
-
-// The number of chars a literal body unescapes to (UTF-8 lead bytes and escapes), or NONE for an
-// escape stage0 rejects or a `\x` above 0x7F (not one char).
-fn unescaped_chars(b: &[u8]) -> u32 {
-    let mut n: u32 = 0;
-    let mut i: usize = 0;
-    while i < b.len() {
-        let c = b[i];
-        if c != 92 {
-            if c & 0xc0 != 0x80 { n = n + 1; }
-            i = i + 1;
-            continue;
-        }
-        if i + 1 >= b.len() { return NONE; }
-        let e = b[i + 1];
-        i = i + 2;
-        if e == 110 || e == 116 || e == 114 || e == 48 || e == 92 || e == 39 || e == 34 || e == 123 || e == 125 {
-            n = n + 1;
-        } else if e == 120 {
-            if i + 2 > b.len() { return NONE; }
-            let h = hex(b[i]);
-            let l = hex(b[i + 1]);
-            if h == NONE || l == NONE || h > 7 { return NONE; }
-            n = n + 1;
-            i = i + 2;
-        } else if e == 117 {
-            if i >= b.len() || b[i] != 123 { return NONE; }
-            let mut j = i + 1;
-            let mut cp: u32 = 0;
-            while j < b.len() && b[j] != 125 {
-                let d = hex(b[j]);
-                if d == NONE || cp > 0x10_ffff { return NONE; }
-                cp = cp * 16 + d;
-                j = j + 1;
-            }
-            if j >= b.len() || j == i + 1 || cp > 0x10_ffff || (cp >= 0xd800 && cp <= 0xdfff) { return NONE; }
-            n = n + 1;
-            i = j + 1;
-        } else {
-            return NONE;
-        }
-    }
-    return n;
-}
-
 // The float format of a float suffix (types FLOAT a), or NONE.
 fn float_suffix(b: &[u8]) -> u32 {
     if b.len() == 3 && b[0] == 102 && b[1] == 49 && b[2] == 54 { return 0; }
@@ -1767,6 +1715,27 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         pat_ty: vec.Vec::<u32>.new(),
         pat_mode: vec.Vec::<u8>.new(),
         arm: col.filled(n, NONE),
+        pat_slot: vec.Vec::<u32>.new(),
+        pat_lvl: vec.Vec::<u32>.new(),
+        pat_err: false,
+        pat_unk: false,
+        pats: tc_useful.pats(),
+        srch: tc_useful.search(),
+        ob_node: vec.Vec::<u32>.new(),
+        ob_ty: vec.Vec::<u32>.new(),
+        ob_mode: vec.Vec::<u8>.new(),
+        of_node: vec.Vec::<u32>.new(),
+        of_ty: vec.Vec::<u32>.new(),
+        of_mode: vec.Vec::<u8>.new(),
+        mr_pat: vec.Vec::<u32>.new(),
+        mr_node: vec.Vec::<u32>.new(),
+        mr_arm: vec.Vec::<u32>.new(),
+        mr_fl: vec.Vec::<u8>.new(),
+        ms_row: vec.Vec::<u32>.new(),
+        ms_pool: vec.Vec::<u32>.new(),
+        fs_tok: vec.Vec::<u32>.new(),
+        fs_bind: vec.Vec::<bool>.new(),
+        miss: vec.Vec::<u32>.new(),
         binds: vec.Vec::<u32>.new(),
         blo: col.filled(n, NONE),
         cargs: vec.Vec::<u32>.new(),

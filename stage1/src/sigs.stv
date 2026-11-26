@@ -1163,9 +1163,9 @@ pub fn lower_type_args(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &l
 // or NONE (not a trait, or a wrong argument count).
 fn trait_ref_at(sg: &mut Sigs, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, sc: consteval.Scope) -> u32 {
     let base = tree.item_node.as_slice()[it as usize] as usize;
-    let (lo, hi) = sg.cx.uses.range(it, (g - base) as% u32);
-    if lo == hi || sg.cx.uses.tag.as_slice()[hi - 1] != resolve.TAG_DECL { return NONE; }
-    let d = sg.cx.uses.target.as_slice()[hi - 1];
+    let u = sg.cx.uses.last(it, (g - base) as% u32);
+    if u == NONE || sg.cx.uses.tag.as_slice()[u as usize] != resolve.TAG_DECL { return NONE; }
+    let d = sg.cx.uses.target.as_slice()[u as usize];
     if ds.kind.as_slice()[d as usize] != decls.DK_TRAIT { return NONE; }
     let ga = child(tree, base, g, K_GENERIC_ARGS);
     let mut args = vec.Vec::<u32>.new();

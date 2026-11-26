@@ -74,7 +74,7 @@ impl Shapes {
 
 // The members of every decl by (parent, index): the field and variant decls sorted, and their
 // keys.
-fn members(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
+pub fn members(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
     let mut keys = vec.Vec::<u64>.new();
     let mut ids = vec.Vec::<u32>.new();
     for e in 0..ds.decls() {
@@ -96,7 +96,7 @@ fn members(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
 }
 
 // The run of members of decl p in the sorted keys.
-fn run_of(keys: &[u64], p: u32) -> (usize, usize) {
+pub fn run_of(keys: &[u64], p: u32) -> (usize, usize) {
     let lo = search.lower_bound(keys, search.pair(p, 0));
     let hi = search.lower_bound(keys, search.pair(p + 1, 0));
     return (lo, hi);
