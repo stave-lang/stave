@@ -85,6 +85,14 @@ pub fn pointee(m: &model.Module, t: u32) -> u32 {
     return NONE;
 }
 
+// Type t as a pointer: (is a ref or raw pointer, mutable, raw).
+pub fn access(m: &model.Module, t: u32) -> (bool, bool, bool) {
+    if !in_range(m, t) { return (false, false, false); }
+    let tag = m.types.tag_of(t);
+    if tag != types.TK_REF && tag != types.TK_PTR { return (false, false, false); }
+    return (true, m.types.a_of(t) == 1, tag == types.TK_PTR);
+}
+
 pub fn is_key(m: &model.Module, t: u32, tag: u8, a: u32, b: u32) -> bool {
     return m.types.tag_of(t) == tag && m.types.a_of(t) == a && m.types.b_of(t) == b && m.types.x(t).len() == 0;
 }

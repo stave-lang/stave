@@ -75,6 +75,12 @@ fn chunk_sum(xs: &[u32]) -> u32 {
     return s;
 }
 
+// The vector load's check `i < xs.len() -| 1` proves `xs[i]` after it.
+fn lane_then_scalar(xs: &[u64], i: usize) -> u64 {
+    let v = u64x2.load(xs, i);
+    return v.reduce_add_wrap() +% xs[i];
+}
+
 fn quad_sum(xs: &[u32]) -> u32 {
     let mut s: u32 = 0;
     let mut i: usize = 0;
@@ -423,6 +429,9 @@ fn main() -> i32 {
     let w7 = chunk_shrunk(&c);
     let w8 = chunk_moved(&c);
     io.print(f"{w1} {w2} {w3} {w4} {w5} {w6} {w7} {w8}\n");
+    let d: [u64; 3] = [1, 2, 3];
+    let w9 = lane_then_scalar(&d, 1);
+    io.print(f"{w9}\n");
     let mut s16: [u32; 16] = [0u32; 16];
     s16[5] = 50;
     s16[4] = 40;

@@ -1,6 +1,6 @@
 //! IR verifier: structure (spans, value definitions), SSA dominance, block
-//! param arity and types, terminators, and per-op operand / result typing. Returns every error
-//! found; never panics, whatever the input.
+//! param arity and types, terminators, per-op operand / result typing, and pointer mutability.
+//! Returns every error found; never panics, whatever the input.
 //!
 //! It is the gate for modules the compiler did not build: a module that verifies must not panic
 //! a back end, the release passes, or the interpreter. So every id is in range and of its kind
@@ -10,6 +10,7 @@
 
 use std::fmt;
 
+mod mutability;
 mod simd;
 
 use crate::arith::{self, CastTy, IntTy};
@@ -756,7 +757,8 @@ impl<'a> FnVerifier<'a> {
                 (k, _) => Err(format!("constant {k:?} cannot have type {}", self.tname(want))),
             },
             Operand::Str(_) => match key {
-                TypeKey::Ref { inner, .. } | TypeKey::RawPtr { inner, .. }
+                // a string's bytes are read-only data: only a shared pointer to them
+                TypeKey::Ref { inner, mutable: false } | TypeKey::RawPtr { inner, mutable: false }
                     if matches!(self.key(*inner), Some(TypeKey::Str)) =>
                 {
                     Ok(())
@@ -820,7 +822,7 @@ impl<'a> FnVerifier<'a> {
         for (bi, bd) in b.blocks.iter().enumerate() {
             let blk = Block(bi as u32);
             for i in bd.insts.indices() {
-                if let Err(e) = self.check_inst(b, blk, i) {
+                if let Err(e) = self.check_inst(b, blk, i).and_then(|()| self.check_mutability(b, i)) {
                     self.err(Some(blk), Some(i), e);
                 }
             }

@@ -1085,3 +1085,95 @@ fn while_le_look_alikes_keep_their_checks() {
         assert!(forge::forgeries_are_refused(&m, f) > 0, "{name}");
     }
 }
+
+/// A `check.bounds` takes unsigned operands of two widths, but its fact `x + c < n` after
+/// `check.bounds x (n -| c)` holds in a witness only where `x` and `n -| c` are read in one int
+/// type (a constant: a value of it), so the prover takes it only there: the mixed forms keep
+/// their checks and elision succeeds; one width removes the checks the fact implies.
+#[test]
+fn a_check_fact_needs_one_int_type() {
+    let head = "stave.ir 4 \"x86_64-linux-v2\" release lowered\ntype t0 int u size\n";
+    let cases: [(&str, &str, usize); 6] = [
+        (
+            "u32 index, usize length",
+            "type t1 int u 32
+fn @0 m.f(t1, t0) {
+b0(%0: t1, %1: t0):
+  %2 = sub.sat t0 %1 1
+  check.bounds () %0 %2
+  check.bounds () %0 %1
+  ret
+}",
+            2,
+        ),
+        (
+            "usize index, u32 length",
+            "type t1 int u 32
+fn @0 m.f(t0, t1) {
+b0(%0: t0, %1: t1):
+  %2 = sub.sat t1 %1 1
+  check.bounds () %0 %2
+  check.bounds () %0 %1
+  ret
+}",
+            2,
+        ),
+        (
+            "u8 index, then widened",
+            "type t1 int u 8
+fn @0 m.f(t1, t0) {
+b0(%0: t1, %1: t0):
+  %2 = sub.sat t0 %1 2
+  check.bounds () %0 %2
+  %3 = cast t0 %0
+  check.bounds () %3 %1
+  ret
+}",
+            2,
+        ),
+        (
+            "constant 300 against a u8 length",
+            "type t1 int u 8
+fn @0 m.f(t1, t1) {
+b0(%0: t1, %1: t1):
+  %2 = sub.sat t1 %0 1
+  check.bounds () 300 %2
+  check.bounds () %1 %0
+  ret
+}",
+            2,
+        ),
+        (
+            "constant 300 against a u8 length, then 255",
+            "type t1 int u 8
+fn @0 m.f(t1, t0, t0) {
+b0(%0: t1, %1: t0, %2: t0):
+  %3 = sub.sat t1 %0 1
+  check.bounds () 300 %3
+  check.bounds () %0 %3
+  check.bounds () 255 %0
+  ret
+}",
+            3,
+        ),
+        (
+            "one width",
+            "fn @0 m.f(t0, t0) {
+b0(%0: t0, %1: t0):
+  %2 = sub.sat t0 %1 1
+  check.bounds () %0 %2
+  %3 = add t0 %0 1
+  check.bounds () %3 %1
+  check.bounds () %0 %1
+  ret
+}",
+            1,
+        ),
+    ];
+    for (name, body, kept) in cases {
+        let src = format!("{head}{body}\n");
+        let mut m = stave_ir::text::read(src.as_bytes()).unwrap_or_else(|e| panic!("{name}: {e:?}")).module;
+        elide(&mut m).unwrap_or_else(|r| panic!("{name}: witness refused: {r:?}"));
+        assert_eq!(checks(&m, FuncId(0)), kept, "{name}");
+    }
+}

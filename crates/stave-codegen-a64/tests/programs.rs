@@ -304,6 +304,7 @@ fn memory_ops() {
     let pst = p.m.types.ref_(true, st);
     let parr = p.m.types.ref_(true, arr);
     let pu16 = p.m.types.ref_(true, t.u16);
+    let cpu16 = p.m.types.ref_(false, t.u16);
     let rpu16 = p.m.types.ptr(true, t.u16);
     let pi64 = p.m.types.ref_(true, t.i64);
     let sl = p.m.types.slice(t.u16);
@@ -325,7 +326,7 @@ fn memory_ops() {
         b.cbr(c, body, &[], exit, &[hp[1].into()]);
         b.switch_to(body);
         b.bounds_check(hp[0], n);
-        let e = b.binary(Op::ElemAddr, pu16, s, hp[0]);
+        let e = b.binary(Op::ElemAddr, cpu16, s, hp[0]);
         let x = b.load(t.u16, e);
         let xw = b.cast(CastKind::Exact, t.u64, x);
         let acc = b.binary(Op::Add, t.u64, hp[1], xw);

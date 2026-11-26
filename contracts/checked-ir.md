@@ -317,7 +317,7 @@ step stops before the next.
    duplicates; the release passes write one only between inlining and the branch folding that
    removes it, opt-passes.md P4), and a `known` fn to have its item's signature; against the
    header, every intrinsic must be built for the target's arch (intrinsics.md, the rule E0704
-   applies to a declaration).
+   applies to a declaration). The verifier checks the mutability of pointers ("Mutability").
 4. **Checks.** At level `lowered`: the removal of proven checks, as after lowering ("Bounds
    checks"); it computes the summaries. A contract check that fails whenever reached, and a call
    that fails a `requires` whenever reached, are reported as in step 3 where a build reports them
@@ -346,7 +346,11 @@ other levels the verifier runs on the renumbered module.
 
 What loading proves depends on the level:
 - Every level: the module is well formed (steps 1-3: types, shapes, statics, signatures,
-  `known` items, intrinsics and their arch, SSA and op typing).
+  `known` items, intrinsics and their arch, SSA and op typing), and every write goes through a
+  pointer that is mutable by the rule of "Mutability". That rule trusts the forms `unsafe` code
+  emits (a cast to or from a raw pointer, a raw pointer of `intrinsic.static_addr`), a `ref mut`
+  loaded through a `ref`, and a field read of an enum variant other than the one the value
+  holds: the IR types them by their source.
 - `lowered`, `checked`: every element access (step 5) has a `check.bounds` or a proof the audit
   accepts.
 - `lowered`: no `claim` line. Step 4 computes the summaries from the bodies; a check is removed
@@ -448,6 +452,51 @@ rejected: use `cast.sat` or `cast.try`). `cast.sat`: int, `char`, or float → i
 `cast.try`: int, `char`, or float → int; int → `char` or float; float → float; `Some` only when
 the value converts exactly (float → int: integral and in range). A float cast to its own type
 (any kind, scalar or per lane) is a bit copy: a signaling NaN keeps its bits.
+
+## Mutability
+
+A pointer type is mutable (`ref mut`, `ptr mut`) or shared (`ref`, `ptr const`). A string
+operand is a shared pointer: its type is `ref str` or `ptr const str` (its bytes are read-only
+data). The verifier checks, after an instruction's typing:
+
+- A write goes through a mutable pointer: the pointer operand of `store` and `mem.store_stream`
+  (else `store through a shared pointer`, `mem.store_stream through a shared pointer`), and the
+  memory operand of `vec.store`, `vec.store_aligned`, `vec.store_stream`, `vec.store_masked`,
+  `vec.scatter` (else `vector store through a shared reference`, or `... shared pointer` for an
+  element pointer).
+- No instruction makes a mutable pointer from a shared one: an instruction whose result is a
+  mutable pointer has no shared pointer operand (else `mutable pointer from a shared pointer
+  operand`). So `addr.field`, `addr.enum_field`, `addr.elem`, `slice.ptr`, and `slice.make` keep
+  or drop the mutability of their pointer operand. Exempt are the instructions whose pointer
+  operands are not where the result points, and the casts `unsafe` code writes:
+  - `call`, `call.ind`, `intrinsic.<name>`: the operands are arguments, the result has the
+    callee's or the signature's type (a callee's body is verified on its own);
+  - `load`: the result is a stored pointer, whose type the `store` that wrote it was checked
+    against; a `&mut` held behind a `&` is read through (`fn sum(ps: &Vec<&mut P>)` reads
+    `r.x`), and a `*mut T` field is read through `&self`;
+  - a cast whose result or operand is a raw pointer, or whose operand is not a pointer (an int,
+    a fn item): `&x as *const T as *mut T` is safe code (`std.cell.UnsafeCell.get`), and a write
+    through the raw pointer is `unsafe` code's obligation; only a cast of a `ref` (or a string) to
+    a `ref mut` is refused.
+
+Every other value keeps its type exactly (block params, `select`, `make`, `get`, call arguments
+and results, `ret`; `enum.get` and `addr.enum_field` have the type of the named variant's
+field), so mutability reaches a value only from a source: a `slot` (`ref mut`), a param or a call
+result of a mutable type, a load of a stored mutable pointer, one of the casts and intrinsics
+above, or a field of an enum variant. Three writes the rule does not see, because the IR types
+them as their source does:
+
+- a write through a `ref mut` loaded through a `ref` (undefined behaviour, LANG.md; safe code
+  only reads through one);
+- a write to an immutable static through `intrinsic.static_addr`, which gives a raw pointer of
+  either mutability (a `static` line does not say whether its decl is a `static mut`), trusted
+  like any raw pointer;
+- a write through a field of a variant other than the one the enum value holds: `enum.get` or
+  `addr.enum_field` of variant `k` reads the payload's bytes as variant `k`'s field whatever
+  variant was made, so `enum E { R(&u32), W(&mut u32) }` turns a `ref` stored as `R` into a
+  `ref mut` read as `W`. Source reads a variant's fields only where a test of its tag (a
+  pattern) chose that variant, or in an enum of one variant; the verifier does not track tags,
+  and refusing an enum whose variants hold both mutabilities would refuse valid source.
 
 ## TypeKey text (canonical type-key printer)
 
@@ -599,7 +648,9 @@ the **Slots** rule still holds.
   `add`/`sub` of constants, unsigned bit ops (`and x y` is at most `x` and `y`, `rem x y` below
   `y` and at most `x`, `shr x k` at most `x`), the range of an int type, and
   `cast`/`cast.wrap`/`cast.sat` to a type holding every value of the source type as the same
-  value; a check or a strict unsigned compare against `sub.sat n c` reads as `i + c < n`; every
+  value; a check against `sub.sat n c` (the one to remove, or a dominating one: a vector access's
+  check proves a scalar access of its first lanes) or a strict unsigned compare against it reads
+  as `i + c < n`; every
   `load (addr.field p k)` of an int field behind `p`, a `&T` (not `&mut`) parameter of the entry
   block with T not `std.cell.UnsafeCell`, and every call `@g p` of a getter (one parameter, the
   body `addr.field %0 k; load; ret`) of that field, as one value for the whole call, so the
@@ -711,12 +762,14 @@ reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.
 - **Fn value** = two words `(code, environment)` (`fntype` layout: 16 bytes, align 8, like a fat
   pointer). A fn item, or a closure body without captures, is the constant `@<inst>` (null
   environment).
-- **Environment**: a body with captures has one more param, last: `%e: t<ref mut (tuple of ref
-  mut T_i)>`, one element per capture in capture order (binding declaration order), pointing at
-  the captured local's slot (a captured local always lives in a `slot`). Its `b0` loads each
-  element (`addr.field %e i`, `load`) and uses it as that local's slot. The enclosing fn fills a
-  `slot` of the tuple (one `addr.field` + `store` per capture, at the closure expression) and
-  makes the value with `%v = fn.make t<fntype> @<enclosing>.<k> %env`.
+- **Environment**: a body with captures has one more param, last: `%e: t<ref mut (tuple of R_i)>`,
+  one element per capture in capture order (binding declaration order), pointing at the captured
+  local's slot (a captured local always lives in a `slot`): `R_i` is `ref T_i` for a `Ref`
+  capture (the body only reads it), `ref mut T_i` for a `RefMut` one. Its `b0` loads each element
+  (`addr.field %e i`, `load`) and uses it as that local's slot. The enclosing fn fills a `slot`
+  of the tuple (one `addr.field` + `store` per capture, at the closure expression; a `Ref`
+  capture of a `ref mut` slot is cast to `ref` first) and makes the value with
+  `%v = fn.make t<fntype> @<enclosing>.<k> %env`.
 - **`call.ind f args..`** passes `f`'s environment word as one extra trailing argument; a callee
   without the environment param (a fn item) ignores it (the Stave calling convention lets the
   caller own the argument area). `eq`/`ne` compare both words.

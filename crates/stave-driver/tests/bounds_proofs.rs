@@ -93,6 +93,7 @@ fn proofs_and_kept_checks_in(release: bool) {
         ("main.window_sum", 0),
         ("main.chunk_sum", 0),
         ("main.quad_sum", 0),
+        ("main.lane_then_scalar", 1),
         ("main.le_only", 1),
         ("main.eq_on_one_path", 1),
         ("main.next_under_len", 1),
@@ -145,6 +146,12 @@ fn proofs_and_kept_checks_in(release: bool) {
     // `i + 4 <= xs.len()` proves the vector's last lane `i + 3`, and every scalar read below it
     assert!(matches!(of("main.chunk_sum")[..], [Proof::Offset { k: 3, .. }]), "{:?}", of("main.chunk_sum"));
     assert!(matches!(of("main.quad_sum")[..], [Proof::Offset { k: 0, .. }, .., Proof::Offset { k: 3, .. }]));
+    // a kept check against `xs.len() -| 1` states `i + 1 < xs.len()`: the scalar read goes
+    assert!(
+        matches!(of("main.lane_then_scalar")[..], [Proof::Offset { k: 0, .. }]),
+        "{:?}",
+        of("main.lane_then_scalar")
+    );
     // `&xs[0..n]` has length `n` and tests `n <= xs.len()`
     assert!(
         matches!(of("main.window_sum")[..], [Proof::Offset { k: 0, .. }, Proof::Offset { k: 0, .. }]),

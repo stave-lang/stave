@@ -116,12 +116,13 @@ pub fn closure_kind(icx: &ItemCx<'_>, m: u32) -> Option<ClosureKind> {
     }
 }
 
-/// The environment of a closure capturing locals of types `caps` (each by `&mut`, the mode
-/// aside): the tuple `(&mut T0, &mut T1, ..)` and the `&mut` to it the body receives. The checker
-/// builds it for every closure ([`crate::typeck::TypedBody::envs`]), so a capture too tall for
-/// the type table is E0005 there, and lowering builds the same type.
-pub fn env_type<I: Interner + ?Sized>(cx: &mut I, caps: &[TypeId]) -> (TypeId, TypeId) {
-    let elems: Vec<TypeId> = caps.iter().map(|&t| cx.mk_ref(true, t)).collect();
+/// The environment of a closure capturing locals of types `caps`, each with its mode: the tuple
+/// `(&T0, &mut T1, ..)` (`&` for a [`CaptureMode::Ref`] capture, which the body only reads, `&mut`
+/// for a [`CaptureMode::RefMut`] one) and the `&mut` to it the body receives. The checker builds
+/// it for every closure ([`crate::typeck::TypedBody::envs`]), so a capture too tall for the type
+/// table is E0005 there, and lowering builds the same type.
+pub fn env_type<I: Interner + ?Sized>(cx: &mut I, caps: &[(TypeId, CaptureMode)]) -> (TypeId, TypeId) {
+    let elems: Vec<TypeId> = caps.iter().map(|&(t, m)| cx.mk_ref(m == CaptureMode::RefMut, t)).collect();
     let tup = cx.intern(crate::types::TypeKind::Tuple(elems.into_boxed_slice()));
     (tup, cx.mk_ref(true, tup))
 }

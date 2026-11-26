@@ -753,7 +753,7 @@ struct At {
 const END: u32 = u32::MAX;
 
 /// An int type: (signed, bits).
-type IntTy = (bool, u32);
+pub(crate) type IntTy = (bool, u32);
 
 /// The width the checker reads an int type at. `usize` / `isize` are 64 bits on every target; a
 /// test holds this to the type and layout layers.
@@ -775,6 +775,35 @@ pub fn int_range((signed, bits): (bool, u32)) -> (i128, i128) {
 fn fits(t: IntTy, c: i128) -> bool {
     let (lo, hi) = int_range(t);
     lo <= c && c <= hi
+}
+
+/// The int type of value `v` as the checker reads it.
+fn value_int_ty(m: &Module, b: &Body, v: Value) -> Option<IntTy> {
+    match b.value_ty(v).and_then(|t| m.types.key(t)) {
+        Some(TypeKey::Int { signed, bits }) => Some((*signed, int_width(*bits))),
+        _ => None,
+    }
+}
+
+/// The int type the two operands of a compare are read in: the type of its value operands, which
+/// must be one, a constant being a value of it (and within [`MAX_CONST`]); `Some(None)` for two
+/// constants within [`MAX_CONST`]. `None`: the compare states no fact the checker reads. A
+/// `check.bounds` takes unsigned operands of any widths, so the prover takes a check's fact only
+/// where this is a type.
+pub(crate) fn compare_ty(m: &Module, b: &Body, x: Operand, y: Operand) -> Option<Option<IntTy>> {
+    let konst = |o: Operand| b.int_const(o).filter(|c| (-MAX_CONST..=MAX_CONST).contains(c));
+    let ty = |o: Operand| match o {
+        Operand::Value(v) => value_int_ty(m, b, v).map(Some),
+        Operand::Const(_) => konst(o).map(|_| None),
+        _ => None,
+    };
+    let t = match (ty(x)?, ty(y)?) {
+        (Some(a), Some(b)) if a != b => return None,
+        (Some(a), _) | (_, Some(a)) => a,
+        (None, None) => return Some(None),
+    };
+    let fits_t = |o: Operand| matches!(o, Operand::Value(_)) || konst(o).is_some_and(|c| fits(t, c));
+    (fits_t(x) && fits_t(y)).then_some(Some(t))
 }
 
 /// Calls `f` with every successor of block `u` and whether the edge is the true side of a `cbr`.
@@ -979,10 +1008,7 @@ impl<'a> Cx<'a> {
 
     /// The int type of `v`, if it is an int.
     fn int_ty(&self, v: Value) -> Option<IntTy> {
-        match self.b.value_ty(v).and_then(|t| self.m.types.key(t)) {
-            Some(TypeKey::Int { signed, bits }) => Some((*signed, int_width(*bits))),
-            _ => None,
-        }
+        value_int_ty(self.m, self.b, v)
     }
 
     /// The largest value of `v`'s type when it is an unsigned int.
@@ -1045,17 +1071,7 @@ impl<'a> Cx<'a> {
     /// themselves), and whether that type is unsigned.
     #[allow(clippy::type_complexity)]
     fn pair(&self, x: Operand, y: Operand) -> Result<((Node, i128), (Node, i128), bool), Reject> {
-        let ty = |o: Operand| match o {
-            Operand::Value(v) => self.int_ty(v).map(Some).ok_or(Reject::Operand),
-            Operand::Const(_) => Ok(None),
-            _ => Err(Reject::Operand),
-        };
-        let t = match (ty(x)?, ty(y)?) {
-            (Some(a), Some(b)) if a != b => return Err(Reject::Operand),
-            (Some(a), _) | (_, Some(a)) => Some(a),
-            (None, None) => None,
-        };
-        match t {
+        match compare_ty(self.m, self.b, x, y).ok_or(Reject::Operand)? {
             Some(t) => Ok((self.of_type(x, t)?, self.of_type(y, t)?, !t.0)),
             None => {
                 let c = |o| self.konst(o).map(|c| (Node::Zero, c)).ok_or(Reject::Operand);

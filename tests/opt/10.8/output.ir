@@ -5,7 +5,7 @@ type t2 bool
 type t3 ref t0
 type t4 ref t7
 type t5 ref mut t0
-type t6 ptr mut t0
+type t6 ptr const t0
 type t7 slice t0
 fn @0 main.sum(t4, t4) -> t0 {
 b0(%0: t4, %1: t4):

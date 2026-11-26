@@ -2352,10 +2352,10 @@ impl<'a> Ck<'a> {
             if c.captures.is_empty() {
                 continue;
             }
-            let caps: Vec<TypeId> = c
+            let caps: Vec<(TypeId, crate::closures::CaptureMode)> = c
                 .captures
                 .iter()
-                .map(|cap| self.locals.get(&cap.binding).copied().unwrap_or(ids::ERROR))
+                .map(|cap| (self.locals.get(&cap.binding).copied().unwrap_or(ids::ERROR), cap.mode))
                 .collect();
             let start = self.tys.refusals();
             let (_, env) = crate::closures::env_type(&mut self.tys, &caps);

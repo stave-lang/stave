@@ -126,7 +126,7 @@ fn same_results_and_traps() {
 }
 
 /// `t.windows(s: &mut [u64], k: usize) -> u64`: the sum of `s[i]` for `i < k`, where every
-/// iteration checks `i` against `len -| 3` twice and against `len -| 1` once, each check with
+/// iteration checks `i` against `len -| 1` once and against `len -| 3` twice, each check with
 /// its own `slice.len` and `sub.sat`, then reads `s[i]` behind its own check against `len`;
 /// and `t.main(k: usize) -> u64`, which calls it on eight elements `3 j + 1`.
 fn windows() -> (Module, FuncId, FuncId) {
@@ -149,7 +149,7 @@ fn windows() -> (Module, FuncId, FuncId) {
     let c = b.cmp(Op::Lt, bool_, hp[0], k);
     b.cbr(c, body, &[], exit, &[]);
     b.switch_to(body);
-    for lanes in [3, 3, 1] {
+    for lanes in [1, 3, 3] {
         let n = b.op(Op::SliceLen, usize_, &[s.into()]);
         let w = b.int(lanes);
         let lim = b.binary(Op::SubSat, usize_, n, w);
@@ -197,7 +197,8 @@ fn one_bound_per_slice_and_width() {
     let b = o.func(f).unwrap().body.as_ref().unwrap();
     assert_eq!(count(b, Op::SubSat), 2);
     assert_eq!(count(b, Op::SliceLen), 1);
-    assert_eq!(count(b, Op::BoundsCheck), 4);
+    // the second check against `len -| 3` and the one against `len` follow from the first ones
+    assert_eq!(count(b, Op::BoundsCheck), 2);
     let entry = b.blocks[0].insts;
     let in_entry = entry.indices().filter(|&i| b.insts.op[i as usize] == Op::SubSat).count();
     assert_eq!(in_entry, 2, "both bounds are computed where the slice is defined");
