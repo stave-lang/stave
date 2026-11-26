@@ -2124,12 +2124,7 @@ impl<'a> FnCx<'a> {
             return;
         }
         self.f.last_site = here;
-        let c = self.f.b.int(s.0 as i128);
-        if let Operand::Const(ci) = c {
-            self.f.site_consts.push(ci);
-        }
-        let f = self.req(Req::Inst(InstKey { decl: sus, args: Vec::new() }));
-        self.f.b.call(f, None, &[c]);
+        self.call_runtime(sus, &[], Some(s), Some(tok));
     }
 
     /// In a user fn, a call of error-trace hook `hook` (`runtime.errtrace.push` / `restart`) with
@@ -2141,12 +2136,29 @@ impl<'a> FnCx<'a> {
             return;
         }
         let s = self.site(tok);
-        let c = self.f.b.int(s.0 as i128);
-        if let Operand::Const(ci) = c {
-            self.f.site_consts.push(ci);
-        }
+        self.call_runtime(d, &[], Some(s), Some(tok));
+    }
+
+    /// A call of `d`, a non-generic runtime fn without a result that lowering inserts, with
+    /// `args` and, when it is given a position to report, the site `row`. The row is an int
+    /// constant at the param that [`stave_ir::known::site_param`] names for `d`'s known item,
+    /// where later stages look for it; a caller and that table disagreeing on the row is an
+    /// internal error (at `tok`).
+    pub fn call_runtime(&mut self, d: DeclId, args: &[Operand], row: Option<Site>, tok: Option<u32>) {
+        let row = row.map(|s| {
+            let c = self.f.b.int(s.0 as i128);
+            if let Operand::Const(ci) = c {
+                self.f.site_consts.push(ci);
+            }
+            c
+        });
+        let param = self.g.prog.known.of(d).and_then(stave_ir::known::site_param);
+        let Some(all) = place_site(args, row, param) else {
+            self.fail_at(tok, "a runtime call and the known-item table disagree on its site row");
+            return;
+        };
         let f = self.req(Req::Inst(InstKey { decl: d, args: Vec::new() }));
-        self.f.b.call(f, None, &[c]);
+        self.f.b.call(f, None, &all);
     }
 
     pub fn emit_call(&mut self, f: FuncId, args: &[Operand], ret: Ty, tok: u32) -> E {
@@ -2256,6 +2268,18 @@ impl FnState {
     }
 }
 
+/// `args` with `row` inserted as param `param`. `None` unless there is both a row and a param
+/// for it or neither, and the param is an index of the resulting list.
+fn place_site(args: &[Operand], row: Option<Operand>, param: Option<usize>) -> Option<Vec<Operand>> {
+    let mut all = args.to_vec();
+    match (row, param) {
+        (None, None) => {}
+        (Some(row), Some(p)) if p <= all.len() => all.insert(p, row),
+        _ => return None,
+    }
+    Some(all)
+}
+
 fn empty_body() -> &'static TypedBody {
     static B: std::sync::OnceLock<TypedBody> = std::sync::OnceLock::new();
     B.get_or_init(|| TypedBody {
@@ -2288,4 +2312,23 @@ fn empty_body() -> &'static TypedBody {
         temps: Vec::new(),
         envs: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_site_row_goes_where_the_param_says_or_nowhere() {
+        let [a, b, row] = [1, 2, 3].map(|i| Operand::Func(FuncId(i)));
+        let at = |p| place_site(&[a, b], Some(row), Some(p));
+        assert_eq!(at(0), Some(vec![row, a, b]));
+        assert_eq!(at(1), Some(vec![a, row, b]));
+        assert_eq!(at(2), Some(vec![a, b, row]));
+        assert_eq!(place_site(&[a, b], None, None), Some(vec![a, b]));
+        // past the list, a row without a param, a param without its row
+        assert_eq!(at(3), None);
+        assert_eq!(place_site(&[a, b], Some(row), None), None);
+        assert_eq!(place_site(&[a, b], None, Some(0)), None);
+    }
 }

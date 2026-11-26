@@ -704,6 +704,63 @@ fn generated_programs_run_in_the_interpreter() {
     }
 }
 
+/// Lowering passes each site row at the param the known-item table names. In a program with
+/// every construct that passes one, the items with a `site_param` that user fns call are all of
+/// them, and each call has a row of its own fn there.
+#[test]
+fn site_rows_are_passed_where_the_known_item_table_says() {
+    use stave_ir::known::site_param;
+    use stave_ir::{Const, Known, Op, Operand};
+    let src = r#"import std.io;
+
+fn small(x: u32) -> u32 requires(x < 100) ensures(result < 50) {
+    return x;
+}
+
+fn err(n: u32) -> Result<u32, u32> {
+    return Result.Err(n);
+}
+
+fn passed() -> Result<u32, u32> {
+    let v = err(1u32)?;
+    return Result.Ok(v);
+}
+
+fn main() {
+    let a = small(1u32);
+    let r = passed();
+    io.print(f"{a}\n");
+}
+"#;
+    let dir = temp_pkg("sites", src);
+    let m = lowered(&dir, "x86_64-linux", Mode::Debug, None);
+    let mut seen = std::collections::BTreeSet::new();
+    for f in m.funcs.iter().filter(|f| f.path.starts_with("main.")) {
+        let Some(b) = &f.body else { continue };
+        for i in 0..b.insts.op.len() {
+            let (Some(Op::Call), [Operand::Func(g), args @ ..]) = (b.insts.op.get(i), b.args(i as u32))
+            else {
+                continue;
+            };
+            let Some(k) = m.funcs[g.index()].known else { continue };
+            let Some(p) = site_param(k) else { continue };
+            let row = match args.get(p) {
+                Some(Operand::Const(c)) => match b.consts.get(c.index()) {
+                    Some(Const::Int(row)) => m.sites.get(*row as usize),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let row = row.unwrap_or_else(|| panic!("{}: no site row at param {p} of `{k}`", f.path));
+            assert_eq!(row.func, f.path, "`{k}`");
+            seen.insert(k);
+        }
+    }
+    let with: Vec<Known> = Known::ALL.iter().copied().filter(|&k| site_param(k).is_some()).collect();
+    assert_eq!(seen.into_iter().collect::<Vec<_>>(), with);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Compiler-known items are stamped by identity: in a program whose own items are named like
 /// them (`tests/conformance/run/known_names`: `mymod.try_alloc`, `panic.trap`, `thread.entry`,
 /// `fn start`, a type `Vec` with a `drop`, ...), no user decl resolves to a known item and no
