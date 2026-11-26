@@ -3,6 +3,7 @@
 // (`diag_sigs.display`), a literal group `{integer}` or `{float}`; a node's span runs from its
 // first token to its last (`ast` `tok_end`); an operand is its node's source text.
 import ast;
+import consteval;
 import decls;
 import diag;
 import diag_sigs;
@@ -58,7 +59,7 @@ fn ty_text(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.
 pub fn gparam_span(sg: &sigs.Sigs, tree: &ast.Ast, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, it: u32, r: usize) -> (u32, u32, u32) {
     let g = tree.item_node.as_slice()[it as usize] as usize + sg.cx.gens.node.as_slice()[r] as usize;
     let a = tree.tok.as_slice()[g];
-    let nt = if tk(t, a) == terminals.T_KW_CONST then a + 1 else a;
+    let nt = if consteval.tk(t, a) == terminals.T_KW_CONST then a + 1 else a;
     return modules.tok_span(lx, set, t, nt);
 }
 
@@ -118,10 +119,6 @@ fn copy_bounds(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, nm: &intern.Interned, sc: 
         out.extend_from_slice(mem.str_bytes(": Copy`"));
     }
     if out.len() == 0 { out.extend_from_slice(mem.str_bytes("`P: Copy` for each param `P`")); }
-}
-
-fn tk(t: &lex.Tokens, tok: u32) -> u8 {
-    return t.kind.as_slice()[tok as usize] as% u8;
 }
 
 // Hole `hole` of the open diagnostic: decimal v.
@@ -252,19 +249,7 @@ pub fn typeck_diags(d: &mut diag.Diags, tc: &tc_rows.Typeck, sg: &sigs.Sigs, ds:
             let x = g.a.as_slice()[k];
             ty_text(&mut buf, sg, ds, nm, sc, x);
             d.arg("type", buf.as_slice());
-            let tab = &sg.cx.tab;
-            let bits = tab.int_bits(x);
-            buf.clear();
-            if tab.a_of(x) == 1 {
-                buf.push(45);
-                text.push_u64(&mut buf, 1u64 << (bits - 1) as u64);
-            } else {
-                buf.push(48);
-            }
-            d.arg("min", buf.as_slice());
-            buf.clear();
-            text.push_u64(&mut buf, if tab.a_of(x) == 1 then (1u64 << (bits - 1) as u64) - 1 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1);
-            d.arg("max", buf.as_slice());
+            diag_sigs.int_bounds(d, &mut buf, &sg.cx.tab, x);
         } else if code == 422 {
             d.begin(422, if case == tc_rows.C_OPERAND then "operand" else if case == tc_rows.C_OPERAND_ARGS then "operand-args" else "operand-type");
             let op = &set.file(f as usize)[s as usize..(s + z) as usize];

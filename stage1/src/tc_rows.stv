@@ -119,6 +119,10 @@ pub struct Typeck {
     pub mt_k: vec.Vec<u32>,
     // the built-in methods and type-relative built-ins
     pub bt: tc_builtins.Builtins,
+    // the divisors of the body's `div_const` calls (argument row, its lane type), evaluated when
+    // the body's check ends
+    pub dc_row: vec.Vec<u32>,
+    pub dc_ty: vec.Vec<u32>,
     // the trait questions, asked in rounds (`tc_traits`)
     pub tq: tc_traits.Tq,
     // `std.core.Option`, `std.core.Result` (NONE: none in this program)
@@ -708,6 +712,10 @@ impl Typeck {
                 continue;
             }
             self.coerce(tab, a, want, NONE);
+            if tc_builtins.is_div_const(callee) {
+                self.dc_row.push(a as% u32);
+                self.dc_ty.push(want);
+            }
         }
         if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_SEL { return self.unify(tab, x, y, self.base as% u32 + tree.kids.row(args as usize)[1]); }
         if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_FREE {

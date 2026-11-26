@@ -146,6 +146,8 @@ impl tc_rows.Typeck {
         self.fc_node.clear();
         self.fc_want.clear();
         self.fc_why.clear();
+        self.dc_row.clear();
+        self.dc_ty.clear();
         self.cur_d = d;
         self.pass = self.pass + 1;
         self.last_pass.as_mut_slice()[d as usize] = self.pass;
@@ -168,6 +170,12 @@ impl tc_rows.Typeck {
         }
         self.walk(sg, ds, nm, set, t, cut, tree, g);
         self.fixes(sg);
+        // a `div_const` divisor is a const-expr of its lane type: what fails an operation of it
+        // is reported by the evaluator (the rest, where the checker typed it)
+        sg.cx.sc = self.sc;
+        for j in 0..self.dc_row.len() {
+            let _ = consteval.eval(&mut sg.cx, tree, t, nm, set, cut, ds, self.it, self.dc_row.as_slice()[j] as usize, self.dc_ty.as_slice()[j]);
+        }
         // a group no context fixed is E0202
         for r in lo..g + 1 {
             let v = self.nty.as_slice()[r];
@@ -590,7 +598,7 @@ impl tc_rows.Typeck {
             let us = sg.cx.tab.usize_t();
             self.coerce(&sg.cx.tab, cnt, us, NONE);
             // a count stage1 does not evaluate, or one stage0 rejects, is not modeled
-            let (gk, gx, gy) = consteval.eval_u64(&mut sg.cx, tree, t, nm, set, cut, ds, self.it, cnt, us, self.sc);
+            let (gk, gx, gy) = consteval.eval_u64(&mut sg.cx, tree, t, nm, set, cut, ds, self.it, cnt, us, self.sc, true);
             if et == NONE { return self.err(); }
             if et == UNK || gk == types.GA_ERROR { return UNK; }
             return array_ty(&mut sg.cx.tab, et, gk, gx, gy);
@@ -1762,6 +1770,8 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         mt_h: vec.Vec::<u32>.new(),
         mt_k: vec.Vec::<u32>.new(),
         bt: tc_builtins.table(&nm.tab, opt),
+        dc_row: vec.Vec::<u32>.new(),
+        dc_ty: vec.Vec::<u32>.new(),
         tq: tc_traits.new(sg, ds, fl, md, nm),
         opt: opt,
         res: res,

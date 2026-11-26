@@ -127,6 +127,11 @@ pub fn is_builtin(x: u32) -> bool {
     return x >= B_BASE && x < B_END;
 }
 
+// Whether callee b is `div_const`, whose argument is a const-expr the evaluator also runs.
+pub fn is_div_const(b: u32) -> bool {
+    return b == B_BASE + K_DIV_CONST;
+}
+
 // The built-in fns, in this order (stage0's `prim.Builtin`); which of them a name is, the
 // resolver decides (`decls.builtin_fn`).
 const FNS: &str = "size_of align_of needs_drop fence_stream soa_row_size soa_read soa_write";
