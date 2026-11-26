@@ -413,6 +413,17 @@ pub fn adt_layout(is_enum: bool, variants: &[Vec<(u64, u64)>]) -> Result<(u64, u
 /// ([`crate::types::MAX_TYPE_HEIGHT`]). So every query ends, with the answer the rules give.
 pub(crate) const QUERY_DEPTH: u32 = crate::typedepth::MAX_TYPE_DEPTH;
 
+/// A closed marker goal that held answers rest on ([`Query`]).
+#[derive(Clone, Copy)]
+enum Frame {
+    /// In progress, at this index of the coinductive goals.
+    Live(usize),
+    /// Ended with an answer that rests on this frame's goal.
+    Up(u32),
+    /// Ended with nothing resting on it.
+    Ended,
+}
+
 /// State of one top-level trait query: the Send/Sync goals in progress (a goal reached again is
 /// assumed to hold), the lowest in-progress index an assumption used below the current goal
 /// (`usize::MAX`: none), and the results already known. The other goals (Copy, a trait with
@@ -421,10 +432,38 @@ pub(crate) const QUERY_DEPTH: u32 = crate::typedepth::MAX_TYPE_DEPTH;
 /// memoized). `any_kind`: impl matching skips the
 /// view-kind rule (a query that asks whether an impl could apply to some instance, or names the
 /// impl a view was refused by; never one that selects an impl).
+///
+/// **Held answers.** A goal of a closed marker trait ([`World::closed_marker`]) reaches only goals
+/// of closed marker traits, all coinductive, so its provisional answers are positive and rest only
+/// on coinductive goals in progress. Such an answer is held ([`Query::held`]) and reused while
+/// those goals are in progress, instead of being recomputed on every path that reaches it (on a
+/// cycle with two paths at each step, as through `W<T> { t: T }`, which holds its argument as a
+/// field and as a type argument, that is exponential in its length). The goal it rests on is a
+/// frame ([`Frame`]); a reuse takes that frame's index as an assumption used, as the goal's own
+/// computation did, so whatever rests on the reuse is held as well. When the frame's goal ends with
+/// answers still resting on it, the frame redirects to the outermost goal its own answer used. A
+/// failing goal drops every answer held since it started; the outermost goal used makes the answers
+/// held since it started final. So a held answer is reused only under the assumptions it was
+/// computed under, and the answer of every goal entered from outside the closed traits, and every
+/// final answer, is the one the rules give: a positive answer survives only in a set of answers
+/// that hold given each other, a negative one comes from a component that does not hold.
 struct Query {
     /// Coinductive goals in progress, and the index of each.
     active: Vec<(TypeId, DeclId)>,
     active_at: FxHashMap<(TypeId, DeclId), usize>,
+    /// Per coinductive goal in progress: its frame (`u32::MAX` for a goal of a marker trait
+    /// that is not closed: its answers are pending, not held).
+    active_frame: Vec<u32>,
+    frames: Vec<Frame>,
+    /// Frames not ended: while none and nothing is held, `frames` is emptied.
+    live_frames: usize,
+    /// Provisional answers of closed marker goals (all positive), each with the frame of the
+    /// outermost goal in progress it rests on, in the order they were recorded; `held_at`
+    /// indexes them by goal.
+    held: Vec<((TypeId, DeclId), u32)>,
+    held_at: FxHashMap<(TypeId, DeclId), usize>,
+    /// Whether answers are held ([`World::implements_unheld`]: never).
+    hold: bool,
     low: usize,
     /// Inductive goals in progress, and the index of each.
     goals: Vec<(TypeId, TraitRef)>,
@@ -443,6 +482,12 @@ impl Default for Query {
         Query {
             active: Vec::new(),
             active_at: FxHashMap::default(),
+            active_frame: Vec::new(),
+            frames: Vec::new(),
+            live_frames: 0,
+            held: Vec::new(),
+            held_at: FxHashMap::default(),
+            hold: true,
             low: usize::MAX,
             goals: Vec::new(),
             goals_at: FxHashMap::default(),
@@ -480,21 +525,110 @@ impl Query {
         low >= me
     }
 
-    /// Enters coinductive goal `key`: `Err` (it holds through this path) if it is in progress.
-    fn enter_active(&mut self, key: (TypeId, DeclId)) -> Result<(), ()> {
+    /// Enters coinductive goal `key` (`held`: of a closed marker trait, with a frame): `Err` (it
+    /// holds through this path) if it is in progress.
+    fn enter_active(&mut self, key: (TypeId, DeclId), held: bool) -> Result<(), ()> {
         if let Some(&i) = self.active_at.get(&key) {
             self.low = self.low.min(i);
             return Err(());
         }
+        let frame = if held {
+            self.frames.push(Frame::Live(self.active.len()));
+            self.live_frames += 1;
+            (self.frames.len() - 1) as u32
+        } else {
+            u32::MAX
+        };
         self.active_at.insert(key, self.active.len());
         self.active.push(key);
+        self.active_frame.push(frame);
         Ok(())
     }
 
-    fn leave_active(&mut self) {
+    /// Leaves the innermost coinductive goal: its frame.
+    fn leave_active(&mut self) -> u32 {
         if let Some(k) = self.active.pop() {
             self.active_at.remove(&k);
         }
+        self.active_frame.pop().unwrap_or(u32::MAX)
+    }
+
+    /// The held answer of `key`, if any: its frame's index is taken as an assumption used.
+    fn held_answer(&mut self, key: (TypeId, DeclId)) -> Option<bool> {
+        let &i = self.held_at.get(&key)?;
+        let at = self.frame_at(self.held[i].1)?;
+        self.low = self.low.min(at);
+        Some(true)
+    }
+
+    /// The index of the goal in progress that frame `f` stands for (redirects followed and
+    /// shortened). `None` only for an ended frame nothing should rest on.
+    fn frame_at(&mut self, f: u32) -> Option<usize> {
+        let mut g = f;
+        let at = loop {
+            match *self.frames.get(g as usize)? {
+                Frame::Live(at) => break at,
+                Frame::Up(u) => g = u,
+                Frame::Ended => {
+                    debug_assert!(false, "a held answer rests on an ended goal");
+                    return None;
+                }
+            }
+        };
+        let mut h = f;
+        while h != g {
+            let Frame::Up(u) = self.frames[h as usize] else { break };
+            self.frames[h as usize] = Frame::Up(g);
+            h = u;
+        }
+        Some(at)
+    }
+
+    /// Records answer `r` of closed marker goal `key` that ended with frame `frame`, entered at
+    /// index `me`, `low` the lowest index its computation used, `start` the length of `held` when
+    /// it started. Returns the answers that became final.
+    fn settle_held(
+        &mut self,
+        key: (TypeId, DeclId),
+        r: bool,
+        frame: u32,
+        me: usize,
+        low: usize,
+        start: usize,
+    ) -> Vec<((TypeId, DeclId), bool)> {
+        let mut out = Vec::new();
+        let up = if r && low < me { self.active_frame.get(low).copied() } else { None };
+        let up = up.unwrap_or(u32::MAX);
+        self.live_frames -= 1;
+        if r && low < me && up != u32::MAX {
+            self.frames[frame as usize] = Frame::Up(up);
+            self.held_at.insert(key, self.held.len());
+            self.held.push((key, up));
+        } else {
+            // A failure: what was held since it started may rest on it, so none of it is kept.
+            // Else this goal is the outermost the held answers since it started rest on: they
+            // are final. (A goal in progress without a frame is never used by a closed marker
+            // goal; were it, its answer and those below would only be dropped.)
+            let fin = r && low >= me;
+            debug_assert!(!r || fin, "a closed marker goal used a goal without a frame");
+            for (k, _) in self.held.drain(start..) {
+                self.held_at.remove(&k);
+                if fin {
+                    out.push((k, true));
+                }
+            }
+            if fin || !r {
+                out.push((key, r));
+            }
+            self.frames[frame as usize] = Frame::Ended;
+        }
+        if self.live_frames == 0 && self.held.is_empty() {
+            self.frames.clear();
+        }
+        for &(k, v) in &out {
+            self.memo.insert(k, v);
+        }
+        out
     }
 
     /// For a goal kept in no stack (a tuple's Copy): the mark [`Query::own_low`] takes.
@@ -571,6 +705,14 @@ pub struct Answers {
     q: Query,
 }
 
+impl Answers {
+    /// Kept answers without held ones ([`World::implements_unheld`]).
+    #[doc(hidden)]
+    pub fn unheld() -> Answers {
+        Answers { q: Query { hold: false, ..Query::default() } }
+    }
+}
+
 /// Final answers of trait queries about concrete types of the global type table, shared by
 /// every query of a checking run, so each (type, trait) is answered once ([`World::implements`]).
 /// Armed for a table by [`QueryCache::arm`]: only ids below the table's length at that time are
@@ -580,6 +722,8 @@ pub struct Answers {
 pub struct QueryCache {
     limit: std::sync::atomic::AtomicU32,
     map: std::sync::Mutex<FxHashMap<(TypeId, DeclId, bool), bool>>,
+    /// Goals computed so far ([`QueryCache::goals_computed`]).
+    goals: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for QueryCache {
@@ -593,6 +737,17 @@ impl QueryCache {
     pub fn arm(&self, len: usize) {
         self.lock().clear();
         self.limit.store(len.min(u32::MAX as usize) as u32, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The trait goals computed by the queries that use this cache, every thread and phase
+    /// together (a goal answered from a memo, a held answer, or this cache is not computed): a
+    /// measure of the solver's work that does not depend on the machine.
+    pub fn goals_computed(&self) -> u64 {
+        self.goals.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn count_goal(&self) {
+        self.goals.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, FxHashMap<(TypeId, DeclId, bool), bool>> {
@@ -941,6 +1096,20 @@ impl<'a> World<'a> {
         self.implements_q(cx, t, tr, env, &mut Query::default())
     }
 
+    /// [`World::implements`] without held answers ([`Query`]): every provisional answer is
+    /// recomputed on each path that reaches it, which may take time exponential in the length of
+    /// a cycle. The same answer as [`World::implements`]; the reference tests compare it with.
+    #[doc(hidden)]
+    pub fn implements_unheld<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        t: TypeId,
+        tr: &TraitRef,
+        env: &[GenericParam],
+    ) -> bool {
+        self.implements_q(cx, t, tr, env, &mut Query { hold: false, ..Query::default() })
+    }
+
     /// [`World::implements`] with the answers of earlier queries in `env` ([`Answers`]).
     pub fn implements_kept<I: Interner + ?Sized>(
         &self,
@@ -985,8 +1154,12 @@ impl<'a> World<'a> {
             return self.is_copy_q(cx, t, env, q);
         }
         let key = (t, tr.trait_decl);
+        let held = q.hold && tr.args.is_empty() && self.closed_marker(tr.trait_decl);
         if tr.args.is_empty() {
             if let Some(&r) = q.memo.get(&key) {
+                return r;
+            }
+            if held && let Some(r) = q.held_answer(key) {
                 return r;
             }
             if let Some(r) = self.sigs.queries.get(&*cx, t, tr.trait_decl, q.any_kind) {
@@ -1004,9 +1177,12 @@ impl<'a> World<'a> {
         };
         let auto = (tr.trait_decl == lang.send || tr.trait_decl == lang.sync || derived.is_some())
             && tr.trait_decl.is_some();
+        if held {
+            return self.held_goal(cx, t, tr, derived, env, q);
+        }
         // Send/Sync/Flat/Frozen are coinductive: a type reached again while its own query is in
         // progress (a recursive type) is assumed to implement them.
-        if auto && q.enter_active(key).is_err() {
+        if auto && q.enter_active(key, false).is_err() {
             return true;
         }
         let me = if auto { q.active.len() - 1 } else { q.active.len() };
@@ -1023,6 +1199,7 @@ impl<'a> World<'a> {
                 }
             }
         };
+        self.sigs.queries.count_goal();
         let r = if let Some(d) = derived {
             self.auto_derived(cx, t, tr, d, env, q)
         } else if auto {
@@ -1041,6 +1218,49 @@ impl<'a> World<'a> {
         let low = q.low;
         let memo_key = tr.args.is_empty().then_some(key);
         let done = q.settle(memo_key, r, low >= me, free_neg, start, auto);
+        self.sigs.queries.put(&*cx, &done, q.any_kind);
+        q.low = saved_low.min(if low < me { low } else { usize::MAX });
+        r
+    }
+
+    /// Whether `tr` is a closed marker trait: Flat and Frozen (their rules reach only goals of
+    /// the same trait), and Send and Sync when every impl of them bounds its params by marker
+    /// traits only ([`Sigs::markers_closed`]). A goal of one reaches only goals of closed marker
+    /// traits, all coinductive: no inductive goal, so no negative answer that rests on one.
+    fn closed_marker(&self, tr: DeclId) -> bool {
+        let lang = &self.sigs.lang;
+        tr.is_some()
+            && (tr == lang.flat
+                || tr == lang.frozen
+                || (self.sigs.markers_closed && (tr == lang.send || tr == lang.sync)))
+    }
+
+    /// A goal of a closed marker trait, not answered yet: its answer is held, not recomputed,
+    /// while it rests on a goal in progress ([`Query`]).
+    fn held_goal<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        t: TypeId,
+        tr: &TraitRef,
+        derived: Option<Derived>,
+        env: &[GenericParam],
+        q: &mut Query,
+    ) -> bool {
+        let key = (t, tr.trait_decl);
+        if q.enter_active(key, true).is_err() {
+            return true;
+        }
+        self.sigs.queries.count_goal();
+        let me = q.active.len() - 1;
+        let saved_low = std::mem::replace(&mut q.low, usize::MAX);
+        let start = q.held.len();
+        let r = match derived {
+            Some(d) => self.auto_derived(cx, t, tr, d, env, q),
+            None => self.send_sync(cx, t, tr, env, q),
+        };
+        let frame = q.leave_active();
+        let low = q.low;
+        let done = q.settle_held(key, r, frame, me, low, start);
         self.sigs.queries.put(&*cx, &done, q.any_kind);
         q.low = saved_low.min(if low < me { low } else { usize::MAX });
         r
@@ -1582,6 +1802,7 @@ impl<'a> World<'a> {
                 if let Some(r) = self.copy_known(cx, t, q) {
                     return r;
                 }
+                self.sigs.queries.count_goal();
                 let low = std::mem::replace(&mut q.low, usize::MAX);
                 let mark = q.open_low();
                 let start = q.pending.len();
@@ -1608,6 +1829,7 @@ impl<'a> World<'a> {
                 }
                 let tr = TraitRef { trait_decl: copy, args: Vec::new() };
                 let Some(mark) = q.enter_goal((t, tr.clone())) else { return false };
+                self.sigs.queries.count_goal();
                 let low = std::mem::replace(&mut q.low, usize::MAX);
                 let start = q.pending.len();
                 let r = self.find_impl_q(cx, t, &tr, env, q).is_some();
