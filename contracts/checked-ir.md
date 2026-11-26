@@ -494,8 +494,8 @@ them as their source does:
 - a write through a field of a variant other than the one the enum value holds: `enum.get` or
   `addr.enum_field` of variant `k` reads the payload's bytes as variant `k`'s field whatever
   variant was made, so `enum E { R(&u32), W(&mut u32) }` turns a `ref` stored as `R` into a
-  `ref mut` read as `W`. Source reads a variant's fields only where a test of its tag (`match`,
-  `if let`) chose that variant, or in an enum of one variant; the verifier does not track tags,
+  `ref mut` read as `W`. Source reads a variant's fields only where a test of its tag (a
+  pattern) chose that variant, or in an enum of one variant; the verifier does not track tags,
   and refusing an enum whose variants hold both mutabilities would refuse valid source.
 
 ## TypeKey text (canonical type-key printer)
