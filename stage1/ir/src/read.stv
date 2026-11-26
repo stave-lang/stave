@@ -567,6 +567,7 @@ fn structure(ld: &mut Loaded, st: &stage.Stage) {
         return;
     }
     if ld.errs.len() > 0 { return; }
+    ld.m.level = st.hd_level.as_slice()[header as usize];
 
     // ids that name lines
     let nstatics = st_data_lo.len() as% u32;
@@ -712,6 +713,20 @@ fn structure(ld: &mut Loaded, st: &stage.Stage) {
     for k in 0..order.len() {
         let i = order.as_slice()[k] as usize;
         let flags = st.fn_flags.as_slice()[i];
+        if ld.m.level == model.LEVEL_LOWERED {
+            let parts = st.iref.row(st.fn_inst.as_slice()[i] as usize);
+            let mut entry = false;
+            for p in 1..parts.len() {
+                if parts[p] == model.UNCHECKED_ENTRY { entry = true; }
+            }
+            if entry {
+                e.clear();
+                bytes.push_str(&mut e, "fn @");
+                msg_inst(&mut e, st, st.fn_inst.as_slice()[i]);
+                bytes.push_str(&mut e, " is an unchecked entry, which a `lowered` module does not hold");
+                ld.errs.add(errs.K_STRUCTURE, fg.line.as_slice()[i], fg.col.as_slice()[i], e.as_slice());
+            }
+        }
         let mut kn = NONE;
         if flags & model.F_KNOWN != 0 {
             kn = kt.find(st.fn_path.row(i));
@@ -780,7 +795,6 @@ fn structure(ld: &mut Loaded, st: &stage.Stage) {
     let h = header as usize;
     m.target = st.hd_target.as_slice()[h];
     m.mode = st.hd_mode.as_slice()[h];
-    m.level = st.hd_level.as_slice()[h];
     for dd in 0..ndecls {
         m.decl_id.push(st.dc_id.as_slice()[dd]);
         m.decl_kind.push(st.dc_kind.as_slice()[dd]);

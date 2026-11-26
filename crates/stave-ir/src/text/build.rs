@@ -567,6 +567,14 @@ pub(crate) fn structure(lines: Vec<Ln>) -> Result<Built, Vec<ReadError>> {
     let level = header.level;
     for &i in &order {
         let f = &fns[i];
+        let entry = f.head.inst.0.iter().skip(1).any(|&n| n == InstanceId::UNCHECKED_ENTRY);
+        if level == Level::Lowered && entry {
+            e.at(
+                f.line,
+                f.col,
+                format!("fn @{} is an unchecked entry, which a `lowered` module does not hold", f.head.inst),
+            );
+        }
         let known = if f.head.known {
             let k = known_by_path(&f.head.path);
             if k.is_none() {

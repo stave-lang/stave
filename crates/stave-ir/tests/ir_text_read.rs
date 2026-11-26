@@ -1224,6 +1224,18 @@ fn body_rules() {
     );
 }
 
+/// The witness checker makes unchecked entries: a `lowered` text holds none, a `checked` one may.
+#[test]
+fn an_unchecked_entry_is_held_only_above_level_lowered() {
+    let fns = "type t0 bool\nfn @0 a() {\nb0():\n  ret\n}\nfn @0.u a() {\nb0():\n  ret\n}\n";
+    rejects(
+        &format!("stave.ir 4 \"x86_64-linux-v2\" debug lowered\n{fns}"),
+        "t.ir:7:1: error: fn @0.u is an unchecked entry, which a `lowered` module does not hold",
+    );
+    let l = load(&format!("stave.ir 4 \"x86_64-linux-v2\" debug checked\n{fns}"));
+    assert_eq!(l.module.funcs[1].instance, InstanceId(vec![0, InstanceId::UNCHECKED_ENTRY]));
+}
+
 #[test]
 fn claim_rules() {
     let f = "fn @0 a() {\nb0():\n  ret\n}\n";

@@ -216,10 +216,6 @@ pub(crate) fn checked_module(
         extend_nodes(n, &r.removal);
         stave_ir::canon::permute_by_func(n, &r.remap);
     }
-    debug_assert!(
-        stave_ir::canon::is_canonical(m),
-        "the removal of proven checks left a module that is not canonical"
-    );
     verified_final(m, Level::Checked)?;
     Ok(r)
 }
@@ -306,7 +302,9 @@ pub(crate) struct CheckRemoval {
 /// their callee's `requires`. Then the witness checker, which shares no code with the proof
 /// search, validates every witness, and only the checks it accepted are deleted and only the
 /// calls it accepted are retargeted. `whole`: `m` is the whole program of a build, not the part
-/// of it the effect pass lowers; only then may a function lose its checked entry.
+/// of it the effect pass lowers; only then may a function lose its checked entry. When `whole`,
+/// `m` must be canonical on entry (the removal renumbers only what it edited); it is canonical on
+/// return.
 pub(crate) fn remove_proven_checks(m: &mut Module, whole: bool) -> Result<CheckRemoval, Failure> {
     let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
     let stated = Claims::from_rows(
@@ -332,9 +330,16 @@ pub(crate) fn remove_proven_checks(m: &mut Module, whole: bool) -> Result<CheckR
 /// Has the witness checker validate every proof (functions in parallel, each reading the
 /// summaries of all; it accepts all or nothing), then deletes the checks and retargets the calls
 /// it accepted. A witness it refuses is a compiler bug, and then nothing is changed. The contract
-/// checks proved or refuted and the calls refuted are read before the removal.
+/// checks proved or refuted and the calls refuted are read before the removal. When `whole`, `m`
+/// must be canonical on entry, as for [`remove_proven_checks`].
 fn remove_checked(m: &mut Module, proved: Vec<Proved>, whole: bool) -> Result<CheckRemoval, Failure> {
     let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
+    if cfg!(debug_assertions) && whole {
+        assert!(
+            stave_ir::canon::is_canonical(m),
+            "the removal of proven checks of a whole program needs a canonical module on entry"
+        );
+    }
     let witnesses: Vec<&FnWitness> = proved.iter().map(|p| &p.witness).collect();
     let checked = {
         let m: &Module = m;
@@ -367,9 +372,21 @@ fn remove_checked(m: &mut Module, proved: Vec<Proved>, whole: bool) -> Result<Ch
     prof::mark("bounds-remove");
     let remap = match edits {
         Some(e) => {
+            // The partial renumbering must give exactly what the full one gives, module and map.
+            let full = cfg!(debug_assertions).then(|| {
+                let mut full_m = m.clone();
+                let map = canonical(&mut full_m);
+                (full_m, map)
+            });
             let remap = stave_ir::canon::restore_by(m, &e, |funcs, one| {
                 funcs.par_iter_mut().enumerate().for_each(|(i, f)| one(i, f))
             });
+            if let Some((full_m, map)) = full {
+                assert!(
+                    remap == map && *m == full_m,
+                    "the partial renumbering after the removal of proven checks differs from the full one"
+                );
+            }
             prof::mark("bounds-renumber");
             remap
         }
@@ -642,6 +659,7 @@ mod tests {
         let s = b.binary(Op::AddWrap, u32t, x, y);
         b.ret(Some(s.into()));
         m.define(f, b.finish().unwrap());
+        canonical(&mut m);
         (m, f)
     }
 

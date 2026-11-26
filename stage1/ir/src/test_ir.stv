@@ -144,6 +144,23 @@ test fn a_constant_switch_scrutinee_only_at_level_opt() {
     debug.assert(first_has(&load.load(text(&dup).as_slice()), "duplicate switch case"), "duplicates refused");
 }
 
+test fn an_unchecked_entry_is_not_held_at_level_lowered() {
+    let body = ["type t0 bool", "fn @0 a.f() {", "b0():", "  ret", "}", "fn @0.u a.f() {", "b0():", "  ret", "}"];
+    let hl = ["stave.ir 4 \"x86_64-linux-v2\" debug lowered"];
+    let mut at_lowered = text(&hl);
+    at_lowered.extend_from_slice(text(&body).as_slice());
+    let ll = load.load(at_lowered.as_slice());
+    debug.assert(!ll.ok() && ll.errs.line.as_slice()[0] == 7 && first_has(&ll, "is an unchecked entry"), "an entry at lowered, at its fn line");
+    let hc = ["stave.ir 4 \"x86_64-linux-v2\" debug checked"];
+    let mut at_checked = text(&hc);
+    at_checked.extend_from_slice(text(&body).as_slice());
+    debug.assert(load.load(at_checked.as_slice()).ok(), "an entry at checked");
+    let claim = ["type t0 bool", "fn @0 a.f() {", "b0():", "  ret", "}", "claim @0 post zero <= zero 0"];
+    let mut with_claim = text(&hl);
+    with_claim.extend_from_slice(text(&claim).as_slice());
+    debug.assert(first_has(&load.load(with_claim.as_slice()), "no `claim` line at level `lowered`"), "no claim at lowered");
+}
+
 test fn a_claim_names_a_param_of_its_fn() {
     let ok = ["stave.ir 4 \"x86_64-linux-v2\" debug checked", "type t0 int u size", "fn @0 a(t0) -> t0 {", "b0(%0: t0):", "  ret %0", "}", "claim @0 pre zero <= p 0 3", "claim @0 post result <= p 0 0"];
     debug.assert(load.load(text(&ok).as_slice()).ok(), "rows on param 0");
