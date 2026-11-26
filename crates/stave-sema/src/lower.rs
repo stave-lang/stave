@@ -748,7 +748,9 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 return JobOut { unbuilt, ..finish_job(cx, out, name) };
             }
             let Some(tb) = body else { return empty(None) };
-            let mut flagged: FxHashSet<crate::lower_fn::FlagKey> = FxHashSet::default();
+            // With the borrow side table on, a local a value is moved out of lives in a slot
+            // (the move is an event on its bytes): such locals are found while lowering, and
+            // the job is lowered again with them in slots.
             let mut slotted: FxHashSet<u32> = FxHashSet::default();
             for _ in 0..64 {
                 let mut cx = FnCx::new(g, icx, path.clone());
@@ -765,27 +767,23 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 };
                 cx.user = !g.builtin_decl(k.decl);
                 cx.needs = needs;
-                cx.flagged = flagged.clone();
                 cx.slotted = slotted.clone();
                 cx.setup(decl.node);
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
                 let mut out = cx.lower_body(decl.node, &ps, ret);
                 cx.check_asked();
                 out.name_off = name;
-                let new: Vec<crate::lower_fn::FlagKey> =
-                    cx.need_flag.iter().filter(|n| !flagged.contains(*n)).cloned().collect();
                 let slots: Vec<u32> = cx.need_slot.iter().copied().filter(|n| !slotted.contains(n)).collect();
-                if (new.is_empty() && slots.is_empty()) || cx.err.is_some() {
+                if slots.is_empty() || cx.err.is_some() {
                     return finish_job(cx, out, name);
                 }
-                flagged.extend(new);
                 slotted.extend(slots);
             }
             empty(Some(LowerError {
                 kind: LowerErrorKind::Internal,
                 func: path,
                 at: String::new(),
-                msg: "drop flags did not converge".into(),
+                msg: "the slots of moved-from locals did not converge".into(),
             }))
         }
     }

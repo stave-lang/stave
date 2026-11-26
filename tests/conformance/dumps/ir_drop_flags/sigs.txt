@@ -1,0 +1,80 @@
+t0 int u 8
+t1 int u 32
+t2 int u size
+t3 int s 32
+t4 bool
+t5 str
+t6 ref t3
+t7 ref t5
+t8 ref t19
+t9 ref t23
+t10 ref t25
+t11 ref mut t18
+t12 ref mut t22
+t13 ref mut t23
+t14 ref mut t24
+t15 ref mut t25
+t16 ptr const t0
+t17 tuple
+t18 adt d7 t24 constparam 1
+t19 adt d10 t24 constparam 1
+t20 adt d17 t1
+t21 adt d17 t24
+t22 adt d37
+t23 adt d46
+t24 param 0
+t25 self
+d0 module d0 - 55 - - 0 pub file 0 path[55]
+d1 module d1 - 32 - - 0 pub file 1 path[0 32]
+d2 module d2 - 7 - - 0 pub file 6 path[26 7]
+d3 module d3 - 27 - - 0 pub file 2 path[26 27]
+d4 module d4 - 28 - - 0 pub file 3 path[26 28]
+d5 module d5 - 36 - - 0 pub file 5 path[26 36]
+d6 module d6 - 49 - - 0 pub file 4 path[26 49]
+d7 struct d2 - 30 30 21 0 pub,view gen[18 0, 17 3 const t1]
+d8 field d2 d7 5 30 19 1 - ty t16
+d9 field d2 d7 13 30 14 0 - ty t8
+d10 struct d2 - 44 28 18 0 pub gen[18 0, 17 3 const t1]
+d11 field d2 d10 16 28 16 1 - ty t21
+d12 field d2 d10 56 28 10 0 - ty t20
+d13 impl d2 - - 29 17 0 unsafe,trait-impl gen[18 3 bound d20, 17 6 const t1] self t19 trait d19
+d14 impl d2 - - 31 17 0 unsafe,trait-impl gen[18 3 bound d19, 17 6 const t1] self t18 trait d19
+d15 impl d2 - - 32 19 0 trait-impl gen[18 0, 17 3 const t1] self t18 trait d29
+d16 method d2 d15 53 32 18 0 trait-impl,has-self gen[] params[t11] ret t17 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d17 struct d3 - 47 10 6 0 pub gen[18 0]
+d18 field d3 d17 65 10 4 0 - ty t24
+d19 trait d4 - 11 14 1 0 pub,unsafe gen[]
+d20 trait d4 - 31 13 1 0 pub,unsafe gen[]
+d21 enum d4 - 34 11 6 0 pub gen[18 0]
+d22 variant d4 d21 3 11 2 0 pub
+d23 variant d4 d21 20 11 5 1 pub,tuple payload[t24]
+d24 trait d4 - 38 16 0 0 pub gen[]
+d25 trait d4 - 42 12 0 0 pub gen[]
+d26 trait d4 - 48 15 0 0 pub gen[]
+d27 trait d4 - 50 19 13 0 pub gen[]
+d28 trait-method d4 d27 40 19 12 0 pub,has-self gen[25 2 bound d31] params[t10 t14] ret t17 self ref abi stave needs[] deny[] from[] pfrom[]
+d29 trait d4 - 51 17 4 0 pub gen[]
+d30 trait-method d4 d29 53 17 3 0 pub,has-self gen[] params[t15] ret t17 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d31 trait d4 - 62 18 9 0 pub gen[]
+d32 trait-method d4 d31 45 18 8 0 pub,has-self gen[] params[t15 t7] ret t17 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d33 impl d4 - - 20 18 0 trait-impl gen[] self t3 trait d27
+d34 method d4 d33 40 20 17 0 trait-impl,has-self gen[25 6 bound d31] params[t6 t14] ret t17 self ref abi stave needs[] deny[] from[] pfrom[]
+d35 impl d4 - - 21 24 0 trait-impl gen[] self t5 trait d27
+d36 method d4 d35 40 21 23 0 trait-impl,has-self gen[25 6 bound d31] params[t7 t14] ret t17 self ref abi stave needs[] deny[] from[] pfrom[]
+d37 struct d5 - 4 24 4 0 pub gen[]
+d38 field d5 d37 1 24 2 0 - ty t2
+d39 impl d5 - - 25 14 0 trait-impl gen[] self t22 trait d31
+d40 method d5 d39 45 25 13 0 trait-impl,has-self gen[] params[t12 t7] ret t17 self ref-mut abi stave needs[] deny[] from[] pfrom[]
+d41 fn d6 - 63 22 7 0 pub gen[] params[t7] ret t17 self - abi stave needs[] deny[] from[] pfrom[]
+d42 fn d0 - 2 7 46 0 - gen[] params[t1] ret t1 self - abi stave needs[] deny[] from[] pfrom[]
+d43 fn d0 - 6 2 7 0 - gen[18 0] params[t24] ret t17 self - abi stave needs[] deny[] from[] pfrom[]
+d44 fn d0 - 21 3 16 0 - gen[] params[t9] ret t4 self - abi stave needs[] deny[] from[] pfrom[]
+d45 fn d0 - 22 8 41 0 - gen[18 0] params[t24 t1] ret t17 self - abi stave needs[] deny[] from[] pfrom[]
+d46 struct d0 - 24 0 4 0 - gen[]
+d47 field d0 d46 59 0 2 0 pub ty t1
+d48 fn d0 - 33 6 25 0 - gen[] params[t1] ret t4 self - abi stave needs[] deny[] from[] pfrom[]
+d49 fn d0 - 39 5 36 0 - gen[] params[t1] ret t1 self - abi stave needs[] deny[] from[] pfrom[]
+d50 fn d0 - 52 4 21 0 - gen[] params[t23 t1] ret t17 self - abi stave needs[] deny[] from[] pfrom[]
+d51 fn d0 - 55 9 59 0 - gen[] params[] ret t3 self - abi stave needs[] deny[] from[] pfrom[]
+d52 impl d0 - - 1 9 0 trait-impl gen[] self t23 trait d29
+d53 method d0 d52 53 1 8 0 trait-impl,has-self gen[] params[t13] ret t17 self ref-mut abi stave needs[] deny[] from[] pfrom[]

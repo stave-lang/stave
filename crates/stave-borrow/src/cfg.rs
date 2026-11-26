@@ -23,7 +23,8 @@
 //! glue is an owner from the statement that makes it to the statement that moves it out: a
 //! local on its scope's list, a temporary on its statement's (`Builder::push` takes it off only
 //! when a statement that moves it is added), and each end or exit drops what is on the lists.
-//! Whether such a drop runs is the dataflow's answer, one init bit per owner. Besides the
+//! Whether such a drop runs is decided once, by the init dataflow over the finished CFG
+//! (`decide_drops`), and stored in the schedule for the lowering to read. Besides the
 //! owners' ends there are the drops of the parts a moving pattern ignores (at its binding
 //! point), of the value an assignment overwrites (before the write), and of the operand a
 //! `select` does not pick (a temporary of its own).
@@ -46,7 +47,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::Span;
-use stave_sema::drops::{Leave, Made, Owner, Point, Row, Schedule};
+use stave_sema::drops::{Leave, Made, Owner, Point, Row, Runs, Schedule};
 use stave_sema::itemcx::ItemCx;
 use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, World};
@@ -54,6 +55,7 @@ use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 use stave_sema::{BindingRef, Coercion, DeclKind, Res, Target, TypedBody};
 use stave_syntax::{NodeKind, Term};
 
+use crate::bits::Bits;
 use crate::ty::{DerefKind, Flows, Tys, call_flows, fn_value_flows};
 
 pub type LocalId = u32;
@@ -524,8 +526,8 @@ pub struct Builder<'a, 'b> {
     result: Option<LocalId>,
     /// The block temporaries of reference chunk bindings, with their store back.
     chunk_temps: FxHashMap<LocalId, ChunkWriteBack>,
-    /// The drops of the values assignments overwrite: (block, statement index).
-    old_drops: Vec<(BlockId, usize)>,
+    /// The drop statements made ([`Builder::drop_at`]).
+    drop_stmts: Vec<DropStmt>,
     /// Binding an arm of a `match` that has another way on (a second arm, a guard): a
     /// temporary scrutinee the arm takes whole is still dropped at the statement's end on the
     /// other ways.
@@ -634,7 +636,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             olds: FxHashMap::default(),
             result: None,
             chunk_temps: FxHashMap::default(),
-            old_drops: Vec::new(),
+            drop_stmts: Vec::new(),
             arm_scrut: false,
             due: Vec::new(),
             envs: Vec::new(),
@@ -657,7 +659,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.body.schedule.require(point, owner);
             }
         }
-        prune_old_drops(&mut self.body, &self.old_drops);
+        decide_drops(&mut self.body, &self.drop_stmts);
         self.body
     }
 
@@ -749,6 +751,9 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.note_deep_drop(p.ty);
         if let Some(b) = self.cur {
             self.due.push((b, point, owner));
+            let holder = self.owner_of(p.local);
+            let at = self.body.blocks[b as usize].stmts.len();
+            self.drop_stmts.push(DropStmt { block: b, at, point, owner, holder });
         }
         self.push(StmtKind::Drop(p), span, node);
     }
@@ -1729,9 +1734,6 @@ impl<'a, 'b> Builder<'a, 'b> {
                         self.due.push((b, Point::Assign(lhs), Owner::Old));
                     }
                 } else {
-                    if let Some(b) = self.cur {
-                        self.old_drops.push((b, self.body.blocks[b as usize].stmts.len()));
-                    }
                     self.drop_at(lp.clone(), Point::Assign(lhs), Owner::Old, span, lhs);
                 }
             }
@@ -4012,18 +4014,24 @@ impl<'a> stave_sema::drops::PatCx<'a> for Builder<'a, '_> {
     }
 }
 
-/// Removes the drops `old` (of the values assignments overwrite, [`Builder::old_drops`]) whose
-/// local holds no value on any path there: it was moved out or dropped, and not assigned since.
-/// Such a drop does not run, so it uses nothing the moved value borrowed. Forward dataflow of
-/// "may hold a value" over the locals concerned, union at joins.
-fn prune_old_drops(body: &mut Body, old: &[(BlockId, usize)]) {
-    let whole = |body: &Body, &(b, i): &(BlockId, usize)| -> Option<LocalId> {
-        match body.blocks.get(b as usize)?.stmts.get(i).map(|s| &s.kind) {
-            Some(StmtKind::Drop(p)) if p.proj.is_empty() => Some(p.local),
+/// Decides once, for every drop statement the entry reaches, whether it runs ([`Runs`]): the
+/// init dataflow of the owners the drops are rooted at, forward, with a may-init and a
+/// may-uninit bit per owner (union at joins; must-init is not may-uninit). A param (a capture
+/// of a nested body too) is init at entry, every other local uninit. A write rooted at the
+/// local inits it (a write of a part, or through it, needs it init: E0502); a move of the
+/// whole local, its drop, and its storage-dead uninit it. A part a pattern moves out leaves the
+/// owner as it is: the whole value moves where the pattern is committed, after the drops of the
+/// parts it ignores. The answers go to the body's schedule ([`Schedule::set_runs`]), one per
+/// row, joined over the statements of one row. Then the drops of overwritten values that never
+/// run are removed: such a drop uses nothing the moved value borrowed.
+fn decide_drops(body: &mut Body, drops: &[DropStmt]) {
+    let root = |body: &Body, d: &DropStmt| -> Option<LocalId> {
+        match body.blocks.get(d.block as usize)?.stmts.get(d.at).map(|s| &s.kind) {
+            Some(StmtKind::Drop(p)) if !p.has_deref() => Some(p.local),
             _ => None,
         }
     };
-    let mut locals: Vec<LocalId> = old.iter().filter_map(|o| whole(body, o)).collect();
+    let mut locals: Vec<LocalId> = drops.iter().filter_map(|d| root(body, d)).collect();
     if locals.is_empty() {
         return;
     }
@@ -4031,46 +4039,35 @@ fn prune_old_drops(body: &mut Body, old: &[(BlockId, usize)]) {
     locals.dedup();
     let idx = |l: LocalId| locals.binary_search(&l).ok();
     let n = locals.len();
-    let mut init = crate::bits::Bits::new(n);
+    let mut init = InitBits { may: Bits::new(n), maybe_not: Bits::new(n) };
     for (k, &l) in locals.iter().enumerate() {
         if body.locals[l as usize].param.is_some() {
-            init.insert(k);
+            init.may.insert(k);
+        } else {
+            init.maybe_not.insert(k);
         }
     }
-    let step = |k: &StmtKind, st: &mut crate::bits::Bits| {
-        let mut gone = |o: &Operand| {
-            if o.kind == OpKind::Move
-                && o.place.proj.is_empty()
-                && let Some(i) = idx(o.place.local)
-            {
-                st.remove(i);
+    let step = |k: &StmtKind, st: &mut InitBits| {
+        let moved = |o: &Operand, st: &mut InitBits| {
+            if o.kind == OpKind::Move && o.place.proj.is_empty() {
+                st.uninit(idx(o.place.local));
             }
         };
         match k {
-            StmtKind::Assign { rv, .. } => crate::loans::for_each_op(rv, &mut gone),
-            StmtKind::Read(o) | StmtKind::Return(o) => gone(o),
+            StmtKind::Assign { rv, .. } => crate::loans::for_each_op(rv, |o| moved(o, st)),
+            StmtKind::Read(o) | StmtKind::Return(o) => moved(o, st),
+            StmtKind::Drop(p) if p.proj.is_empty() => st.uninit(idx(p.local)),
+            StmtKind::StorageDead(l) => st.uninit(idx(*l)),
             _ => {}
         }
-        match k {
-            StmtKind::Assign { dest, .. } => {
-                if let Some(i) = idx(dest.local) {
-                    st.insert(i);
-                }
-            }
-            StmtKind::Drop(p) if p.proj.is_empty() => {
-                if let Some(i) = idx(p.local) {
-                    st.remove(i);
-                }
-            }
-            StmtKind::StorageDead(l) => {
-                if let Some(i) = idx(*l) {
-                    st.remove(i);
-                }
-            }
-            _ => {}
+        if let StmtKind::Assign { dest, .. } = k
+            && let Some(i) = idx(dest.local)
+        {
+            st.may.insert(i);
+            st.maybe_not.remove(i);
         }
     };
-    let mut entry: Vec<Option<crate::bits::Bits>> = vec![None; body.blocks.len()];
+    let mut entry: Vec<Option<InitBits>> = vec![None; body.blocks.len()];
     entry[0] = Some(init);
     let mut work: Vec<BlockId> = vec![0];
     while let Some(b) = work.pop() {
@@ -4080,7 +4077,10 @@ fn prune_old_drops(body: &mut Body, old: &[(BlockId, usize)]) {
         }
         for &succ in body.blocks[b as usize].term.succs() {
             let changed = match &mut entry[succ as usize] {
-                Some(e) => e.union_with(&st),
+                Some(e) => {
+                    let a = e.may.union_with(&st.may);
+                    e.maybe_not.union_with(&st.maybe_not) || a
+                }
                 slot @ None => {
                     *slot = Some(st.clone());
                     true
@@ -4091,22 +4091,81 @@ fn prune_old_drops(body: &mut Body, old: &[(BlockId, usize)]) {
             }
         }
     }
-    let mut dead: Vec<(BlockId, usize)> = Vec::new();
-    for o in old {
-        let Some(l) = whole(body, o) else { continue };
+    // the state before each drop: its block's statements are applied once, in order
+    let mut order: Vec<&DropStmt> = drops.iter().collect();
+    order.sort_unstable_by_key(|d| (d.block, d.at));
+    let mut runs: Vec<(Point, Owner, Runs, Owner)> = Vec::new();
+    let mut walk: Option<(BlockId, usize, InitBits)> = None;
+    for d in order {
+        let (Some(l), Some(e)) = (root(body, d), entry[d.block as usize].as_ref()) else { continue };
         let Some(k) = idx(l) else { continue };
-        // an unreachable block runs nothing
-        let Some(mut st) = entry[o.0 as usize].clone() else { continue };
-        for s in &body.blocks[o.0 as usize].stmts[..o.1] {
+        let (mut from, mut st) = match walk.take() {
+            Some((b, at, st)) if b == d.block => (at, st),
+            _ => (0, e.clone()),
+        };
+        for s in &body.blocks[d.block as usize].stmts[from..d.at] {
             step(&s.kind, &mut st);
         }
-        if !st.contains(k) {
-            dead.push(*o);
-        }
+        from = d.at;
+        runs.push((d.point, d.owner, Runs::of(st.may.contains(k), !st.maybe_not.contains(k)), d.holder));
+        walk = Some((d.block, from, st));
     }
+    runs.sort_unstable_by_key(|r| (r.0, r.1));
+    // the old-value drops that never run
+    let mut never: Vec<Point> = Vec::new();
+    let mut i = 0;
+    while i < runs.len() {
+        let (point, owner, mut r, holder) = runs[i];
+        let mut j = i + 1;
+        while j < runs.len() && runs[j].0 == point && runs[j].1 == owner {
+            r = r.join(runs[j].2);
+            j += 1;
+        }
+        body.schedule.set_runs(point, owner, r, holder);
+        if owner == Owner::Old && r == Runs::Never {
+            never.push(point);
+        }
+        i = j;
+    }
+    let whole = |body: &Body, d: &DropStmt| {
+        let s = body.blocks[d.block as usize].stmts.get(d.at);
+        s.is_some_and(|s| matches!(&s.kind, StmtKind::Drop(p) if p.proj.is_empty()))
+    };
+    let mut dead: Vec<(BlockId, usize)> = drops
+        .iter()
+        .filter(|d| d.owner == Owner::Old && never.binary_search(&d.point).is_ok() && whole(body, d))
+        .map(|d| (d.block, d.at))
+        .collect();
     dead.sort_unstable();
     for &(b, i) in dead.iter().rev() {
         body.blocks[b as usize].stmts.remove(i);
+    }
+}
+
+/// A drop statement ([`Builder::drop_at`]): where it is, its row, and the owner whose value it
+/// drops (an assignment's old value: the local assigned).
+#[derive(Clone, Copy, Debug)]
+struct DropStmt {
+    block: BlockId,
+    at: usize,
+    point: Point,
+    owner: Owner,
+    holder: Owner,
+}
+
+/// The init bits of [`decide_drops`].
+#[derive(Clone)]
+struct InitBits {
+    may: Bits,
+    maybe_not: Bits,
+}
+
+impl InitBits {
+    fn uninit(&mut self, i: Option<usize>) {
+        if let Some(i) = i {
+            self.may.remove(i);
+            self.maybe_not.insert(i);
+        }
     }
 }
 
