@@ -650,6 +650,20 @@ fn types_holding_themselves_by_value() {
     let mut want = vec![at(two, "A"), at(two, "B")];
     want.sort();
     assert_eq!(diags(two), want);
+    // a separate cycle through an instance of a reported declaration is reported too; the
+    // same cycle at other args is not
+    let apart = "struct A<T> { n: Option<A<T>>, t: T }\nstruct B { x: A<B> }\nstruct H { p: *const A<H> }\n\
+                 fn f(h: &A<H>, a: &A<u8>) -> u32 { return 0; }";
+    let mut want = vec![at(apart, "A"), at(apart, "B")];
+    want.sort();
+    assert_eq!(diags(apart), want);
+    let same =
+        "struct L<T> { x: Option<L<T>>, y: Option<L<T>> }\nfn f(a: &L<u8>, b: &L<u16>) -> u32 { return 0; }";
+    assert_eq!(diags(same), vec![at(same, "L")]);
+    let many: String = std::iter::once("struct A<T> { n: Option<A<T>>, t: T }\n".to_string())
+        .chain((0..2000).map(|i| format!("struct B{i} {{ x: A<B{i}> }}\n")))
+        .collect();
+    assert_eq!(diags(&many).len(), 2001);
     let none: Vec<String> = Vec::new();
     for src in [
         "struct N { next: *const N, all: *mut [N] }",
