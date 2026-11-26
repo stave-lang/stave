@@ -123,6 +123,8 @@ struct Body {
     // per value: the operand that replaces it (`rk` NO_REP: none)
     rk: vec.Vec<u8>,
     ri: vec.Vec<u32>,
+    // the row of value 0 in the model's value types (C* adds no value)
+    vlo: usize,
 }
 
 // The body of fn f.
@@ -160,6 +162,7 @@ fn take(m: &model.Module, f: usize) -> Body {
         t_case: vec.Vec::<u32>.new(),
         rk: col.filled(nv, NO_REP),
         ri: col.filled(nv, 0u32),
+        vlo: m.fn_val_lo.as_slice()[f] as usize,
     };
     b.ck.extend_from_slice(&m.const_kind.as_slice()[clo..clo + nc]);
     b.cb.extend_from_slice(&m.const_bits.as_slice()[clo..clo + nc]);
@@ -615,8 +618,11 @@ impl Body {
         let r = cl.removable_of(self.i_op.as_slice()[i], self.i_intr.as_slice()[i]);
         if r == opt_table.REMOVABLE_YES { return true; }
         if r == opt_table.REMOVABLE_FLOAT { return vtypes.classify(m, self.i_ty.as_slice()[i]).k == vtypes.K_FLOAT; }
-        if r == opt_table.REMOVABLE_CONST_INDEX { return self.i_n.as_slice()[i] >= 2 && self.is_int_const(self.i_lo.as_slice()[i] as usize + 1); }
-        return false;
+        if r != opt_table.REMOVABLE_CONST_INDEX || self.i_n.as_slice()[i] < 2 { return false; }
+        let x = self.i_lo.as_slice()[i] as usize;
+        let (k, hi, lo) = self.int_const(m, x + 1);
+        let at = if self.ok.as_slice()[x] == model.O_VALUE then m.val_ty.as_slice()[self.vlo + self.oi.as_slice()[x] as usize] else NONE;
+        return vtypes.fixed_index(m, at, k, hi, lo);
     }
 
     // Marks live the values among operand rows lo .. lo + n.

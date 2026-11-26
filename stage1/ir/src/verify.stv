@@ -1105,11 +1105,14 @@ impl V {
             if !self.check_operand(m, ol, at) { return false; }
             let mut ft = NONE;
             if m.types.tag_of(at) == types.TK_ARRAY {
-                let xs = m.types.x(at);
-                let len = ((xs[1] as u64) << 32) | (xs[2] as u64);
                 let (c, hi, lo) = self.int_const(m, ol + 1);
                 if c {
-                    if hi != 0 || lo >= len { return self.fail("array index constant out of range"); }
+                    // At level `opt` a constant at or past the length (a 64-bit unsigned value)
+                    // may stand here: inlining and the clean-up substitute constants for params
+                    // and folded values. The access then traps `Bounds` as it runs, as a dynamic
+                    // index out of range does.
+                    let opt = m.level == model.LEVEL_OPT && hi == 0;
+                    if !vtypes.fixed_index(m, at, c, hi, lo) && !opt { return self.fail("array index constant out of range"); }
                 } else {
                     let ic = self.opnd_cls(m, ol + 1);
                     if ic.k != vtypes.K_INT || ic.signed { return self.fail("array index must be an unsigned int"); }

@@ -67,7 +67,11 @@ constant is legal at level `opt` (checked-ir.md "Loading" step 3): X writes one 
 substitutes a constant argument for a param a callee switches on, and C1 when it substitutes a
 constant for a param. C3 of the same clean-up round turns every such `switch` into a `br`, and
 nothing after C3 (C4-C6, `B`, `canon`) puts a constant into a scrutinee, so the module after `C*`
-and the output never hold one; only the module after `X` (`--dump-phase=inline`) may.
+and the output never hold one; only the module after `X` (`--dump-phase=inline`) may. An array
+index of `get` or `set` that is an int constant at or past the length is legal at level `opt`
+too: X, C1, and C2 write one when they substitute a constant for an index value. No pass removes
+or rewrites it: it traps `Bounds` where it stands when it runs (K2: it is not removable), so any
+phase module and the output may hold one.
 
 ## 2. Constants
 
@@ -95,7 +99,9 @@ decimal integer `N` without sign. The ranges: `threshold`, `cap`, `slot_callee`,
 outside its range is an error, never replaced by the table's value.
 
 **K2.** An op row's `removable`: `yes`; `no`; `float` (yes iff the result type is a float type);
-`const-index` (yes iff operand 1 is an int constant); `lanes` (yes iff the `vec.*` or `mask.*`
+`const-index` (yes iff operand 1 is an int constant that fixes the element: any field index of a
+tuple or ADT, an array index below the length; an array index constant at or past it traps, P4);
+`lanes` (yes iff the `vec.*` or `mask.*`
 op is not marked † in checked-ir.md "Vector and mask ops" and is none of the memory ops
 `vec.load`, `vec.store`, `vec.load_aligned`, `vec.store_aligned`, `vec.store_stream`,
 `vec.load_masked`, `vec.store_masked`, `vec.gather`, `vec.scatter`). A row whose name ends in `*`
@@ -427,7 +433,8 @@ caller's own level. Each line ends with one `\n`; nothing else is printed.
   examples of section 10 and at least: a single-block callee; several `ret`s; a callee with a
   loop; slots; nesting three deep; self and mutual recursion; `features` both ways; a cold site;
   a budget cut and its tie-break; constant, string, and `@fn` arguments; a unit call and an unused
-  result; a site in `b0`; two sites in one block; an `@n.u` callee; every reachable verdict. A case
+  result; a site in `b0`; two sites in one block; an `@n.u` callee; every reachable verdict; an
+  array index constant past the length, its result read and unread; more than one round. A case
   run under limits other than the table's keeps them beside its texts in a file `limits`, one
   `NAME=N` per line (K1), each passed as `--limit NAME=N` to every run of the case (10.10:
   `cap=20`). A case is a directory holding `input.ir` and, of the texts it checks,
@@ -438,10 +445,15 @@ caller's own level. Each line ends with one `\n`; nothing else is printed.
 - **Base**: on every `release` cell of the stage1 IR corpus, `stage1 ir opt --passes=base` equals
   `stave ir opt` on the same `checked` text, both in the same form (gate or emit).
 - **Verifiers**: stage1's verifier after every phase (`--verify-phases`) and stage0's
-  (`stave ir check`) on every full `opt` output: no fault.
+  (`stave ir check`) on every full `opt` output, and on the module after `C*` of every `release`
+  `checked` text of the stage1 IR corpus under the table's limits and under `rounds=3
+  threshold=100 cap=20000`: no fault. A fault put into one phase module of a round before the
+  last is reported for that phase (exit 3).
 - **Behaviour**: `stave ir run` with `STAVE_INTERP_CHECK=1` on the `checked` text and on its full
   `opt` text: equal stdout, stderr, and exit status, no memory error; the conformance run suite on
-  binaries built by `stave ir emit --release`, `stage1 ir opt`, `stave ir build`.
+  binaries built by `stave ir emit --release`, `stage1 ir opt`, `stave ir build`, for each target
+  a program names: its expected stdout, and the exit status and stderr of the plain release
+  build.
 - **Determinism**: the same output under one thread and under all threads; `opt(fmt(t)) =
   opt(t)` and `fmt(opt(t)) = opt(t)`; the same for the `inline` dump.
 - **Folding**: every `fold` op on every int type against the stave-ir interpreter, exhaustive on

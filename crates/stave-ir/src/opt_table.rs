@@ -13,7 +13,8 @@ pub enum Removable {
     Yes,
     /// Only when the result type is a float type (the int forms trap).
     Float,
-    /// Only when operand 1 (the index) is a constant (a dynamic index traps).
+    /// Only when operand 1 (the index) is a constant that fixes the element: a field index, an
+    /// array index below the length (`Body::access_may_trap`; any other array index traps).
     ConstIndex,
     /// A vector or mask op: only when it neither traps nor accesses memory.
     Lanes,

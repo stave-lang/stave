@@ -13,12 +13,14 @@
 # Behaviour: every program of tests/conformance with an expected stdout (`//~ STDOUT FILE` of a
 # single-file program that is no part of a package, `expected.stdout` of a package), built through
 # `ir emit --release`, `stage1 ir opt --verify-phases`, `stave ir build`, prints that stdout and
-# exits as the plain `stave build --release` binary does (run in the program's directory, stdin
-# empty). Not run: the runner's `_selftest` fixtures, programs with `CHECK-ONLY` or
-# `RESOURCE-LIMIT`, an `ARGS` other than `--release`, or a `TARGET` the host does not run
-# (aarch64, `-v4`); counted by reason. Every run is under STAVE_OPT_GATE_LIMIT seconds (default
-# 120). Prints the instruction totals (body lines that are not terminators) before and after, and
-# the inlined rows of the `inline` dump.
+# exits and writes stderr (a trap: its kind and site) as the plain `stave build --release` binary
+# does (run in the program's directory, stdin empty), once per `TARGET` (`aarch64-linux` under
+# qemu-aarch64; a program of tests/conformance/run without one: the host and `aarch64-linux`).
+# Not run: the runner's `_selftest` fixtures, programs with `CHECK-ONLY` or `RESOURCE-LIMIT`, an
+# `ARGS` other than `--release`, or a `TARGET` the host does not run (`-v4`, SVE, `aarch64-linux`
+# without qemu-aarch64); counted by reason. Every run is under STAVE_OPT_GATE_LIMIT seconds
+# (default 120). Prints the instruction totals (body lines that are not terminators) before and
+# after, and the inlined rows of the `inline` dump.
 #
 # Times (no threshold): the normal stage1 (built by stage0), stage0's `--release` build of stage1,
 # and stage1-fast, each on `build --dump=tokens,items,ast` of the stage1 sources, best of three.
@@ -48,6 +50,7 @@ if [ "${1:-}" = "--one" ]; then
   rm -rf "$d"
   mkdir -p "$d"
   name=$(echo "$src" | sed "s|^$ROOT/tests/conformance/||")
+  [ "$target" = "-" ] || name="$name@$target"
   tflag=""
   if [ "$target" != "-" ]; then tflag="--target $target"; fi
   # shellcheck disable=SC2086
@@ -60,12 +63,18 @@ if [ "${1:-}" = "--one" ]; then
   ps=0; bs=0
   cwd="$src"
   [ "$kind" = pkg ] || cwd=$(dirname "$src")
-  (cd "$cwd" && lim "$LIMIT" "$d/plain" > "$d/plain.out" 2> "$d/plain.errout" < /dev/null) || ps=$?
-  (cd "$cwd" && lim "$LIMIT" "$d/bin" > "$d/bin.out" 2> "$d/bin.errout" < /dev/null) || bs=$?
+  run=""
+  [ "$target" = aarch64-linux ] && run=qemu-aarch64
+  # shellcheck disable=SC2086
+  (cd "$cwd" && lim "$LIMIT" $run "$d/plain" > "$d/plain.out" 2> "$d/plain.errout" < /dev/null) || ps=$?
+  # shellcheck disable=SC2086
+  (cd "$cwd" && lim "$LIMIT" $run "$d/bin" > "$d/bin.out" 2> "$d/bin.errout" < /dev/null) || bs=$?
   if ! cmp -s "$want" "$d/bin.out"; then
     echo "FAIL $name: stdout differs from $(basename "$want") (first: $(cmp "$want" "$d/bin.out" 2>&1 | head -1)); plain build $(if cmp -s "$want" "$d/plain.out"; then echo equal; else echo differs too; fi)"
   elif [ "$ps" != "$bs" ]; then
     echo "FAIL $name: exit $bs, plain release build $ps"
+  elif ! cmp -s "$d/plain.errout" "$d/bin.errout"; then
+    echo "FAIL $name: stderr differs from the plain release build's ($(head -c 200 "$d/bin.errout" | tr '\n' ' '))"
   else
     echo "OK $name $inl $(ins "$d/in.ir") $(ins "$d/out.ir")"
   fi
@@ -110,13 +119,23 @@ todo() {
   case "$2" in "$CONF"/_selftest/*) echo "runner self-test" >> "$OUT/skips.txt"; return ;; esac
   if grep -q '^//~ \(CHECK-ONLY\|RESOURCE-LIMIT\)' "$a"; then echo "check-only or resource-limit" >> "$OUT/skips.txt"; return; fi
   if grep '^//~ ARGS' "$a" | grep -qv '^//~ ARGS --release$'; then echo "other build flags" >> "$OUT/skips.txt"; return; fi
-  tg=$(sed -n 's|^//~ TARGET ||p' "$a" | head -1)
-  case "$tg" in
-    ""|x86_64-linux|x86_64-linux-v2|x86_64-linux-v3) ;;
-    *) echo "target $tg" >> "$OUT/skips.txt"; return ;;
-  esac
-  echo "$1 $2 ${tg:--} $4" >> "$OUT/list.txt"
+  tgs=$(sed -n 's|^//~ TARGET ||p' "$a")
+  # a program of the run suite without a TARGET runs on the host and on AArch64, as stage0's
+  # suite runs it
+  if [ -z "$tgs" ]; then
+    tgs="-"
+    case "$2" in "$CONF"/run/*) tgs="- aarch64-linux" ;; esac
+  fi
+  for tg in $tgs; do
+    case "$tg" in
+      -|x86_64-linux|x86_64-linux-v2|x86_64-linux-v3) ;;
+      aarch64-linux) if [ -z "$QEMU" ]; then echo "target $tg without qemu-aarch64" >> "$OUT/skips.txt"; continue; fi ;;
+      *) echo "target $tg" >> "$OUT/skips.txt"; continue ;;
+    esac
+    echo "$1 $2 $tg $4" >> "$OUT/list.txt"
+  done
 }
+QEMU=$(command -v qemu-aarch64 || true)
 find "$CONF" -name '*.stv' | sort | while read -r f; do
   # a file of a package is that package's, not a program of its own
   if awk -v f="$f" '{ if (index(f, $0 "/") == 1) found = 1 } END { exit !found }' "$OUT/pkgs.txt"; then continue; fi
@@ -136,7 +155,7 @@ awk '{ print NR, $0 }' "$OUT/list.txt" > "$OUT/list.n"
 total=$(wc -l < "$OUT/list.n")
 xargs -P "$JOBS" -L 1 sh "$0" --one < "$OUT/list.n" > "$OUT/result.txt"
 ok=$(grep -c '^OK ' "$OUT/result.txt" || true)
-echo "stage1-opt-gate: behaviour $ok / $total programs print their expected stdout and exit as the plain release build"
+echo "stage1-opt-gate: behaviour $ok / $total program runs print their expected stdout, exit, and write stderr as the plain release build"
 if [ -s "$OUT/skips.txt" ]; then
   echo "stage1-opt-gate: not run: $(sort "$OUT/skips.txt" | uniq -c | awk '{ c = $1; $1 = ""; sub(/^ /, ""); printf "%s%s (%d)", sep, $0, c; sep = "; " }')"
 fi

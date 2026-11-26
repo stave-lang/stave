@@ -24,7 +24,7 @@
 //! | `select` | `c a b` | `c ? a : b` for a `bool` `c` and any one type of `a`, `b`; branch-free in every backend |
 //! | `cast cast.wrap cast.sat cast.round cast.try` | `x` | `as as% as\| as~ as?`; `cast.try` yields the `Option` instance |
 //! | `make` | elems.. | tuple / struct / array value |
-//! | `get` / `set` | `agg idx` / `agg idx v` | field or element; a dynamic array index traps `Bounds` |
+//! | `get` / `set` | `agg idx` / `agg idx v` | field or element; an array index that is no constant below the length traps `Bounds` when out of range |
 //! | `enum.make` / `enum.tag` / `enum.get` | `v fields..` / `e` / `e v f` | enum value, its variant index, a variant field |
 //! | `slot` | — | stack slot of the pointee type, in `b0` only; result is a pointer |
 //! | `load` / `store` | `p` / `p v` | memory read / write |
@@ -42,7 +42,7 @@
 use stave_target::FeatureSet;
 
 use crate::simd::VecOp;
-use crate::types::{GenericArg, TypeId, TypeTable};
+use crate::types::{GenericArg, TypeId, TypeKey, TypeTable};
 
 macro_rules! id {
     ($(#[$m:meta])* $name:ident) => {
@@ -539,6 +539,14 @@ impl Insts {
     }
 }
 
+/// The element a `get`/`set` index `k` (its int constant, if it is one) fixes in an array of
+/// length `len`: `k` when it is a constant below `len`. Every other index is checked when the
+/// access runs and traps `Bounds` when it is out of range; an int constant at or past `len` is
+/// such an index, legal only at level `opt` (contracts/checked-ir.md "Loading" step 3).
+pub fn const_elem(k: Option<i128>, len: u64) -> Option<u64> {
+    k.and_then(|k| u64::try_from(k).ok()).filter(|&k| k < len)
+}
+
 /// A function body. Equality leaves out the borrow side table ([`Module`]'s equality).
 #[derive(Clone, Debug, Default)]
 pub struct Body {
@@ -590,6 +598,24 @@ impl Body {
 
     pub fn konst(&self, c: ConstId) -> Option<Const> {
         self.consts.get(c.index()).copied()
+    }
+
+    /// Whether `get`/`set` instruction `i` may trap `Bounds`: an array access whose index is not
+    /// a constant element position ([`const_elem`]). A field access (tuple or ADT) never traps;
+    /// an access of any other operand is taken to trap.
+    pub fn access_may_trap(&self, types: &TypeTable, i: u32) -> bool {
+        let args = self.args(i);
+        let at = match args.first() {
+            Some(Operand::Value(v)) => self.value_ty(*v),
+            _ => None,
+        };
+        match at.and_then(|t| types.key(t)) {
+            Some(TypeKey::Array { len, .. }) => {
+                const_elem(args.get(1).and_then(|o| self.int_const(*o)), *len).is_none()
+            }
+            Some(TypeKey::Tuple(_) | TypeKey::Adt { .. }) => false,
+            _ => true,
+        }
     }
 
     /// The int constant an operand denotes, if it is one.

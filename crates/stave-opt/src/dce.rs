@@ -19,8 +19,7 @@ fn removable(types: &TypeTable, b: &Body, i: usize) -> bool {
             // IEEE on floats; ints trap on overflow or a zero divisor
             matches!(b.insts.ty[i].and_then(|t| types.key(t)), Some(TypeKey::Float(_)))
         }
-        // a dynamic index traps `Bounds`
-        Op::Get | Op::Set => b.args(i as u32).get(1).is_some_and(|o| b.int_const(*o).is_some()),
+        Op::Get | Op::Set => !b.access_may_trap(types, i as u32),
         Op::AddWrap
         | Op::SubWrap
         | Op::MulWrap

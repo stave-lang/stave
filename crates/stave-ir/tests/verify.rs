@@ -365,6 +365,45 @@ fn aggregate_typing_errors() {
     has(&m, "variant index out of range");
 }
 
+/// An array index constant at or past the length is legal only at level `opt`, where it traps
+/// `Bounds` as it runs; one outside `0 ..= 2^64 - 1` never is. A constant below the length fixes the element,
+/// any other index may trap (`Body::access_may_trap`).
+#[test]
+fn an_array_index_constant_past_the_length_is_legal_only_at_level_opt() {
+    use stave_ir::text::Level;
+    for (k, opt_ok) in [(1i128, true), (2, true), (u64::MAX as i128, true), (1 << 64, false), (-1, false)] {
+        let mut m = Module::new();
+        let i32t = m.types.i32();
+        let arr = m.types.array(i32t, 2);
+        define(&mut m, &[0], "t.f", &[arr], Some(i32t), |b, _| {
+            let a = b.param(0).unwrap();
+            let k = b.int(k);
+            let g = b.op(Op::Get, i32t, &[a.into(), k]);
+            let v = b.int(7);
+            b.op(Op::Set, arr, &[a.into(), k, v]);
+            b.ret(Some(g.into()));
+        });
+        let level = |l| {
+            stave_ir::verify_module_at(&m, l).map_err(|e| e.iter().map(|e| e.to_string()).collect::<Vec<_>>())
+        };
+        let body = m.funcs[0].body.as_ref().unwrap();
+        let trap =
+            (0..body.insts.len() as u32).map(|i| body.access_may_trap(&m.types, i)).collect::<Vec<_>>();
+        if k == 1 {
+            assert_eq!(level(Level::Checked), Ok(()), "{k}");
+            assert_eq!(trap, [false, false], "{k}");
+            continue;
+        }
+        assert!(
+            level(Level::Checked)
+                .is_err_and(|e| e.iter().any(|s| s.contains("array index constant out of range"))),
+            "{k}"
+        );
+        assert_eq!(level(Level::Opt).is_ok(), opt_ok, "{k}: {:?}", level(Level::Opt));
+        assert_eq!(trap, [true, true], "{k}");
+    }
+}
+
 #[test]
 fn builder_misuse_is_an_error_not_a_panic() {
     let mut b = FuncBuilder::new(&[]);

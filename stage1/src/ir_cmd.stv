@@ -78,11 +78,11 @@ fn read_into(file: &string.String, src: &mut vec.Vec<u8>) -> bool {
 }
 
 // What `ir opt` prints: the `inline` dump, the module after X or after C* of the last round, or
-// the output (after the base passes).
-const SHOW_DUMP: u8 = 0;
-const SHOW_INLINE: u8 = 1;
-const SHOW_CLEAN: u8 = 2;
-const SHOW_OUTPUT: u8 = 3;
+// the output (after the base passes). The last three also name the phases X, C*, and B.
+pub const SHOW_DUMP: u8 = 0;
+pub const SHOW_INLINE: u8 = 1;
+pub const SHOW_CLEAN: u8 = 2;
+pub const SHOW_OUTPUT: u8 = 3;
 
 fn opt_run(a: &[string.String]) -> i32 {
     let mut lim = decide.Limits.table();
@@ -150,71 +150,89 @@ fn opt_run(a: &[string.String]) -> i32 {
         io.eprint(f"{file}: error: ir opt reads a `release checked` module\n");
         return 1;
     }
-    let m = &mut ld.m;
-    canon.canon(m);
     let mut out = vec.Vec::<u8>.new();
-    let mut txt = vec.Vec::<u8>.new();
+    let mut err = vec.Vec::<u8>.new();
     let n = if only_base then 0 else lim.rounds;
+    let code = optimize(file, &mut ld.m, &lim, n, show, verify, fn(m: &mut model.Module, r: u64, ph: u8) {}, &mut out, &mut err);
+    let _ = io.write_all(2, err.as_slice());
+    if code == 0 { let _ = io.write_all(1, out.as_slice()); }
+    return code;
+}
+
+// `ir opt` on the loaded `release checked` module m of FILE: canonical, then n rounds of rule P1,
+// then (show SHOW_OUTPUT) the base passes and `canon` at level `opt`. Exit 0 with what `show`
+// names in out, or exit 3 with the stage1 verifier's faults of the first phase module that fails
+// in err. The printed module is always checked; with `verify` also the canonical module after
+// every phase of every round (P4). `after(m, r, ph)` runs on the canonical module after phase ph
+// (SHOW_INLINE, SHOW_CLEAN, SHOW_OUTPUT) of round r (0 for B) before it is checked; the command
+// passes one that does nothing.
+pub fn optimize(file: &string.String, m: &mut model.Module, lim: &decide.Limits, n: u64, show: u8, verify: bool, after: fn(&mut model.Module, u64, u8), out: &mut vec.Vec<u8>, err: &mut vec.Vec<u8>) -> i32 {
+    canon.canon(m);
+    let mut txt = vec.Vec::<u8>.new();
     let mut r: u64 = 1;
     while r <= n {
         let last = r == n;
         let fx = facts.build(&*m);
-        let d = decide.decide(&*m, &fx, &lim);
+        let d = decide.decide(&*m, &fx, lim);
         if show == SHOW_DUMP {
-            decide.dump(&*m, &fx, &d, r as% u32, &mut out);
-            if last { break; }
+            decide.dump(&*m, &fx, &d, r as% u32, out);
+            if last { return 0; }
         }
         expand.run(m, &fx, &d);
         canon.canon(m);
-        if (verify || (last && show == SHOW_INLINE)) && !phase_text(file, "inline", &*m, &mut txt) { return 3; }
-        if last && show == SHOW_INLINE { break; }
+        after(m, r, SHOW_INLINE);
+        if (verify || (last && show == SHOW_INLINE)) && !phase_text(file, "inline", &*m, &mut txt, err) { return 3; }
+        if last && show == SHOW_INLINE {
+            out.extend_from_slice(txt.as_slice());
+            return 0;
+        }
         let _ = clean.run(m);
         canon.canon(m);
-        if (verify || (last && show == SHOW_CLEAN)) && !phase_text(file, "clean", &*m, &mut txt) { return 3; }
+        after(m, r, SHOW_CLEAN);
+        if (verify || (last && show == SHOW_CLEAN)) && !phase_text(file, "clean", &*m, &mut txt, err) { return 3; }
         r = r + 1;
     }
     if show == SHOW_OUTPUT {
         base.run(m);
         canon.canon(m);
         m.level = model.LEVEL_OPT;
-        if !phase_text(file, "base", &*m, &mut txt) { return 3; }
+        after(m, 0, SHOW_OUTPUT);
+        if !phase_text(file, "base", &*m, &mut txt, err) { return 3; }
     }
-    let _ = io.write_all(1, if show == SHOW_DUMP then out.as_slice() else txt.as_slice());
+    if show != SHOW_DUMP { out.extend_from_slice(txt.as_slice()); }
     return 0;
 }
 
 // The text of m after phase `ph` into out, checked by the stage1 verifier on its reload (false: a
-// fault, reported). A printed module is always checked (P4).
-fn phase_text(file: &string.String, ph: &str, m: &model.Module, out: &mut vec.Vec<u8>) -> bool {
+// fault, reported in err). A printed module is always checked (P4).
+fn phase_text(file: &string.String, ph: &str, m: &model.Module, out: &mut vec.Vec<u8>, err: &mut vec.Vec<u8>) -> bool {
     *out = print.print(m);
-    return phase_verified(file, ph, out.as_slice());
+    return phase_verified(file, ph, out.as_slice(), err);
 }
 
-// The stage1 verifier on t, the printed module after phase `ph`: each fault prints
-// `FILE: internal error: PH: @<inst>: MSG` on stderr, `<inst>` the fn whose lines hold it.
-fn phase_verified(file: &string.String, ph: &str, t: &[u8]) -> bool {
+// The stage1 verifier on t, the printed module after phase `ph`: each fault appends
+// `FILE: internal error: PH: @<inst>: MSG` to err, `<inst>` the fn whose lines hold it.
+fn phase_verified(file: &string.String, ph: &str, t: &[u8], err: &mut vec.Vec<u8>) -> bool {
     let ld = load.load(t);
     if ld.ok() { return true; }
-    let mut e = vec.Vec::<u8>.new();
     for j in 0..ld.errs.len() {
-        e.extend_from_slice(file.as_bytes());
-        e.extend_from_slice(mem.str_bytes(": internal error: "));
-        e.extend_from_slice(mem.str_bytes(ph));
-        e.extend_from_slice(mem.str_bytes(": "));
+        err.extend_from_slice(file.as_bytes());
+        err.extend_from_slice(mem.str_bytes(": internal error: "));
+        err.extend_from_slice(mem.str_bytes(ph));
+        err.extend_from_slice(mem.str_bytes(": "));
         let line = ld.errs.line.as_slice()[j];
         let mut at = ld.fn_line.len();
         for f in 0..ld.fn_line.len() {
             if ld.fn_line.as_slice()[f] <= line { at = f; }
         }
         if at < ld.m.fn_inst.rows() {
-            e.push(64);
-            print.push_inst(&mut e, ld.m.fn_inst.row(at));
-            e.extend_from_slice(mem.str_bytes(": "));
+            err.push(64);
+            print.push_inst(err, ld.m.fn_inst.row(at));
+            err.extend_from_slice(mem.str_bytes(": "));
         }
-        e.extend_from_slice(ld.errs.msg.row(j));
-        e.push(10);
+        err.extend_from_slice(ld.errs.msg.row(j));
+        err.push(10);
     }
-    let _ = io.write_all(2, e.as_slice());
     return false;
 }
 

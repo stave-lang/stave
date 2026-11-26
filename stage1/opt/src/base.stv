@@ -18,6 +18,7 @@ import ir.generated.opt_table;
 import ir.grammar;
 import ir.model;
 import ir.types;
+import ir.vtypes;
 import prims.col;
 import prims.perm;
 import prims.sort;
@@ -92,9 +93,18 @@ impl Ops {
         if c == opt_table.REMOVABLE_YES { return true; }
         if c == opt_table.REMOVABLE_FLOAT { return m.types.tag_of(m.ins_ty.as_slice()[r]) == types.TK_FLOAT; }
         if c != opt_table.REMOVABLE_CONST_INDEX || m.ins_opnd_n.as_slice()[r] < 2 { return false; }
-        let (k, _, _) = int_const(m, f, m.ins_opnd_lo.as_slice()[r] as usize + 1);
-        return k;
+        let ol = m.ins_opnd_lo.as_slice()[r] as usize;
+        let (k, hi, lo) = int_const(m, f, ol + 1);
+        return vtypes.fixed_index(m, value_ty(m, f, ol), k, hi, lo);
     }
+}
+
+// The type of operand row x of fn f when it is a value, else NONE.
+fn value_ty(m: &model.Module, f: usize, x: usize) -> u32 {
+    if x >= m.opnd_kind.len() || m.opnd_kind.as_slice()[x] != model.O_VALUE { return NONE; }
+    let v = m.opnd_id.as_slice()[x];
+    if v >= m.fn_val_n.as_slice()[f] { return NONE; }
+    return m.val_ty.as_slice()[m.fn_val_lo.as_slice()[f] as usize + v as usize];
 }
 
 // Whether operand row x of fn f is an int constant, and its value as two's-complement (hi, lo).

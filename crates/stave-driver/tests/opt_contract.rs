@@ -17,6 +17,8 @@
 //! - a `switch` on an int constant, legal at level `opt` only: every consumer of an `opt` text
 //!   (`stave ir run`, `stave ir build` for x86-64 and AArch64) takes the case whose value is the
 //!   constant, and the base passes never see one (they take `lowered` or `checked` text);
+//! - an array index constant at or past the length, legal at level `opt` only: every consumer of
+//!   an `opt` text traps `Bounds` at the access, whether or not its result is read;
 //! - `stave ir opt` keeps the stack section of an emit-form file.
 
 use std::path::{Path, PathBuf};
@@ -25,6 +27,7 @@ use std::process::Command;
 #[path = "../../../tests/support/legs.rs"]
 mod legs;
 
+use stave_driver::build;
 use stave_driver::dump::emit_text;
 use stave_driver::exec::{self, RunSpec, TempDir};
 use stave_driver::ir_cmd::{self, IrError};
@@ -240,7 +243,9 @@ fn a_case_keeps_its_limit_overrides_in_its_directory() {
 
 /// A `--passes=base` case: `stave ir opt input.ir` is its output. Every other case with an output:
 /// the output is `canon(B(clean))` (rule P1), so the base passes on the clean-up's text (`clean.ir`,
-/// else the output itself) read at level `checked` give the output.
+/// else the output itself), loaded at its level `opt`, give the output. (`stave ir opt` refuses an
+/// `opt` file, and the text need not load at level `checked`: an array index constant past the
+/// length is legal only at `opt`.)
 #[test]
 fn base_passes_give_every_cases_output() {
     for d in case_dirs() {
@@ -258,7 +263,11 @@ fn base_passes_give_every_cases_output() {
                 p if p.is_file() => ("clean.ir", read(&p)),
                 _ => ("output.ir", want.clone()),
             };
-            let got = opt(&format!("{d}/{f} as checked"), &at_level(&clean, "opt", "checked"));
+            let name = format!("{d}/{f}");
+            let l = load(&name, &clean);
+            let m = build::base_passes(&l.module).unwrap_or_else(|e| panic!("{name}: base passes: {e}"));
+            let got = stave_ir::print_module(&m, &l.header, l.stack.as_ref())
+                .unwrap_or_else(|e| panic!("{name}: print: {e:?}"));
             assert_eq!(got, want, "{d}: the base passes on {f}");
         }
     }
@@ -406,8 +415,14 @@ fn main() -> i32 {
 /// The `opt` text of [`SWITCH_PROGRAM`] for `target` in the emit form (`stave ir emit --release`,
 /// then `stave ir opt`), with the `checked` text it came from.
 fn switch_program(dir: &Path, target: Triple) -> (String, String) {
+    emitted(dir, target, SWITCH_PROGRAM)
+}
+
+/// The `opt` text of the program `program` for `target` in the emit form, with the `checked` text
+/// it came from.
+fn emitted(dir: &Path, target: Triple, program: &str) -> (String, String) {
     let src = dir.join("main.stv");
-    std::fs::write(&src, SWITCH_PROGRAM).unwrap();
+    std::fs::write(&src, program).unwrap();
     let mut o = Options::new(Goal::Check).threads(Some(2));
     o.lower = true;
     o.emit_ir = true;
@@ -492,6 +507,120 @@ fn a_constant_switch_scrutinee_takes_the_case_of_its_value() {
         }
         let refused = ir_cmd::opt(&load("opt", &switch_on(&optimized, "1")));
         assert!(matches!(refused, Err(IrError::Input(_))), "{target}: `stave ir opt` of an `opt` text");
+    }
+}
+
+/// `at` lowers to `%r = get t %a %i !s` and `ret %r`; `main` exits with `at(a, 2)`.
+const INDEX_PROGRAM: &str = "fn at(a: [u32; 4], i: usize) -> u32 {
+    return a[i];
+}
+
+fn main() -> i32 {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    return at(a, 2) as% i32;
+}
+";
+
+/// The forms of `at`'s access with an int constant index: the `get` whose result `at` returns,
+/// the `get` whose result nothing reads, and a `set` whose result nothing reads (`at` then
+/// returns 7).
+#[derive(Clone, Copy, Debug)]
+enum Access {
+    Get,
+    DeadGet,
+    DeadSet,
+}
+
+/// `text` with `at`'s access in the form `form` at the index constant `k`, and the site (`line:col`)
+/// of the access.
+fn access_at(text: &str, form: Access, k: &str) -> (String, String) {
+    let start = text.find(" main.at(").expect("fn main.at");
+    let head = &text[start..text[start..].find('\n').unwrap() + start];
+    let agg = head.split(['(', ',']).nth(1).expect("the array param's type");
+    let at = start + text[start..].find(" = get ").expect("at reads a[i] by `get`");
+    let line_start = text[..at].rfind('\n').unwrap() + 1;
+    let line_end = at + text[at..].find('\n').unwrap();
+    let words: Vec<&str> = text[line_start..line_end].split_whitespace().collect();
+    let [r, _, _, t, a, _, site] = words[..] else { panic!("`get` line {words:?}") };
+    let ret = format!("\n  ret {r}\n");
+    let ret_at = line_end + text[line_end..].find(&ret).expect("at returns the element");
+    let (inst, ret_new) = match form {
+        Access::Get => (format!("  {r} = get {t} {a} {k} {site}"), ret.clone()),
+        Access::DeadGet => (format!("  {r} = get {t} {a} {k} {site}"), "\n  ret 7\n".to_string()),
+        Access::DeadSet => (format!("  {r} = set {agg} {a} {k} 9 {site}"), "\n  ret 7\n".to_string()),
+    };
+    let out = format!(
+        "{}{inst}{}{ret_new}{}",
+        &text[..line_start],
+        &text[line_end..ret_at],
+        &text[ret_at + ret.len()..]
+    );
+    let row = format!("site {} ", &site[1..]);
+    let s = text.lines().find(|l| l.starts_with(&row)).expect("the access's site row");
+    let parts: Vec<&str> = s.rsplitn(4, ' ').collect();
+    (out, format!("{}:{}", parts[2], parts[1]))
+}
+
+/// Index constants and what `main` gives with them in each form: an element (exit = the element,
+/// or 7), or the trap `Bounds` at the access (exit 101) for a constant at or past the length,
+/// whether or not its result is read.
+const INDEXES: [(&str, Access, Option<i32>); 9] = [
+    ("2", Access::Get, Some(3)),
+    ("3", Access::Get, Some(4)),
+    ("4", Access::Get, None),
+    ("18446744073709551615", Access::Get, None),
+    ("0", Access::DeadGet, Some(7)),
+    ("4", Access::DeadGet, None),
+    ("5", Access::DeadGet, None),
+    ("3", Access::DeadSet, Some(7)),
+    ("4", Access::DeadSet, None),
+];
+
+#[test]
+fn an_array_index_constant_past_the_length_traps_bounds_at_its_site() {
+    let tmp = TempDir::new("optidx").unwrap();
+    for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
+        let (checked, optimized) = emitted(tmp.path(), target, INDEX_PROGRAM);
+        let how = runner(target);
+        for (n, (k, form, want)) in INDEXES.into_iter().enumerate() {
+            let name = format!("{target} {form:?} {k}");
+            let (text, site) = access_at(&optimized, form, k);
+            let trap = format!(":{site} in main.at");
+            let check = |exit: i32, stderr: &[u8], who: &str| {
+                let err = String::from_utf8_lossy(stderr);
+                match want {
+                    Some(w) => assert_eq!((exit, err.as_ref()), (w, ""), "{name}: {who}"),
+                    None => assert!(
+                        exit == 101 && err.contains("panic: Bounds at ") && err.contains(&trap),
+                        "{name}: {who}: exit {exit}, stderr {err:?}, want Bounds at {site}"
+                    ),
+                }
+            };
+            let l = load(&name, &text);
+            let ran = ir_cmd::run(&l, &[]).unwrap_or_else(|e| panic!("{name}: ir run: {:?}", e.lines()));
+            check(ran.ran.exit, &ran.ran.stderr, "`stave ir run`");
+            let built =
+                ir_cmd::build(&l, Some(2)).unwrap_or_else(|e| panic!("{name}: ir build: {:?}", e.lines()));
+            if let Some(runner) = how {
+                let bin = tmp.path().join(format!("idx-{target}-{n}"));
+                built.image.write_file(&bin).unwrap();
+                let spec = RunSpec { args: &[], runner, cwd: None, inherit: false };
+                let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
+                check(got.exit, &got.stderr, "the `stave ir build` binary");
+            }
+            // Below level `opt` a constant index past the length is no access.
+            let low = access_at(&checked, form, k).0;
+            match (ir_cmd::load(&name, low.as_bytes()), want) {
+                (Ok(_), Some(_)) => {}
+                (Err(IrError::Input(es)), None) => {
+                    assert!(
+                        es.iter().any(|e| e.contains("array index constant out of range")),
+                        "{name}: {es:?}"
+                    )
+                }
+                (r, _) => panic!("{name}: the `checked` text: {:?}", r.map(|_| ())),
+            }
+        }
     }
 }
 

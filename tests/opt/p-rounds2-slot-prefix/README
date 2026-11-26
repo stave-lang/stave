@@ -1,0 +1,1 @@
+Two rounds (rounds=2, slot_caller=100): in round 1 the third slot callee passes SLOT_CALLER and the slot-free callee sorted after it is cut too (D4: the accepted rows are a prefix); round 2 decides on the cleaned module, where both remaining calls fit, and inlines them; the dump prints both rounds.

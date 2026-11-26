@@ -1,0 +1,1 @@
+A constant argument for an index param lands in the index of `get` (X2); one past the length is legal at level `opt` (P4) and stays, through C* and B, a `get` that traps `Bounds` at its site.
