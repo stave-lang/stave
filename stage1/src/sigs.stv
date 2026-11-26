@@ -793,7 +793,7 @@ fn visit_garg(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens
         if c != NONE {
             let ck = kind(tree, c as usize);
             if consteval.is_expr_kind(ck) {
-                let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, c as usize, cty, sc);
+                let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, c as usize, cty, sc, false);
                 lw.garg(k, x, y);
                 return;
             }
@@ -805,14 +805,14 @@ fn visit_garg(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens
                         let gp = base + cx.uses.target.as_slice()[r] as usize;
                         let (idx, gc, _) = consteval.generic_index(cx, tree, t, ds, it, gp, sc);
                         if gc {
-                            let (k, x, y) = consteval.const_param_arg(cx, idx, want, sc);
+                            let (k, x, y) = consteval.const_param_arg(cx, tree, it, c as usize, idx, want, sc, true);
                             lw.garg(k, x, y);
                             return;
                         }
                     } else {
                         let d = cx.uses.target.as_slice()[r];
                         if ds.kind.as_slice()[d as usize] == decls.DK_CONST {
-                            let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, c as usize, cty, sc);
+                            let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, c as usize, cty, sc, false);
                             lw.garg(k, x, y);
                             return;
                         }
@@ -863,7 +863,7 @@ fn array_of(cx: &mut consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.I
     let e = expr_child(tree, base, g);
     if e != NONE {
         let us = cx.tab.usize_t();
-        let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, e as usize, us, sc);
+        let (k, x, y) = consteval.eval_u64(cx, tree, t, nm, set, cut, ds, it, e as usize, us, sc, false);
         if elem == ERR || k == types.GA_ERROR { return ERR; }
         cx.tab.begin();
         cx.tab.push_garg(k, x, y);
@@ -1622,7 +1622,7 @@ fn settle(sg: &mut Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.So
 }
 
 // Whether type ty names a generic param (type or const) or `Self`.
-fn has_params(tab: &types.Table, ty: u32) -> bool {
+pub fn has_params(tab: &types.Table, ty: u32) -> bool {
     let mut stack = vec.Vec::<u32>.new();
     let mut kids = vec.Vec::<u32>.new();
     stack.push(ty);
@@ -1661,8 +1661,8 @@ fn lower_garg_ty(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tok
 fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, res: &resolve.Names, lay: consteval.Lay) -> Sigs {
     let n = ds.decls();
     let gens = consteval.Gens.{ lo: vec.Vec::<u32>.new(), name: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new(), is_const: vec.Vec::<bool>.new(), cty: vec.Vec::<u32>.new(), is_view: vec.Vec::<bool>.new() };
-    let consts = consteval.Consts.{ state: col.filled(n, consteval.CV_NONE), ty: col.filled(n, ERR), neg: col.filled(n, false), mag: col.filled(n, 0u64) };
-    let cx = consteval.Cx.{ tab: types.Table.new(), uses: consteval.Uses.new(res), parent: consteval.parents(tree), gens: gens, consts: consts, ty: col.filled(n, ERR), ready: col.filled(n, false), skip: consteval.CV_NONE, lay: lay, sc: consteval.no_scope(), hits: 0, wait: col.filled(n, false) };
+    let consts = consteval.Consts.new(n);
+    let cx = consteval.Cx.{ tab: types.Table.new(), uses: consteval.Uses.new(res), parent: consteval.parents(tree), gens: gens, consts: consts, ty: col.filled(n, ERR), ready: col.filled(n, false), skip: consteval.CV_NONE, lay: lay, sc: consteval.no_scope(), hits: 0, wait: col.filled(n, false), rep: consteval.Reports.new(), dfr: consteval.no_defer() };
     let mut sg = Sigs.{
         cx: cx,
         sflags: col.filled(n, 0u16),
@@ -1986,14 +1986,20 @@ fn alias_or_const(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Inte
         sg.cx.consts.state.as_mut_slice()[du] = consteval.CV_FAIL;
         return;
     }
-    if sg.cx.tab.tag_of(ty) != types.TK_INT {
+    if !consteval.evaluable(&sg.cx.tab, ty) {
         sg.cx.consts.state.as_mut_slice()[du] = consteval.CV_UNSUP;
         return;
     }
     sg.cx.sc = consteval.no_scope();
     let (st, _, neg, mag) = consteval.eval(&mut sg.cx, tree, t, nm, set, cut, ds, it, e as usize, ty);
     if st == consteval.CV_LAYOUT { sg.cx.hits = sg.cx.hits + 1; }
-    sg.cx.consts.state.as_mut_slice()[du] = st;
-    sg.cx.consts.neg.as_mut_slice()[du] = neg;
-    sg.cx.consts.mag.as_mut_slice()[du] = mag;
+    let c = &mut sg.cx.consts;
+    c.state.as_mut_slice()[du] = st;
+    c.neg.as_mut_slice()[du] = neg;
+    c.mag.as_mut_slice()[du] = mag;
+    if st == consteval.CV_OK && c.at_lo != NONE {
+        c.alo.as_mut_slice()[du] = c.at_lo;
+        c.an.as_mut_slice()[du] = c.at_n;
+        c.arep.as_mut_slice()[du] = c.at_rep;
+    }
 }

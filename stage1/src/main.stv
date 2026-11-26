@@ -321,6 +321,8 @@ fn main() -> i32 {
         diag_tc.typeck_diags(&mut d, &c, &sg, &ds, &md, &nm, &lx, &set, &toks, &tree);
         tc = Option.Some(c);
     }
+    // after the body checker: it evaluates const forms too
+    diag_sigs.eval_diags(&mut d, &sg, &ds, &nm, &lx, &set, &toks, &cut);
     let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
     let rows = d.order(ft.rank.as_slice());
     let shown = diag_out.render(&d, rows.as_slice(), &ft, &set, cli.json);

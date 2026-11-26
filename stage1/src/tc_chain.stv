@@ -85,6 +85,7 @@ const OLD_CALL: u32 = 0xffff_fefc;
 // arguments are checked without a context, their pending groups take the error type, and the
 // call's value is of it (stage0's `args_only`).
 const ERR_CALL: u32 = 0xffff_fefb;
+const NOT_FOUND: u32 = tc_rows.NOT_FOUND;
 
 // The chain step waiting for the child being checked: none, generic arguments, a call's arguments,
 // an index, a struct literal.
@@ -130,7 +131,14 @@ impl tc_rows.Typeck {
             self.head_state(sg, ds, nm, set, t, cut, tree, r, head);
             if self.chain.as_slice()[r] == S_ERR && self.acc.as_slice()[r] == NONE {
                 let ty = self.bt.type_head(&mut sg.cx.tab, tc_rows.tok_text(t, set, cut, self.it, a, false));
-                if ty != UNK { self.set_chain(r, S_TYPE, ty); }
+                let s = nm.tok_str.as_slice()[a as usize];
+                if ty != UNK {
+                    self.set_chain(r, S_TYPE, ty);
+                } else if s != NONE && !ds.is_prim.as_slice()[s as usize] && ds.builtin.as_slice()[s as usize] == 0 {
+                    // no decl, local, generic param, built-in type, or built-in fn takes the name:
+                    // the resolver's E0101 / E0103, a value of the error type
+                    self.set_chain(r, S_VAL, ERR);
+                }
             }
         } else if ft == terminals.T_KW_SELF_TYPE {
             // `Self` of an impl names its self type; a trait's `Self` is not checked yet
@@ -162,10 +170,10 @@ impl tc_rows.Typeck {
             // no decl, local, or generic param takes the name: it may be a built-in fn
             let s = nm.tok_str.as_slice()[first_tok(tree, head) as usize];
             if s == self.old_s && s != NONE && self.clause != tc_rows.CL_NONE && ga == NONE {
-                // `old` outside an `ensures` or inside `old(..)`: E0213, not reported here
+                // `old` outside an `ensures` or inside `old(..)`: E0213 (not reported here), a
+                // value of the error type
                 if self.clause != tc_rows.CL_ENSURES || self.old_depth > 0 {
-                    let e = self.err();
-                    self.set_chain(r, S_ERR, e);
+                    self.set_chain(r, S_VAL, ERR);
                 } else {
                     self.set_chain(r, S_OLD, NONE);
                 }
@@ -196,8 +204,22 @@ impl tc_rows.Typeck {
                 return;
             }
             ty = out.as_slice()[1];
-            if ty == ERR || ty == NONE {
+            // a type question on the error type is answered (stage0: the error was reported)
+            if ty == NONE || (ty == ERR && !self.bt.is_type_query(s)) {
                 self.set_chain(r, S_ERR, UNK);
+                return;
+            }
+        }
+        if ty != NONE && ty != ERR && self.bt.is_type_query(s) && !sigs.has_params(&sg.cx.tab, ty) && !self.tq.has_layout(&mut sg.cx.tab, ty) {
+            // no layout: stage0's E0911 (not reported here), the call `()` is of the error type;
+            // with arguments the arity error comes first (the fn type's call reports it)
+            let q = tree.tok_end.as_slice()[ga as usize];
+            if tk(t, q) != terminals.T_L_PAREN {
+                self.set_chain(r, S_ERR, UNK);
+                return;
+            }
+            if tk(t, q + 1) == terminals.T_R_PAREN {
+                self.set_chain(r, S_VAL, ERR);
                 return;
             }
         }
@@ -512,7 +534,8 @@ impl tc_rows.Typeck {
                     if u == NONE {
                         let recv0 = if self.chain.as_slice()[r] == S_VAL then self.acc.as_slice()[r] else UNK;
                         let recv = self.force(recv0);
-                        let (m, inst, b) = self.method_of(sg, ds, nm, r, recv, seg);
+                        let (m0, inst, b) = self.method_of(sg, ds, nm, r, recv, seg);
+                        let m = if m0 == NOT_FOUND then NONE else m0;
                         let mut xs = vec.Vec::<u32>.new();
                         if self.bt.shaped_targs(m) { sigs.lower_type_args(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, c, self.sc, true, &mut xs); }
                         let v = self.bi_targs(&mut sg.cx.tab, t, set, cut, tree, m, inst, c, seg, xs.as_slice());
@@ -560,6 +583,14 @@ impl tc_rows.Typeck {
                     }
                     let recv = self.force(recv0);
                     let (m, inst, b) = self.method_of(sg, ds, nm, r, recv, seg);
+                    if m == NOT_FOUND {
+                        self.set_chain(r, S_VAL, ERR);
+                        if close == q + 1 {
+                            p = close + 1;
+                            continue;
+                        }
+                        return self.err_args(tree, r, c, close);
+                    }
                     let ch = if close + 1 == end then self.hint.as_slice()[r] else NONE;
                     self.set_chain(r, S_VAL, UNK);
                     if close == q + 1 {
@@ -857,9 +888,11 @@ impl tc_rows.Typeck {
     // and after them the field decl each field expression names (read by `gen_param`). The row
     // is UNK for a literal not checked yet (a head state not modeled, a const generic param whose
     // argument is neither written nor in the context, an unknown context that may give the
-    // arguments) and for a literal with a type error (a type or enum with no fields, a field
-    // named twice or not a field, a field left out). With a const generic param the third value
-    // is the literal's type (all its arguments given: nothing to infer), else NONE.
+    // arguments) and for a literal with a type error (a type or enum with no fields, a field left
+    // out). A field named twice (stage0's E0105) or not a field (E0208) names no field decl
+    // (NONE): its expression is typed without a context, a literal of it of the error type, and
+    // the literal is typed without it. With a const generic param the third value is the
+    // literal's type (all its arguments given: nothing to infer), else NONE.
     fn lit_binds(&mut self, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, r: usize, sl: usize, ch: u32) -> (u32, u32, u32) {
         let st = self.chain.as_slice()[r];
         let a = self.acc.as_slice()[r];
@@ -906,18 +939,20 @@ impl tc_rows.Typeck {
             }
         }
         let ks = tree.kids.row(sl);
+        let mut named: usize = 0;
         for j in 0..ks.len() {
             let e = self.base + ks[j] as usize;
             let nt = first_tok(tree, e) - 2;
             if tk(t, nt) != terminals.T_IDENT || tk(t, nt + 1) != terminals.T_COLON { return (NONE, UNK, NONE); }
-            let f = member(ds, d, nm.tok_str.as_slice()[nt as usize]);
-            if f == NONE { return (NONE, self.err(), NONE); }
+            let mut f = member(ds, d, nm.tok_str.as_slice()[nt as usize]);
             for k in 0..j {
-                if self.binds.as_slice()[b + n + k] == f { return (NONE, self.err(), NONE); }
+                if self.binds.as_slice()[b + n + k] == f { f = NONE; }
             }
+            if f != NONE { named = named + 1; }
             self.binds.push(f);
         }
-        if field_count(ds, d) != ks.len() { return (NONE, self.err(), NONE); }
+        if field_count(ds, d) != named { return (NONE, self.err(), NONE); }
+        if consts && named != ks.len() { return (NONE, UNK, NONE); }
         return (d, b as% u32, if consts then preset else NONE);
     }
 
@@ -1055,7 +1090,7 @@ impl tc_rows.Typeck {
             ty = self.field_sym(sg, ds, ty, syms.as_slice()[p]);
         }
         let disp = self.tq.tr.lang.display;
-        if ty == UNK || ty == NONE || disp == NONE { return h; }
+        if ty == UNK || ty == NONE || ty == ERR || disp == NONE { return h; }
         let inner = peel_refs(&sg.cx.tab, ty);
         let e = self.tq.env_of(sg, self.sc);
         // the value is a `String` whatever the answer (stage0's E0208 / E0901, not reported here)
@@ -1435,11 +1470,12 @@ impl tc_rows.Typeck {
 
     // The parameter type of argument j of a generic call of callee at row r (r, sf as in
     // `gen_arity`), a trait method's `Self` replaced by sf; of a struct literal, the type of the
-    // field its expression j names (`lit_binds`).
+    // field its expression j names (`lit_binds`; NONE: it names none).
     fn gen_param(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, r: u32, callee: u32, sf: u32, j: usize) -> u32 {
         if r != NONE && kind(tree, r as usize) == K_STRUCT_LIT {
             let n = self.call_n(sg, ds, callee);
             let f = self.binds.as_slice()[self.blo.as_slice()[r as usize] as usize + n + j];
+            if f == NONE { return NONE; }
             let ft = sg.cx.ty.as_slice()[f as usize];
             return if ft == NONE then ERR else ft;
         }
@@ -1499,6 +1535,11 @@ impl tc_rows.Typeck {
         let a = self.base + tree.kids.row(r)[j] as usize;
         if j >= self.gen_arity(sg, tree, r as% u32, callee, sf) { return; }
         let p = self.gen_param(sg, ds, tree, r as% u32, callee, sf, j);
+        if p == NONE && kind(tree, r) == K_STRUCT_LIT {
+            let v = self.resolve_at(a);
+            if is_lit(v) { self.fix_err(v); }
+            return;
+        }
         if p == ERR {
             self.waits.as_mut_slice()[r] = true;
             return;
@@ -1528,6 +1569,7 @@ impl tc_rows.Typeck {
         let b = self.blo.as_slice()[r] as usize;
         let n = self.gen_n(sg, ds, callee, sf);
         let p = self.gen_param(sg, ds, tree, r as% u32, callee, sf, j);
+        if p == NONE && kind(tree, r) == K_STRUCT_LIT { return NONE; }
         if p == ERR { return UNK; }
         if !self.unresolved(&sg.cx.tab, p, b, n) { return self.subst_binds(sg, p, b, n); }
         return if self.waits.as_slice()[r] then UNK else NONE;
@@ -1681,6 +1723,8 @@ impl tc_rows.Typeck {
         let (m, i, b, open) = self.headless_method(sg, ds, c, s);
         if m != NONE || open { return (m, i, b); }
         let (bi, bc) = builtin_callee(self.bt.method(&sg.cx.tab, c, s), c);
+        // a built-in type: no impl and no built-in has the method
+        if bi == NONE && builtin_kind(ct) { return (NOT_FOUND, NONE, NONE); }
         return (bi, bc, NONE);
     }
 
@@ -1718,13 +1762,15 @@ impl tc_rows.Typeck {
         return self.field_sym(sg, ds, recv, nm.tok_str.as_slice()[seg as usize]);
     }
 
-    // Field named s of a value of type recv.
+    // Field named s of a value of type recv; no such field is stage0's E0208 (not reported
+    // here): the error type.
     fn field_sym(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, recv: u32, s: u32) -> u32 {
-        if recv == UNK { return UNK; }
+        if recv == UNK || is_lit(recv) { return UNK; }
         if recv == NONE { return self.err(); }
+        if recv == ERR { return ERR; }
         let tab = &mut sg.cx.tab;
         let mut inner = peel_refs(tab, recv);
-        if tab.tag_of(inner) != types.TK_ADT { return self.err(); }
+        if tab.tag_of(inner) != types.TK_ADT { return ERR; }
         // a `Soa<P>` outside its module: column s, field s of the struct P as a `[F]` place
         let column = tab.a_of(inner) == self.soa && self.module != self.soa_mod;
         if column {
@@ -1734,31 +1780,39 @@ impl tc_rows.Typeck {
             if tab.tag_of(inner) != types.TK_ADT { return self.err(); }
         }
         let d = tab.a_of(inner);
-        if ds.kind.as_slice()[d as usize] != decls.DK_STRUCT { return self.err(); }
+        if ds.kind.as_slice()[d as usize] != decls.DK_STRUCT { return ERR; }
         let f = member(ds, d, s);
-        if f == NONE { return self.err(); }
+        if f == NONE { return ERR; }
         let ft = sg.cx.ty.as_slice()[f as usize];
-        if ft == ERR || ft == NONE { return self.err(); }
+        if ft == ERR { return ERR; }
+        if ft == NONE { return self.err(); }
         self.args.clear();
         self.args.extend_from_slice(sg.cx.tab.x(inner));
         let v = sg.cx.tab.subst(ft, self.args.as_slice());
         return if column && v != ERR then sg.cx.tab.key(types.TK_SLICE, v, 0) else v;
     }
 
-    // Element `.N` (the IntLit token at tok) of a tuple (through references).
+    // Element `.N` (the IntLit token at tok) of a tuple (through references); none is stage0's
+    // E0208 (not reported here): the error type.
     fn tuple_field(&mut self, tab: &types.Table, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, recv: u32, tok: u32) -> u32 {
-        if recv == UNK { return UNK; }
+        if recv == UNK || is_lit(recv) { return UNK; }
         if recv == NONE { return self.err(); }
         let inner = peel_refs(tab, recv);
-        if tab.tag_of(inner) != types.TK_TUPLE { return self.err(); }
+        if tab.tag_of(inner) != types.TK_TUPLE { return ERR; }
         let i = lit_index(tc_rows.tok_text(t, set, cut, self.it, tok, false));
         let xs = tab.x(inner);
-        if i >= xs.len() { return self.err(); }
+        if i >= xs.len() { return ERR; }
         return xs[i];
     }
 }
 
 // A built-in callee b instantiated by type c, or (NONE, NONE) when b is none.
+// Whether a value of a type of tag `tag` has the methods of impls without a struct or enum head
+// and of the built-ins only.
+fn builtin_kind(tag: u8) -> bool {
+    return tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_VECTOR || tag == types.TK_MASK || tag == types.TK_STR || tag == types.TK_SLICE || tag == types.TK_ARRAY || tag == types.TK_TUPLE || tag == types.TK_PTR || tag == types.TK_FN;
+}
+
 fn builtin_callee(b: u32, c: u32) -> (u32, u32) {
     if tc_builtins.is_builtin(b) { return (b, c); }
     return (NONE, NONE);

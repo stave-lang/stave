@@ -333,6 +333,68 @@ fn tok_text(out: &mut vec.Vec<u8>, lx: &lex.Lexer, set: &source.SourceSet, t: &l
     out.extend_from_slice(&set.file(f)[s..e]);
 }
 
+// The holes `min` and `max` of the open diagnostic: the range of int type x.
+pub fn int_bounds(d: &mut diag.Diags, buf: &mut vec.Vec<u8>, tab: &types.Table, x: u32) {
+    let bits = tab.int_bits(x);
+    let signed = tab.is_signed(x);
+    buf.clear();
+    if signed {
+        buf.push(45);
+        text.push_u64(buf, 1u64 << (bits - 1) as u64);
+    } else {
+        buf.push(48);
+    }
+    d.arg("min", buf.as_slice());
+    buf.clear();
+    text.push_u64(buf, if signed then (1u64 << (bits - 1) as u64) - 1 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1);
+    d.arg("max", buf.as_slice());
+}
+
+// Each row const evaluation reported (`consteval.Reports`) as a diagnostic; an operand is its
+// span's text as written.
+pub fn eval_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items) {
+    let r = &sg.cx.rep;
+    let sc = [0u32, 0u32, 0u32, 0u32];
+    let mut buf = vec.Vec::<u8>.new();
+    for k in 0..r.len() {
+        let code = r.code.as_slice()[k];
+        let f = cut.file.as_slice()[r.item.as_slice()[k] as usize] as usize;
+        let s = t.start.as_slice()[r.lo.as_slice()[k] as usize];
+        let e = tok_end(lx, set, t, f, r.hi.as_slice()[k]);
+        let src = &set.file(f)[s as usize..e as usize];
+        let ty = r.ty.as_slice()[k];
+        let x = r.x.as_slice()[k];
+        if code == consteval.EV_NO_TYPE || code == consteval.EV_INFER {
+            d.begin(202, if code == consteval.EV_INFER then "infer" else "");
+            d.arg("literal", src);
+        } else if code == consteval.EV_MISMATCH {
+            d.begin(201, "no-cast");
+            buf.clear();
+            display(&mut buf, sg, ds, nm, &sc, ty);
+            d.arg("expected", buf.as_slice());
+            buf.clear();
+            if x == consteval.LIT_INT { buf.extend_from_slice(mem.str_bytes("{integer}")); } else { display(&mut buf, sg, ds, nm, &sc, x); }
+            d.arg("found", buf.as_slice());
+            d.arg("operand", src);
+        } else {
+            d.begin(203, if code == consteval.EV_RANGE then "" else if x == 0 then "index-empty" else "index");
+            d.arg("literal", src);
+            buf.clear();
+            display(&mut buf, sg, ds, nm, &sc, ty);
+            d.arg("type", buf.as_slice());
+            if code == consteval.EV_RANGE {
+                int_bounds(d, &mut buf, &sg.cx.tab, ty);
+            } else if x != 0 {
+                d.arg("min", mem.str_bytes("0"));
+                buf.clear();
+                text.push_u32(&mut buf, x - 1);
+                d.arg("max", buf.as_slice());
+            }
+        }
+        d.end(f as% u32, s, e - s);
+    }
+}
+
 // Each `sigs` row as a diagnostic.
 pub fn sigs_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items) {
     let r = &sg.rows;
@@ -379,19 +441,7 @@ pub fn sigs_diags(d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, nm: &int
             buf.clear();
             display(&mut buf, sg, ds, nm, sc, x);
             d.arg("type", buf.as_slice());
-            let bits = sg.cx.tab.int_bits(x);
-            let signed = sg.cx.tab.is_signed(x);
-            buf.clear();
-            if signed {
-                buf.push(45);
-                text.push_u64(&mut buf, 1u64 << (bits - 1) as u64);
-            } else {
-                buf.push(48);
-            }
-            d.arg("min", buf.as_slice());
-            buf.clear();
-            text.push_u64(&mut buf, if signed then (1u64 << (bits - 1) as u64) - 1 else if bits == 64 then 0xffff_ffff_ffff_ffff else (1u64 << bits as u64) - 1);
-            d.arg("max", buf.as_slice());
+            int_bounds(d, &mut buf, &sg.cx.tab, x);
         } else if code == sigs.D_E0413 {
             let g = r.b.as_slice()[k];
             d.begin(413, if ds.kind.as_slice()[g as usize] == decls.DK_STATIC then "static" else "");

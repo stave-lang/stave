@@ -33,6 +33,9 @@ pub struct Tq {
     pub tr: traits.Traits,
     sh: layout.Shapes,
     pa: layout.Parts,
+    // the types `has_layout` answered, and the answers
+    lay_t: vec.Vec<u32>,
+    lay_ok: vec.Vec<bool>,
     // the environment of the body being checked, once made
     env_ok: bool,
     env: u32,
@@ -55,6 +58,8 @@ pub fn new(sg: &sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &modules.M
         tr: traits.new(sg, &sg.cx.tab, ds, fl, md, nm),
         sh: sh,
         pa: layout.Parts.new(),
+        lay_t: vec.Vec::<u32>.new(),
+        lay_ok: vec.Vec::<bool>.new(),
         env_ok: false,
         env: 0,
         pending: false,
@@ -114,6 +119,20 @@ impl Tq {
             return A_WAIT;
         }
         return if self.tr.is(g) then A_YES else A_NO;
+    }
+
+    // Whether type t (no generic params) has a layout, stage0's `layout_of`.
+    pub fn has_layout(&mut self, tab: &mut types.Table, t: u32) -> bool {
+        for k in 0..self.lay_t.len() {
+            if self.lay_t.as_slice()[k] == t { return self.lay_ok.as_slice()[k]; }
+        }
+        let roots = [t];
+        let w = layout.closure(tab, &self.sh, &mut self.pa, &roots);
+        let ly = layout.layouts(tab, &self.sh, &self.pa, w.as_slice());
+        let ok = ly.at(t, 0) == layout.LS_OK;
+        self.lay_t.push(t);
+        self.lay_ok.push(ok);
+        return ok;
     }
 
     // Expands and decides every goal asked so far.

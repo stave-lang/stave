@@ -119,6 +119,10 @@ pub struct Typeck {
     pub mt_k: vec.Vec<u32>,
     // the built-in methods and type-relative built-ins
     pub bt: tc_builtins.Builtins,
+    // the divisors of the body's `div_const` calls (argument row, its lane type), evaluated when
+    // the body's check ends
+    pub dc_row: vec.Vec<u32>,
+    pub dc_ty: vec.Vec<u32>,
     // the trait questions, asked in rounds (`tc_traits`)
     pub tq: tc_traits.Tq,
     // `std.core.Option`, `std.core.Result` (NONE: none in this program)
@@ -158,6 +162,9 @@ pub struct Typeck {
 }
 
 pub const LIT_INT: u32 = 0xffff_fff0;
+// A method lookup's callee when stage0's lookup finds no method or two (its E0208, E0901, or
+// E0908, not reported here): the call is of the error type.
+pub const NOT_FOUND: u32 = 0xffff_fefa;
 pub const LIT_FLOAT: u32 = 0xffff_fff1;
 pub const WHY_DECL: u32 = 0x8000_0000;
 
@@ -205,6 +212,13 @@ pub const C_ARITY: u8 = 15;
 pub const C_TYPE_ARGS: u8 = 16;
 // E0201 case `not-value`: the chain at node row n names no value.
 pub const C_NOT_VALUE: u8 = 17;
+// E0422 cases (an operator on an operand type a that is not Copy where it is used; b the
+// operator trait's position in `traits.OPS`): `operand` (a generic param, x its row of `Gens`),
+// `operand-args` (a type that names params), `operand-type` (any other); of the last two, x is
+// the impl the operator goes through (NONE: none).
+pub const C_OPERAND: u8 = 1;
+pub const C_OPERAND_ARGS: u8 = 2;
+pub const C_OPERAND_TYPE: u8 = 3;
 // An E0201 whose fix is decided at the body's end (`tc_diag.fixes`).
 pub const C_PENDING: u8 = 255;
 
@@ -701,6 +715,10 @@ impl Typeck {
                 continue;
             }
             self.coerce(tab, a, want, NONE);
+            if tc_builtins.is_div_const(callee) {
+                self.dc_row.push(a as% u32);
+                self.dc_ty.push(want);
+            }
         }
         if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_SEL { return self.unify(tab, x, y, self.base as% u32 + tree.kids.row(args as usize)[1]); }
         if nb == 2 && self.bt.arg_kind(tab, callee, c, 0) == tc_builtins.A_FREE {

@@ -8,18 +8,27 @@
 // chain it is in (`200 + 100 - 100u8` is `u8` throughout); the expected type fixes a group when
 // the literal is made. Then the literals are checked against their types and `value` evaluates
 // the decided nodes bottom-up (node ids are postorder, so a node's operands come first and the
-// first failing node is the one a left-to-right evaluation fails at), each in its decided type:
-// overflow, division by zero, `MIN / -1`, and a shift amount outside the width fail.
+// first failing node is the one a left-to-right evaluation fails at), each in its decided type,
+// lazily where the run time is (an `if` arm not taken, the operands of `&&` / `||` past the one
+// that decides it): overflow, division by zero, `MIN / -1`, an index past the end, and a shift
+// amount outside the width fail.
+//
+// What fails an operation is reported where the evaluation runs (stage0's E0203 at the
+// operation, `Cx.rep`); any other failure that stage0 reports in its words is kept as the
+// evaluation's one deferred diagnostic (`Cx.dfr`: a mismatch, E0201; a literal out of range,
+// E0203; a literal without a type, E0202), reported by an owner that does not type the
+// expression itself (`eval_u64`). An expression nested past `MAX_DEPTH` levels has no value.
 //
 // Const items are evaluated in dependency rounds (`round_consts`): a const whose initializer
 // and type name only consts of earlier rounds is in the next round; the consts left over are on
 // a cycle or depend on one, and have no value (stage0: E0904 case `cycle`).
 //
-// The forms evaluated: int literals, a const item by path, a bare const generic parameter as a
-// whole length or argument, parentheses, the operators `+ - * / %` (and their `%` and `|`
-// forms), `& | ^ << >> <<%`, unary `-` and `~`, and `as` / `as%` / `as|` between int types.
-// A form outside these makes the evaluation `UNSUP` (stage1 does not decide it: the caller
-// writes no dump).
+// The forms evaluated: int literals, `true` and `false`, a const item by path, a bare const
+// generic parameter as a whole length or argument, parentheses, the operators `+ - * / %` (and
+// their `%` and `|` forms), `& | ^ << >> <<%` (`& | ^` on `bool`s too), unary `-`, `~`, `!`,
+// comparisons, `&&`, `||`, `if then else`, `as` / `as%` / `as|` between int types, and arrays
+// of ints or `bool`s: literals `[a, b]`, `[e; n]`, `[]`, and an index into one. A form outside
+// these makes the evaluation `UNSUP` (stage1 does not decide it: the caller writes no dump).
 //
 // `size_of::<T>()` / `align_of::<T>()` of a type without parameters is a layout request (`Lay`,
 // keyed by the call's node row): decided, it is T's size or alignment (or a failure: T has no
@@ -69,6 +78,10 @@ const K_IMPL_DECL: u8 = node_kinds.KIND_IMPL_DECL;
 const K_TRAIT_DECL: u8 = node_kinds.KIND_TRAIT_DECL;
 const K_MATCH: u8 = node_kinds.KIND_MATCH_EXPR;
 const K_RANGE: u8 = node_kinds.KIND_RANGE_EXPR;
+const K_AND: u8 = node_kinds.KIND_AND_EXPR;
+const K_OR: u8 = node_kinds.KIND_OR_EXPR;
+const K_CMP: u8 = node_kinds.KIND_CMP_EXPR;
+const K_IF: u8 = node_kinds.KIND_IF_EXPR;
 
 // The resolutions of every use, by (item, key node), then offset: `resolve`'s rows with a
 // search key.
@@ -148,13 +161,114 @@ pub fn no_scope() -> Scope {
     return Scope.{ par_lo: 0, par_hi: 0, own_lo: 0, own_hi: 0, own: NONE, self_ty: NONE };
 }
 
-// The values of const items, per decl D: state, declared type, int value (sign, magnitude).
+// The values of const items, per decl D: state, declared type, scalar value (sign, magnitude; a
+// `bool` is 0 or 1), and for an array its elements in the pool (`alo`, NONE: none; `an` of them,
+// or one repeated `an` times when `arep`). `at_*`: the array the last evaluation gave (`at_lo`
+// NONE: a scalar), its elements pushed onto the pool.
 pub struct Consts {
     pub state: vec.Vec<u8>,
     pub ty: vec.Vec<u32>,
     pub neg: vec.Vec<bool>,
     pub mag: vec.Vec<u64>,
+    pub alo: vec.Vec<u32>,
+    pub an: vec.Vec<u32>,
+    pub arep: vec.Vec<bool>,
+    pub pneg: vec.Vec<bool>,
+    pub pmag: vec.Vec<u64>,
+    pub at_lo: u32,
+    pub at_n: u32,
+    pub at_rep: bool,
 }
+
+impl Consts {
+    pub fn new(n: usize) -> Consts {
+        return Consts.{ state: col.filled(n, CV_NONE), ty: col.filled(n, types.ERR), neg: col.filled(n, false), mag: col.filled(n, 0u64), alo: col.filled(n, NONE), an: col.filled(n, 0u32), arep: col.filled(n, false), pneg: vec.Vec::<bool>.new(), pmag: vec.Vec::<u64>.new(), at_lo: NONE, at_n: 0, at_rep: false };
+    }
+}
+
+// Whether the evaluator gives a const of type t its value: an int, a `bool`, an array of them.
+pub fn evaluable(tab: &types.Table, t: u32) -> bool {
+    if t == NONE || t == types.ERR { return false; }
+    let tag = tab.tag_of(t);
+    if tag == types.TK_ARRAY { return scalar_elem(tab, tab.a_of(t)) && arr_len(tab, t) != NO_TY; }
+    return tag == types.TK_INT || tag == types.TK_BOOL;
+}
+
+// The diagnostics of const evaluation, one row each (stage0 reports them where the evaluation
+// runs; one met twice is one diagnostic): code (`EV_*`), item, the first and last global token
+// of the primary span, a type and a value by code:
+// - `EV_RANGE` (E0203): the span's text is out of range for int type `ty`: a literal, or an
+//   operation that overflows, divides by zero, or is `MIN / -1` or `MIN % -1`;
+// - `EV_INDEX` (E0203 cases `index`, `index-empty`): the index at the span is past the end of a
+//   const array of type `ty`, x its length;
+// - `EV_MISMATCH` (E0201 case `no-cast`): the span has type x (`LIT_INT`: an int literal
+//   without a type) where type `ty` is required;
+// - `EV_NO_TYPE` (E0202): nothing gives the literal at the span a type;
+// - `EV_INFER` (E0202 case `infer`): nothing gives the array literal `[]` at the span its type.
+pub struct Reports {
+    pub code: vec.Vec<u8>,
+    pub item: vec.Vec<u32>,
+    pub lo: vec.Vec<u32>,
+    pub hi: vec.Vec<u32>,
+    pub ty: vec.Vec<u32>,
+    pub x: vec.Vec<u32>,
+}
+
+impl Reports {
+    pub fn new() -> Reports {
+        return Reports.{ code: vec.Vec::<u8>.new(), item: vec.Vec::<u32>.new(), lo: vec.Vec::<u32>.new(), hi: vec.Vec::<u32>.new(), ty: vec.Vec::<u32>.new(), x: vec.Vec::<u32>.new() };
+    }
+
+    pub fn len(&self) -> usize {
+        return self.code.len();
+    }
+
+    pub fn add(&mut self, code: u8, it: u32, lo: u32, hi: u32, ty: u32, x: u32) {
+        self.code.push(code);
+        self.item.push(it);
+        self.lo.push(lo);
+        self.hi.push(hi);
+        self.ty.push(ty);
+        self.x.push(x);
+    }
+}
+
+pub const EV_RANGE: u8 = 1;
+pub const EV_INDEX: u8 = 2;
+pub const EV_MISMATCH: u8 = 3;
+pub const EV_NO_TYPE: u8 = 4;
+pub const EV_INFER: u8 = 5;
+pub const LIT_INT: u32 = 0xffff_fff0;
+
+// The first failure of an evaluation that reports nothing, as a `Reports` row (`code` 0: none).
+pub struct Defer {
+    pub code: u8,
+    pub it: u32,
+    pub lo: u32,
+    pub hi: u32,
+    pub ty: u32,
+    pub x: u32,
+}
+
+impl Copy for Defer {}
+
+pub fn no_defer() -> Defer {
+    return Defer.{ code: 0, it: NONE, lo: NONE, hi: NONE, ty: NONE, x: NONE };
+}
+
+// The most bytes of compile-time data a value of a const-expr may have (stage0's
+// `MAX_DATA_BYTES`; past it, E0904 case `size`).
+const MAX_DATA_BYTES: u64 = 1u64 << 26;
+
+// The most nested levels a const-expr is decided to (stage0's `MAX_DEPTH`).
+const MAX_DEPTH: usize = 2000;
+
+// The status of one integer operation (`arith`): done, its value outside the type (or a division
+// by zero), a shift amount outside the width, no rule.
+const A_OK: u8 = 0;
+const A_OVER: u8 = 1;
+const A_SHIFT: u8 = 2;
+const A_NONE: u8 = 3;
 
 // The layout requests of `size_of` / `align_of` calls, by the call's node row: the state
 // (`CV_OK`, `CV_FAIL`, or pending `CV_LAYOUT`), size and alignment once decided, and the item and
@@ -241,6 +355,9 @@ pub struct Cx {
     // evaluations so far that wait for a layout; per decl D: whether its signature waited
     pub hits: u32,
     pub wait: vec.Vec<bool>,
+    // what const evaluations reported, and the running one's failure that reports nothing
+    pub rep: Reports,
+    pub dfr: Defer,
 }
 
 impl Cx {
@@ -431,7 +548,11 @@ fn add_exact(an: bool, am: u64, bn: bool, bm: u64) -> (bool, u64, bool) {
 }
 
 // One evaluation's state: per node of the expression's subtree (offset from `lo`), the decided
-// type (a T, or a literal group `LIT | g`), and for a literal its sign and magnitude.
+// type (a T, or a literal group `LIT | g`), for a literal its sign and magnitude, and the value:
+// a scalar (sign, magnitude; a `bool` is 0 or 1), or an array of scalars (`vlo` its first
+// element in the pool `pneg` / `pmag`, NONE for a scalar; `vn` elements, or one repeated `vn`
+// times when `vrep`). `aux`: a comparison's operand type, an index's array type. `gfirst`: per
+// literal group the row of the literal that made it.
 struct Ev {
     it: u32,
     base: usize,
@@ -443,9 +564,18 @@ struct Ev {
     lbig: vec.Vec<bool>,
     vneg: vec.Vec<bool>,
     vmag: vec.Vec<u64>,
+    vlo: vec.Vec<u32>,
+    vn: vec.Vec<u32>,
+    vrep: vec.Vec<bool>,
     cast_to: vec.Vec<u32>,
+    aux: vec.Vec<u64>,
     gpar: vec.Vec<u32>,
     gfix: vec.Vec<u32>,
+    gfirst: vec.Vec<u32>,
+    pneg: vec.Vec<bool>,
+    pmag: vec.Vec<u64>,
+    // per node: settled and evaluated already (a repeat count, inline)
+    done: vec.Vec<bool>,
     out: u8,
 }
 
@@ -486,25 +616,50 @@ impl Ev {
         if self.out == CV_OK || (why != CV_FAIL && self.out == CV_FAIL) { self.out = why; }
     }
 
-    // The type of a node of type t where `want` is required.
-    fn coerce(&mut self, tab: &types.Table, t: u64, want: u32) -> bool {
+    // The evaluation fails with diagnostic code (`EV_*`) at node row n (type ty, value x), which
+    // an owner that does not type the expression itself reports (`eval_u64`): the first one.
+    fn defer(&mut self, cx: &mut Cx, tree: &ast.Ast, code: u8, n: usize, ty: u32, x: u32) {
+        if cx.dfr.code == 0 {
+            let a = tree.tok.as_slice()[n];
+            cx.dfr = Defer.{ code: code, it: self.it, lo: a, hi: tree.tok_end.as_slice()[n] - 1, ty: ty, x: x };
+        }
+        self.fail(CV_FAIL);
+    }
+
+    // The value at node row n (a type or a group) where `want` is required: a mismatch is
+    // E0201 at n, unless one of the types is the error type (reported where it was made).
+    fn coerce(&mut self, cx: &mut Cx, tree: &ast.Ast, n: usize, t: u64, want: u32) -> bool {
         let r = self.resolve(t);
         if r & LIT == 0 {
             if r as% u32 == want { return true; }
+            if cx.tab.is_err(r as% u32) || cx.tab.is_err(want) {
+                self.fail(CV_FAIL);
+                return false;
+            }
+            self.defer(cx, tree, EV_MISMATCH, n, want, r as% u32);
+            return false;
+        }
+        if self.fix(&cx.tab, (r & 0xffff_ffff) as% u32, want) { return true; }
+        if cx.tab.is_err(want) {
             self.fail(CV_FAIL);
             return false;
         }
-        if self.fix(tab, (r & 0xffff_ffff) as% u32, want) { return true; }
-        self.fail(CV_FAIL);
+        self.defer(cx, tree, EV_MISMATCH, n, want, LIT_INT);
         return false;
     }
 
-    fn unify(&mut self, tab: &types.Table, a: u64, b: u64) -> u64 {
+    // The type of the operands a and b of one operator, rn the right operand's row: a mismatch
+    // is E0201 at rn, the left operand's type expected.
+    fn unify(&mut self, cx: &mut Cx, tree: &ast.Ast, rn: usize, a: u64, b: u64) -> u64 {
         let x = self.resolve(a);
         let y = self.resolve(b);
         if x & LIT == 0 && y & LIT == 0 {
             if x == y { return x; }
-            self.fail(CV_FAIL);
+            if cx.tab.is_err(x as% u32) || cx.tab.is_err(y as% u32) {
+                self.fail(CV_FAIL);
+            } else {
+                self.defer(cx, tree, EV_MISMATCH, rn, x as% u32, y as% u32);
+            }
             return NO_TY;
         }
         if x & LIT != 0 && y & LIT != 0 {
@@ -515,9 +670,20 @@ impl Ev {
             return LIT | (l as u64);
         }
         let (g, t) = if x & LIT != 0 then ((x & 0xffff_ffff) as% u32, y as% u32) else ((y & 0xffff_ffff) as% u32, x as% u32);
-        if self.fix(tab, g, t) { return t as u64; }
-        self.fail(CV_FAIL);
+        if self.fix(&cx.tab, g, t) { return t as u64; }
+        if cx.tab.is_err(t) {
+            self.fail(CV_FAIL);
+        } else {
+            self.defer(cx, tree, EV_MISMATCH, rn, t, LIT_INT);
+        }
         return NO_TY;
+    }
+
+    // Group value v has no type (stage0's E0202 at the literal that made its root group).
+    fn no_type(&mut self, cx: &mut Cx, tree: &ast.Ast, v: u64) {
+        let r = self.find((v & 0xffff_ffff) as% u32);
+        let n = self.gfirst.as_slice()[r as usize] as usize;
+        self.defer(cx, tree, EV_NO_TYPE, n, NONE, NONE);
     }
 
     fn hint_of(&mut self, t: u64, outer: u32) -> u32 {
@@ -525,14 +691,43 @@ impl Ev {
         if r & LIT == 0 { return r as% u32; }
         return outer;
     }
+
+    // Node x takes the value of node c (a scalar or an array).
+    fn copy_val(&mut self, x: usize, c: usize) {
+        let neg = self.vneg.as_slice()[c];
+        let mag = self.vmag.as_slice()[c];
+        let lo = self.vlo.as_slice()[c];
+        let n = self.vn.as_slice()[c];
+        let rep = self.vrep.as_slice()[c];
+        self.vneg.as_mut_slice()[x] = neg;
+        self.vmag.as_mut_slice()[x] = mag;
+        self.set_arr(x, lo as usize, n, rep);
+    }
+
+    // Node x is an array of n scalars from the pool on, one repeated when `rep`.
+    fn set_arr(&mut self, x: usize, lo: usize, n: u32, rep: bool) {
+        self.vlo.as_mut_slice()[x] = lo as% u32;
+        self.vn.as_mut_slice()[x] = n;
+        self.vrep.as_mut_slice()[x] = rep;
+    }
 }
 
-// Decide frames: node row, hint, next child index, the chain's type so far.
+// Decide frames: node row, hint, next child index, the chain's type so far (an array literal:
+// its element type so far; a repeat: the mark of the groups its count makes).
 struct Frames {
     node: vec.Vec<u32>,
     hint: vec.Vec<u32>,
     k: vec.Vec<u32>,
     acc: vec.Vec<u64>,
+}
+
+impl Frames {
+    fn push(&mut self, node: usize, hint: u32, acc: u64) {
+        self.node.push(node as% u32);
+        self.hint.push(hint);
+        self.k.push(1);
+        self.acc.push(acc);
+    }
 }
 
 // The value of the const item d: (state, type, neg, mag).
@@ -620,13 +815,17 @@ fn names_generic(cx: &Cx, tree: &ast.Ast, it: u32, base: usize, g: usize) -> boo
 }
 
 // Evaluates the expression at row g (item it, item base `base`) expecting type `want` (NONE:
-// none): (outcome, type, neg, mag). A fail of a const it names without a value is `CV_FAIL`, of
-// one stage1 cannot evaluate its outcome.
+// none): (outcome, type, neg, mag); an array value is left in the const pool (`Consts.at_lo`).
+// A fail of a const it names without a value is `CV_FAIL`, of one stage1 cannot evaluate its
+// outcome. What fails an operation it evaluates (overflow, an index past the end) is reported
+// (`Cx.rep`); the first failure that reports nothing is kept (`Cx.dfr`).
 pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32) -> (u8, u32, bool, u64) {
+    cx.dfr = no_defer();
+    cx.consts.at_lo = NONE;
     let base = tree.item_node.as_slice()[it as usize] as usize;
     let a = tree.tok.as_slice()[g];
     if kind(tree, g) == K_PRIMARY && tk(t, a) == terminals.T_INT_LIT && tree.tok_end.as_slice()[g] == a + 1 {
-        return lone_literal(cx, t, set, cut, it, a, want);
+        return lone_literal(cx, tree, t, set, cut, it, g, want);
     }
     let lo = g - tree.size.as_slice()[g] as usize;
     let n = g - lo + 1;
@@ -641,62 +840,121 @@ pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, s
         lbig: col.filled(n, false),
         vneg: col.filled(n, false),
         vmag: col.filled(n, 0u64),
+        vlo: col.filled(n, NONE),
+        vn: col.filled(n, 0u32),
+        vrep: col.filled(n, false),
         cast_to: col.filled(n, NONE),
+        aux: col.filled(n, NO_TY),
         gpar: vec.Vec::<u32>.new(),
         gfix: vec.Vec::<u32>.new(),
+        gfirst: vec.Vec::<u32>.new(),
+        done: col.filled(n, false),
+        pneg: vec.Vec::<bool>.new(),
+        pmag: vec.Vec::<u64>.new(),
         out: CV_OK,
     };
     let top = decide(cx, tree, t, nm, set, cut, ds, &mut ev, g, want);
     if ev.out != CV_OK { return (ev.out, types.ERR, false, 0); }
     if want != NONE {
-        if !ev.coerce(&cx.tab, top, want) { return (ev.out, types.ERR, false, 0); }
+        if !ev.coerce(cx, tree, g, top, want) { return (ev.out, types.ERR, false, 0); }
     } else if ev.resolve(top) & LIT != 0 {
+        ev.no_type(cx, tree, top);
         return (CV_FAIL, types.ERR, false, 0);
     }
-    // every group has a type, every literal fits it, every operator is defined on it
-    for k in 0..ev.gpar.len() {
-        let r = ev.find(k as% u32);
-        if ev.gfix.as_slice()[r as usize] == NONE { return (CV_FAIL, types.ERR, false, 0); }
-    }
-    for x in 0..n {
-        let ty = ev.nty.as_slice()[x];
-        if ty == NO_TY { continue; }
-        let rt = ev.resolve(ty);
-        ev.nty.as_mut_slice()[x] = rt;
-        if ev.lit.as_slice()[x] == 1 {
-            if ev.lbig.as_slice()[x] || !in_range(&cx.tab, rt as% u32, ev.lneg.as_slice()[x], ev.lmag.as_slice()[x]) { return (CV_FAIL, types.ERR, false, 0); }
-        }
-        let k = kind(tree, lo + x);
-        let rule = (is_chain(k) && tree.kids.row(lo + x).len() > 1) || k == K_UNARY;
-        if ev.lit.as_slice()[x] == 0 && rule {
-            if cx.tab.tag_of(rt as% u32) != types.TK_INT { return (CV_FAIL, types.ERR, false, 0); }
-            if k == K_UNARY && tk(t, tree.tok.as_slice()[lo + x]) == terminals.T_MINUS && !cx.tab.is_signed(rt as% u32) { return (CV_FAIL, types.ERR, false, 0); }
-        }
-    }
-    let r = value(cx, tree, t, ds, &mut ev, g);
+    if !settle(cx, tree, t, &mut ev, lo, g, 0) { return (ev.out, types.ERR, false, 0); }
+    let r = value(cx, tree, t, &mut ev, lo, g);
     if r != CV_OK { return (r, types.ERR, false, 0); }
     let x = g - lo;
+    let vl = ev.vlo.as_slice()[x];
+    if vl != NONE {
+        let c = &mut cx.consts;
+        c.at_lo = c.pmag.len() as% u32;
+        c.at_n = ev.vn.as_slice()[x];
+        c.at_rep = ev.vrep.as_slice()[x];
+        let cnt = if c.at_rep then 1usize else c.at_n as usize;
+        for k in 0..cnt {
+            c.pneg.push(ev.pneg.as_slice()[vl as usize + k]);
+            c.pmag.push(ev.pmag.as_slice()[vl as usize + k]);
+        }
+    }
     return (CV_OK, ev.nty.as_slice()[x] as% u32, ev.vneg.as_slice()[x], ev.vmag.as_slice()[x]);
 }
 
-// An expression that is one int literal at token a, expected type `want` (NONE: none): the
+// Keeps diagnostic code (`EV_*`) at node row n of item it (type ty, value x) as the evaluation's
+// failure that reports nothing, unless one is kept already.
+fn note(cx: &mut Cx, tree: &ast.Ast, it: u32, code: u8, n: usize, ty: u32, x: u32) {
+    if cx.dfr.code != 0 { return; }
+    let a = tree.tok.as_slice()[n];
+    cx.dfr = Defer.{ code: code, it: it, lo: a, hi: tree.tok_end.as_slice()[n] - 1, ty: ty, x: x };
+}
+
+// An expression that is one int literal (node row g), expected type `want` (NONE: none): the
 // two passes collapse to this (a suffix gives its type, else the expected type does).
-fn lone_literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, a: u32, want: u32) -> (u8, u32, bool, u64) {
+fn lone_literal(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, it: u32, g: usize, want: u32) -> (u8, u32, bool, u64) {
     let f = cut.file.as_slice()[it as usize] as usize;
-    let (s, e) = lit_text(t, set, cut, it, a);
+    let (s, e) = lit_text(t, set, cut, it, tree.tok.as_slice()[g]);
     let (mag, big, suf) = parse_int(&set.file(f)[s..e]);
     if suf == 0xff || (suf == 100 && want != NONE) { return (CV_FAIL, types.ERR, false, 0); }
     if suf == 100 { return (CV_UNSUP, types.ERR, false, 0); }
     let ty = if suf != 0 then suffix_ty(&mut cx.tab, suf) else want;
-    if ty == NONE || (want != NONE && ty != want) || cx.tab.tag_of(ty) != types.TK_INT { return (CV_FAIL, types.ERR, false, 0); }
-    if big || !in_range(&cx.tab, ty, false, mag) { return (CV_FAIL, types.ERR, false, 0); }
+    if ty == NONE || cx.tab.is_err(ty) { return (CV_FAIL, types.ERR, false, 0); }
+    if want != NONE && (ty != want || cx.tab.tag_of(ty) != types.TK_INT) {
+        if !cx.tab.is_err(want) { note(cx, tree, it, EV_MISMATCH, g, want, if suf != 0 then ty else LIT_INT); }
+        return (CV_FAIL, types.ERR, false, 0);
+    }
+    if big || !in_range(&cx.tab, ty, false, mag) {
+        note(cx, tree, it, EV_RANGE, g, ty, NONE);
+        return (CV_FAIL, types.ERR, false, 0);
+    }
     return (CV_OK, ty, false, mag);
+}
+
+// The element type an array hint gives (NONE: none).
+fn elem_hint(tab: &types.Table, h: u32) -> u32 {
+    if h == NONE || h == types.ERR || tab.tag_of(h) != types.TK_ARRAY { return NONE; }
+    return tab.a_of(h);
+}
+
+// Whether the evaluator holds arrays of type t's elements: ints and `bool`s.
+fn scalar_elem(tab: &types.Table, t: u32) -> bool {
+    if t == NONE || t == types.ERR { return false; }
+    let tag = tab.tag_of(t);
+    return tag == types.TK_INT || tag == types.TK_BOOL;
+}
+
+// The length of array type t, if it is a value (else NONE as u64).
+fn arr_len(tab: &types.Table, t: u32) -> u64 {
+    let xs = tab.x(t);
+    if xs.len() < 3 || xs[0] != types.GA_VALUE { return NO_TY; }
+    return ((xs[1] as u64) << 32) | xs[2] as u64;
+}
+
+// The array type of elem and length n (an evaluated array of ints or `bool`s), or the error type
+// when its bytes pass the compile-time data limit (stage0: E0904 case `size`).
+fn array_ty(tab: &mut types.Table, elem: u32, n: u64) -> u32 {
+    let bytes: u64 = if tab.tag_of(elem) == types.TK_BOOL then 1u64 else if tab.int_bits(elem) == 0 then 8u64 else (tab.int_bits(elem) / 8) as u64;
+    if n > MAX_DATA_BYTES / bytes { return types.ERR; }
+    tab.begin();
+    tab.push_garg(types.GA_VALUE, (n >> 32) as% u32, n as% u32);
+    return tab.intern(types.TK_ARRAY, elem, 0);
+}
+
+// The index form `C[i]` at Postfix row g: a head `Primary` and one index step, its last.
+fn is_index(tree: &ast.Ast, t: &lex.Tokens, base: usize, g: usize) -> bool {
+    let ks = tree.kids.row(g);
+    if ks.len() != 2 { return false; }
+    let head = base + ks[0] as usize;
+    let ie = base + ks[1] as usize;
+    if kind(tree, head) != K_PRIMARY { return false; }
+    let open = tree.tok_end.as_slice()[head];
+    return tk(t, open) == terminals.T_L_BRACKET && tree.tok.as_slice()[ie] == open + 1 && tree.tok_end.as_slice()[ie] + 1 == tree.tok_end.as_slice()[g];
 }
 
 // The decide pass from row g with hint `want`: the type of g (a T or a group).
 fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, ev: &mut Ev, g: usize, want: u32) -> u64 {
     let base = ev.base;
     let it = ev.it;
+    let bool_t = cx.tab.key(types.TK_BOOL, 0, 0);
     let mut fr = Frames.{ node: vec.Vec::<u32>.new(), hint: vec.Vec::<u32>.new(), k: vec.Vec::<u32>.new(), acc: vec.Vec::<u64>.new() };
     let mut cur = g;
     let mut hint = want;
@@ -709,20 +967,45 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
             let k = kind(tree, cur);
             let ks = tree.kids.row(cur);
             let a = tree.tok.as_slice()[cur];
+            // stage0 decides a node at the depth of its frames plus one, the head path of an
+            // index without deciding it; past `MAX_DEPTH` it reports E0904 case `depth` (not a
+            // code here) and there is no value
+            let top = fr.node.len();
+            let pf = if top > 0 then fr.node.as_slice()[top - 1] as usize else 0usize;
+            let path_head = top > 0 && kind(tree, pf) == K_POSTFIX && cur == base + tree.kids.row(pf)[0] as usize && k == K_PRIMARY && tk(t, a) == terminals.T_IDENT;
+            if top + 1 > MAX_DEPTH && !path_head {
+                ev.fail(CV_FAIL);
+                continue;
+            }
             if is_chain(k) && ks.len() > 1 {
-                fr.node.push(cur as% u32);
-                fr.hint.push(hint);
-                fr.k.push(1);
-                fr.acc.push(NO_TY);
+                fr.push(cur, hint, NO_TY);
                 cur = base + ks[0] as usize;
                 continue;
             }
-            if (is_chain(k) || k == K_CAST) && ks.len() == 1 {
-                fr.node.push(cur as% u32);
-                fr.hint.push(hint);
-                fr.k.push(1);
-                fr.acc.push(NO_TY);
+            if (is_chain(k) || k == K_CAST || k == K_AND || k == K_OR || k == K_CMP) && ks.len() == 1 {
+                fr.push(cur, hint, NO_TY);
                 cur = base + ks[0] as usize;
+                continue;
+            }
+            if k == K_AND || k == K_OR || k == K_IF {
+                if k == K_IF && ks.len() != 3 {
+                    ev.fail(CV_UNSUP);
+                    continue;
+                }
+                // a condition and every `&&` / `||` operand is a `bool`
+                fr.push(cur, hint, NO_TY);
+                cur = base + ks[0] as usize;
+                hint = bool_t;
+                continue;
+            }
+            if k == K_CMP {
+                if ks.len() != 3 {
+                    ev.fail(CV_UNSUP);
+                    continue;
+                }
+                fr.push(cur, hint, NO_TY);
+                cur = base + ks[0] as usize;
+                hint = NONE;
                 continue;
             }
             if k == K_UNARY {
@@ -747,16 +1030,14 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                         continue;
                     }
                 }
-                if op != terminals.T_MINUS && op != terminals.T_TILDE {
+                if op != terminals.T_MINUS && op != terminals.T_TILDE && op != terminals.T_BANG {
                     ev.fail(CV_UNSUP);
                     continue;
                 }
-                // the operand has the node's type
-                fr.node.push(cur as% u32);
-                fr.hint.push(hint);
-                fr.k.push(1);
-                fr.acc.push(NO_TY);
+                // the operand has the node's type; `!`'s is a `bool`
+                fr.push(cur, hint, NO_TY);
                 cur = c;
+                if op == terminals.T_BANG { hint = bool_t; }
                 continue;
             }
             if k == K_CAST {
@@ -764,10 +1045,14 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                     ev.fail(CV_UNSUP);
                     continue;
                 }
-                fr.node.push(cur as% u32);
-                fr.hint.push(hint);
-                fr.k.push(1);
-                fr.acc.push(NO_TY);
+                fr.push(cur, hint, NO_TY);
+                cur = base + ks[0] as usize;
+                hint = NONE;
+                continue;
+            }
+            if k == K_POSTFIX && is_index(tree, t, base, cur) {
+                // the array first, without an expected type
+                fr.push(cur, hint, NO_TY);
                 cur = base + ks[0] as usize;
                 hint = NONE;
                 continue;
@@ -779,17 +1064,50 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                     entering = false;
                     continue;
                 }
+                if op == terminals.T_KW_TRUE || op == terminals.T_KW_FALSE {
+                    let x = cur - ev.lo;
+                    ev.lit.as_mut_slice()[x] = 2;
+                    ev.vmag.as_mut_slice()[x] = if op == terminals.T_KW_TRUE then 1u64 else 0u64;
+                    ret = bool_t as u64;
+                    ev.nty.as_mut_slice()[x] = ret;
+                    entering = false;
+                    continue;
+                }
                 if op == terminals.T_L_PAREN {
                     let close = tree.tok_end.as_slice()[cur] - 1;
                     if ks.len() == 1 && tk(t, close - 1) != terminals.T_COMMA {
-                        fr.node.push(cur as% u32);
-                        fr.hint.push(hint);
-                        fr.k.push(1);
-                        fr.acc.push(NO_TY);
+                        fr.push(cur, hint, NO_TY);
                         cur = base + ks[0] as usize;
                         continue;
                     }
                     ev.fail(CV_UNSUP);
+                    continue;
+                }
+                if op == terminals.T_L_BRACKET {
+                    let eh = elem_hint(&cx.tab, hint);
+                    if ks.len() == 0 {
+                        // `[]` has the expected type, an array of length 0 (none: E0202 `infer`)
+                        if eh == NONE || arr_len(&cx.tab, hint) != 0 {
+                            ev.defer(cx, tree, EV_INFER, cur, NONE, NONE);
+                            continue;
+                        }
+                        if !scalar_elem(&cx.tab, eh) {
+                            ev.fail(CV_UNSUP);
+                            continue;
+                        }
+                        let x = cur - ev.lo;
+                        ev.lit.as_mut_slice()[x] = 2;
+                        let pl = ev.pmag.len();
+                        ev.set_arr(x, pl, 0, false);
+                        ret = hint as u64;
+                        ev.nty.as_mut_slice()[x] = ret;
+                        entering = false;
+                        continue;
+                    }
+                    // `[e; n]`, `[a, b, ..]`: the first element under the element hint
+                    fr.push(cur, hint, if eh == NONE then NO_TY else eh as u64);
+                    cur = base + ks[0] as usize;
+                    hint = eh;
                     continue;
                 }
                 if op != terminals.T_IDENT {
@@ -856,14 +1174,28 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                         ev.fail(if st == CV_UNSUP || st == CV_LAYOUT then st else CV_FAIL);
                         continue;
                     }
-                    if cx.tab.tag_of(ty) != types.TK_INT {
+                    let x = cur - ev.lo;
+                    let tag = cx.tab.tag_of(ty);
+                    let al = cx.consts.alo.as_slice()[d as usize];
+                    if tag == types.TK_INT || tag == types.TK_BOOL {
+                        ev.vneg.as_mut_slice()[x] = neg;
+                        ev.vmag.as_mut_slice()[x] = mag;
+                    } else if al != NONE {
+                        // an array: its elements into this evaluation's pool
+                        let an = cx.consts.an.as_slice()[d as usize];
+                        let rep = cx.consts.arep.as_slice()[d as usize];
+                        let pl = ev.pmag.len();
+                        let cnt = if rep then 1u32 else an;
+                        for j in 0..cnt as usize {
+                            ev.pneg.push(cx.consts.pneg.as_slice()[al as usize + j]);
+                            ev.pmag.push(cx.consts.pmag.as_slice()[al as usize + j]);
+                        }
+                        ev.set_arr(x, pl, an, rep);
+                    } else {
                         ev.fail(CV_UNSUP);
                         continue;
                     }
-                    let x = cur - ev.lo;
                     ev.lit.as_mut_slice()[x] = 2;
-                    ev.vneg.as_mut_slice()[x] = neg;
-                    ev.vmag.as_mut_slice()[x] = mag;
                     ret = ty as u64;
                     ev.nty.as_mut_slice()[x] = ret;
                     entering = false;
@@ -892,28 +1224,183 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
         let fks = tree.kids.row(fnode);
         let fh = fr.hint.as_slice()[f];
         let kk = fr.k.as_slice()[f] as usize;
-        if (is_chain(fk) || fk == K_CAST) && fks.len() == 1 {
+        let ftok = tree.tok.as_slice()[fnode];
+        // the next child of the frame: `nk` with hint `nh`
+        let mut nk: usize = 0;
+        let mut nh = NONE;
+        if (is_chain(fk) || fk == K_CAST || fk == K_AND || fk == K_OR || fk == K_CMP) && fks.len() == 1 {
             ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
         } else if is_chain(fk) {
-            let acc = if kk == 1 then ret else ev.unify(&cx.tab, fr.acc.as_slice()[f], ret);
+            let acc = if kk == 1 then ret else ev.unify(cx, tree, base + fks[kk - 1] as usize, fr.acc.as_slice()[f], ret);
             if ev.out != CV_OK { return NO_TY; }
             if kk < fks.len() {
                 fr.acc.as_mut_slice()[f] = acc;
-                fr.k.as_mut_slice()[f] = (kk + 1) as% u32;
-                cur = base + fks[kk] as usize;
-                hint = ev.hint_of(acc, fh);
-                entering = true;
-                continue;
+                nk = kk;
+                nh = ev.hint_of(acc, fh);
+            } else {
+                ev.nty.as_mut_slice()[fnode - ev.lo] = acc;
+                ret = acc;
             }
-            ev.nty.as_mut_slice()[fnode - ev.lo] = acc;
-            ret = acc;
-        } else if fk == K_UNARY || fk == K_PRIMARY {
+        } else if fk == K_AND || fk == K_OR {
+            if !ev.coerce(cx, tree, base + fks[kk - 1] as usize, ret, bool_t) { return NO_TY; }
+            if kk < fks.len() {
+                nk = kk;
+                nh = bool_t;
+            } else {
+                ret = bool_t as u64;
+                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+            }
+        } else if fk == K_IF {
+            if kk == 1 {
+                if !ev.coerce(cx, tree, base + fks[0] as usize, ret, bool_t) { return NO_TY; }
+                nk = 1;
+                nh = fh;
+            } else if kk == 2 {
+                fr.acc.as_mut_slice()[f] = ret;
+                nk = 2;
+                nh = ev.hint_of(ret, fh);
+            } else {
+                ret = ev.unify(cx, tree, base + fks[2] as usize, fr.acc.as_slice()[f], ret);
+                if ev.out != CV_OK { return NO_TY; }
+                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+            }
+        } else if fk == K_CMP {
+            if kk == 1 {
+                fr.acc.as_mut_slice()[f] = ret;
+                nk = 2;
+                nh = ev.hint_of(ret, NONE);
+            } else {
+                let u = ev.unify(cx, tree, base + fks[2] as usize, fr.acc.as_slice()[f], ret);
+                if ev.out != CV_OK { return NO_TY; }
+                ev.aux.as_mut_slice()[fnode - ev.lo] = u;
+                ret = bool_t as u64;
+                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+            }
+        } else if fk == K_UNARY {
+            if tk(t, ftok) == terminals.T_BANG {
+                if !ev.coerce(cx, tree, base + fks[0] as usize, ret, bool_t) { return NO_TY; }
+                ret = bool_t as u64;
+            }
+            ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+        } else if fk == K_POSTFIX {
+            if kk == 1 {
+                // the array; then the index, a `usize`
+                let b = ev.resolve(ret);
+                if b & LIT != 0 {
+                    ev.no_type(cx, tree, b);
+                    return NO_TY;
+                }
+                if cx.tab.tag_of(b as% u32) != types.TK_ARRAY {
+                    ev.fail(CV_FAIL);
+                    return NO_TY;
+                }
+                if !scalar_elem(&cx.tab, cx.tab.a_of(b as% u32)) || arr_len(&cx.tab, b as% u32) == NO_TY {
+                    ev.fail(CV_UNSUP);
+                    return NO_TY;
+                }
+                ev.aux.as_mut_slice()[fnode - ev.lo] = b;
+                nk = 1;
+                nh = cx.tab.usize_t();
+            } else {
+                let us = cx.tab.usize_t();
+                if !ev.coerce(cx, tree, base + fks[1] as usize, ret, us) { return NO_TY; }
+                ret = cx.tab.a_of(ev.aux.as_slice()[fnode - ev.lo] as% u32) as u64;
+                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+            }
+        } else if fk == K_PRIMARY && tk(t, ftok) == terminals.T_L_BRACKET {
+            let eh = elem_hint(&cx.tab, fh);
+            let rep = fks.len() == 2 && tk(t, tree.tok_end.as_slice()[base + fks[0] as usize]) == terminals.T_SEMI;
+            if rep && kk == 1 {
+                // the element: a literal takes the element hint (none: E0202); then the count,
+                // a `usize` evaluated on its own (its groups from the mark in `acc`)
+                let r = ev.resolve(ret);
+                let mut elem = r as% u32;
+                if r & LIT != 0 {
+                    if eh == NONE {
+                        ev.no_type(cx, tree, r);
+                        return NO_TY;
+                    }
+                    if !ev.coerce(cx, tree, base + fks[0] as usize, ret, eh) { return NO_TY; }
+                    elem = eh;
+                }
+                if !scalar_elem(&cx.tab, elem) {
+                    ev.fail(CV_UNSUP);
+                    return NO_TY;
+                }
+                fr.acc.as_mut_slice()[f] = ((elem as u64) << 32) | ev.gpar.len() as u64;
+                nk = 1;
+                nh = cx.tab.usize_t();
+            } else if rep {
+                let c = base + fks[1] as usize;
+                let us = cx.tab.usize_t();
+                if !ev.coerce(cx, tree, c, ret, us) { return NO_TY; }
+                let mark = fr.acc.as_slice()[f];
+                let clo = c - tree.size.as_slice()[c] as usize;
+                if !settle(cx, tree, t, ev, clo, c, (mark & 0xffff_ffff) as usize) { return NO_TY; }
+                let r = value(cx, tree, t, ev, clo, c);
+                if r != CV_OK {
+                    ev.fail(r);
+                    return NO_TY;
+                }
+                for x in clo..c + 1 {
+                    ev.done.as_mut_slice()[x - ev.lo] = true;
+                }
+                let at = array_ty(&mut cx.tab, (mark >> 32) as% u32, ev.vmag.as_slice()[c - ev.lo]);
+                if at == types.ERR {
+                    ev.fail(CV_FAIL);
+                    return NO_TY;
+                }
+                ret = at as u64;
+                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+            } else {
+                // the element type: the hint's, else the first element's that has one
+                let mut et = fr.acc.as_slice()[f];
+                if et == NO_TY {
+                    let r = ev.resolve(ret);
+                    if r & LIT == 0 { et = r; }
+                }
+                fr.acc.as_mut_slice()[f] = et;
+                if kk < fks.len() {
+                    nk = kk;
+                    nh = if et == NO_TY then NONE else et as% u32;
+                } else {
+                    if et == NO_TY {
+                        // every element a literal: one group, then no context (E0202)
+                        let mut u = ev.nty.as_slice()[base + fks[0] as usize - ev.lo];
+                        for j in 1..fks.len() {
+                            let v = ev.nty.as_slice()[base + fks[j] as usize - ev.lo];
+                            u = ev.unify(cx, tree, base + fks[j] as usize, u, v);
+                            if ev.out != CV_OK { return NO_TY; }
+                        }
+                        ev.no_type(cx, tree, u);
+                        return NO_TY;
+                    }
+                    let elem = et as% u32;
+                    for j in 0..fks.len() {
+                        let c = base + fks[j] as usize;
+                        let v = ev.nty.as_slice()[c - ev.lo];
+                        if !ev.coerce(cx, tree, c, v, elem) { return NO_TY; }
+                    }
+                    if !scalar_elem(&cx.tab, elem) {
+                        ev.fail(CV_UNSUP);
+                        return NO_TY;
+                    }
+                    let at = array_ty(&mut cx.tab, elem, fks.len() as u64);
+                    if at == types.ERR {
+                        ev.fail(CV_FAIL);
+                        return NO_TY;
+                    }
+                    ret = at as u64;
+                    ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+                }
+            }
+        } else if fk == K_PRIMARY {
             ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
         } else if fk == K_CAST {
             // the operand has no expected type; each step names an int type
             let r = ev.resolve(ret);
             if r & LIT != 0 {
-                ev.fail(CV_FAIL);
+                ev.no_type(cx, tree, r);
                 return NO_TY;
             }
             let mut src = r as% u32;
@@ -940,6 +1427,13 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
             }
             ret = src as u64;
             ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+        }
+        if nk != 0 {
+            fr.k.as_mut_slice()[f] = (nk + 1) as% u32;
+            cur = base + fks[nk] as usize;
+            hint = nh;
+            entering = true;
+            continue;
         }
         fr.node.truncate(f);
         fr.hint.truncate(f);
@@ -998,6 +1492,7 @@ fn literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Item
         let gid = ev.gpar.len() as% u32;
         ev.gpar.push(gid);
         ev.gfix.push(NONE);
+        ev.gfirst.push(g as% u32);
         if hint != NONE { let _ = ev.fix(&cx.tab, gid, hint); }
         r = LIT | (gid as u64);
     }
@@ -1005,39 +1500,143 @@ fn literal(cx: &mut Cx, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Item
     return r;
 }
 
-// The value pass: every decided node of the subtree of g in node order.
-fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, ev: &mut Ev, g: usize) -> u8 {
-    let base = ev.base;
-    for row in ev.lo..g + 1 {
+// The checks of rows first..=last once decided, as stage0's `settle`: every group made since mark
+// g0 has a type (else E0202), then every literal fits its type (else E0203 at it), then every
+// operator is defined on its type (else E0206, or E0904 for a user type). False: the evaluation
+// failed.
+fn settle(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize, last: usize, g0: usize) -> bool {
+    for k in g0..ev.gpar.len() {
+        let r = ev.find(k as% u32);
+        if ev.gfix.as_slice()[r as usize] == NONE {
+            ev.no_type(cx, tree, LIT | r as u64);
+            return false;
+        }
+    }
+    for row in first..last + 1 {
         let x = row - ev.lo;
         let ty = ev.nty.as_slice()[x];
-        if ty == NO_TY { continue; }
-        let l = ev.lit.as_slice()[x];
-        if l == 1 {
-            ev.vneg.as_mut_slice()[x] = ev.lneg.as_slice()[x];
-            ev.vmag.as_mut_slice()[x] = ev.lmag.as_slice()[x];
-            continue;
+        if ty == NO_TY || ev.done.as_slice()[x] { continue; }
+        let rt = ev.resolve(ty);
+        ev.nty.as_mut_slice()[x] = rt;
+        if ev.lit.as_slice()[x] == 1 && (ev.lbig.as_slice()[x] || !in_range(&cx.tab, rt as% u32, ev.lneg.as_slice()[x], ev.lmag.as_slice()[x])) {
+            ev.defer(cx, tree, EV_RANGE, row, rt as% u32, NONE);
+            return false;
         }
-        if l == 2 { continue; }
+    }
+    for row in first..last + 1 {
+        let x = row - ev.lo;
+        let rt = ev.nty.as_slice()[x];
+        if rt == NO_TY || ev.lit.as_slice()[x] != 0 || ev.done.as_slice()[x] { continue; }
+        let k = kind(tree, row);
+        let n = tree.kids.row(row).len();
+        let tag = cx.tab.tag_of(rt as% u32);
+        let mut ok = true;
+        if is_chain(k) && n > 1 {
+            ok = tag == types.TK_INT || (tag == types.TK_BOOL && (k == K_BIT_AND || k == K_BIT_OR || k == K_BIT_XOR));
+        } else if k == K_UNARY {
+            let op = tk(t, tree.tok.as_slice()[row]);
+            if op == terminals.T_MINUS { ok = tag == types.TK_INT && cx.tab.is_signed(rt as% u32); }
+            if op == terminals.T_TILDE { ok = tag == types.TK_INT; }
+        } else if k == K_CMP && n > 1 {
+            let a0 = ev.aux.as_slice()[x];
+            let ot = ev.resolve(a0);
+            ev.aux.as_mut_slice()[x] = ot;
+            let otag = cx.tab.tag_of(ot as% u32);
+            ok = ot & LIT == 0 && (otag == types.TK_INT || otag == types.TK_BOOL);
+        }
+        if !ok {
+            ev.fail(CV_FAIL);
+            return false;
+        }
+    }
+    return true;
+}
+
+// The value pass over rows first..=last in node order (node ids are postorder: a node's operands
+// come first), lazy where the run time is: the arm of an `if` not taken and the operands of a
+// `&&` / `||` past the one that decides it are skipped. An operation that would trap at run time
+// (overflow, division by zero, `MIN / -1`, an index past the end) is reported here, stage0's
+// E0203 at it.
+fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize, last: usize) -> u8 {
+    let base = ev.base;
+    // rows below `skip` are not evaluated
+    let mut skip = first;
+    for row in first..last + 1 {
+        if row < skip { continue; }
+        let x = row - ev.lo;
+        let ty = ev.nty.as_slice()[x];
+        if ty == NO_TY || ev.done.as_slice()[x] { continue; }
+        let l = ev.lit.as_slice()[x];
         let k = kind(tree, row);
         let ks = tree.kids.row(row);
         let tt = ty as% u32;
-        if k == K_PRIMARY || (is_chain(k) && ks.len() == 1) || (k == K_CAST && ks.len() == 1) {
-            if ks.len() == 0 { continue; }
+        if l == 1 {
+            ev.vneg.as_mut_slice()[x] = ev.lneg.as_slice()[x];
+            ev.vmag.as_mut_slice()[x] = ev.lmag.as_slice()[x];
+        } else if l == 2 {} else if k == K_PRIMARY && tk(t, tree.tok.as_slice()[row]) == terminals.T_L_BRACKET {
+            let pl = ev.pmag.len();
+            let rep = ks.len() == 2 && tk(t, tree.tok_end.as_slice()[base + ks[0] as usize]) == terminals.T_SEMI;
+            let cnt = if rep then 1usize else ks.len();
+            for j in 0..cnt {
+                let c = base + ks[j] as usize - ev.lo;
+                let cn = ev.vneg.as_slice()[c];
+                let cm = ev.vmag.as_slice()[c];
+                ev.pneg.push(cn);
+                ev.pmag.push(cm);
+            }
+            let n = if rep then arr_len(&cx.tab, tt) as% u32 else ks.len() as% u32;
+            ev.set_arr(x, pl, n, rep);
+        } else if k == K_POSTFIX {
+            // `a[i]`: an index past the end traps `Bounds` at run time
+            let a = base + ks[0] as usize - ev.lo;
+            let ie = base + ks[1] as usize;
+            let i = ev.vmag.as_slice()[ie - ev.lo];
+            let n = ev.vn.as_slice()[a];
+            if i >= n as u64 {
+                let at = ev.aux.as_slice()[x] as% u32;
+                cx.rep.add(EV_INDEX, ev.it, tree.tok.as_slice()[ie], tree.tok_end.as_slice()[ie] - 1, at, n);
+                return CV_FAIL;
+            }
+            let p = ev.vlo.as_slice()[a] as usize + (if ev.vrep.as_slice()[a] then 0usize else i as usize);
+            ev.vneg.as_mut_slice()[x] = ev.pneg.as_slice()[p];
+            ev.vmag.as_mut_slice()[x] = ev.pmag.as_slice()[p];
+        } else if k == K_IF {
+            let c = base + ks[0] as usize - ev.lo;
+            let arm = if ev.vmag.as_slice()[c] == 1 then ks[1] else ks[2];
+            ev.copy_val(x, base + arm as usize - ev.lo);
+        } else if (k == K_AND || k == K_OR) && ks.len() > 1 {
+            // the first operand that decides it, else the last
+            let is_or = k == K_OR;
+            let mut v = !is_or;
+            for j in 0..ks.len() {
+                if (ev.vmag.as_slice()[base + ks[j] as usize - ev.lo] == 1) == is_or {
+                    v = is_or;
+                    break;
+                }
+            }
+            ev.vmag.as_mut_slice()[x] = if v then 1u64 else 0u64;
+        } else if k == K_CMP && ks.len() > 1 {
+            let a = base + ks[0] as usize - ev.lo;
+            let b = base + ks[2] as usize - ev.lo;
+            let c = cmp_vals(ev.vneg.as_slice()[a], ev.vmag.as_slice()[a], ev.vneg.as_slice()[b], ev.vmag.as_slice()[b]);
+            let op = tk(t, tree.tok.as_slice()[base + ks[1] as usize]);
+            let v = if op == terminals.T_EQ_EQ then c == 0 else if op == terminals.T_BANG_EQ then c != 0 else if op == terminals.T_LT then c < 0 else if op == terminals.T_LT_EQ then c <= 0 else if op == terminals.T_GT then c > 0 else c >= 0;
+            ev.vmag.as_mut_slice()[x] = if v then 1u64 else 0u64;
+        } else if k == K_PRIMARY || ((is_chain(k) || k == K_CAST || k == K_AND || k == K_OR || k == K_CMP) && ks.len() == 1) {
+            if ks.len() > 0 { ev.copy_val(x, base + ks[0] as usize - ev.lo); }
+        } else if k == K_UNARY {
             let c = base + ks[0] as usize - ev.lo;
             let cn = ev.vneg.as_slice()[c];
             let cm = ev.vmag.as_slice()[c];
-            ev.vneg.as_mut_slice()[x] = cn;
-            ev.vmag.as_mut_slice()[x] = cm;
-            continue;
-        }
-        if k == K_UNARY {
-            let c = base + ks[0] as usize - ev.lo;
-            let cn = ev.vneg.as_slice()[c];
-            let cm = ev.vmag.as_slice()[c];
-            if tk(t, tree.tok.as_slice()[row]) == terminals.T_MINUS {
+            let op = tk(t, tree.tok.as_slice()[row]);
+            if op == terminals.T_BANG {
+                ev.vmag.as_mut_slice()[x] = 1 - cm;
+            } else if op == terminals.T_MINUS {
                 let (_, lo, _) = range_of(&cx.tab, tt);
-                if cn && cm == lo { return CV_FAIL; }
+                if cn && cm == lo {
+                    cx.rep.add(EV_RANGE, ev.it, tree.tok.as_slice()[row], tree.tok_end.as_slice()[row] - 1, tt, NONE);
+                    return CV_FAIL;
+                }
                 ev.vneg.as_mut_slice()[x] = !cn && cm != 0;
                 ev.vmag.as_mut_slice()[x] = cm;
             } else {
@@ -1045,9 +1644,7 @@ fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, ev: &mut
                 ev.vneg.as_mut_slice()[x] = rn;
                 ev.vmag.as_mut_slice()[x] = rm;
             }
-            continue;
-        }
-        if k == K_CAST {
+        } else if k == K_CAST {
             let c = base + ks[0] as usize - ev.lo;
             let to = ev.cast_to.as_slice()[x];
             let op = tk(t, tree.tok.as_slice()[base + ks[1] as usize] - 1);
@@ -1056,27 +1653,57 @@ fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, ev: &mut
             let (rn, rm) = if op == terminals.T_AS_PERCENT then wrap(word(cn, cm), cx.tab.is_signed(to), cx.tab.int_bits(to)) else clamp(&cx.tab, to, cn, cm, false);
             ev.vneg.as_mut_slice()[x] = rn;
             ev.vmag.as_mut_slice()[x] = rm;
-            continue;
-        }
-        if is_chain(k) {
-            let c0 = base + ks[0] as usize - ev.lo;
-            let mut an = ev.vneg.as_slice()[c0];
-            let mut am = ev.vmag.as_slice()[c0];
+        } else if is_chain(k) {
+            let c0 = base + ks[0] as usize;
+            let mut an = ev.vneg.as_slice()[c0 - ev.lo];
+            let mut am = ev.vmag.as_slice()[c0 - ev.lo];
+            let bit = cx.tab.tag_of(tt) == types.TK_BOOL;
             for j in 1..ks.len() {
                 let cr = base + ks[j] as usize;
                 let c = cr - ev.lo;
                 let op = tk(t, tree.tok.as_slice()[cr] - 1);
-                let (ok, rn, rm) = arith(&cx.tab, tt, op, an, am, ev.vneg.as_slice()[c], ev.vmag.as_slice()[c]);
-                if !ok { return CV_FAIL; }
+                let (st, rn, rm) = if bit then (A_OK, false, bool_op(op, am, ev.vmag.as_slice()[c])) else arith(&cx.tab, tt, op, an, am, ev.vneg.as_slice()[c], ev.vmag.as_slice()[c]);
+                if st == A_OVER {
+                    // the operation from the chain's first operand through this one
+                    cx.rep.add(EV_RANGE, ev.it, tree.tok.as_slice()[c0], tree.tok_end.as_slice()[cr] - 1, tt, NONE);
+                    return CV_FAIL;
+                }
+                if st != A_OK { return CV_FAIL; }
                 an = rn;
                 am = rm;
             }
             ev.vneg.as_mut_slice()[x] = an;
             ev.vmag.as_mut_slice()[x] = am;
-            continue;
+        }
+        // laziness: what the value of row decides of its parent's other operands
+        let p = cx.parent.as_slice()[row];
+        if p == NONE || p as usize > last { continue; }
+        let pk = kind(tree, p as usize);
+        let pks = tree.kids.row(p as usize);
+        if pk == K_IF && pks.len() == 3 {
+            if row == base + pks[0] as usize && ev.vmag.as_slice()[x] == 0 { skip = base + pks[1] as usize + 1; }
+            if row == base + pks[1] as usize { skip = base + pks[2] as usize + 1; }
+        }
+        if (pk == K_AND || pk == K_OR) && pks.len() > 1 && (ev.vmag.as_slice()[x] == 1) == (pk == K_OR) {
+            skip = base + pks[pks.len() - 1] as usize + 1;
         }
     }
     return CV_OK;
+}
+
+// The order of two values (neg, mag): -1, 0, 1.
+fn cmp_vals(an: bool, am: u64, bn: bool, bm: u64) -> i32 {
+    if an != bn { return if an then -1i32 else 1i32; }
+    if am == bm { return 0i32; }
+    let less = if an then am > bm else am < bm;
+    return if less then -1i32 else 1i32;
+}
+
+// `&`, `|`, `^` on `bool`s (0 or 1).
+fn bool_op(op: u8, a: u64, b: u64) -> u64 {
+    if op == terminals.T_AMP { return a & b; }
+    if op == terminals.T_PIPE { return a | b; }
+    return a ^ b;
 }
 
 // (neg, mag) saturated into type t; `exact_over`: the exact value overflowed 64 bits.
@@ -1091,8 +1718,8 @@ fn clamp(tab: &types.Table, t: u32, neg: bool, mag: u64, exact_over: bool) -> (b
     return (false, mag);
 }
 
-// One integer operation in type t: (ok, neg, mag).
-fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64) -> (bool, bool, u64) {
+// One integer operation in type t: (status `A_*`, neg, mag).
+fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64) -> (u8, bool, u64) {
     let signed = tab.is_signed(t);
     let bits = tab.int_bits(t);
     if op == terminals.T_PLUS || op == terminals.T_MINUS || op == terminals.T_PLUS_PIPE || op == terminals.T_MINUS_PIPE {
@@ -1100,10 +1727,10 @@ fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64
         let (rn, rm, over) = add_exact(an, am, if sub then !bn && bm != 0 else bn, bm);
         if op == terminals.T_PLUS_PIPE || op == terminals.T_MINUS_PIPE {
             let (cn, cm) = clamp(tab, t, rn, rm, over);
-            return (true, cn, cm);
+            return (A_OK, cn, cm);
         }
-        if over || !in_range(tab, t, rn, rm) { return (false, false, 0); }
-        return (true, rn, rm);
+        if over || !in_range(tab, t, rn, rm) { return (A_OVER, false, 0); }
+        return (A_OK, rn, rm);
     }
     if op == terminals.T_STAR || op == terminals.T_STAR_PIPE {
         let over = am.mul_hi(bm) != 0;
@@ -1111,34 +1738,34 @@ fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64
         let rn = (an != bn) && rm != 0;
         if op == terminals.T_STAR_PIPE {
             let (cn, cm) = clamp(tab, t, an != bn, rm, over);
-            return (true, cn, cm);
+            return (A_OK, cn, cm);
         }
-        if over || !in_range(tab, t, rn, rm) { return (false, false, 0); }
-        return (true, rn, rm);
+        if over || !in_range(tab, t, rn, rm) { return (A_OVER, false, 0); }
+        return (A_OK, rn, rm);
     }
     if op == terminals.T_SLASH || op == terminals.T_PERCENT {
         let (_, lo, _) = range_of(tab, t);
-        if bm == 0 || (signed && an && am == lo && bn && bm == 1) { return (false, false, 0); }
+        if bm == 0 || (signed && an && am == lo && bn && bm == 1) { return (A_OVER, false, 0); }
         if op == terminals.T_SLASH {
             let q = am / bm;
-            return (true, (an != bn) && q != 0, q);
+            return (A_OK, (an != bn) && q != 0, q);
         }
         let r = am % bm;
-        return (true, an && r != 0, r);
+        return (A_OK, an && r != 0, r);
     }
     if op == terminals.T_PLUS_PERCENT || op == terminals.T_MINUS_PERCENT || op == terminals.T_STAR_PERCENT {
         let x = word(an, am);
         let y = word(bn, bm);
         let w = if op == terminals.T_PLUS_PERCENT then x +% y else if op == terminals.T_MINUS_PERCENT then x -% y else x *% y;
         let (rn, rm) = wrap(w, signed, bits);
-        return (true, rn, rm);
+        return (A_OK, rn, rm);
     }
     if op == terminals.T_AMP || op == terminals.T_PIPE || op == terminals.T_CARET {
         let x = word(an, am);
         let y = word(bn, bm);
         let w = if op == terminals.T_AMP then x & y else if op == terminals.T_PIPE then x | y else x ^ y;
         let (rn, rm) = wrap(w, signed, bits);
-        return (true, rn, rm);
+        return (A_OK, rn, rm);
     }
     if op == terminals.T_LT_LT || op == terminals.T_LT_LT_PERCENT || op == terminals.T_GT_GT {
         let mut amt_neg = bn && bm != 0;
@@ -1147,7 +1774,7 @@ fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64
             amt = word(bn, bm) & (bits as u64 - 1);
             amt_neg = false;
         }
-        if amt_neg || amt >= bits as u64 { return (false, false, 0); }
+        if amt_neg || amt >= bits as u64 { return (A_SHIFT, false, 0); }
         let x = word(an, am);
         if op == terminals.T_GT_GT {
             if signed {
@@ -1155,23 +1782,26 @@ fn arith(tab: &types.Table, t: u32, op: u8, an: bool, am: u64, bn: bool, bm: u64
                 if vn {
                     // arithmetic shift of a negative value: -((m - 1) >> amt) - 1
                     let q = (vm - 1) >> amt;
-                    return (true, true, q + 1);
+                    return (A_OK, true, q + 1);
                 }
-                return (true, false, vm >> amt);
+                return (A_OK, false, vm >> amt);
             }
             let (_, vm) = wrap(x, false, bits);
-            return (true, false, vm >> amt);
+            return (A_OK, false, vm >> amt);
         }
         let (rn, rm) = wrap(x << amt, signed, bits);
-        return (true, rn, rm);
+        return (A_OK, rn, rm);
     }
-    return (false, false, 0);
+    return (A_NONE, false, 0);
 }
 
 // An array length or const generic argument: the const parameter it names, or its value as a
 // `u64`, as generic-argument words (kind, x, y). A bare const generic param names itself; any
-// other expression is evaluated as type `want`.
-pub fn eval_u64(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32, sc: Scope) -> (u32, u32, u32) {
+// other expression is evaluated as type `want`. `typed`: the caller types the expression itself
+// (a repeat count of a body), so only what fails an operation is reported here; else the
+// evaluation's first failure that reports nothing is reported too (stage0: no other checker
+// types these expressions).
+pub fn eval_u64(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32, sc: Scope, typed: bool) -> (u32, u32, u32) {
     let base = tree.item_node.as_slice()[it as usize] as usize;
     if kind(tree, g) == K_PRIMARY && tk(t, tree.tok.as_slice()[g]) == terminals.T_IDENT && tree.tok_end.as_slice()[g] == tree.tok.as_slice()[g] + 1 {
         let (lo, hi) = cx.uses.range(it, (g - base) as% u32);
@@ -1179,7 +1809,7 @@ pub fn eval_u64(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interne
             let gp = base + cx.uses.target.as_slice()[lo] as usize;
             if kind(tree, gp) == K_GENERIC_PARAM && tk(t, tree.tok.as_slice()[gp]) == terminals.T_KW_CONST {
                 let (idx, _, _) = generic_index(cx, tree, t, ds, it, gp, sc);
-                return const_param_arg(cx, idx, want, sc);
+                return const_param_arg(cx, tree, it, g, idx, want, sc, !typed);
             }
         }
     }
@@ -1189,18 +1819,23 @@ pub fn eval_u64(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interne
         if neg { return (types.GA_ERROR, 0, 0); }
         return (types.GA_VALUE, (mag >> 32) as% u32, mag as% u32);
     }
+    if st == CV_FAIL && !typed && cx.dfr.code != 0 {
+        let d = cx.dfr;
+        cx.rep.add(d.code, d.it, d.lo, d.hi, d.ty, d.x);
+    }
     if st == CV_UNSUP { cx.note_skip(st); }
     if st == CV_LAYOUT { cx.hits = cx.hits + 1; }
     return (types.GA_ERROR, 0, 0);
 }
 
-// Const param idx given where a const of type `want` is required: itself, or an error when its
-// declared type differs (E0201).
-pub fn const_param_arg(cx: &Cx, idx: u32, want: u32, sc: Scope) -> (u32, u32, u32) {
+// Const param idx given at node row g of item it where a const of type `want` is required:
+// itself, or an error when its declared type differs (E0201 at g when `report`).
+pub fn const_param_arg(cx: &mut Cx, tree: &ast.Ast, it: u32, g: usize, idx: u32, want: u32, sc: Scope, report: bool) -> (u32, u32, u32) {
     let r = sc.row(idx);
     if r == NONE || want == NONE { return (types.GA_PARAM, idx, 0); }
     if !cx.gens.is_const.as_slice()[r as usize] { return (types.GA_PARAM, idx, 0); }
     let ct = cx.gens.cty.as_slice()[r as usize];
     if ct == want || ct == types.ERR || want == types.ERR { return (types.GA_PARAM, idx, 0); }
+    if report { cx.rep.add(EV_MISMATCH, it, tree.tok.as_slice()[g], tree.tok_end.as_slice()[g] - 1, want, ct); }
     return (types.GA_ERROR, 0, 0);
 }
