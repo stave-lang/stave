@@ -1389,7 +1389,7 @@ impl<'p> SigBuilder<'p> {
             s.impls_by_trait.get(tr).is_none_or(|v| {
                 v.iter().all(|d| match s.decls.get(d.idx()) {
                     Some(DeclSig::Impl(i)) => i.generics.iter().all(|g| g.bounds.iter().all(marker_bound)),
-                    _ => true,
+                    _ => false,
                 })
             })
         });
