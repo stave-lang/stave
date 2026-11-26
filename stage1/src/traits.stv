@@ -21,8 +21,8 @@
 // 3. expansion, in goal order: a goal's clauses from the rules (structural parts, the impls whose
 //    self type matches and whose params take no view), creating the goals they name;
 // 4. solving: strongly connected components of the goal graph (Tarjan, explicit stack), each
-//    decided after the components it depends on: a component's coinductive goals start true,
-//    its inductive ones false, and its members are re-evaluated until none changes.
+//    decided after the components it depends on (`decide`): a cycle holds only when every goal
+//    on it is coinductive.
 // Passes 2-4 may run again with more queries: a goal's clauses name only goals expanded with it,
 // so the goals decided before keep their answers (`decided`).
 import decls;
@@ -1066,9 +1066,15 @@ impl Traits {
     }
 
     // Decides one component (the components it reaches are decided): a goal without a cycle
-    // from its clauses; else the coinductive members start true, the inductive ones false, and
-    // all are re-evaluated until none changes (a component of one kind moves one way and
-    // settles within its size; a mixed one stops at the cap).
+    // from its clauses is its clauses' answer. Else a goal holds when it has a proof in which a
+    // goal met again on its own path holds through that path only if every goal of the cycle is
+    // coinductive (contracts/lang-details.md "Trait cycles"). In a component of one kind the
+    // members start true (coinductive) or false (inductive) and are re-evaluated until none
+    // changes: they move one way and settle within the component's size. A mixed component is
+    // the least fixpoint, over its members' answers X, of: the inductive members' answers from
+    // X, and the greatest fixpoint of the coinductive ones given those. X starts false and only
+    // grows, so at most size + 1 rounds, each settling the coinductive members within their
+    // count.
     fn decide(&mut self, comp: &[u32], edge: &[u32], e_lo: &[u32]) {
         if comp.len() == 1 {
             let g = comp[0] as usize;
@@ -1082,22 +1088,56 @@ impl Traits {
                 return;
             }
         }
+        let mut nco: usize = 0;
         for k in 0..comp.len() {
-            let g = comp[k] as usize;
-            self.val.as_mut_slice()[g] = self.co.as_slice()[g];
+            if self.co.as_slice()[comp[k] as usize] { nco = nco + 1; }
         }
-        let cap = 2 * comp.len() + 2;
-        for _ in 0..cap {
+        if nco == 0 || nco == comp.len() {
+            for k in 0..comp.len() {
+                let g = comp[k] as usize;
+                self.val.as_mut_slice()[g] = self.co.as_slice()[g];
+            }
+            self.settle(comp, false);
+            return;
+        }
+        for k in 0..comp.len() {
+            self.val.as_mut_slice()[comp[k] as usize] = false;
+        }
+        let mut was = col.filled(comp.len(), false);
+        let mut ind = col.filled(comp.len(), false);
+        loop {
+            for k in 0..comp.len() {
+                let g = comp[k] as usize;
+                was.as_mut_slice()[k] = self.val.as_slice()[g];
+                if !self.co.as_slice()[g] { ind.as_mut_slice()[k] = self.eval(g); }
+            }
+            for k in 0..comp.len() {
+                let g = comp[k] as usize;
+                self.val.as_mut_slice()[g] = self.co.as_slice()[g] || ind.as_slice()[k];
+            }
+            self.settle(comp, true);
+            let mut grew = false;
+            for k in 0..comp.len() {
+                if self.val.as_slice()[comp[k] as usize] != was.as_slice()[k] { grew = true; }
+            }
+            if !grew { return; }
+        }
+    }
+
+    // Re-evaluates the members of `comp` (`co_only`: its coinductive ones) until none changes.
+    fn settle(&mut self, comp: &[u32], co_only: bool) {
+        loop {
             let mut changed = false;
             for k in 0..comp.len() {
                 let g = comp[k] as usize;
+                if co_only && !self.co.as_slice()[g] { continue; }
                 let v = self.eval(g);
                 if v != self.val.as_slice()[g] {
                     self.val.as_mut_slice()[g] = v;
                     changed = true;
                 }
             }
-            if !changed { break; }
+            if !changed { return; }
         }
     }
 

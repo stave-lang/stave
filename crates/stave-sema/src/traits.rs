@@ -429,7 +429,15 @@ enum Frame {
 /// (`usize::MAX`: none), and the results already known. The other goals (Copy, a trait with
 /// impls) are inductive: one reached again while in progress does not hold through that path
 /// (`goals`, `goal_low`: the same bookkeeping, so a negative answer that used it is not
-/// memoized). `any_kind`: impl matching skips the
+/// memoized).
+///
+/// **Cycles.** A goal reached again while in progress holds through that path only when every
+/// goal from it to the current one is coinductive (contracts/lang-details.md "Trait cycles"): a
+/// coinductive goal reached again with an inductive goal in progress above it is cut like an
+/// inductive one (`nlow`, `mixed_hit`: the negative answers that used it wait for its answer).
+/// An answer that used a goal still in progress further out is pending until that goal ends,
+/// and dropped when the goal's answer is not the one the path assumed. So every answer kept is
+/// the one the rule gives, whatever goal was asked first. `any_kind`: impl matching skips the
 /// view-kind rule (a query that asks whether an impl could apply to some instance, or names the
 /// impl a view was refused by; never one that selects an impl).
 ///
@@ -454,6 +462,14 @@ struct Query {
     /// Per coinductive goal in progress: its frame (`u32::MAX` for a goal of a marker trait
     /// that is not closed: its answers are pending, not held).
     active_frame: Vec<u32>,
+    /// Per coinductive goal in progress: how many inductive goals were in progress when it was
+    /// entered (more now: a path back to it passes an inductive goal).
+    active_ind: Vec<usize>,
+    /// Per coinductive goal in progress: whether a path that passes an inductive goal reached it.
+    mixed_hit: Vec<bool>,
+    /// The lowest index of a coinductive goal in progress reached through an inductive goal (a
+    /// negative answer rests on it), `usize::MAX`: none.
+    nlow: usize,
     frames: Vec<Frame>,
     /// Frames not ended: while none and nothing is held, `frames` is emptied.
     live_frames: usize,
@@ -483,6 +499,9 @@ impl Default for Query {
             active: Vec::new(),
             active_at: FxHashMap::default(),
             active_frame: Vec::new(),
+            active_ind: Vec::new(),
+            mixed_hit: Vec::new(),
+            nlow: usize::MAX,
             frames: Vec::new(),
             live_frames: 0,
             held: Vec::new(),
@@ -525,12 +544,18 @@ impl Query {
         low >= me
     }
 
-    /// Enters coinductive goal `key` (`held`: of a closed marker trait, with a frame): `Err` (it
-    /// holds through this path) if it is in progress.
-    fn enter_active(&mut self, key: (TypeId, DeclId), held: bool) -> Result<(), ()> {
+    /// Enters coinductive goal `key` (`held`: of a closed marker trait, with a frame). If it is in
+    /// progress: `Err` with its answer through this path, true when no inductive goal is in
+    /// progress above it, else false (the cycle passes an inductive goal).
+    fn enter_active(&mut self, key: (TypeId, DeclId), held: bool) -> Result<(), bool> {
         if let Some(&i) = self.active_at.get(&key) {
+            if self.goals.len() > self.active_ind[i] {
+                self.nlow = self.nlow.min(i);
+                self.mixed_hit[i] = true;
+                return Err(false);
+            }
             self.low = self.low.min(i);
-            return Err(());
+            return Err(true);
         }
         let frame = if held {
             self.frames.push(Frame::Live(self.active.len()));
@@ -542,15 +567,19 @@ impl Query {
         self.active_at.insert(key, self.active.len());
         self.active.push(key);
         self.active_frame.push(frame);
+        self.active_ind.push(self.goals.len());
+        self.mixed_hit.push(false);
         Ok(())
     }
 
-    /// Leaves the innermost coinductive goal: its frame.
-    fn leave_active(&mut self) -> u32 {
+    /// Leaves the innermost coinductive goal: its frame, and whether a path through an inductive
+    /// goal reached it.
+    fn leave_active(&mut self) -> (u32, bool) {
         if let Some(k) = self.active.pop() {
             self.active_at.remove(&k);
         }
-        self.active_frame.pop().unwrap_or(u32::MAX)
+        self.active_ind.pop();
+        (self.active_frame.pop().unwrap_or(u32::MAX), self.mixed_hit.pop().unwrap_or(false))
     }
 
     /// The held answer of `key`, if any: its frame's index is taken as an assumption used.
@@ -644,13 +673,16 @@ impl Query {
     }
 
     /// Records answer `r` of a goal that ended (`key`: `None` for one not memoized): final
-    /// (`free_pos`: it used no assumed coinductive goal further out, `free_neg`: no cut
-    /// inductive goal further out; a positive answer needs the first, a negative one the second)
-    /// or pending. The pending answers recorded since `start` (below this goal) that assumed
-    /// this goal's answer wrongly are dropped: positives once a coinductive goal fails,
-    /// negatives once an inductive goal holds. A goal free of both is the outermost goal the rest
-    /// used, so they are final now: kept if they assumed its answer, else dropped (dropping only
-    /// costs a recomputation). Returns the final answers.
+    /// (`free_pos`: it used no assumed coinductive goal further out, `free_neg`: no cut goal
+    /// further out; a positive answer needs the first, a negative one the second) or pending.
+    /// The pending answers recorded since `start` (below this goal) that may have assumed this
+    /// goal's answer wrongly are dropped (dropping only costs a recomputation): positives once a
+    /// coinductive goal fails (they may have assumed it holds), negatives once an inductive goal
+    /// holds or a coinductive one that was cut (`cut`) holds. A goal free of both is the
+    /// outermost goal the rest used, so they are final now: kept if they assumed its answer
+    /// (positives below a coinductive goal that holds, negatives below an inductive one that
+    /// does not), else dropped. Returns the final answers.
+    #[allow(clippy::too_many_arguments)]
     fn settle(
         &mut self,
         key: Option<(TypeId, DeclId)>,
@@ -659,13 +691,14 @@ impl Query {
         free_neg: bool,
         start: usize,
         coinductive: bool,
+        cut: bool,
     ) -> Vec<((TypeId, DeclId), bool)> {
         let start = start.min(self.pending.len());
         let mut below: Vec<((TypeId, DeclId), bool)> = self.pending.drain(start..).collect();
         if coinductive && !r {
             below.retain(|e| !e.1);
         }
-        if !coinductive && r {
+        if r && (!coinductive || cut) {
             below.retain(|e| e.1);
         }
         let mut out = Vec::new();
@@ -1181,12 +1214,14 @@ impl<'a> World<'a> {
             return self.held_goal(cx, t, tr, derived, env, q);
         }
         // Send/Sync/Flat/Frozen are coinductive: a type reached again while its own query is in
-        // progress (a recursive type) is assumed to implement them.
-        if auto && q.enter_active(key, false).is_err() {
-            return true;
+        // progress (a recursive type) is assumed to implement them, unless the path back to it
+        // passes an inductive goal.
+        if auto && let Err(r) = q.enter_active(key, false) {
+            return r;
         }
         let me = if auto { q.active.len() - 1 } else { q.active.len() };
         let saved_low = std::mem::replace(&mut q.low, usize::MAX);
+        let saved_nlow = std::mem::replace(&mut q.nlow, usize::MAX);
         let start = q.pending.len();
         let mark = if auto {
             (q.goals.len(), q.open_low())
@@ -1195,6 +1230,7 @@ impl<'a> World<'a> {
                 Some(m) => m,
                 None => {
                     q.low = saved_low;
+                    q.nlow = saved_nlow;
                     return false;
                 }
             }
@@ -1211,15 +1247,14 @@ impl<'a> World<'a> {
         } else {
             self.find_impl_q(cx, t, tr, env, q).is_some()
         };
-        if auto {
-            q.leave_active();
-        }
-        let free_neg = if auto { q.own_low(mark.1) } else { q.leave_goal(mark) };
-        let low = q.low;
+        let cut = auto && q.leave_active().1;
+        let own = if auto { q.own_low(mark.1) } else { q.leave_goal(mark) };
+        let (low, nlow) = (q.low, q.nlow);
         let memo_key = tr.args.is_empty().then_some(key);
-        let done = q.settle(memo_key, r, low >= me, free_neg, start, auto);
+        let done = q.settle(memo_key, r, low >= me, own && nlow >= me, start, auto, cut);
         self.sigs.queries.put(&*cx, &done, q.any_kind);
         q.low = saved_low.min(if low < me { low } else { usize::MAX });
+        q.nlow = saved_nlow.min(if nlow < me { nlow } else { usize::MAX });
         r
     }
 
@@ -1247,8 +1282,12 @@ impl<'a> World<'a> {
         q: &mut Query,
     ) -> bool {
         let key = (t, tr.trait_decl);
-        if q.enter_active(key, true).is_err() {
-            return true;
+        match q.enter_active(key, true) {
+            Ok(()) => {}
+            Err(r) => {
+                debug_assert!(r, "a closed marker goal reached through an inductive goal");
+                return r;
+            }
         }
         self.sigs.queries.count_goal();
         let me = q.active.len() - 1;
@@ -1258,7 +1297,7 @@ impl<'a> World<'a> {
             Some(d) => self.auto_derived(cx, t, tr, d, env, q),
             None => self.send_sync(cx, t, tr, env, q),
         };
-        let frame = q.leave_active();
+        let (frame, _) = q.leave_active();
         let low = q.low;
         let done = q.settle_held(key, r, frame, me, low, start);
         self.sigs.queries.put(&*cx, &done, q.any_kind);
@@ -1804,15 +1843,17 @@ impl<'a> World<'a> {
                 }
                 self.sigs.queries.count_goal();
                 let low = std::mem::replace(&mut q.low, usize::MAX);
+                let nlow = std::mem::replace(&mut q.nlow, usize::MAX);
                 let mark = q.open_low();
                 let start = q.pending.len();
                 let r = ts.iter().all(|&x| self.is_copy_q(cx, x, env, q));
-                let own = q.own_low(mark);
+                let own = q.own_low(mark) && q.nlow == usize::MAX;
                 // not a goal of its own: what it used is settled by the goals that set it
                 let free_pos = q.low == usize::MAX;
-                let done = q.settle(Some((t, copy)), r, free_pos, own, start, false);
+                let done = q.settle(Some((t, copy)), r, free_pos, own, start, false, false);
                 self.sigs.queries.put(&*cx, &done, q.any_kind);
                 q.low = q.low.min(low);
+                q.nlow = q.nlow.min(nlow);
                 r
             }
             TypeKind::Param(i) => {
@@ -1831,12 +1872,14 @@ impl<'a> World<'a> {
                 let Some(mark) = q.enter_goal((t, tr.clone())) else { return false };
                 self.sigs.queries.count_goal();
                 let low = std::mem::replace(&mut q.low, usize::MAX);
+                let nlow = std::mem::replace(&mut q.nlow, usize::MAX);
                 let start = q.pending.len();
                 let r = self.find_impl_q(cx, t, &tr, env, q).is_some();
-                let own = q.leave_goal(mark);
-                let done = q.settle(Some((t, copy)), r, q.low == usize::MAX, own, start, false);
+                let own = q.leave_goal(mark) && q.nlow == usize::MAX;
+                let done = q.settle(Some((t, copy)), r, q.low == usize::MAX, own, start, false, false);
                 self.sigs.queries.put(&*cx, &done, q.any_kind);
                 q.low = q.low.min(low);
+                q.nlow = q.nlow.min(nlow);
                 r
             }
         }

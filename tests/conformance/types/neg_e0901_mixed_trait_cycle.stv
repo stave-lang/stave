@@ -1,0 +1,93 @@
+//~ CHECK-ONLY
+// A cycle of trait goals holds only when every goal on it is Send, Sync, Flat, or Frozen
+// (contracts/lang-details.md "Trait cycles"). `S: Send` needs `R<Q<S>>: Send`, which needs
+// `Q<S>: Tr`, which needs `S: Send`: the cycle passes the user trait `Tr`, so neither holds,
+// whichever is asked first. The same through `Copy`. A cycle of Send goals alone holds, also
+// when a goal on it needs a user trait off the cycle.
+trait Tr {}
+
+struct Q<T> {
+    pub p: *const T,
+}
+
+impl<T: Send> Tr for Q<T> {}
+
+struct R<T> {
+    pub p: *const T,
+}
+
+unsafe("R<T> is sent only with a Tr payload") impl<T: Tr> Send for R<T> {}
+
+struct S {
+    pub f: R<Q<S>>,
+}
+
+struct C<T> {
+    pub p: *const T,
+}
+
+impl<T: Send> Copy for C<T> {}
+
+struct D<T> {
+    pub p: *const T,
+}
+
+unsafe("D<T> is sent only with a Copy payload") impl<T: Copy> Send for D<T> {}
+
+struct SC {
+    pub f: D<C<SC>>,
+}
+
+struct P<T> {
+    pub p: *const T,
+}
+
+unsafe("P<T> is sent only with a Send payload") impl<T: Send> Send for P<T> {}
+
+struct L {
+    pub v: u32,
+    pub next: P<L>,
+}
+
+struct M {
+    pub next: P<M>,
+    pub r: R<Q<u32>>,
+}
+
+fn need_send<T: Send>() {}
+
+fn need_tr<T: Tr>() {}
+
+fn need_copy<T: Copy>() {}
+
+fn send_first() {
+    need_send::<S>(); //~ ERROR E0901
+    need_tr::<Q<S>>(); //~ ERROR E0901
+}
+
+fn tr_first() {
+    need_tr::<Q<S>>(); //~ ERROR E0901
+    need_send::<S>(); //~ ERROR E0901
+}
+
+fn send_first_copy() {
+    need_send::<SC>(); //~ ERROR E0901
+    need_copy::<C<SC>>(); //~ ERROR E0901
+}
+
+fn copy_first() {
+    need_copy::<C<SC>>(); //~ ERROR E0901
+    need_send::<SC>(); //~ ERROR E0901
+}
+
+fn holds() {
+    need_send::<L>();
+    need_send::<M>();
+    need_tr::<Q<L>>();
+    need_tr::<Q<M>>();
+    need_copy::<C<L>>();
+}
+
+fn main() -> i32 {
+    return 0;
+}
