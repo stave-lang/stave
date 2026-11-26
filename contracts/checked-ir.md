@@ -669,8 +669,15 @@ The drop of the value an assignment overwrites is a drop of the local assigned. 
 at more than one place (a statement lowered at each `return`) is tested unless every place gives
 the same answer, and a drop no path from the entry reaches is left out.
 
-- An owner has a flag exactly when one of its drops is tested. A flag is a `bool` `slot`; no
-  flag is an SSA value or a block param, and a temporary with a flag holds its value in a slot.
+- The dataflow is the generic body's. A drop in an arm an instance deletes (a constant
+  condition, contracts/lang-details.md "§1 Type queries") is not tested in that instance: the
+  drops on a `return`, `?`, `break`, or `continue` in the arm, those of a pattern or an
+  assignment in the arm, and the end drops of the locals bound and the statements' temporaries
+  in it; a temporary made in the arm (an `ensures` clause lowered at a `return` there included)
+  has no flag. A closure or `spawn` body in the arm keeps its own drops, as it keeps its code.
+- In each instance an owner has a flag exactly when one of its drops is tested. A flag is a
+  `bool` `slot`; no flag is an SSA value or a block param, and a temporary with a flag holds its
+  value in a slot.
 - The slots of a fn, in order: the locals' slots ("Slots"), the flags of its flagged locals in
   declaration order, the flags of its flagged temporaries in the order the temporaries are made,
   then every other slot. Right after the slots `b0` stores `0` into each flag, in the same order.

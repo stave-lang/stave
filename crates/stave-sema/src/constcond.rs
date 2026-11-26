@@ -16,7 +16,9 @@
 //!   flows), but still adds the instances it names as nodes: lowering lowers the arm before
 //!   deleting it and asks for them;
 //! - the effect pass counts no source in the other arm (`unsafe`, `scope`, `spawn`, intrinsic
-//!   calls); its traps are gone with the deleted blocks.
+//!   calls); its traps are gone with the deleted blocks;
+//! - no drop in the other arm is tested, and an owner whose tested drops are all there has no
+//!   flag ([`crate::drops::Schedule::instance`]).
 //!
 //! A dead arm is still type- and borrow-checked as written. Code in a closure literal inside a
 //! dead arm belongs to the closure's own node, which stays as written (nothing reaches it).
@@ -175,11 +177,19 @@ impl DeadSites {
         }
         let mut br = None;
         let icx = crate::effects::item_cx(prog, b.item, &mut br)?;
+        DeadSites::of(&icx, b, taken)
+    }
+
+    /// [`DeadSites::new`] for a caller that has the body's item context.
+    pub fn of(icx: &ItemCx<'_>, b: &TypedBody, taken: &[bool]) -> Option<DeadSites> {
+        if b.const_ifs.is_empty() || taken.is_empty() {
+            return None;
+        }
         let end = |t: u32| {
             let s = icx.tok_span(t);
             s.offset + s.len
         };
-        let mut closures: Vec<(u32, u32, u32, u32)> = crate::closures::closure_nodes(&icx, b.node)
+        let mut closures: Vec<(u32, u32, u32, u32)> = crate::closures::closure_nodes(icx, b.node)
             .into_iter()
             .map(|(node, _)| {
                 let lo = icx.a(node);

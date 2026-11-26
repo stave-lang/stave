@@ -300,6 +300,8 @@ pub(crate) struct FnState {
     /// Where the next temporary's flag goes among the slots: after the locals' slots and the
     /// flags made before it.
     pub flag_at: usize,
+    /// The arms of constant conditions the instance deletes that are being lowered.
+    pub deleted: u32,
     pub ret: Ty,
     pub site_consts: Vec<ConstId>,
     /// The values of the int constants made by [`FnCx::int`], by constant index.
@@ -447,6 +449,9 @@ pub(crate) struct FnCx<'a> {
     pub hold_site: bool,
     /// The drop schedule of the body being lowered, when the borrow checker made one.
     pub sched: Option<&'a crate::drops::Schedule>,
+    /// The tested drops this instance keeps and its flagged owners, from the schedule and the
+    /// instance's deleted arms ([`FnCx::instance_flags`]).
+    pub tested: crate::drops::Tested,
     /// What the lowering did with the rows of the schedule ([`FnCx::scheduled`],
     /// [`FnCx::check_asked`]).
     pub ledger: Ledger,
@@ -496,6 +501,7 @@ impl<'a> FnCx<'a> {
             result_local: None,
             hold_site: false,
             sched: None,
+            tested: crate::drops::Tested::default(),
             ledger: Ledger::default(),
         }
     }
@@ -939,13 +945,36 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// Whether owner `o` has a flag: the drop schedule's answer. A lowering without a schedule
-    /// (of a program that was not borrow checked) gives every owner of a body one.
+    /// Decides once per instance which tested drops of the schedule it keeps, and so which
+    /// owners have a flag: those not in an arm the instance deletes
+    /// ([`crate::constcond::DeadSites`], [`crate::drops::row_tok`]).
+    pub fn instance_flags(&mut self) {
+        let Some(s) = self.sched else { return };
+        let icx = self.icx;
+        let dead = match (self.tb, self.taken) {
+            (Some(tb), Some(t)) => crate::constcond::DeadSites::of(&icx, tb, t),
+            _ => None,
+        };
+        self.tested = s.instance(|p, o| {
+            let t = crate::drops::row_tok(&icx, p, o);
+            matches!((&dead, t), (Some(d), Some(t)) if d.holds_tok(t))
+        });
+    }
+
+    /// Whether owner `o` has a flag: the instance's answer. A lowering without a schedule (of
+    /// a program that was not borrow checked) gives every owner of a body one.
     fn has_flag(&self, o: Owner) -> bool {
         match self.sched {
-            Some(s) => s.flagged(o),
+            Some(_) => self.tested.flagged(o),
             None => self.has_body,
         }
+    }
+
+    /// Whether a temporary made here gets a flag: one made in an arm the instance deletes has
+    /// none, as all of its drops are there (an `ensures` clause lowered at a `return` in the
+    /// arm included).
+    fn temp_flag(&self, o: Owner) -> bool {
+        self.f.deleted == 0 && self.has_flag(o)
     }
 
     /// A flag: a `bool` slot at position `at` among the slots, cleared at entry.
@@ -1018,7 +1047,7 @@ impl<'a> FnCx<'a> {
         };
         let stmt = self.f.open.last().copied().unwrap_or(crate::temps::NONE);
         let mut flag = None;
-        if self.has_flag(Owner::Temp(stmt, made)) {
+        if self.temp_flag(Owner::Temp(stmt, made)) {
             let fs = self.new_flag(self.f.flag_at);
             self.f.flag_at += 1;
             let one = self.int(1);
@@ -1077,7 +1106,7 @@ impl<'a> FnCx<'a> {
     /// lives in a slot, since its drop is then not dominated by `v`.
     pub fn value_temp(&mut self, v: Operand, t: Ty, scoped: bool, made: Made) -> Place {
         let stmt = self.f.open.last().copied().unwrap_or(crate::temps::NONE);
-        if self.has_flag(Owner::Temp(stmt, made)) {
+        if self.temp_flag(Owner::Temp(stmt, made)) {
             let (s, st) = self.spill(v, t);
             let l = self.new_temp(t, Home::Slot(s), scoped, made);
             return Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) };
@@ -1652,13 +1681,17 @@ impl<'a> FnCx<'a> {
     }
 
     /// Whether the drop of owner `l` at `key` runs: the drop schedule's answer, where a drop no
-    /// path from the entry reaches runs never. Without a schedule: never where the owner's
-    /// state says it holds no value, else behind its flag.
-    fn runs(&self, l: usize, key: (Point, Owner)) -> Runs {
+    /// path from the entry reaches runs never; with it, whether it is a tested drop in an arm
+    /// the instance deletes ([`FnCx::instance_flags`]). Without a schedule: never where the
+    /// owner's state says it holds no value, else behind its flag.
+    fn runs(&self, l: usize, key: (Point, Owner)) -> (Runs, bool) {
         match self.sched {
-            Some(s) => s.runs(key.0, key.1).unwrap_or(Runs::Never),
-            None if self.st(l) == Init::Gone => Runs::Never,
-            None => Runs::Flag,
+            Some(s) => match s.runs(key.0, key.1).unwrap_or(Runs::Never) {
+                Runs::Flag => (Runs::Flag, !self.tested.kept(key.0, key.1)),
+                r => (r, false),
+            },
+            None if self.st(l) == Init::Gone => (Runs::Never, false),
+            None => (Runs::Flag, false),
         }
     }
 
@@ -1669,7 +1702,19 @@ impl<'a> FnCx<'a> {
         if !self.needs_drop(p.ty) || !self.open() {
             return;
         }
-        match self.runs(l, key) {
+        let (runs, deleted) = self.runs(l, key);
+        // the instance's answer and the arms the lowering lowers as deleted agree
+        if deleted && self.f.deleted == 0 {
+            let (point, owner) = key;
+            self.fail_at(
+                None,
+                format!(
+                    "a tested drop the instance deletes is lowered where it runs: {owner:?} at {point:?}"
+                ),
+            );
+            return;
+        }
+        match runs {
             Runs::Never => {
                 // the lowering's state follows the same moves: a value it may hold here is
                 // one the checks find gone
@@ -1684,6 +1729,11 @@ impl<'a> FnCx<'a> {
             Runs::Always => self.drop_held(l, p, key),
             Runs::Flag => {
                 let Some(fs) = self.locals[l].flag else {
+                    // nothing reaches a drop in a deleted arm: lowered untested
+                    if self.f.deleted > 0 {
+                        self.drop_held(l, p, key);
+                        return;
+                    }
                     let (point, owner) = key;
                     self.fail_at(
                         None,
@@ -1801,7 +1851,7 @@ impl<'a> FnCx<'a> {
         if !self.open() {
             return;
         }
-        if self.runs(l, key) == Runs::Never && self.st(l) == Init::Gone {
+        if self.runs(l, key).0 == Runs::Never && self.st(l) == Init::Gone {
             return;
         }
         let p = match self.local_place(l) {
@@ -2171,6 +2221,7 @@ impl FnState {
             stmt_depth: Vec::new(),
             own_temps: 0,
             flag_at: 0,
+            deleted: 0,
             ret,
             site_consts: Vec::new(),
             kvals: Vec::new(),

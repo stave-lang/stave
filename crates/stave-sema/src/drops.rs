@@ -20,9 +20,12 @@
 //!
 //! **Whether a drop runs.** The CFG's init dataflow decides it once per row ([`Runs`],
 //! [`Schedule::runs`]): the drop runs where its owner is must-init, not where it is not
-//! may-init, and tests the owner's flag where it is may-init and not must-init. An owner has a
-//! flag exactly when one of its drops is tested ([`Schedule::flagged`]). The lowering reads
-//! both and decides neither.
+//! may-init, and tests the owner's flag where it is may-init and not must-init. The dataflow
+//! is the generic body's; an instance deletes the arms of its constant conditions
+//! ([`crate::constcond`]), and a tested drop in such an arm needs no flag, since nothing
+//! reaches it. In each instance an owner has a flag exactly when one of the tested drops it
+//! keeps is of the owner's value ([`Schedule::instance`], [`Tested`]). The lowering reads both
+//! and decides neither.
 //!
 //! **Exits.** An exit that leaves scopes and statements drops in the order of their normal
 //! ends, innermost first ([`exit_order`], which both stages call): the temporaries of a
@@ -185,6 +188,43 @@ impl Runs {
     }
 }
 
+/// The tested drops of one instance of a body ([`Schedule::instance`]): one answer, which the
+/// lowering of the instance reads for both its flags and its tested drops.
+#[derive(Clone, Debug, Default)]
+pub struct Tested {
+    /// The tested drops the instance keeps, sorted.
+    kept: Vec<(Point, Owner)>,
+    /// The owners with a flag, sorted.
+    flags: Vec<Owner>,
+}
+
+impl Tested {
+    /// Whether the drop of `owner` at `point` is a tested drop the instance keeps.
+    pub fn kept(&self, point: Point, owner: Owner) -> bool {
+        self.kept.binary_search(&(point, owner)).is_ok()
+    }
+
+    /// Whether `owner` has a flag in the instance.
+    pub fn flagged(&self, owner: Owner) -> bool {
+        self.flags.binary_search(&owner).is_ok()
+    }
+}
+
+/// The token where the drop of `owner` at `point` is lowered, as far as an instance's deleted
+/// arms go ([`crate::constcond::DeadSites`]): an exit's token; a pattern's or an assignment's
+/// node; at an end, the owner's binding (a local's scope is in an arm exactly when its binding
+/// is) or the temporary's statement (a statement in an arm ends in it). `None`: in no deleted
+/// arm, so a tested drop there keeps its flag.
+pub fn row_tok(icx: &ItemCx<'_>, point: Point, owner: Owner) -> Option<u32> {
+    match (point, owner) {
+        (Point::Return(t) | Point::Try(t) | Point::Jump(t), _) => Some(t),
+        (Point::Bind(n) | Point::Assign(n), _) => Some(icx.a(n)),
+        (Point::End, Owner::Local(n)) => Some(icx.a(n)),
+        (Point::End, Owner::Temp(s, _)) if s != crate::temps::NONE => Some(icx.a(s)),
+        (Point::End, _) => None,
+    }
+}
+
 /// The drops of one body (its closures and `spawn` bodies included: nodes and tokens are the
 /// item's).
 #[derive(Clone, Debug, Default)]
@@ -194,11 +234,10 @@ pub struct Schedule {
     order: Vec<(Point, Owner)>,
     /// The drops the code must decide ([`Schedule::require`]).
     due: Vec<(Point, Owner)>,
-    /// Whether each reachable drop runs ([`Schedule::runs`]); a row the CFG's entry does not
-    /// reach has none. Once sealed, sorted with one entry per row.
-    runs: Vec<(Point, Owner, Runs)>,
-    /// The owners with a flag ([`Schedule::flagged`]); once sealed, sorted.
-    flags: Vec<Owner>,
+    /// Whether each reachable drop runs ([`Schedule::runs`]), with the owner whose value it
+    /// drops; a row the CFG's entry does not reach has none. Once sealed, sorted with one entry
+    /// per row.
+    runs: Vec<(Point, Owner, Runs, Owner)>,
     sorted: bool,
 }
 
@@ -224,12 +263,9 @@ impl Schedule {
 
     /// The drop of `owner` at `point` is reached with `runs`, joined over every place that
     /// reaches it; `holder`: the owner whose value it drops (an assignment's old value: the
-    /// local assigned), flagged when the drop is tested.
+    /// local assigned), whose flag the drop tests.
     pub fn set_runs(&mut self, point: Point, owner: Owner, runs: Runs, holder: Owner) {
-        self.runs.push((point, owner, runs));
-        if runs == Runs::Flag {
-            self.flags.push(holder);
-        }
+        self.runs.push((point, owner, runs, holder));
         self.sorted = false;
     }
 
@@ -237,7 +273,7 @@ impl Schedule {
     pub fn runs(&self, point: Point, owner: Owner) -> Option<Runs> {
         if !self.sorted {
             let mut out: Option<Runs> = None;
-            for &(p, o, r) in &self.runs {
+            for &(p, o, r, _) in &self.runs {
                 if p == point && o == owner {
                     out = Some(out.map_or(r, |x| x.join(r)));
                 }
@@ -248,12 +284,22 @@ impl Schedule {
         self.runs.get(i).filter(|x| x.0 == point && x.1 == owner).map(|x| x.2)
     }
 
-    /// Whether `owner` has a flag: some drop of its value is tested ([`Runs::Flag`]).
-    pub fn flagged(&self, owner: Owner) -> bool {
-        if !self.sorted {
-            return self.flags.contains(&owner);
+    /// The tested drops one instance keeps and the owners with a flag there: every tested drop
+    /// ([`Runs::Flag`]) for which `deleted` (the row is in an arm the instance deletes) is
+    /// false, and the owners whose values those drops drop.
+    pub fn instance(&self, deleted: impl Fn(Point, Owner) -> bool) -> Tested {
+        let mut out = Tested::default();
+        for &(p, o, _, holder) in &self.runs {
+            if self.runs(p, o) == Some(Runs::Flag) && !deleted(p, o) {
+                out.kept.push((p, o));
+                out.flags.push(holder);
+            }
         }
-        self.flags.binary_search(&owner).is_ok()
+        out.kept.sort_unstable();
+        out.kept.dedup();
+        out.flags.sort_unstable();
+        out.flags.dedup();
+        out
     }
 
     pub fn extend(&mut self, other: &Schedule) {
@@ -261,7 +307,6 @@ impl Schedule {
         self.order.extend_from_slice(&other.order);
         self.due.extend_from_slice(&other.due);
         self.runs.extend_from_slice(&other.runs);
-        self.flags.extend_from_slice(&other.flags);
         self.sorted = false;
     }
 
@@ -274,16 +319,14 @@ impl Schedule {
         self.due.sort_unstable();
         self.due.dedup();
         self.runs.sort_unstable();
-        let mut runs: Vec<(Point, Owner, Runs)> = Vec::with_capacity(self.runs.len());
-        for &(p, o, r) in &self.runs {
+        let mut runs: Vec<(Point, Owner, Runs, Owner)> = Vec::with_capacity(self.runs.len());
+        for &(p, o, r, h) in &self.runs {
             match runs.last_mut() {
                 Some(x) if x.0 == p && x.1 == o => x.2 = x.2.join(r),
-                _ => runs.push((p, o, r)),
+                _ => runs.push((p, o, r, h)),
             }
         }
         self.runs = runs;
-        self.flags.sort_unstable();
-        self.flags.dedup();
         self.sorted = true;
     }
 

@@ -235,6 +235,7 @@ impl<'a> FnCx<'a> {
 
     /// Locals, slots, assignment sites, and closures of the body at `root`.
     pub fn setup(&mut self, root: u32) {
+        self.instance_flags();
         let icx = self.icx;
         let tb = self.tb();
         let mut binds: Vec<(u32, u32, Ty)> = Vec::new();
@@ -1379,17 +1380,23 @@ impl<'a> FnCx<'a> {
             (None, None, _) => return,
         }
         self.f.b.switch_to(then);
+        let dead = u32::from(taken == Some(false));
+        self.f.deleted += dead;
         self.block(tb);
         self.br_join(j, &[]);
+        self.f.deleted -= dead;
         if let (Some(eb), Some(e)) = (eb, els) {
             self.f.env = snap;
             self.f.b.switch_to(eb);
+            let dead = u32::from(taken == Some(true));
+            self.f.deleted += dead;
             if self.nkind(e) == Some(NodeKind::IfStmt) {
                 self.if_stmt(e);
             } else {
                 self.block(e);
             }
             self.br_join(j, &[]);
+            self.f.deleted -= dead;
         }
         self.enter_live(j);
     }
