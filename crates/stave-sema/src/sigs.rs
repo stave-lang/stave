@@ -1156,6 +1156,10 @@ pub(crate) struct SigBuilder<'p> {
     pub lang: LangItems,
     /// Const evaluation stack (cycle reporting).
     const_stack: Vec<DeclId>,
+    /// Type aliases whose targets are being lowered, outermost first, and those found on a
+    /// cycle of aliases (E0423 case `alias`, once per cycle).
+    alias_stack: Vec<DeclId>,
+    alias_cycles: Vec<DeclId>,
     /// Internal errors of const evaluation.
     pub internal: Vec<String>,
     /// The generics of the decl being built ([`LowerHost::view_env`]).
@@ -1274,6 +1278,8 @@ impl<'p> SigBuilder<'p> {
             diags: Vec::new(),
             lang: LangItems::default(),
             const_stack: Vec::new(),
+            alias_stack: Vec::new(),
+            alias_cycles: Vec::new(),
             internal: Vec::new(),
             cur_generics: Vec::new(),
             bound_scope: None,
@@ -1541,6 +1547,22 @@ impl<'p> SigBuilder<'p> {
                 && matches!(decl.kind, DeclKind::Const | DeclKind::Static)
             {
                 self.report_const_cycle(d);
+            }
+            // an alias reached while its own target is lowered: no finite type expands it, also
+            // through a pointer; the use gets the error type. One report per cycle, at its
+            // first alias in source order.
+            if st == State::InProgress
+                && let Some(pos) = self.alias_stack.iter().position(|&x| x == d)
+                && !self.alias_cycles.contains(&d)
+            {
+                let cycle: Vec<DeclId> = self.alias_stack[pos..].to_vec();
+                self.alias_cycles.extend_from_slice(&cycle);
+                if let Some(first) =
+                    cycle.iter().filter_map(|&x| self.prog.decl(x).map(|y| (y.name_span, x))).min()
+                {
+                    let name = self.prog.decl_path(first.1);
+                    self.diags.extend(mk("E0423", Some("alias"), &[("name", &name)], first.0, &[]));
+                }
             }
             return;
         }
@@ -2010,10 +2032,12 @@ impl<'p> SigBuilder<'p> {
         let generics = self.generics_of(d);
         let env = TyEnv { icx, n_parent: 0, self_ty: None };
         // `type A = never;` is allowed (the alias is checked where it is used).
+        self.alias_stack.push(d);
         let target = match icx.child(decl.node, NodeKind::Type) {
             Some(t) => lower_type(self, &env, t, true),
             None => ids::ERROR,
         };
+        self.alias_stack.pop();
         DeclSig::Alias(AliasDef { generics, target })
     }
 

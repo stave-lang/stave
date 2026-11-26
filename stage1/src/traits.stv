@@ -442,6 +442,9 @@ pub struct Traits {
     pub comp: Comp,
     // per decl: a `view` struct or enum
     adt_view: vec.Vec<bool>,
+    // per decl: a struct or enum with a `Drop` impl declared in its package, accepted or not
+    // (some instance may run it): the `Drop` part of Flat, and `drop-impl` of a type with params
+    pub adt_drop: vec.Vec<bool>,
     keys: Keys,
     co: vec.Vec<bool>,
     // per goal: its clauses are the rows `cl_lo[g]..cl_hi[g]` of `cl`
@@ -478,10 +481,24 @@ pub fn new(sg: &sigs.Sigs, tab: &types.Table, ds: &decls.Decls, fl: &files.FileL
     for d in 0..ds.decls() {
         adt_view.as_mut_slice()[d] = ds.flags.as_slice()[d] & decls.F_VIEW != 0;
     }
+    let lang = lang_items(fl, md, ds, nm);
+    let im = impls(sg, tab, ds);
+    let mut adt_drop = col.filled(ds.decls(), false);
+    let k = im.trait_pos(lang.drop);
+    if lang.drop != NONE && k != NONE {
+        let is = im.of(k);
+        for j in 0..is.len() {
+            let h = im.head_of.as_slice()[is[j] as usize];
+            if (h >> 62) != 1 { continue; }
+            let d = (h & 0xffff_ffff) as% u32;
+            if own_package(ds, md, is[j], d) { adt_drop.as_mut_slice()[d as usize] = true; }
+        }
+    }
     return Traits.{
         adt_view: adt_view,
-        lang: lang_items(fl, md, ds, nm),
-        im: impls(sg, tab, ds),
+        adt_drop: adt_drop,
+        lang: lang,
+        im: im,
         comp: Comp.new(),
         keys: Keys.new(),
         co: vec.Vec::<bool>.new(),
@@ -504,6 +521,14 @@ pub fn new(sg: &sigs.Sigs, tab: &types.Table, ds: &decls.Decls, fl: &files.FileL
         s_stack: vec.Vec::<u32>.new(),
         s_bargs: vec.Vec::<u32>.new(),
     };
+}
+
+// Whether decls a and b are declared in one package (a decl of no module only with another).
+pub fn own_package(ds: &decls.Decls, md: &modules.Modules, a: u32, b: u32) -> bool {
+    let ma = ds.module.as_slice()[a as usize];
+    let mb = ds.module.as_slice()[b as usize];
+    if ma == NONE || mb == NONE { return ma == mb; }
+    return md.mod_pkg.as_slice()[ma as usize] == md.mod_pkg.as_slice()[mb as usize];
 }
 
 fn real(t: u32) -> bool {
@@ -844,7 +869,7 @@ impl Traits {
             if a == self.lang.unsafe_cell { return; }
             if !frozen {
                 if self.adt_view.as_slice()[a as usize] { return; }
-                if self.lang.drop != NONE && self.head_has(self.lang.drop, a) { return; }
+                if self.adt_drop.as_slice()[a as usize] { return; }
             }
             if sh.kind_of(a) == layout.SK_NONE { return; }
             pa.make(tab, sh, t);

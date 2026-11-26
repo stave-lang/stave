@@ -600,6 +600,104 @@ fn type_depth_limit() {
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 
+/// E0423: a struct or enum that holds itself by value is reported at its declaration, used or
+/// not, once per cycle, at the first declaration of the cycle; an indirection breaks the cycle;
+/// a type that only holds such a type is not reported, nor is it too deep (E0005). Cycles and
+/// chains far longer than the type depth limit are walked without recursion.
+#[test]
+fn types_holding_themselves_by_value() {
+    let diags = |body: &str| -> Vec<String> {
+        let src = format!("{body}\nfn main() -> i32 {{ return 0; }}\n");
+        let (p, tc) = mem(&src);
+        let mut v: Vec<String> = tc
+            .all_diagnostics(&p)
+            .iter()
+            .map(|d| format!("{} {}", d.code(), d.primary().map_or(0, |s| s.offset)))
+            .collect();
+        v.sort();
+        v
+    };
+    let at = |src: &str, name: &str| -> String {
+        let decl = |kw: &str| {
+            [" ", "<"].iter().find_map(|end| src.find(&format!("{kw} {name}{end}"))).map(|i| i + kw.len() + 1)
+        };
+        format!("E0423 {}", decl("struct").or(decl("enum")).unwrap_or(0))
+    };
+    let cases = [
+        ("struct Loop { next: Loop }\nfn f(l: &Loop) -> u32 { return 0; }", "Loop"),
+        ("struct Outer { l: Loop }\nstruct Loop { next: Loop, n: u32 }", "Loop"),
+        ("enum E { A(E), B }", "E"),
+        ("enum E { A(Option<E>), B }", "E"),
+        ("struct T { t: (u32, T) }", "T"),
+        ("struct A { a: [A; 0] }", "A"),
+        ("struct W<T> { t: T }\nstruct L { w: W<L> }", "L"),
+        ("struct G<T> { g: G<T>, t: T }", "G"),
+        ("struct A { b: B }\nstruct B { a: A }", "A"),
+        ("struct A<T> { b: B<T> }\nstruct B<T> { a: A<T>, t: T }", "A"),
+        ("type P = (u32, S);\nstruct S { p: P }", "S"),
+        // another instance of the declaration, not its own type
+        ("struct D<T> { a: T, n: Option<D<u32>> }\nfn f(d: &D<u32>) -> u32 { return d.a; }", "D"),
+        ("enum L<T> { Nil, Cons(T, L<u8>) }", "L"),
+        ("struct A<T> { b: B<u8> }\nstruct B<T> { a: A<T>, t: T }", "A"),
+        ("struct G<const N: usize> { a: [G<3>; N], b: u32 }", "G"),
+        ("struct P<T, U> { q: Q<U> }\nstruct Q<V> { p: P<V, V> }", "P"),
+    ];
+    for (src, name) in cases {
+        assert_eq!(diags(src), vec![at(src, name)], "{src}");
+    }
+    // two cycles: one report each
+    let two = "struct A { a: A }\nstruct B { b: B, a: A }";
+    let mut want = vec![at(two, "A"), at(two, "B")];
+    want.sort();
+    assert_eq!(diags(two), want);
+    let none: Vec<String> = Vec::new();
+    for src in [
+        "struct N { next: *const N, all: *mut [N] }",
+        "enum List { Nil, Cons(u32, *mut List) }",
+        "view struct V { next: &V, n: u32 }",
+        "import std.vec;\nstruct T { kids: vec.Vec<T>, o: Option<*const T> }",
+        "struct P<T> { p: *const T }\nstruct S { p: P<S> }\nfn f(s: S) -> S { return s; }",
+    ] {
+        assert_eq!(diags(src), none, "{src}");
+    }
+    // long cycles and chains: one report, no E0005 for the types on or above a cycle
+    let n = 5000;
+    let cycle: String = (0..n).map(|i| format!("struct S{i} {{ a: S{}, n: u32 }}\n", (i + 1) % n)).collect();
+    assert_eq!(diags(&cycle), vec!["E0423 7".to_string()]);
+    let enums: String = (0..n).map(|i| format!("enum E{i} {{ A(E{}), B }}\n", (i + 1) % n)).collect();
+    assert_eq!(diags(&enums), vec!["E0423 5".to_string()]);
+    let into: String = (0..n)
+        .map(|i| {
+            if i + 1 < n {
+                format!("struct S{i} {{ a: S{} }}\n", i + 1)
+            } else {
+                format!("struct S{i} {{ a: S{i} }}\n")
+            }
+        })
+        .collect();
+    assert_eq!(diags(&into), vec![at(&into, &format!("S{}", n - 1))]);
+    let inst: String =
+        (0..n).map(|i| format!("struct S{i}<T> {{ a: S{}<u8>, t: T }}\n", (i + 1) % n)).collect();
+    assert_eq!(
+        diags(&format!("{inst}fn f(s: &S0<u8>) -> u8 {{ return s.t; }}")),
+        vec!["E0423 7".to_string()]
+    );
+    // an alias that names itself, also behind a pointer
+    assert_eq!(diags("type A = (u8, A);\nfn f(a: &A) -> u8 { return a.0; }"), vec!["E0423 5".to_string()]);
+    assert_eq!(diags("type P = *const P;"), vec!["E0423 5".to_string()]);
+    let chain: String = (0..n)
+        .map(|i| {
+            if i + 1 < n {
+                format!("struct S{i} {{ a: S{} }}\n", i + 1)
+            } else {
+                format!("struct S{i} {{ a: u32 }}\n")
+            }
+        })
+        .collect();
+    assert_eq!(diags(&chain), vec!["E0005 7".to_string()]);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}
+
 /// The E0908 fixes are code that compiles once the body is filled in: `impls-static` writes the
 /// bound with one impl's trait args, the method's params and result, and the call with its args;
 /// `for` names the trait as the module does.

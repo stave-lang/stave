@@ -111,7 +111,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0005",
         severity: Severity::Error,
         area: "lex-parse",
-        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type at the first signature, field, alias, value, or call that reaches it, and at each expression, statement, or declaration whose checking asks for a type past the limit",
+        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance (one that reaches a type holding itself by value has no depth: E0423); once per type at the first signature, field, alias, value, or call that reaches it, and at each expression, statement, or declaration whose checking asks for a type past the limit",
         retired: false,
         located: true,
         holes: &[],
@@ -2838,6 +2838,44 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0423",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "struct or enum that holds itself by value, used or not: a cycle of parts held by value (struct fields, enum payloads, tuple, array (any length), and range elements, the fields of a generic ADT instance after substitution), through the declaration's own type or another instance of it (`struct D<T> { n: Option<D<u32>> }`); a reference, raw pointer, slice, or fn type breaks the cycle (`vec.Vec` holds a raw pointer). Every such cycle (a strongly connected component of the by-value parts graph of the types the program writes or builds) is reported once per declaration, and a cycle holding an instance of a declaration already reported is not reported again: at the first declaration in source order with a field that writes a type of the cycle (not a wrapper whose field is its bare param, `Option`), else at the first with an instance in it; label at that field. A type that only holds such a type is not reported, nor is it too deep (E0005). Case `alias`: a type alias whose target names the alias, directly or through other aliases, also behind a pointer (no finite type expands it); once per cycle, at its first alias in source order",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{name}` holds itself by value: it has no finite size",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "recursive type without indirection" },
+                    LabelTemplate { at: "field", text: "this field leads back to `{name}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "hold the recursive part behind a raw pointer or in a `vec.Vec`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "alias",
+                message: "type alias `{name}` names itself: no finite type expands it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "recursive alias" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "declare a struct or enum for the recursive type, holding the recursive part behind a raw pointer or in a `vec.Vec`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
@@ -5159,7 +5197,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0906",
         severity: Severity::Error,
         area: "generics",
-        rule: "impl lacks a trait method, or defines a method the trait does not declare",
+        rule: "impl lacks a trait method, or defines a method the trait does not declare (a rejected `Drop` impl, this or E0905, still gives its type a destructor on every instance it applies to)",
         retired: false,
         located: true,
         holes: &[

@@ -4,7 +4,8 @@
 //!   and so do the lock-rank tests `rank_*.stv`;
 //! - related-span goldens: `--diagnostics json` of every negative there equals
 //!   `tests/conformance/borrow/_json/<name>.json` (only the diagnostics located in the test file;
-//!   `STAVE_BLESS=1` rewrites them; a missing one is written and fails the run once);
+//!   `STAVE_BLESS=1` rewrites them; a missing one is written and fails the run once; a case
+//!   whose diagnostics point into a library file has no golden: [`golden_paths`]);
 //! - no valid program of the other suites gets an E05xx (no false positives);
 //! - diagnostics are identical with 1 and 8 threads;
 //! - the 100k-line corpus has no borrow error, and the `borrowck` stage time is printed
@@ -16,6 +17,9 @@ use stave_driver::conformance::stage0::{Stage0, registry_codes};
 use stave_driver::conformance::{Config, Outcome, Report, run_suite};
 use stave_driver::pipeline::{self, Goal, Options, Output, Stage};
 use stave_driver::shipped::Library;
+
+#[path = "../../../tests/support/golden_paths.rs"]
+mod golden_paths;
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -117,6 +121,10 @@ fn related_span_goldens() {
         let out = check(&f, 2);
         let got = json_of(&out, &name);
         assert!(got.contains("\"code\":\"E05"), "{name}: no borrow diagnostic\n{got}");
+        if let Some(why) = golden_paths::host_path(&got, &repo()) {
+            diffs.push(format!("{name}: {why}"));
+            continue;
+        }
         let path = gdir.join(name.replace(".stv", ".json"));
         if bless {
             std::fs::create_dir_all(&gdir).unwrap();
@@ -135,6 +143,45 @@ fn related_span_goldens() {
         }
     }
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+    assert_eq!(stave_borrow::diagnostic_build_failures(), 0);
+}
+
+/// One answer to "has a destructor": a rejected `Drop` impl (no `drop` method, only another
+/// method, a `drop` beside another method listed first, a `drop` of the wrong signature) counts
+/// on every instance it applies to, so moving a part out is E0504 in a generic body and at a
+/// concrete instance alike. Their E0906 / E0905 point into `std`, so the case is checked here
+/// and has no golden.
+#[test]
+fn rejected_drop_impls_count_on_every_instance() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rejected_drop_impls");
+    std::fs::create_dir_all(&dir).unwrap();
+    let impls = [
+        "{}",
+        "{ fn foo(&mut self) {} }",
+        "{ fn foo(&mut self) {} fn drop(&mut self) {} }",
+        "{ fn drop(&self) {} }",
+    ];
+    for (k, imp) in impls.iter().enumerate() {
+        let src = format!(
+            "struct N {{ x: u32 }}\nstruct W<T> {{ t: T }}\nimpl<T> Drop for W<T> {imp}\n\
+             fn g<T>(w: W<T>) -> T {{ let W.{{ t }} = w; return t; }}\n\
+             fn h(w: W<N>) -> N {{ let W.{{ t }} = w; return t; }}\n\
+             struct C {{ n: N }}\nimpl Drop for C {imp}\n\
+             fn k(c: C) -> N {{ let C.{{ n }} = c; return n; }}\n\
+             fn main() -> i32 {{ return 0; }}\n"
+        );
+        let path = dir.join(format!("case{k}.stv"));
+        std::fs::write(&path, src).unwrap();
+        let out = check(&path, 2);
+        let mut lines: Vec<u32> = out
+            .diagnostics
+            .iter()
+            .filter(|d| d.code() == "E0504")
+            .filter_map(|d| d.primary().and_then(|s| out.files().locate(s).ok()).map(|l| l.line))
+            .collect();
+        lines.sort_unstable();
+        assert_eq!(lines, [4, 5, 8], "{imp}: E0504 in g, h, and k");
+    }
     assert_eq!(stave_borrow::diagnostic_build_failures(), 0);
 }
 

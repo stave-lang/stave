@@ -1,0 +1,7 @@
+# E0423 across packages: a cycle through an instance in a dependency is reported there; a
+# cycle through a dependency's wrapper is reported at the struct of this package.
+name = "holds_itself_pkg"
+kind = "bin"
+
+[dependencies]
+dep = { path = "dep" }

@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// E0423: a struct or enum that holds itself by value has no finite size, used or not. Once per
+// cycle, at its first declaration in source order: through fields, enum payloads, tuple and
+// array elements (`[T; 0]` too), the fields of a generic instance, and an alias. A type that only
+// holds such a type (`Outer`) is not reported, and a use behind a reference changes nothing.
+struct Loop { next: Loop, n: u32 } //~ ERROR E0423
+
+struct Outer { l: Loop }
+
+enum Tree { Leaf, Node(Tree, Tree) } //~ ERROR E0423
+
+enum MaybeSelf { A(Option<MaybeSelf>), B } //~ ERROR E0423
+
+struct InTuple { t: (u32, InTuple) } //~ ERROR E0423
+
+struct InEmptyArray { a: [InEmptyArray; 0] } //~ ERROR E0423
+
+struct Wrap<T> { v: T }
+
+struct ThroughWrap { w: Wrap<ThroughWrap> } //~ ERROR E0423
+
+struct Gen<T> { g: Gen<T>, t: T } //~ ERROR E0423
+
+struct Ping { p: Pong } //~ ERROR E0423
+
+struct Pong { p: Ping }
+
+type Pair = (u32, Aliased);
+
+struct Aliased { p: Pair } //~ ERROR E0423
+
+fn f(l: &Loop, o: &Outer, t: &Tree) -> u32 {
+    return l.n;
+}
+
+fn main() -> i32 {
+    return 0;
+}

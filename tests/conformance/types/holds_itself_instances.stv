@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// E0423 for a cycle through another instance of a generic declaration (not its own type with
+// its params): `D<u32>` holds `Option<D<u32>>`, which holds `D<u32>`. Reported at the
+// declaration whose field writes a type of the cycle, once per declaration, and not again for
+// the same cycle at other args; `Option` (its field is its bare param) is never the one.
+struct D<T> { a: T, n: Option<D<u32>> } //~ ERROR E0423
+
+enum L<T> { Nil, Cons(T, L<u8>) } //~ ERROR E0423
+
+struct A<T> { b: B<u8> } //~ ERROR E0423
+
+struct B<T> { a: A<T>, t: T }
+
+struct G<const N: usize> { a: [G<3>; N], b: u32 } //~ ERROR E0423
+
+struct Z<const N: usize> { a: [Z<0>; 0], n: [u8; N] } //~ ERROR E0423
+
+struct P<T, U> { q: Q<U> } //~ ERROR E0423
+
+struct Q<V> { p: P<V, V> }
+
+struct S0<T> { a: S1<u8>, t: T } //~ ERROR E0423
+
+struct S1<T> { a: S0<u8>, t: T }
+
+fn f(d: &D<u32>, l: &L<u8>, b: &B<u8>, g: &G<3>, s: &S0<u8>) -> u32 {
+    return d.a + g.b;
+}
+
+fn main() -> i32 {
+    return 0;
+}

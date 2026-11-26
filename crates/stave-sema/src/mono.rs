@@ -358,28 +358,20 @@ pub(crate) fn resolve_trait_method<I: Interner + ?Sized>(
     Some(Resolved::Inst(InstKey { decl: m, args }))
 }
 
-/// The `Drop.drop` impl method instance of `t`, if `t` implements `Drop`.
+/// The `Drop.drop` impl method instance of `t`: the `drop` method of its `Drop` impl
+/// ([`drop_impl_of`]). None for a type without one, and for an impl without a `drop` method
+/// (E0906): the type still has the impl ([`drop_impl`]), so the checker treats it as having a
+/// destructor, and lowering, which runs only on accepted programs, never meets it.
 pub(crate) fn drop_method<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> Option<InstKey> {
-    drop_method_kept(w, cx, t, &mut Answers::default())
-}
-
-/// [`drop_method`] with the answers of earlier queries in the empty environment.
-fn drop_method_kept<I: Interner + ?Sized>(
-    w: &World<'_>,
-    cx: &mut I,
-    t: TypeId,
-    kept: &mut Answers,
-) -> Option<InstKey> {
-    let drop = w.sigs.lang.drop;
-    let TypeKind::Adt { def, .. } = *cx.kind(t) else { return None };
-    if drop.is_none() {
-        return None;
-    }
-    let (imp, args) = w.find_impl_kept(cx, t, &TraitRef { trait_decl: drop, args: Vec::new() }, &[], kept)?;
-    if !own_package(w, imp, def) {
-        return None;
-    }
-    let m = *w.sigs.impl_def(imp)?.methods.first()?;
+    let (imp, args) = drop_impl_of(w, cx, t, &mut Answers::default())?;
+    let name = w.prog.decl(*w.sigs.trait_def(w.sigs.lang.drop)?.methods.first()?)?.name;
+    let m = w
+        .sigs
+        .impl_def(imp)?
+        .methods
+        .iter()
+        .copied()
+        .find(|&m| w.prog.decl(m).is_some_and(|d| d.name == name))?;
     Some(InstKey { decl: m, args })
 }
 
@@ -390,11 +382,47 @@ fn own_package(w: &World<'_>, imp: DeclId, def: DeclId) -> bool {
     package(imp) == package(def)
 }
 
+/// The `Drop` impls that count for ADT `def`: those whose self type is an instance of it,
+/// declared in its package, in impl list order (positions in `impls_by_trait`). Whether the
+/// checker accepts the impl (E0905, E0906, E0416, ..) does not matter: a rejected impl has the
+/// same effect, a destructor, on every instance it applies to.
+fn adt_drop_impls<'w>(w: &'w World<'_>, def: DeclId) -> impl Iterator<Item = DeclId> + 'w {
+    let drop = w.sigs.lang.drop;
+    let list = w.sigs.impls_by_trait.get(&drop).map_or(&[][..], |v| &v[..]);
+    let at =
+        w.sigs.trait_impls_by_head.get(&(drop, Some(crate::TypeHead::Adt(def)))).map_or(&[][..], |v| &v[..]);
+    at.iter()
+        .filter_map(move |&k| list.get(k as usize).copied())
+        .filter(move |&i| drop.is_some() && own_package(w, i, def))
+}
+
+/// Whether ADT `def` has a `Drop` impl ([`adt_drop_impls`]): some instance may run one. The
+/// answer for a type with parameters, and the `Drop` part of the Flat rule.
+pub(crate) fn adt_drop_impl(w: &World<'_>, def: DeclId) -> bool {
+    adt_drop_impls(w, def).next().is_some()
+}
+
+/// The `Drop` impl of concrete type `t` and its args: the first of [`adt_drop_impls`] that
+/// applies to it.
+fn drop_impl_of<I: Interner + ?Sized>(
+    w: &World<'_>,
+    cx: &mut I,
+    t: TypeId,
+    kept: &mut Answers,
+) -> Option<(DeclId, Vec<GArg>)> {
+    let TypeKind::Adt { def, .. } = *cx.kind(t) else { return None };
+    adt_drop_impls(w, def).find_map(|i| {
+        let imp = w.sigs.impl_def(i)?;
+        w.impl_applies_kept(cx, imp, t, &[], kept).map(|args| (i, args))
+    })
+}
+
 /// Whether a value of type `t` runs a `Drop` impl of its own when dropped (not only the glue of
-/// its parts). A concrete type: the impl its instance resolves to ([`drop_method`]), so a Copy
+/// its parts). A concrete type: the impl its instance resolves to ([`drop_impl_of`]), so a Copy
 /// instance of a type with a `Drop` impl for another instance has none. A type with parameters
-/// (in a generic body): some instance may, so any `Drop` impl of its ADT counts. The one answer
-/// the borrow checker's CFG, the lowering, and the drop schedule read.
+/// (in a generic body): some instance may, so any `Drop` impl of its ADT counts
+/// ([`adt_drop_impl`]). The one answer the borrow checker's CFG, the lowering, the drop
+/// schedule, and the `kinds` dump read.
 pub fn drop_impl<I: Interner + ?Sized>(w: &World<'_>, cx: &mut I, t: TypeId) -> bool {
     drop_impl_kept(w, cx, t, &mut Answers::default())
 }
@@ -409,15 +437,9 @@ pub fn drop_impl_kept<I: Interner + ?Sized>(
 ) -> bool {
     let TypeKind::Adt { def, .. } = *cx.kind(t) else { return false };
     if !has_params(cx, t) {
-        return drop_method_kept(w, cx, t, kept).is_some();
+        return drop_impl_of(w, cx, t, kept).is_some();
     }
-    let drop = w.sigs.lang.drop;
-    w.sigs.impls_by_trait.get(&drop).is_some_and(|is| {
-        is.iter().any(|&i| {
-            w.sigs.impl_def(i).is_some_and(|d| d.head == Some(crate::TypeHead::Adt(def)))
-                && own_package(w, i, def)
-        })
-    })
+    adt_drop_impl(w, def)
 }
 
 /// Field types of the variants of a concrete ADT type (struct: one variant).
