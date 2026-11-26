@@ -677,7 +677,9 @@ the same answer, and a drop no path from the entry reaches is left out.
   has no flag. A closure or `spawn` body in the arm keeps its own drops, as it keeps its code.
 - In each instance an owner has a flag exactly when one of its drops is tested. A flag is a
   `bool` `slot`; no flag is an SSA value or a block param, and a temporary with a flag holds its
-  value in a slot.
+  value in a slot. Code after a constant `if` whose taken arm never falls through is not in a
+  deleted arm: its drops count as tested, so an owner can keep a flag that nothing loads once
+  that code is removed.
 - The slots of a fn, in order: the locals' slots ("Slots"), the flags of its flagged locals in
   declaration order, the flags of its flagged temporaries in the order the temporaries are made,
   then every other slot. Right after the slots `b0` stores `0` into each flag, in the same order.
