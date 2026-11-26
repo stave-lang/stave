@@ -544,6 +544,7 @@ rule is in stage-gates.md).
    | `match` statement or expression | per arm in source order: test (one per alternative of an or-pattern, in source order), guard (if present), body; then join |
    | `&&`, `\|\|` | right operand, join |
    | `?` | error return, continue |
+   | a tested drop ("Drop flags") | drop, continue |
    | anything else | none |
 
    Blocks unreachable from `b0` (e.g. code after `return`) are deleted, and the rest are renumbered
@@ -596,7 +597,8 @@ the **Slots** rule still holds.
   (lang-details.md, "§1 Type queries") ends in `br` to the taken arm (or the join), and the other
   arm, unreachable, is deleted.
 - **Slots**: every `slot` is in `b0`, before any other instruction of `b0`, one per local in a
-  slot in declaration order (fn params first, then `let`s in source order).
+  slot in declaration order (fn params first, then `let`s in source order). The drop flags
+  follow them ("Drop flags").
 - **Panics**: an unconditional trap (`unwrap` on `None`, a failed `std.debug.assert`, ...) is
   `panic.<kind> ()` followed by the terminator `unreachable`; code after it in source is
   unreachable and deleted with its blocks. A call of a `-> never` fn is followed by `unreachable`
@@ -609,10 +611,10 @@ the **Slots** rule still holds.
   source order, is `e` evaluated once; the `old(e)` uses read that value. At each `return`, `?`
   error return, and the end of a unit body, after the scope drops, `result` is bound to the
   returned value (an int or `bool` no clause borrows: that SSA value; else stored to its slot, the
-  last slot, none for a unit return) and each `ensures` clause is checked the same way, `fail`
-  calling `runtime.panic.ensures_failed (site, s)` with the site of the `return` token (the `?`,
-  the body's `}`). No `panic.<kind>` op: the report holds the clause text. A `requires` clause of
-  a `test fn` is not checked. The removal pass below treats each such check like a bounds check:
+  last of the locals' slots, none for a unit return) and each `ensures` clause is checked the
+  same way, `fail` calling `runtime.panic.ensures_failed (site, s)` with the site of the `return`
+  token (the `?`, the body's `}`). No `panic.<kind>` op: the report holds the clause text. A
+  `requires` clause of a `test fn` is not checked. The removal pass below treats each such check like a bounds check:
   a proven one goes (`cbr` becomes `br ok`, the call and its block go); one that fails whenever
   reached is a compile error (E0215, E0217) and stays.
 - **Contracts across calls** (stave-ir `witness`, "Summaries"): a fn states rows `a <= b + w`
@@ -700,6 +702,43 @@ the **Slots** rule still holds.
   the arm accepts every value. Otherwise the match has no `switch`: every alternative tests the
   discriminant itself, a failed test branches to the next alternative, and a false guard to the
   first alternative of the next arm.
+
+### Drop flags
+
+An owner is a local or a temporary whose type has drop glue in the instance. Whether a drop of
+an owner runs where it is reached is decided once, by the forward init dataflow of the borrow
+checker's CFG of the generic body (may-init: the owner holds its value on some path to the drop;
+must-init: on every path), and the lowering only reads the answer:
+
+| At the drop | The drop |
+|---|---|
+| must-init | is emitted |
+| not may-init | is left out |
+| may-init, not must-init | is tested: it runs where the owner's flag is set |
+
+The drop of the value an assignment overwrites is a drop of the local assigned. A drop reached
+at more than one place (a statement lowered at each `return`) is tested unless every place gives
+the same answer, and a drop no path from the entry reaches is left out.
+
+- The dataflow is the generic body's. A drop in an arm an instance deletes (a constant
+  condition, contracts/lang-details.md "§1 Type queries") is not tested in that instance: the
+  drops on a `return`, `?`, `break`, or `continue` in the arm, those of a pattern or an
+  assignment in the arm, and the end drops of the locals bound and the statements' temporaries
+  in it; a temporary made in the arm (an `ensures` clause lowered at a `return` there included)
+  has no flag. A closure or `spawn` body in the arm keeps its own drops, as it keeps its code.
+- In each instance an owner has a flag exactly when one of its drops is tested. A flag is a
+  `bool` `slot`; no flag is an SSA value or a block param, and a temporary with a flag holds its
+  value in a slot. Code after a constant `if` whose taken arm never falls through is not in a
+  deleted arm: its drops count as tested, so an owner can keep a flag that nothing loads once
+  that code is removed.
+- The slots of a fn, in order: the locals' slots ("Slots"), the flags of its flagged locals in
+  declaration order, the flags of its flagged temporaries in the order the temporaries are made,
+  then every other slot. Right after the slots `b0` stores `0` into each flag, in the same order.
+- A flag is stored `1` where its owner gets its value (its binding, an assignment of the whole
+  owner, the making of a temporary), `0` where the value is moved out, and `0` after each drop
+  of the owner at its end or on an exit that is emitted or tested.
+- A tested drop is `%f = load t<bool> %flag` and `cbr %f d c`, with block `d` holding the drop
+  and `br c`; the code after the drop continues in block `c` ("Order", rule 2).
 
 ## Types and fntype
 

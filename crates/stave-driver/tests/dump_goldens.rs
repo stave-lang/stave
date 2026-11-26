@@ -3,8 +3,8 @@
 //! (formats: contracts/stage-gates.md). `stats.txt` must be written and is never compared. Dumps
 //! cover the whole program, so the cases build against the pinned stand-in library
 //! `tests/conformance/dumps/_lib` (`std/`, an empty `runtime/`; the CLI test uses it through
-//! `STAVE_STD_DIR`), the `kinds_` cases against `_lib_kinds` (`_lib` plus the marker traits,
-//! `std.cell`, and `std.sync`): the goldens do not move with the shipped std/.
+//! `STAVE_STD_DIR`), the `kinds_` cases and `ir_drop_flags` against `_lib_kinds` (`_lib` plus
+//! the marker traits, `std.cell`, and `std.sync`): the goldens do not move with the shipped std/.
 //!
 //! IR text goldens (contracts/checked-ir.md): every `ir_<construct>/` case is a package `input`
 //! plus the expected `ir.txt` of a debug lowering (`stave check --dump=ir`), its `lir.txt`
@@ -65,9 +65,10 @@ fn dumps_dir(case: &str) -> PathBuf {
     repo().join("tests/conformance/dumps").join(case)
 }
 
-/// The pinned library of `case`: `_lib_kinds` for the `kinds_` cases, else `_lib`.
+/// The pinned library of `case`: `_lib_kinds` for the `kinds_` cases and for `ir_drop_flags`
+/// (its owners need the `Drop` trait), else `_lib`.
 fn golden_std(case: &str) -> Library {
-    let lib = if case.starts_with("kinds_") { "_lib_kinds" } else { "_lib" };
+    let lib = if case.starts_with("kinds_") || case == "ir_drop_flags" { "_lib_kinds" } else { "_lib" };
     Library::in_dir(&repo().join("tests/conformance/dumps").join(lib))
 }
 

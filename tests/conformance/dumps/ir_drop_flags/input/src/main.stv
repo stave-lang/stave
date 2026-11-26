@@ -1,0 +1,75 @@
+//~ CHECK-ONLY
+// ir golden (checked-ir.md "Drop flags"): an owner moved on some paths only has a flag, a `bool`
+// slot after the locals' slots, stored 0 at entry, 1 where the owner gets its value, 0 where
+// the value is moved out and after its drop; the drop at its end is tested (`load`, `cbr`, the
+// drop's block first). A flagged param, a `let`, a temporary made on one side of `&&`, and a
+// closure body with a flag of its own; `arm<Res>` deletes the arm holding the only tested drop
+// of `a`, so `a` has no flag there.
+struct Res {
+    pub id: u32,
+}
+
+impl Drop for Res {
+    fn drop(&mut self) {
+    }
+}
+
+fn eat<T>(x: T) {
+}
+
+fn keep(r: &Res) -> bool {
+    return r.id > 0;
+}
+
+fn param(r: Res, k: u32) {
+    if k == 1 {
+        eat(r);
+    }
+}
+
+fn local(k: u32) -> u32 {
+    let a = Res.{ id: k };
+    let b = Res.{ id: 2 };
+    if k == 2 {
+        eat(a);
+    }
+    return b.id;
+}
+
+fn temp(k: u32) -> bool {
+    let ok = k == 1 && keep(&Res.{ id: k });
+    return ok;
+}
+
+fn closure(k: u32) -> u32 {
+    let f = fn(j: u32) -> u32 {
+        let c = Res.{ id: j };
+        if j == 1 {
+            eat(c);
+        }
+        return j + k;
+    };
+    return f(k);
+}
+
+fn arm<T>(y: T, k: u32) {
+    if needs_drop::<T>() {
+        eat(y);
+    } else {
+        let a = y;
+        if k == 1 {
+            eat(a);
+        }
+    }
+}
+
+fn main() -> i32 {
+    param(Res.{ id: 1 }, 1);
+    arm(Res.{ id: 3 }, 1);
+    arm(3u32, 1);
+    let n = local(1) + closure(1);
+    if temp(1) {
+        return (n - 4) as% i32;
+    }
+    return 1;
+}

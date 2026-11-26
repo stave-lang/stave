@@ -741,7 +741,8 @@ impl<'a> FnCx<'a> {
         let vt = if ty.is_none() || self.is_never(ty) { self.t_unit() } else { ty };
         let j = self.join(n, &[vt]);
         // a constant condition branches to its arm only, as in `if_stmt`
-        match self.const_cond(n) {
+        let taken = self.const_cond(n);
+        match taken {
             Some(k) => self.f.b.br(if k { then } else { els }, &[]),
             None => {
                 let bt = self.t_bool();
@@ -752,20 +753,26 @@ impl<'a> FnCx<'a> {
         let snap = self.f.env.clone();
         // each branch is a statement of its own: its temporaries end before the join
         self.f.b.switch_to(then);
+        let dead = u32::from(taken == Some(false));
+        self.f.deleted += dead;
         self.begin_temps(a);
         let v = self.val(a, Some(vt));
         self.end_temps();
         if let Some(v) = v {
             self.br_join(j, &[v]);
         }
+        self.f.deleted -= dead;
         self.f.env = snap;
         self.f.b.switch_to(els);
+        let dead = u32::from(taken == Some(true));
+        self.f.deleted += dead;
         self.begin_temps(b);
         let v = self.val(b, Some(vt));
         self.end_temps();
         if let Some(v) = v {
             self.br_join(j, &[v]);
         }
+        self.f.deleted -= dead;
         let reached = self.f.joins[j].st.is_some();
         self.enter(j);
         if !reached {
