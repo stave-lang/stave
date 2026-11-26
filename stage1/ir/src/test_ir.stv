@@ -139,6 +139,11 @@ test fn a_write_needs_a_mutable_pointer() {
     debug.assert(first_has(&load.load(text(&f).as_slice()), "mutable pointer from a shared pointer operand"), "no ref mut cast of a ref");
     let g = [hdr, "type t0 int u 32", "type t1 ref mut t0", "fn @0 a.f() {", "b0():", "  %0 = slot t1", "  store () %0 7", "  ret", "}"];
     debug.assert(load.load(text(&g).as_slice()).ok(), "a store to a slot");
+    // a field read of another variant than the value's is not seen by the rule (a stated residual)
+    let h = [hdr, "decl d0 enum app.E", "type t0 int u 32", "type t1 ref t0", "type t2 ref mut t0", "type t3 adt d0", "shape t3 enum | t1 | t2", "fn @0 app.f(t1) {", "b0(%0: t1):", "  %1 = enum.make t3 0 %0", "  %2 = enum.get t2 %1 1 0", "  store () %2 7", "  ret", "}"];
+    debug.assert(load.load(text(&h).as_slice()).ok(), "a variant pun by value");
+    let k = [hdr, "decl d0 enum app.E", "type t0 int u 32", "type t1 ref t0", "type t2 ref mut t0", "type t3 adt d0", "type t4 ref mut t3", "type t5 ref mut t2", "shape t3 enum | t1 | t2", "fn @0 app.f(t1) {", "b0(%0: t1):", "  %1 = slot t4", "  %2 = enum.make t3 0 %0", "  store () %1 %2", "  %3 = addr.enum_field t5 %1 1 0", "  %4 = load t2 %3", "  store () %4 7", "  ret", "}"];
+    debug.assert(load.load(text(&k).as_slice()).ok(), "a variant pun through memory");
 }
 
 test fn slots_are_a_prefix_of_b0() {

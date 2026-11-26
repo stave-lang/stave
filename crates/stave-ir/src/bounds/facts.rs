@@ -60,6 +60,7 @@ use super::{BOUNDS_STEP_LIMIT, Cx, Proof, preds_of};
 use crate::ir::{Block, Body, CastKind, Func, FuncId, Op, Operand, Term as IrTerm, Value, ValueDef};
 use crate::types::{TypeId, TypeKey};
 use crate::verify::Dominators;
+use crate::witness::check::compare_ty;
 use crate::witness::{
     ASSERT_BLOCKS, Edge, MAX_CONST, NO_BLOCK, NOT_DEPTH, Node, Row, Source, Summary, Term as RowTerm,
 };
@@ -517,14 +518,13 @@ impl Cx<'_> {
     }
 
     /// The fact a `check.bounds x (n -| c)` states after it: `x < n -| c`, so `x + c < n`
-    /// (`n -| c` is `max(n - c, 0)`, and `x < 0` is false for an unsigned `x`). A check on any
-    /// other length is no fact here: the `Dominated` proof reads it.
+    /// (`n -| c` is `max(n - c, 0)`, and `x < 0` is false for an unsigned `x`). Only where `x`
+    /// and `n -| c` are read in one unsigned type ([`compare_ty`]: a check also takes operands
+    /// of two widths, whose fact the witness checker does not read). A check on any other length
+    /// is no fact here: the `Dominated` proof reads it.
     fn check_facts(&self, g: &mut Graph, i: u32) {
         let &[x, y] = self.b.args(i) else { return };
-        // `check.bounds` compares unsigned (its operands are unsigned values or constants ≥ 0)
-        if let Operand::Value(xv) = x
-            && !self.unsigned(xv)
-        {
+        if !matches!(compare_ty(self.m, self.b, x, y), Some(Some((false, _)))) {
             return;
         }
         let Some((n, c)) = self.sat_bound(y) else { return };

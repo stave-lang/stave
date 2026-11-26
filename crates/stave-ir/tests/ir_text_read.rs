@@ -2228,3 +2228,31 @@ fn a_mutable_pointer_comes_from_a_mutable_source() {
         }
     }
 }
+
+/// A field read of an enum variant other than the one the value holds is a reinterpretation the
+/// mutability rule does not see (checked-ir.md "Mutability", its third residual): a `ref` made
+/// as variant 0 of `enum E { R(&u32), W(&mut u32) }` is read as variant 1's `ref mut` and
+/// written, by value (`enum.get`) or through memory (`addr.enum_field`, `load`). Both load at
+/// every level; the stage1 verifier pins the same verdict (`stage1/ir/src/test_ir.stv`).
+#[test]
+fn a_variant_pun_is_not_seen_by_the_mutability_rule() {
+    let types = "decl d0 enum app.E
+type t0 int u 32
+type t1 ref t0
+type t2 ref mut t0
+type t3 adt d0
+type t4 ref mut t3
+type t5 ref mut t2
+shape t3 enum | t1 | t2
+";
+    let bodies = [
+        "fn @0 app.f(t1) {\nb0(%0: t1):\n  %1 = enum.make t3 0 %0\n  %2 = enum.get t2 %1 1 0\n  store () %2 7\n  ret\n}\n",
+        "fn @0 app.f(t1) {\nb0(%0: t1):\n  %1 = slot t4\n  %2 = enum.make t3 0 %0\n  store () %1 %2\n  \
+         %3 = addr.enum_field t5 %1 1 0\n  %4 = load t2 %3\n  store () %4 7\n  ret\n}\n",
+    ];
+    for body in bodies {
+        for level in LEVELS {
+            load(&format!("stave.ir 4 \"x86_64-linux-v2\" release {level}\n{types}{body}"));
+        }
+    }
+}

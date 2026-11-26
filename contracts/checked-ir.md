@@ -348,8 +348,9 @@ What loading proves depends on the level:
 - Every level: the module is well formed (steps 1-3: types, shapes, statics, signatures,
   `known` items, intrinsics and their arch, SSA and op typing), and every write goes through a
   pointer that is mutable by the rule of "Mutability". That rule trusts the forms `unsafe` code
-  emits (a cast to or from a raw pointer, a raw pointer of `intrinsic.static_addr`) and a
-  `ref mut` loaded through a `ref`: the IR types them by their source.
+  emits (a cast to or from a raw pointer, a raw pointer of `intrinsic.static_addr`), a `ref mut`
+  loaded through a `ref`, and a field read of an enum variant other than the one the value
+  holds: the IR types them by their source.
 - `lowered`, `checked`: every element access (step 5) has a `check.bounds` or a proof the audit
   accepts.
 - `lowered`: no `claim` line. Step 4 computes the summaries from the bodies; a check is removed
@@ -478,14 +479,24 @@ data). The verifier checks, after an instruction's typing:
     through the raw pointer is `unsafe` code's obligation; only a cast of a `ref` (or a string) to
     a `ref mut` is refused.
 
-Every other value keeps its type exactly (block params, `select`, `make`, `get`, `enum.get`, call
-arguments and results, `ret`), so mutability reaches a value only from a source: a `slot`
-(`ref mut`), a param or a call result of a mutable type, a load of a stored mutable pointer, or
-one of the casts and intrinsics above. Two writes the rule does not see, because the IR types
-them as their source does: a write through a `ref mut` loaded through a `ref` (undefined
-behaviour, LANG.md; safe code only reads through one), and a write to an immutable static
-through `intrinsic.static_addr`, which gives a raw pointer of either mutability (a `static` line
-does not say whether its decl is a `static mut`), trusted like any raw pointer.
+Every other value keeps its type exactly (block params, `select`, `make`, `get`, call arguments
+and results, `ret`; `enum.get` and `addr.enum_field` have the type of the named variant's
+field), so mutability reaches a value only from a source: a `slot` (`ref mut`), a param or a call
+result of a mutable type, a load of a stored mutable pointer, one of the casts and intrinsics
+above, or a field of an enum variant. Three writes the rule does not see, because the IR types
+them as their source does:
+
+- a write through a `ref mut` loaded through a `ref` (undefined behaviour, LANG.md; safe code
+  only reads through one);
+- a write to an immutable static through `intrinsic.static_addr`, which gives a raw pointer of
+  either mutability (a `static` line does not say whether its decl is a `static mut`), trusted
+  like any raw pointer;
+- a write through a field of a variant other than the one the enum value holds: `enum.get` or
+  `addr.enum_field` of variant `k` reads the payload's bytes as variant `k`'s field whatever
+  variant was made, so `enum E { R(&u32), W(&mut u32) }` turns a `ref` stored as `R` into a
+  `ref mut` read as `W`. Source reads a variant's fields only where a test of its tag (`match`,
+  `if let`) chose that variant, or in an enum of one variant; the verifier does not track tags,
+  and refusing an enum whose variants hold both mutabilities would refuse valid source.
 
 ## TypeKey text (canonical type-key printer)
 
