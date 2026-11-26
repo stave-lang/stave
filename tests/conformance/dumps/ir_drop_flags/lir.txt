@@ -8,10 +8,10 @@ type t3 ref t0
 type t4 ref t11
 type t5 ref mut t0
 type t6 ref mut t2
-type t7 ref mut t5
+type t7 ref mut t3
 type t8 ref mut t10
 type t9 ref mut t11
-type t10 tuple t5
+type t10 tuple t3
 type t11 adt d46
 type t12 fntype t0 -> t0
 shape t11 struct t0
@@ -51,11 +51,12 @@ b0(%0: t0):
   %2 = slot t8
   store () %1 %0
   %3 = addr.field t7 %2 0
-  store () %3 %1
-  %4 = fn.make t12 @0.0 %2
-  %5 = load t0 %1
-  %6 = call.ind t0 %4 %5 !1
-  ret %6
+  %4 = cast t3 %1
+  store () %3 %4
+  %5 = fn.make t12 @0.0 %2
+  %6 = load t0 %1
+  %7 = call.ind t0 %5 %6 !1
+  ret %7
 }
 fn @0.0 main.closure(t0, t8) -> t0 site 2 {
 b0(%0: t0, %1: t8):
@@ -63,7 +64,7 @@ b0(%0: t0, %1: t8):
   %3 = slot t6
   store () %3 0
   %4 = addr.field t7 %1 0
-  %5 = load t5 %4
+  %5 = load t3 %4
   %6 = make t11 %0
   store () %2 %6
   store () %3 1
