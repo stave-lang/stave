@@ -18,7 +18,8 @@ fn optimized(m: &Module) -> Module {
     let mut c = m.clone();
     bounds::elide(&mut c).unwrap_or_else(|r| panic!("witness refused: {r:?}"));
     verify_module(&c).unwrap();
-    bounds::audit(&c).unwrap_or_else(|u| panic!("unguarded after removal: {u:?}"));
+    let before =
+        element_accesses(&bounds::audit(&c).unwrap_or_else(|u| panic!("unguarded after removal: {u:?}")));
     stave_opt::slices::declare_elem_pointers(&mut c.types);
     let types = c.types.clone();
     for f in &mut c.funcs {
@@ -27,8 +28,16 @@ fn optimized(m: &Module) -> Module {
         }
     }
     verify_module(&c).unwrap_or_else(|e| panic!("optimized IR does not verify: {e:?}"));
-    bounds::audit(&c).unwrap_or_else(|u| panic!("unguarded after the release passes: {u:?}"));
+    let after = bounds::audit(&c).unwrap_or_else(|u| panic!("unguarded after the release passes: {u:?}"));
+    // the element pointer form the passes make (`slice.ptr` + the access) is audited as before
+    assert_eq!(element_accesses(&after), before);
     c
+}
+
+/// The number of element accesses per kind, without the `slice.ptr`s.
+fn element_accesses(acc: &[bounds::Access]) -> [usize; 4] {
+    use bounds::AccessKind as K;
+    [K::Elem, K::Get, K::Set, K::Vector].map(|k| acc.iter().filter(|a| a.kind == k).count())
 }
 
 fn count(b: &Body, op: Op) -> usize {

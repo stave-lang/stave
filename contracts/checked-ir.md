@@ -19,10 +19,9 @@ error diagnostics; with errors, its file is not written.
 Each level is printed from the canonical module of that point ("Canonical module"), so ids of
 one level do not correspond to those of another. stage0's own release build also runs the bounds
 audit on the output of its base passes, as a self-check of stage0; that audit is not part of level
-`opt`, and loading an `opt` text does not run it. It checks only the accesses the audit counts
-("Loading" step 5) that are left after the base passes: rule B2 (opt-passes.md) has put every
-element access of a slice of non-array, non-slice elements into pointer form through
-`slice.ptr`, which is not among them.
+`opt`, and loading an `opt` text does not run it. It checks that every element access the base
+passes leave, those rule B2 (opt-passes.md) puts behind `slice.ptr` included, still has a
+`check.bounds` or a proof the audit accepts ("Loading" step 5).
 
 The **gate form** is what the dumps hold. The **emit form** (`stave ir emit`) is the gate form
 plus the stack section: the `runstack`, `truncated`, `node`, `edge` and `nodes` lines. Rule: the
@@ -325,11 +324,21 @@ step stops before the next.
    as errors (E0215, E0217, E0218: not in an instance of a generic fn).
 5. **Audit.** At levels `lowered` and `checked`: the bounds audit of every fn, reading calls by
    the loaded `claim` rows (`checked`) or the computed ones (`lowered`); an unguarded access is
-   reported as in step 3. The accesses the audit counts: an `addr.elem` whose operand 0 is a
-   `ref` to an array or slice, a `get` or `set` of an array, and a vector memory op whose
-   operand 0 is a `ref` or `ptr` to an array or slice. At level `opt` no audit runs: the release
-   passes inline calls and substitute arguments for params, and the audit takes facts from calls
-   and params.
+   reported as in step 3. Every element access has a `check.bounds` or a proof the audit
+   accepts, or traps itself (`get` and `set` with a dynamic index; masked, gather and scatter
+   vector ops). The element accesses: every `addr.elem` but the pointer arithmetic below, a `get`
+   or `set` of an array, and every vector memory op. One through the element pointer
+   `p = slice.ptr s` of a slice is an access of `s` (refused when the elements of `s` are arrays
+   or slices); one through any other reference or raw pointer to an array or slice is checked
+   against that type's length. A `slice.ptr` result points to the slice's element type, and its
+   every use is such an access of its slice, a prefetch, a cast to an int, or `slice.make` of it
+   with `slice.len s` whose type is that of `s` with mutability or alignment dropped (raised
+   alignment only as the `Some` of `align_to`'s `select`); any other is refused as an unguarded
+   access. An `addr.elem` on a raw pointer to one element that is, through pointer-to-pointer
+   casts, the result of a `load` or a call is pointer arithmetic, the `unsafe` code's own
+   obligation, and no access; any other access through a pointer to one element is refused. At
+   level `opt` no audit runs: the release passes inline calls and substitute arguments for
+   params, and the audit takes facts from calls and params.
 
 After steps 3-5 the loaded module is renumbered canonically. At level `lowered` the removal of
 step 4 follows, which keeps the module canonical, and then the IR verifier, as in a build; at the
@@ -338,11 +347,14 @@ other levels the verifier runs on the renumbered module.
 What loading proves depends on the level:
 - Every level: the module is well formed (steps 1-3: types, shapes, statics, signatures,
   `known` items, intrinsics and their arch, SSA and op typing).
-- `lowered`, `checked`: every access the audit counts (step 5) has a `check.bounds` or a proof
-  the audit accepts.
+- `lowered`, `checked`: every element access (step 5) has a `check.bounds` or a proof the audit
+  accepts.
 - `lowered`: no `claim` line. Step 4 computes the summaries from the bodies; a check is removed
-  only by a proof the witness checker accepts. This is the one level at which loading
-  establishes that every access the audit counts is in bounds.
+  only by a proof the witness checker accepts. This is the one level at which loading proves
+  the element accesses of slices and arrays in bounds. The IR carries no `unsafe` marker, and
+  `unsafe` code emits the following forms, so they are trusted, not proved: pointer arithmetic
+  on a raw pointer to one element from a `load` or a call, a cast that changes a pointer's
+  pointee, `slice.make` with a length taken from data, and a cast of an int to a pointer.
 - `checked`: the `claim` rows are assertions of the text, not facts loading proves; the text
   holds no proof to check them by. The audit trusts them as it trusts computed summaries: a
   `pre` row lets an access of the fn go without a check, a `post` row lets a caller's access go
