@@ -474,10 +474,19 @@ pub enum InterpError {
     },
     /// `max_steps` exhausted.
     Fuel,
-    /// An access outside any live region (a native run would fault), or a load of a mask whose
-    /// lane at `fault.addr` is neither all zeros nor all ones (undefined behaviour).
+    /// An access outside any live region (a native run would fault).
     Fault {
         fault: Fault,
+        func: FuncId,
+        site: Site,
+    },
+    /// A load of a mask whose lane number `lane` (`bits` wide, at `addr`) holds `value`, neither
+    /// all zeros nor all ones: undefined behaviour.
+    MaskLaneFault {
+        addr: u64,
+        lane: u32,
+        bits: u32,
+        value: u64,
         func: FuncId,
         site: Site,
     },

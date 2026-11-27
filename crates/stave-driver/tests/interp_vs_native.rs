@@ -416,7 +416,7 @@ fn simd_programs_run_in_the_interpreter() {
 }
 
 /// A mask loaded from memory with a lane that is neither all zeros nor all ones is undefined
-/// behaviour: the interpreter reports a fault at the load.
+/// behaviour: the interpreter reports a fault at the load that names the lane.
 #[test]
 fn malformed_mask_load_is_an_interpreter_fault() {
     let p = repo().join("tests/conformance/simd/ub_mask_bits.stv");
@@ -424,7 +424,10 @@ fn malformed_mask_load_is_an_interpreter_fault() {
         let out = lower_only(&p, target);
         let m = out.for_interp().unwrap();
         match interp::run(m, "main.main", target, &[], &[], Limits::default()) {
-            Err(e) => assert!(e.contains("Fault"), "{target}: {e}"),
+            Err(e) => assert!(
+                e.contains("MaskLaneFault") && e.contains("lane: 2, bits: 32, value: 1,"),
+                "{target}: {e}"
+            ),
             Ok(r) => panic!("{target}: ran to the end\n{}", show(&r.ran)),
         }
     }
@@ -510,7 +513,7 @@ fn malformed_mask_load_masked_reads_only_checked_lanes() {
             let name = &c.name;
             let out = lower_only(&c.path, target);
             match interp::run(out.for_interp().unwrap(), "main.main", target, &[], &[], Limits::default()) {
-                Err(e) if e.contains("Fault") => {}
+                Err(e) if e.contains("MaskLaneFault") => {}
                 Err(e) => failures.push(format!("{name} [{target}]: interpreter: {e}")),
                 Ok(r) => failures.push(format!("{name} [{target}]: interpreter ran on\n{}", show(&r.ran))),
             }

@@ -717,7 +717,8 @@ What the tracking mode does not see, or sees later than the rules say:
   integer, bytes of a reference copied one by one, a pointer from `extern "C"` or a system call)
   acts as the root of its allocation: its accesses kill references a finer rule would keep,
   and two such pointers are never in conflict with each other.
-- **Memory errors.** Out-of-bounds and misaligned accesses, uninitialized bytes other than
-  moved-out ones, leaks, a second `free`, and `p.read()` of a Copy type are the memory checking
-  mode's, not this model's.
+- **Memory errors.** Out-of-bounds accesses, reads of bytes never written, leaks, and a second
+  `free` are the memory checking mode's, not this model's. Neither mode reports a misaligned
+  access, or a read of a slot that a `p.read()` of a Copy type left uninitialized, though both
+  are undefined behaviour (LANG.md §3).
 - **Foreign code.** Accesses made by `extern "C"` code and by the kernel are not seen.
