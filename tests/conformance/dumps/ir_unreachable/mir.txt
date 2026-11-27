@@ -63,7 +63,9 @@ loop b3 b4 [b3]
 body d23 0 6 ok
 block b0 goto b1
 block b1 goto b1
-loop b1 - [b1]
+block b2 return
+  6 return const 6
+loop b1 b2 [b1]
 body d24 2 15 ok
 t0 int u 32
 t1 int s 32

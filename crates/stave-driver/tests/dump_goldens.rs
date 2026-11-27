@@ -336,7 +336,7 @@ fn semantic_dump_properties() {
 /// section right after its fn's; only an `ok` section has lines after its header; in one, each
 /// of `t<j>`, `l<j>`, `L<j>`, `b<j>` is defined once, dense from 0, in its line kind's order, and
 /// every one a line names is defined; the blocks are numbered in the preorder of a depth-first
-/// walk from `b0` over the printed successors; a local a statement names first after the params
+/// walk from `b0` over the printed successors, then by walks from the least-keyed block left; a local a statement names first after the params
 /// and captures has the next number.
 #[test]
 fn mir_dump_properties() {
@@ -420,10 +420,13 @@ fn check_section(case: &str, h: &str, lines: &[&str]) {
     // per loan: the local of its place and the loan it reborrows whole
     let mut loans: Vec<(u32, Option<u32>)> = Vec::new();
     let mut stmts: Vec<&str> = Vec::new();
+    // per block: its statement nodes (`-` sorts last)
+    let mut keys: Vec<Vec<u32>> = Vec::new();
     for l in lines {
         let w: Vec<&str> = l.split(' ').collect();
         let k = if l.starts_with("  ") {
             stmts.push(l);
+            keys.last_mut().unwrap().push(w[2].parse().unwrap_or(u32::MAX));
             continue;
         } else if mir_ref(w[0], 't').is_some() {
             0
@@ -448,7 +451,10 @@ fn check_section(case: &str, h: &str, lines: &[&str]) {
                 fixed += 1;
             }
             2 => loans.push((mir_ref(w[3], 'l').unwrap(), mir_ref(w[4], 'L'))),
-            3 => succs.push(mir_refs(l, 'b').into_iter().skip(1).collect()),
+            3 => {
+                succs.push(mir_refs(l, 'b').into_iter().skip(1).collect());
+                keys.push(Vec::new());
+            }
             _ => {}
         }
     }
@@ -459,18 +465,37 @@ fn check_section(case: &str, h: &str, lines: &[&str]) {
             }
         }
     }
-    // blocks: preorder of the depth-first walk from b0
+    // blocks: preorder of the depth-first walk from b0, then walks from the least-keyed block
+    // left, those no block left leads to first
+    let n = succs.len();
     let mut order = Vec::new();
-    let mut done = vec![false; succs.len()];
-    let mut stack = vec![0u32];
-    while let Some(b) = stack.pop() {
-        if std::mem::replace(&mut done[b as usize], true) {
-            continue;
+    let mut done = vec![false; n];
+    let walk = |from: u32, done: &mut Vec<bool>, order: &mut Vec<u32>| {
+        let mut stack = vec![from];
+        while let Some(b) = stack.pop() {
+            if std::mem::replace(&mut done[b as usize], true) {
+                continue;
+            }
+            order.push(b);
+            stack.extend(succs[b as usize].iter().rev());
         }
-        order.push(b);
-        stack.extend(succs[b as usize].iter().rev());
+    };
+    walk(0, &mut done, &mut order);
+    let mut led = vec![false; n];
+    for b in (0..n).filter(|&b| !done[b]) {
+        for &s in &succs[b] {
+            led[s as usize] = true;
+        }
     }
-    assert_eq!(order, (0..succs.len() as u32).collect::<Vec<_>>(), "{case} {h}: blocks not in preorder");
+    let mut roots: Vec<usize> = (0..n).filter(|&b| !done[b] && !led[b]).collect();
+    roots.sort_by(|&x, &y| keys[x].cmp(&keys[y]));
+    for r in roots {
+        walk(r as u32, &mut done, &mut order);
+    }
+    while let Some(b) = (0..n).filter(|&b| !done[b]).min_by(|&x, &y| keys[x].cmp(&keys[y])) {
+        walk(b as u32, &mut done, &mut order);
+    }
+    assert_eq!(order, (0..n as u32).collect::<Vec<_>>(), "{case} {h}: blocks not in the walk order");
     // locals and loans: numbered where the statements first name them, a loan's place right
     // after the loan
     let (mut next_l, mut next_loan) = (fixed, 0u32);

@@ -124,6 +124,7 @@ block b4 goto b3
   12 assign l1 init use copy l0.v3:1 12
 block b5 return
   27 return const 27
+block b6 unreachable
 body d24 4 28 ok
 t0 int u 32
 t1 bool

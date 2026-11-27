@@ -5,7 +5,10 @@
 //! or recursion order of the builder, so a second builder with other data structures prints the
 //! same bytes for the same CFG:
 //! - blocks: the preorder of a depth-first walk from the entry that takes the successors in
-//!   order; a block the entry does not reach is not printed;
+//!   order, then the blocks the entry does not reach (their calls, loans, and moves are read by
+//!   the lock-rank scan, the liveness, and the reports) by further walks, each from the block
+//!   with the least key among those left: first the ones no other block left leads to, then
+//!   any; the key of a block is the list of its statement nodes;
 //! - locals: the params by index, then the captures by binding node, then every other local in
 //!   the order the printed lines first name it (blocks, then findings); a local no line names
 //!   is not printed;
@@ -198,6 +201,44 @@ impl Find<'_> {
     }
 }
 
+/// Numbers every block: the preorder of the walk from the entry, then the blocks it does not
+/// reach by walks from the least-keyed block left, those without a predecessor left first.
+fn number_blocks(b: &Body, num: &mut Num) {
+    let walk = |num: &mut Num, from: u32| {
+        let mut stack: Vec<u32> = vec![from];
+        while let Some(x) = stack.pop() {
+            match num.block.get_mut(x as usize) {
+                Some(n) if *n == u32::MAX => *n = num.blocks.len() as u32,
+                _ => continue,
+            }
+            num.blocks.push(x);
+            stack.extend(b.blocks[x as usize].term.succs().iter().rev());
+        }
+    };
+    walk(num, 0);
+    let n = b.blocks.len();
+    if num.blocks.len() == n {
+        return;
+    }
+    let key = |x: usize| -> Vec<u32> { b.blocks[x].stmts.iter().map(|s| s.node).collect() };
+    let mut led = vec![false; n];
+    for (i, blk) in b.blocks.iter().enumerate() {
+        if num.block[i] == u32::MAX {
+            for &s in blk.term.succs() {
+                led[s as usize] = true;
+            }
+        }
+    }
+    let mut roots: Vec<usize> = (0..n).filter(|&x| num.block[x] == u32::MAX && !led[x]).collect();
+    roots.sort_by_cached_key(|&x| key(x));
+    for x in roots {
+        walk(num, x as u32);
+    }
+    while let Some(x) = (0..n).filter(|&x| num.block[x] == u32::MAX).min_by_key(|&x| key(x)) {
+        walk(num, x as u32);
+    }
+}
+
 /// The lines of one body after its header.
 fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
     let mut num = Num {
@@ -208,15 +249,7 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
         loan: vec![u32::MAX; b.loans.len()],
         loans: Vec::new(),
     };
-    let mut stack: Vec<u32> = vec![0];
-    while let Some(x) = stack.pop() {
-        match num.block.get_mut(x as usize) {
-            Some(n) if *n == u32::MAX => *n = num.blocks.len() as u32,
-            _ => continue,
-        }
-        num.blocks.push(x);
-        stack.extend(b.blocks[x as usize].term.succs().iter().rev());
-    }
+    number_blocks(b, &mut num);
     let mut params: Vec<(u32, LocalId)> = Vec::new();
     let mut caps: Vec<(u32, LocalId)> = Vec::new();
     for (i, l) in b.locals.iter().enumerate() {
@@ -385,25 +418,14 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
 
     let mut loops: Vec<(u32, u32, Vec<u32>)> = Vec::new();
     for &(head, exit, end) in &b.loops {
-        let Some(&h) = num.block.get(head as usize).filter(|h| **h != u32::MAX) else { continue };
-        let e = num.block.get(exit as usize).copied().unwrap_or(u32::MAX);
-        let mut inside: Vec<u32> = (head..end)
-            .filter(|&x| x != exit)
-            .filter_map(|x| num.block.get(x as usize).copied())
-            .filter(|&x| x != u32::MAX)
-            .collect();
+        let mut inside: Vec<u32> =
+            (head..end).filter(|&x| x != exit).map(|x| num.block[x as usize]).collect();
         inside.sort_unstable();
-        loops.push((h, e, inside));
+        loops.push((num.block[head as usize], num.block[exit as usize], inside));
     }
     loops.sort();
     for (h, e, inside) in loops {
-        let _ = write!(out, "loop b{h} ");
-        if e == u32::MAX {
-            out.push('-');
-        } else {
-            let _ = write!(out, "b{e}");
-        }
-        out.push_str(" [");
+        let _ = write!(out, "loop b{h} b{e} [");
         for (i, x) in inside.iter().enumerate() {
             if i > 0 {
                 out.push(' ');

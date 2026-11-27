@@ -216,7 +216,15 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
       fn's. The text is stage0's diagnosis of its own bug: a second compiler prints the
       state, and the gate compares an `internal` header up to the reason.
   - Numbering. Blocks `b<j>`: the preorder of a depth-first walk from the entry that takes the
-    successors in order; a block the entry does not reach is not printed. Locals `l<j>`: the
+    successors in order, then the blocks the entry does not reach (code after a loop without
+    `break`, a join every way into which exits): the checks read their calls, loans, and
+    moves too (the lock-rank scan takes every call token, the liveness every use). They are
+    numbered by further walks of the same kind, each through the blocks not yet numbered and
+    from the one with the least key among them: first among the blocks no block left leads
+    to, then, when only cycles are left, among all. The key of a block is the list of its
+    statement nodes, compared as lists (`-` after every number, a shorter prefix first). Of two
+    blocks with equal keys the walk takes the builder's first, an order the corpus never shows
+    (two unreached starts with one key: none in 1135 roots). Locals `l<j>`: the
     params by index, then the captures by binding node, then every other local in the order the
     lines below first name it (blocks in order, then the `find` lines); a local no line names is
     not printed. Loans `L<j>`: in the order the block lines first name them. Naming a loan for
@@ -253,8 +261,8 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
     `call[OPND, ..] tok T flows F stores[S, ..]`: T the call's file token index (as `ast`
     `a`), F `-` (no origins), `all` (every argument's), or `[i, copy i, ..]` (per named param:
     the argument index); S `a<b` / `a<copy b`, then ` view` when the target points to a view.
-  - `loop b<head> b<exit>|- [b<j> ..]`, by (head, exit): each loop the entry reaches, with
-    its exit (`-`: none reached) and its blocks, sorted. The blocks of a loop are syntactic:
+  - `loop b<head> b<exit> [b<j> ..]`, by (head, exit): each loop, with its exit and its
+    blocks, sorted. The blocks of a loop are syntactic:
     its head and every block its condition, body, and (`for`) step make, those of the forms
     and of the exits (`return`, `?`, `break`, `continue`) inside it included; its exit block
     (where the code after the loop goes on) is not. So a block only an exit inside the loop
