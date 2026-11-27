@@ -1,0 +1,405 @@
+// Tests of `stmts`: every kind of statement and what belongs to the statement around it, the
+// checks and snapshots of contracts, the `old(` forms that leave a contract unknown, and deep
+// nesting. Rows are named by their source text.
+import generated.node_kinds;
+import generated.terminals;
+import ir.bytes;
+import stmts;
+import test_kit;
+import text;
+import std.debug;
+import std.io;
+import std.string;
+import std.vec;
+
+const NONE: u32 = stmts.NONE;
+
+// The source text of row g of item i.
+fn node_text(o: &test_kit.Out, i: usize, g: usize) -> &[u8] from o {
+    let f = o.cut.file.as_slice()[i] as usize;
+    let src = o.set.file(f);
+    let start = o.toks.start.as_slice()[o.tree.tok.as_slice()[g] as usize] as usize;
+    let past = o.tree.tok_end.as_slice()[g] as usize;
+    let mut stop = src.len();
+    if past < o.toks.file_tok.as_slice()[f + 1] as usize { stop = o.toks.start.as_slice()[past] as usize; }
+    while stop > start && (src[stop - 1] == 32 || src[stop - 1] == 10) {
+        stop = stop - 1;
+    }
+    return &src[start..stop];
+}
+
+fn kind_name(b: u8) -> &str {
+    if b == stmts.B_STMT { return "stmt"; }
+    if b == stmts.B_COND { return "cond"; }
+    if b == stmts.B_GUARD { return "guard"; }
+    if b == stmts.B_BRANCH { return "branch"; }
+    if b == stmts.B_ARM { return "arm"; }
+    if b == stmts.B_CHECK { return "check"; }
+    if b == stmts.B_OLD { return "old"; }
+    return "-";
+}
+
+// The parsed program src (module `main`, every item of it parsed) and its statements.
+fn parsed(src: &str) -> (test_kit.Out, stmts.Stmts) {
+    let o = test_kit.single(src);
+    let mut own: usize = 0;
+    for i in 0..o.tree.items() {
+        if o.cut.file.as_slice()[i] != 0 { continue; }
+        debug.assert(o.tree.ok(i), "the test program parses");
+        own = own + 1;
+    }
+    debug.assert(own > 0, "the test program has items");
+    let s = stmts.build(&o.nm, &o.toks, &o.cut, &o.tree);
+    return (o, s);
+}
+
+// As `parsed`, with `of` held against its definition: the smallest statement subtree holding
+// the row (in postorder the first statement at or above it whose subtree reaches down to it).
+fn run(src: &str) -> (test_kit.Out, stmts.Stmts) {
+    let (o, s) = parsed(src);
+    for i in 0..o.tree.items() {
+        let hi = o.tree.item_node.as_slice()[i + 1] as usize;
+        for g in o.tree.item_node.as_slice()[i] as usize..hi {
+            let mut want = NONE;
+            for p in g..hi {
+                if s.bound.as_slice()[p] != stmts.B_NONE && p - o.tree.size.as_slice()[p] as usize <= g {
+                    want = p as% u32;
+                    break;
+                }
+            }
+            debug.assert(s.of.as_slice()[g] == want, "`of` is the smallest statement holding the row");
+        }
+    }
+    return (o, s);
+}
+
+// A line `KIND TEXT` per statement of module `main`, in row order.
+fn statements(o: &test_kit.Out, s: &stmts.Stmts) -> vec.Vec<u8> {
+    let mut out = vec.Vec::<u8>.new();
+    for i in 0..o.tree.items() {
+        if o.cut.file.as_slice()[i] != 0 { continue; }
+        for g in o.tree.item_node.as_slice()[i] as usize..o.tree.item_node.as_slice()[i + 1] as usize {
+            let b = s.bound.as_slice()[g];
+            if b == stmts.B_NONE { continue; }
+            bytes.push_str(&mut out, kind_name(b));
+            out.push(32);
+            out.extend_from_slice(node_text(o, i, g));
+            out.push(10);
+        }
+    }
+    return out;
+}
+
+// `KIND TEXT` of the statement holding the first row of module `main` whose text is `at`, `-`
+// when none holds it.
+fn holder(o: &test_kit.Out, s: &stmts.Stmts, at: &str) -> vec.Vec<u8> {
+    let mut out = vec.Vec::<u8>.new();
+    for i in 0..o.tree.items() {
+        if o.cut.file.as_slice()[i] != 0 { continue; }
+        for g in o.tree.item_node.as_slice()[i] as usize..o.tree.item_node.as_slice()[i + 1] as usize {
+            if !text.eq_str(node_text(o, i, g), at) { continue; }
+            let h = s.of.as_slice()[g];
+            bytes.push_str(&mut out, kind_name(s.bound_of(g as% u32)));
+            if h != NONE {
+                out.push(32);
+                out.extend_from_slice(node_text(o, i, h as usize));
+            }
+            return out;
+        }
+    }
+    bytes.push_str(&mut out, "no such row");
+    return out;
+}
+
+fn expect(got: vec.Vec<u8>, want: &str, msg: &str) {
+    if !text.eq_str(got.as_slice(), want) {
+        let _ = io.write_all(2, got.as_slice());
+        io.eprint("\n");
+    }
+    debug.assert(text.eq_str(got.as_slice(), want), msg);
+}
+
+// The item of row g.
+fn item_of(o: &test_kit.Out, g: u32) -> usize {
+    for i in 0..o.tree.items() {
+        if g < o.tree.item_node.as_slice()[i + 1] { return i; }
+    }
+    return o.tree.items();
+}
+
+fn row_line(o: &test_kit.Out, out: &mut vec.Vec<u8>, what: &str, g: u32) {
+    bytes.push_str(out, what);
+    out.push(32);
+    out.extend_from_slice(node_text(o, item_of(o, g), g as usize));
+    out.push(10);
+}
+
+fn check_lines(o: &test_kit.Out, out: &mut vec.Vec<u8>, what: &str, cs: &[stmts.Check]) {
+    for j in 0..cs.len() {
+        let c = cs[j];
+        row_line(o, out, what, c.clause);
+        row_line(o, out, "  :", c.node);
+    }
+}
+
+// The contracts, each as its fn's name and `?` when unknown, its `result` clause, checks, and
+// snapshot operands. Every snapshot's `(` follows an `old` and its operand is a statement.
+fn contracts(o: &test_kit.Out, s: &stmts.Stmts) -> vec.Vec<u8> {
+    let mut out = vec.Vec::<u8>.new();
+    for r in 0..s.fns.len() {
+        let g = s.fns.as_slice()[r];
+        debug.assert(s.contract(g) == r as% u32, "a contract is found by its fn row");
+        let mut x = o.tree.tok.as_slice()[g as usize] as usize;
+        while o.toks.kind.as_slice()[x] != terminals.T_IDENT {
+            x = x + 1;
+        }
+        let i = item_of(o, g);
+        let src = o.set.file(o.cut.file.as_slice()[i] as usize);
+        let start = o.toks.start.as_slice()[x] as usize;
+        let stop = o.toks.start.as_slice()[x + 1] as usize;
+        bytes.push_str(&mut out, "fn ");
+        out.extend_from_slice(&src[start..stop]);
+        if !s.known.as_slice()[r] { bytes.push_str(&mut out, " ?"); }
+        out.push(10);
+        let res = s.result.as_slice()[r];
+        if res != NONE { row_line(o, &mut out, "result", res); }
+        check_lines(o, &mut out, "req", s.req.row(r));
+        check_lines(o, &mut out, "ens", s.ens.row(r));
+        let olds = s.olds.row(r);
+        for j in 0..olds.len() {
+            let q = olds[j];
+            let p = q.paren as usize;
+            debug.assert(o.toks.kind.as_slice()[p] == terminals.T_L_PAREN && o.toks.kind.as_slice()[p - 1] == terminals.T_IDENT, "the `(` of an `old`");
+            debug.assert(o.tree.tok.as_slice()[q.node as usize] == q.paren + 1, "the operand follows its `(`");
+            debug.assert(s.bound.as_slice()[q.node as usize] == stmts.B_OLD && s.of.as_slice()[q.node as usize] == q.node, "an operand is a statement of its own");
+            row_line(o, &mut out, "old", q.node);
+        }
+    }
+    return out;
+}
+
+test fn block_children() {
+    let (o, s) = run("fn f() { let a = g(); a = h(); i(); return j(); }\nfn h() { loop { break; } loop { continue; } unsafe(\"x\") { g(); } strict { g(); } emulate { g(); } scope { spawn { k(); } } { g(); } }\n");
+    expect(statements(&o, &s), "stmt let a = g();\nstmt a = h();\nstmt i();\nstmt return j();\nstmt break;\nstmt loop { break; }\nstmt continue;\nstmt loop { continue; }\nstmt g();\nstmt unsafe(\"x\") { g(); }\nstmt g();\nstmt strict { g(); }\nstmt g();\nstmt emulate { g(); }\nstmt k();\nstmt spawn { k(); }\nstmt scope { spawn { k(); } }\nstmt g();\nstmt { g(); }\n", "every child of a block");
+    expect(holder(&o, &s, "g()"), "stmt let a = g();", "an initializer");
+    expect(holder(&o, &s, "j()"), "stmt return j();", "a returned value");
+    expect(holder(&o, &s, "k()"), "stmt k();", "the innermost statement");
+}
+
+test fn if_and_while_conditions() {
+    let (o, s) = run("fn f() { if a() && b() { c(); } else if d() { e(); } else { h(); } while i() || j() { k(); } }\n");
+    expect(statements(&o, &s), "cond a() && b()\nstmt c();\ncond d()\nstmt e();\nstmt h();\nstmt if a() && b() { c(); } else if d() { e(); } else { h(); }\ncond i() || j()\nstmt k();\nstmt while i() || j() { k(); }\n", "conditions of `if` and `while` statements");
+    expect(holder(&o, &s, "b()"), "cond a() && b()", "the right side of `&&` stays in the condition");
+    expect(holder(&o, &s, "j()"), "cond i() || j()", "and of `||`");
+    expect(holder(&o, &s, "{ c(); }"), "stmt if a() && b() { c(); } else if d() { e(); } else { h(); }", "a block belongs to its statement");
+}
+
+test fn short_circuit_operands_and_for_headers() {
+    let (o, s) = run("fn f() { let a = x() && y(); let b = x() || z(); for i in lo()..hi() { g(); } for v: f32x4 in c() { d(); } tail scalar (y) { e(); } for w: f32x4 in k() {} tail masked (w, m) { h(); } for u: f32x4 in l() {} tail exact; }\n");
+    expect(statements(&o, &s), "stmt let a = x() && y();\nstmt let b = x() || z();\nstmt g();\nstmt for i in lo()..hi() { g(); }\nstmt d();\nstmt e();\nstmt for v: f32x4 in c() { d(); } tail scalar (y) { e(); }\nstmt h();\nstmt for w: f32x4 in k() {} tail masked (w, m) { h(); }\nstmt for u: f32x4 in l() {} tail exact;\n", "no statement in `&&`, `||`, or a `for` header");
+    expect(holder(&o, &s, "y()"), "stmt let a = x() && y();", "the right side of `&&`");
+    expect(holder(&o, &s, "z()"), "stmt let b = x() || z();", "the right side of `||`");
+    expect(holder(&o, &s, "hi()"), "stmt for i in lo()..hi() { g(); }", "a `for` range");
+    expect(holder(&o, &s, "c()"), "stmt for v: f32x4 in c() { d(); } tail scalar (y) { e(); }", "a `for` source");
+}
+
+test fn match_statements() {
+    let (o, s) = run("fn f() { match a() { x if b(x) => { c(); } y | z => { d(); } _ if e() && g() => {} P.Q => { match h() { _ => {} } } } }\n");
+    expect(statements(&o, &s), "guard b(x)\nstmt c();\nstmt d();\nguard e() && g()\nstmt match h() { _ => {} }\nstmt match a() { x if b(x) => { c(); } y | z => { d(); } _ if e() && g() => {} P.Q => { match h() { _ => {} } } }\n", "guards, and no arm of a statement `match` is a statement");
+    expect(holder(&o, &s, "a()"), "stmt match a() { x if b(x) => { c(); } y | z => { d(); } _ if e() && g() => {} P.Q => { match h() { _ => {} } } }", "a scrutinee");
+    expect(holder(&o, &s, "g()"), "guard e() && g()", "the whole guard");
+    expect(holder(&o, &s, "h()"), "stmt match h() { _ => {} }", "a nested scrutinee");
+}
+
+test fn value_matches() {
+    let (o, s) = run("fn f() { let v = match a() { x if b(x) => c(x), y | z => d() || e(), w => g() && h(), }; match match i() { x => j(), } { _ => {} } }\n");
+    expect(statements(&o, &s), "guard b(x)\narm c(x)\narm d() || e()\narm g() && h()\nstmt let v = match a() { x if b(x) => c(x), y | z => d() || e(), w => g() && h(), };\narm j()\nstmt match match i() { x => j(), } { _ => {} }\n", "guards and arm bodies");
+    expect(holder(&o, &s, "a()"), "stmt let v = match a() { x if b(x) => c(x), y | z => d() || e(), w => g() && h(), };", "a scrutinee");
+    expect(holder(&o, &s, "e()"), "arm d() || e()", "the whole arm body");
+    expect(holder(&o, &s, "i()"), "stmt match match i() { x => j(), } { _ => {} }", "the scrutinee of a scrutinee");
+}
+
+test fn value_ifs() {
+    let (o, s) = run("fn f() { let v = if a() then b() else c(); let w = if p() then q() else if r() then s() else t(); let u = 1u32 + (if k() then l() else m()); }\n");
+    expect(statements(&o, &s), "branch b()\nbranch c()\nstmt let v = if a() then b() else c();\nbranch q()\nbranch s()\nbranch t()\nbranch if r() then s() else t()\nstmt let w = if p() then q() else if r() then s() else t();\nbranch l()\nbranch m()\nstmt let u = 1u32 + (if k() then l() else m());\n", "branches, an `else if` among them");
+    expect(holder(&o, &s, "a()"), "stmt let v = if a() then b() else c();", "a condition");
+    expect(holder(&o, &s, "r()"), "branch if r() then s() else t()", "the condition of an `else if` is in its branch");
+    expect(holder(&o, &s, "k()"), "stmt let u = 1u32 + (if k() then l() else m());", "a condition in parentheses");
+}
+
+test fn value_forms_in_conditions_and_guards() {
+    let (o, s) = run("fn f() { if if a() then b() else c() {} while match d() { x => e(), } {} match g() { x if match h() { y => i(), } => {} _ => {} } if k() {} else if if l() then m() else n() {} }\n");
+    expect(statements(&o, &s), "branch b()\nbranch c()\ncond if a() then b() else c()\nstmt if if a() then b() else c() {}\narm e()\ncond match d() { x => e(), }\nstmt while match d() { x => e(), } {}\narm i()\nguard match h() { y => i(), }\nstmt match g() { x if match h() { y => i(), } => {} _ => {} }\ncond k()\nbranch m()\nbranch n()\ncond if l() then m() else n()\nstmt if k() {} else if if l() then m() else n() {}\n", "statements inside conditions and guards");
+    expect(holder(&o, &s, "a()"), "cond if a() then b() else c()", "a value `if` condition inside a statement condition");
+    expect(holder(&o, &s, "d()"), "cond match d() { x => e(), }", "a scrutinee inside a condition");
+    expect(holder(&o, &s, "h()"), "guard match h() { y => i(), }", "a scrutinee inside a guard");
+}
+
+test fn closures_and_rows_outside_statements() {
+    let (o, s) = run("struct S { a: [u8; 4] }\nfn f(p: u32) { let c = fn(x: u32) -> u32 { return g(x); }; h(fn() { while a() { b(); } }); }\n");
+    expect(statements(&o, &s), "stmt return g(x);\nstmt let c = fn(x: u32) -> u32 { return g(x); };\ncond a()\nstmt b();\nstmt while a() { b(); }\nstmt h(fn() { while a() { b(); } });\n", "a closure body has the statements of any block");
+    expect(holder(&o, &s, "{ return g(x); }"), "stmt let c = fn(x: u32) -> u32 { return g(x); };", "a closure body belongs to the statement around the closure");
+    expect(holder(&o, &s, "4"), "-", "an array length");
+    expect(holder(&o, &s, "u32"), "-", "a parameter type");
+    expect(holder(&o, &s, "{ let c = fn(x: u32) -> u32 { return g(x); }; h(fn() { while a() { b(); } }); }"), "-", "a body");
+    debug.assert(s.fns.len() == 0, "no contract");
+}
+
+test fn global_initializers() {
+    let (o, s) = run("const K: u32 = match 9u32 { 0 => 1u32, x if x > 1 => if true then 2u32 else 3u32, _ => 4u32 };\nstatic L: [u8; 2] = [if true then 5u8 else 6u8, 7u8];\n");
+    expect(statements(&o, &s), "arm 1u32\nguard x > 1\nbranch 2u32\nbranch 3u32\narm if true then 2u32 else 3u32\narm 4u32\nbranch 5u8\nbranch 6u8\n", "the value forms of an initializer");
+    expect(holder(&o, &s, "9u32"), "-", "no statement holds a scrutinee here");
+    expect(holder(&o, &s, "7u8"), "-", "nor an array element");
+}
+
+test fn contract_checks() {
+    let (o, s) = run("fn f(a: u32, b: u32) -> u32 requires(a < 1 && b < 2) requires((a < 3 && b < 4) && a < 5) requires(a < 6 || b < 7 && a < 8) ensures(result == a && b < 9) ensures(a > 0) { return a; }\n");
+    expect(statements(&o, &s), "check a < 1\ncheck b < 2\ncheck (a < 3 && b < 4)\ncheck a < 5\ncheck a < 6 || b < 7 && a < 8\ncheck result == a\ncheck b < 9\ncheck a > 0\nstmt return a;\n", "the operands of the top-level `&&`, else the clause");
+    expect(contracts(&o, &s), "fn f\nresult ensures(result == a && b < 9)\nreq requires(a < 1 && b < 2)\n  : a < 1\nreq requires(a < 1 && b < 2)\n  : b < 2\nreq requires((a < 3 && b < 4) && a < 5)\n  : (a < 3 && b < 4)\nreq requires((a < 3 && b < 4) && a < 5)\n  : a < 5\nreq requires(a < 6 || b < 7 && a < 8)\n  : a < 6 || b < 7 && a < 8\nens ensures(result == a && b < 9)\n  : result == a\nens ensures(result == a && b < 9)\n  : b < 9\nens ensures(a > 0)\n  : a > 0\n", "the checks in the order they run");
+    expect(holder(&o, &s, "b < 4"), "check (a < 3 && b < 4)", "parentheses end the split");
+    expect(holder(&o, &s, "b < 7"), "check a < 6 || b < 7 && a < 8", "`&&` under `||` is not top-level");
+}
+
+test fn snapshots() {
+    let (o, s) = run("fn g(a: &V, b: u32) -> u32 requires(b > 0) ensures(old(b) == b && old(b && c) ) ensures(f(old(1u32), old((b))) ) {}\n");
+    expect(statements(&o, &s), "check b > 0\nold b\ncheck old(b) == b\nold b && c\ncheck old(b && c)\nold 1u32\nold (b)\ncheck f(old(1u32), old((b)))\n", "each operand of an `old` is a statement");
+    expect(contracts(&o, &s), "fn g\nresult ensures(old(b) == b && old(b && c) )\nreq requires(b > 0)\n  : b > 0\nens ensures(old(b) == b && old(b && c) )\n  : old(b) == b\nens ensures(old(b) == b && old(b && c) )\n  : old(b && c)\nens ensures(f(old(1u32), old((b))) )\n  : f(old(1u32), old((b)))\nold b\nold b && c\nold 1u32\nold (b)\n", "snapshots in source order, an operand never split");
+    expect(holder(&o, &s, "c"), "old b && c", "the right side of `&&` in an operand");
+}
+
+test fn snapshots_in_source_order_along_a_chain() {
+    let (o, s) = run("fn g(a: &V, b: u32) ensures(old(a).m(old(b), h(old(b + 1))).n(old(a.len(),)) == old(a)[old(b)]) {}\n");
+    expect(contracts(&o, &s), "fn g\nresult ensures(old(a).m(old(b), h(old(b + 1))).n(old(a.len(),)) == old(a)[old(b)])\nens ensures(old(a).m(old(b), h(old(b + 1))).n(old(a.len(),)) == old(a)[old(b)])\n  : old(a).m(old(b), h(old(b + 1))).n(old(a.len(),)) == old(a)[old(b)]\nold a\nold b\nold b + 1\nold a.len()\nold a\nold b\n", "a call at the head of a chain comes before the calls in its later steps");
+}
+
+test fn value_forms_in_clauses() {
+    let (o, s) = run("fn h(a: u32) requires(if a > 1 then a < 2 else a < 3) ensures(old(if a > 0 then a else 2u32) == (match a { x if x > 3 => x, _ => 4u32 })) {}\n");
+    expect(statements(&o, &s), "branch a < 2\nbranch a < 3\ncheck if a > 1 then a < 2 else a < 3\nbranch a\nbranch 2u32\nold if a > 0 then a else 2u32\nguard x > 3\narm x\narm 4u32\ncheck old(if a > 0 then a else 2u32) == (match a { x if x > 3 => x, _ => 4u32 })\n", "statements inside a check and inside an operand");
+    expect(holder(&o, &s, "a > 0"), "old if a > 0 then a else 2u32", "a condition inside an operand");
+    expect(holder(&o, &s, "a > 1"), "check if a > 1 then a < 2 else a < 3", "a condition inside a check");
+}
+
+test fn every_fn_form_with_clauses() {
+    let (o, s) = run("struct S {}\nimpl S { fn m(&self) requires(x()) {} fn p(&self) {} pub fn n(&self) ensures(y()) {} }\nextern \"C\" fn e(a: u32) requires(a > 0) ensures(a < 9) {}\nunsafe(\"o\") fn u() requires(z()) {}\ntest fn t(a: u32) requires(a < 3) {}\nrec fn r(a: u32) ensures(a < 4) {}\nimpl T for S { fn q(&self) requires(w()) {} }\nfn plain() { v(); }\n");
+    expect(contracts(&o, &s), "fn m\nreq requires(x())\n  : x()\nfn n\nresult ensures(y())\nens ensures(y())\n  : y()\nfn e\nresult ensures(a < 9)\nreq requires(a > 0)\n  : a > 0\nens ensures(a < 9)\n  : a < 9\nfn u\nreq requires(z())\n  : z()\nfn t\nreq requires(a < 3)\n  : a < 3\nfn r\nresult ensures(a < 4)\nens ensures(a < 4)\n  : a < 4\nfn q\nreq requires(w())\n  : w()\n", "a contract per fn with a clause");
+    let mut bare: usize = 0;
+    for g in 0..o.tree.nodes() {
+        if o.tree.kind.as_slice()[g] == node_kinds.KIND_FN_DECL && s.contract(g as% u32) == NONE { bare = bare + 1; }
+    }
+    debug.assert(bare == 2, "`p` and `plain` have none");
+}
+
+test fn old_that_takes_no_snapshot_is_unknown() {
+    let (o, s) = run("fn a(x: u32) requires(old(x) > 0) {}\nfn b(x: u32) ensures(old(old(x)) > 0) {}\nfn c(x: u32) ensures(old() > 0) {}\nfn d(x: u32) ensures(old(x, x) > 0) {}\nfn e(x: u32) ensures(old()(x) > 0) {}\nfn g(x: u32) ensures(old(x + h(old(x))) > 0) {}\nfn i(x: u32) ensures(old(x).m(old(old(x)))) {}\nfn j(x: u32) requires(f(x, old(x))) ensures(old(x) > 0) {}\nfn k(x: u32) ensures(old(x) > 0) ensures(old()) {}\nfn ok(x: u32) ensures(old(x) > 0) {}\n");
+    expect(contracts(&o, &s), "fn a ?\nreq requires(old(x) > 0)\n  : old(x) > 0\nfn b ?\nresult ensures(old(old(x)) > 0)\nens ensures(old(old(x)) > 0)\n  : old(old(x)) > 0\nfn c ?\nresult ensures(old() > 0)\nens ensures(old() > 0)\n  : old() > 0\nfn d ?\nresult ensures(old(x, x) > 0)\nens ensures(old(x, x) > 0)\n  : old(x, x) > 0\nfn e ?\nresult ensures(old()(x) > 0)\nens ensures(old()(x) > 0)\n  : old()(x) > 0\nfn g ?\nresult ensures(old(x + h(old(x))) > 0)\nens ensures(old(x + h(old(x))) > 0)\n  : old(x + h(old(x))) > 0\nfn i ?\nresult ensures(old(x).m(old(old(x))))\nens ensures(old(x).m(old(old(x))))\n  : old(x).m(old(old(x)))\nfn j ?\nresult ensures(old(x) > 0)\nreq requires(f(x, old(x)))\n  : f(x, old(x))\nens ensures(old(x) > 0)\n  : old(x) > 0\nold x\nfn k ?\nresult ensures(old(x) > 0)\nens ensures(old(x) > 0)\n  : old(x) > 0\nens ensures(old())\n  : old()\nold x\nfn ok\nresult ensures(old(x) > 0)\nens ensures(old(x) > 0)\n  : old(x) > 0\nold x\n", "outside an `ensures`, nested, or not of one operand");
+}
+
+test fn old_that_is_no_call_of_the_snapshot() {
+    let (o, s) = run("fn m(x: u32) ensures(x.old(1u32) && old == x && old::<u32>(x) && (old)(x) && x.old) {}\nfn n(x: u32) { let y = old(x); old(); old(old(x)); }\n");
+    expect(contracts(&o, &s), "fn m\nresult ensures(x.old(1u32) && old == x && old::<u32>(x) && (old)(x) && x.old)\nens ensures(x.old(1u32) && old == x && old::<u32>(x) && (old)(x) && x.old)\n  : x.old(1u32)\nens ensures(x.old(1u32) && old == x && old::<u32>(x) && (old)(x) && x.old)\n  : old == x\nens ensures(x.old(1u32) && old == x && old::<u32>(x) && (old)(x) && x.old)\n  : old::<u32>(x)\nens ensures(x.old(1u32) && old == x && old::<u32>(x) && (old)(x) && x.old)\n  : (old)(x)\nens ensures(x.old(1u32) && old == x && old::<u32>(x) && (old)(x) && x.old)\n  : x.old\n", "a method, a value, generic arguments, parentheses, and a body take no snapshot");
+    expect(holder(&o, &s, "old(x)"), "stmt let y = old(x);", "outside a clause `old` is a name");
+}
+
+// n copies of `piece` appended to out.
+fn repeat(out: &mut string.String, piece: &str, n: usize) {
+    for _ in 0..n {
+        out.push_str(piece);
+    }
+}
+
+// The number of rows of kind b.
+fn count(s: &stmts.Stmts, b: u8) -> usize {
+    let xs = s.bound.as_slice();
+    let mut n: usize = 0;
+    for g in 0..xs.len() {
+        if xs[g] == b { n = n + 1; }
+    }
+    return n;
+}
+
+// Links of a chain, and levels of brackets (a file nested deeper than the bracket limit has no
+// items).
+const DEEP: usize = 30000;
+const NEST: usize = 9000;
+
+test fn deep_blocks_and_else_if_chains() {
+    let mut a = string.String.new();
+    a.push_str("fn f() { ");
+    repeat(&mut a, "{ ", NEST);
+    a.push_str("g();");
+    repeat(&mut a, " }", NEST);
+    a.push_str(" }\n");
+    let (o, s) = parsed(a.as_str());
+    debug.assert(count(&s, stmts.B_STMT) == NEST + 1, "a statement per block and the call");
+    expect(holder(&o, &s, "g()"), "stmt g();", "the innermost of many");
+    let mut b = string.String.new();
+    b.push_str("fn f() { if a() {} ");
+    repeat(&mut b, "else if a() {} ", DEEP);
+    b.push_str("else { z(); } }\n");
+    let (o2, s2) = parsed(b.as_str());
+    debug.assert(count(&s2, stmts.B_COND) == DEEP + 1 && count(&s2, stmts.B_STMT) == 2, "a condition per link");
+    expect(holder(&o2, &s2, "a()"), "cond a()", "a condition far down the chain");
+    expect(holder(&o2, &s2, "z()"), "stmt z();", "the last block");
+}
+
+test fn deep_value_forms() {
+    let mut a = string.String.new();
+    a.push_str("fn f() { let v = ");
+    repeat(&mut a, "if c() then 1u32 else ", DEEP);
+    a.push_str("d(); }\n");
+    let (o, s) = parsed(a.as_str());
+    debug.assert(count(&s, stmts.B_BRANCH) == 2 * DEEP && count(&s, stmts.B_STMT) == 1, "two branches per link");
+    expect(holder(&o, &s, "d()"), "branch d()", "the last branch");
+    let mut b = string.String.new();
+    b.push_str("fn f() { let v = ");
+    repeat(&mut b, "match a() { x => ", NEST);
+    b.push_str("d()");
+    repeat(&mut b, " }", NEST);
+    b.push_str("; }\n");
+    let (o2, s2) = parsed(b.as_str());
+    debug.assert(count(&s2, stmts.B_ARM) == NEST && count(&s2, stmts.B_STMT) == 1, "an arm per level");
+    expect(holder(&o2, &s2, "d()"), "arm d()", "the innermost arm");
+    let mut c = string.String.new();
+    c.push_str("fn f() { x(");
+    repeat(&mut c, "(", NEST);
+    c.push_str("d()");
+    repeat(&mut c, ")", NEST);
+    c.push_str("); }\n");
+    let (o3, s3) = parsed(c.as_str());
+    let h = holder(&o3, &s3, "d()");
+    debug.assert(count(&s3, stmts.B_STMT) == 1 && test_kit.has(h.as_slice(), "stmt x((("), "a statement far above");
+}
+
+test fn deep_contracts() {
+    let mut a = string.String.new();
+    a.push_str("fn f(a: bool) requires(a");
+    repeat(&mut a, " && a", DEEP);
+    a.push_str(") ensures(old(a)");
+    repeat(&mut a, " && old(a)", DEEP);
+    a.push_str(") {}\n");
+    let (o, s) = parsed(a.as_str());
+    debug.assert(s.known.len() == 1 && s.known.as_slice()[0], "one known contract");
+    debug.assert(s.req.row(0).len() == DEEP + 1 && s.ens.row(0).len() == DEEP + 1 && s.olds.row(0).len() == DEEP + 1, "a check per operand, a snapshot per call");
+    let olds = s.olds.row(0);
+    for j in 1..olds.len() {
+        debug.assert(olds[j - 1].paren < olds[j].paren, "in source order");
+    }
+    let mut b = string.String.new();
+    b.push_str("fn f(a: u32) ensures(");
+    repeat(&mut b, "old(", NEST);
+    b.push_str("a");
+    repeat(&mut b, ")", NEST);
+    b.push_str(") {}\n");
+    let (_, s2) = parsed(b.as_str());
+    debug.assert(s2.known.len() == 1 && !s2.known.as_slice()[0] && s2.olds.row(0).len() == 0, "nested calls leave the contract unknown");
+    let mut c = string.String.new();
+    c.push_str("fn f(a: u32) ensures(old(a)");
+    repeat(&mut c, ".m(old(a))", DEEP);
+    c.push_str(") {}\n");
+    let (_, s3) = parsed(c.as_str());
+    debug.assert(s3.known.as_slice()[0] && s3.olds.row(0).len() == DEEP + 1, "a long chain of snapshots");
+    let chain = s3.olds.row(0);
+    for j in 1..chain.len() {
+        debug.assert(chain[j - 1].paren < chain[j].paren, "in source order");
+    }
+}

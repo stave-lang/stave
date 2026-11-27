@@ -1,0 +1,318 @@
+// Where a temporary ends, and the checks and snapshots of every contract: facts of the syntax
+// alone, answered once for every pass that opens statements.
+//
+// A temporary ends with its statement, the innermost of these that holds the node making it:
+// - a child of a block;
+// - the condition of an `if` or `while` statement;
+// - a `match` guard;
+// - a branch of a value `if` (an `else if` there is a value `if` inside the `else` branch);
+// - the body of an arm of a value `match`;
+// - a check of a contract clause: an operand of its top-level `&&`, else its expression;
+// - the operand `e` of an `old(e)`.
+// Everything else belongs to the statement around it: the scrutinee of a `match`, the header of
+// a `for`, the condition of a value `if`, the right side of `&&` and `||`. A `for` iterator and
+// an `old(e)` value are not temporaries of a statement: the loop and the clauses end them.
+//
+// A pass opens a statement only at a row with `bound` set, and a temporary it makes at row n
+// has `of[n]` as the innermost statement that pass has open.
+//
+// An `old(e)` takes a snapshot: `old` directly before its `(`, one argument, in an `ensures`,
+// outside every other `old(..)`. Any other `old(` in a clause takes none and leaves the contract
+// of its fn unknown (`known`): such a fn is neither built nor assumed to have no snapshot.
+import ast;
+import consteval;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import items;
+import lex;
+import modules;
+import prims.col;
+import prims.ragged;
+import prims.search;
+import prims.sort;
+import std.idx;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = idx.NONE;
+
+// The kinds of statement (`B_NONE`: the node is none).
+pub const B_NONE: u8 = 0;
+pub const B_STMT: u8 = 1;
+// The condition of an `if` or `while` statement.
+pub const B_COND: u8 = 2;
+pub const B_GUARD: u8 = 3;
+// A branch of a value `if`.
+pub const B_BRANCH: u8 = 4;
+// The body of an arm of a value `match`.
+pub const B_ARM: u8 = 5;
+// A check of a contract clause.
+pub const B_CHECK: u8 = 6;
+// The operand of a snapshot.
+pub const B_OLD: u8 = 7;
+
+const K_AND: u8 = node_kinds.KIND_AND_EXPR;
+const K_ARGS: u8 = node_kinds.KIND_ARGS;
+const K_BLOCK: u8 = node_kinds.KIND_BLOCK;
+const K_ENSURES: u8 = node_kinds.KIND_ENSURES;
+const K_EXTERN_ITEM: u8 = node_kinds.KIND_EXTERN_ITEM;
+const K_FN_DECL: u8 = node_kinds.KIND_FN_DECL;
+const K_IF_EXPR: u8 = node_kinds.KIND_IF_EXPR;
+const K_IF_STMT: u8 = node_kinds.KIND_IF_STMT;
+const K_MATCH: u8 = node_kinds.KIND_MATCH_EXPR;
+const K_POSTFIX: u8 = node_kinds.KIND_POSTFIX;
+const K_PRIMARY: u8 = node_kinds.KIND_PRIMARY;
+const K_REQUIRES: u8 = node_kinds.KIND_REQUIRES;
+const K_STMT: u8 = node_kinds.KIND_STMT;
+
+// One check of a contract: its clause row and the row it evaluates.
+pub struct Check {
+    pub clause: u32,
+    pub node: u32,
+}
+
+impl Copy for Check {}
+
+// One snapshot: the global token of its `(` and the operand's row.
+pub struct Old {
+    pub paren: u32,
+    pub node: u32,
+}
+
+impl Copy for Old {}
+
+pub struct Stmts {
+    // per node row: the row of the statement holding it (a statement holds itself), NONE: none
+    pub of: vec.Vec<u32>,
+    // per node row: the kind of statement it is (`B_*`)
+    pub bound: vec.Vec<u8>,
+    // the contracts, one per fn row with a clause, ascending
+    pub fns: vec.Vec<u32>,
+    // per contract: every form in it is known; false: its rows below are incomplete
+    pub known: vec.Vec<bool>,
+    // per contract: its first `Ensures` row, which binds `result` (NONE without one)
+    pub result: vec.Vec<u32>,
+    // per contract: the checks of its `requires` and of its `ensures` clauses, in the order they
+    // run, and the snapshots in source order
+    pub req: ragged.Ragged<Check>,
+    pub ens: ragged.Ragged<Check>,
+    pub olds: ragged.Ragged<Old>,
+}
+
+impl Stmts {
+    // The kind of the statement a temporary made at row n ends with (`B_NONE`: no statement
+    // holds n).
+    pub fn bound_of(&self, n: u32) -> u8 {
+        let s = self.of.as_slice()[n as usize];
+        return if s == NONE then B_NONE else self.bound.as_slice()[s as usize];
+    }
+
+    // The contract of the fn at row g, or NONE when it has no clause.
+    pub fn contract(&self, g: u32) -> u32 {
+        let r = search.lower_bound(self.fns.as_slice(), g);
+        return if r < self.fns.len() && self.fns.as_slice()[r] == g then r as% u32 else NONE;
+    }
+
+    fn mark(&mut self, n: usize, b: u8) {
+        self.bound.as_mut_slice()[n] = b;
+    }
+
+    // Adds the contract of row g (item base `base`), which has a clause among its children.
+    fn add_contract(&mut self, t: &lex.Tokens, nm: &intern.Interned, cut: &items.Items, tree: &ast.Ast, base: usize, g: usize, old_s: u32) {
+        let gk = consteval.kind(tree, g);
+        let mut known = gk == K_FN_DECL || gk == K_EXTERN_ITEM;
+        let mut result = NONE;
+        let ks = tree.kids.row(g);
+        for j in 0..ks.len() {
+            let c = base + ks[j] as usize;
+            let ck = consteval.kind(tree, c);
+            if ck != K_REQUIRES && ck != K_ENSURES { continue; }
+            let post = ck == K_ENSURES;
+            if post && result == NONE { result = c as% u32; }
+            let cs = tree.kids.row(c);
+            if cs.len() != 1 {
+                known = false;
+                continue;
+            }
+            let e = base + cs[0] as usize;
+            // each operand of the top-level `&&` is a check of its own
+            if consteval.kind(tree, e) == K_AND {
+                let es = tree.kids.row(e);
+                for x in 0..es.len() {
+                    self.add_check(post, c, base + es[x] as usize);
+                }
+            } else {
+                self.add_check(post, c, e);
+            }
+            if !self.add_snapshots(t, nm, cut, tree, base, c, old_s) { known = false; }
+        }
+        self.fns.push(g as% u32);
+        self.known.push(known);
+        self.result.push(result);
+        self.req.end_row();
+        self.ens.end_row();
+        self.olds.end_row();
+    }
+
+    fn add_check(&mut self, post: bool, c: usize, e: usize) {
+        self.mark(e, B_CHECK);
+        let x = Check.{ clause: c as% u32, node: e as% u32 };
+        if post {
+            self.ens.push(x);
+        } else {
+            self.req.push(x);
+        }
+    }
+
+    // Adds the snapshots of the clause at row c, in source order; false, adding none, when an
+    // `old(` in the clause takes none.
+    fn add_snapshots(&mut self, t: &lex.Tokens, nm: &intern.Interned, cut: &items.Items, tree: &ast.Ast, base: usize, c: usize, old_s: u32) -> bool {
+        let mut heads: usize = 0;
+        let mut parens = vec.Vec::<u32>.new();
+        let mut operands = vec.Vec::<u32>.new();
+        for q in c - tree.size.as_slice()[c] as usize..c {
+            if old_head(t, nm, tree, q, old_s) { heads = heads + 1; }
+            if consteval.kind(tree, q) != K_POSTFIX { continue; }
+            let e = snapshot_operand(t, nm, tree, base, q, old_s);
+            if e == NONE { continue; }
+            let h = base + tree.kids.row(q)[0] as usize;
+            parens.push(tree.tok.as_slice()[h] + 1);
+            operands.push(e);
+        }
+        if heads == 0 { return true; }
+        if consteval.kind(tree, c) != K_ENSURES || parens.len() != heads { return false; }
+        // a chain is above the calls in its later steps, so row order is not source order
+        let order = sort.sort_perm(parens.as_slice());
+        let ord = order.as_slice();
+        let ps = parens.as_slice();
+        // a `(` before the `)` of the call last passed is of a call inside it
+        let mut end: u32 = 0;
+        for j in 0..ord.len() {
+            let p = ps[ord[j] as usize];
+            if p < end { return false; }
+            end = cut.mate.as_slice()[p as usize];
+        }
+        for j in 0..ord.len() {
+            let x = ord[j] as usize;
+            let e = operands.as_slice()[x];
+            self.mark(e as usize, B_OLD);
+            self.olds.push(Old.{ paren: ps[x], node: e });
+        }
+        return true;
+    }
+
+    // Marks the statements among the arms of the `match` whose children are ks (the scrutinee,
+    // then the arms): each guard, and in a value `match` each body.
+    fn mark_arms(&mut self, tree: &ast.Ast, base: usize, ks: &[u32], value: bool) {
+        for j in 1..ks.len() {
+            // [ArmPattern, guard?, body]
+            let ak = tree.kids.row(base + ks[j] as usize);
+            if ak.len() >= 3 { self.mark(base + ak[1] as usize, B_GUARD); }
+            if value && ak.len() > 0 { self.mark(base + ak[ak.len() - 1] as usize, B_ARM); }
+        }
+    }
+
+    // Marks the children of row g that are statements of their own.
+    fn mark_below(&mut self, t: &lex.Tokens, tree: &ast.Ast, base: usize, g: usize) {
+        let k = consteval.kind(tree, g);
+        let ks = tree.kids.row(g);
+        if k == K_BLOCK {
+            for j in 0..ks.len() {
+                self.mark(base + ks[j] as usize, B_STMT);
+            }
+        } else if k == K_IF_STMT {
+            if ks.len() > 0 { self.mark(base + ks[0] as usize, B_COND); }
+        } else if k == K_IF_EXPR {
+            // [condition, then, else]
+            for j in 1..ks.len() {
+                if j <= 2 { self.mark(base + ks[j] as usize, B_BRANCH); }
+            }
+        } else if k == K_MATCH {
+            self.mark_arms(tree, base, ks, true);
+        } else if k == K_STMT {
+            let first = consteval.tk(t, tree.tok.as_slice()[g]);
+            if first == terminals.T_KW_WHILE {
+                if ks.len() > 0 { self.mark(base + ks[0] as usize, B_COND); }
+            } else if first == terminals.T_KW_MATCH {
+                self.mark_arms(tree, base, ks, false);
+            }
+        }
+    }
+}
+
+// Whether row h is the identifier `old` directly before a `(`: in a clause, that name there
+// means the snapshot and nothing else.
+fn old_head(t: &lex.Tokens, nm: &intern.Interned, tree: &ast.Ast, h: usize, old_s: u32) -> bool {
+    if old_s == NONE || consteval.kind(tree, h) != K_PRIMARY { return false; }
+    let x = tree.tok.as_slice()[h];
+    if consteval.tk(t, x) != terminals.T_IDENT || nm.tok_str.as_slice()[x as usize] != old_s { return false; }
+    return consteval.tk(t, x + 1) == terminals.T_L_PAREN;
+}
+
+// The operand of the one-argument call `old(e)` that begins the chain at row q, or NONE.
+fn snapshot_operand(t: &lex.Tokens, nm: &intern.Interned, tree: &ast.Ast, base: usize, q: usize, old_s: u32) -> u32 {
+    let ks = tree.kids.row(q);
+    if ks.len() < 2 { return NONE; }
+    let h = base + ks[0] as usize;
+    if !old_head(t, nm, tree, h, old_s) { return NONE; }
+    let a = base + ks[1] as usize;
+    // `old()` has no `Args`: the next child is then a later step's, further right
+    if consteval.kind(tree, a) != K_ARGS || tree.tok.as_slice()[a] != tree.tok.as_slice()[h] + 2 { return NONE; }
+    let args = tree.kids.row(a);
+    return if args.len() == 1 then (base + args[0] as usize) as% u32 else NONE;
+}
+
+// Whether a child of row g is a contract clause.
+fn has_clause(tree: &ast.Ast, base: usize, g: usize) -> bool {
+    let ks = tree.kids.row(g);
+    for j in 0..ks.len() {
+        let k = consteval.kind(tree, base + ks[j] as usize);
+        if k == K_REQUIRES || k == K_ENSURES { return true; }
+    }
+    return false;
+}
+
+// The statements and contracts of every item.
+pub fn build(nm: &intern.Interned, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast) -> Stmts {
+    let n = tree.nodes();
+    let mut s = Stmts.{
+        of: col.filled(n, NONE),
+        bound: col.filled(n, B_NONE),
+        fns: vec.Vec::<u32>.new(),
+        known: vec.Vec::<bool>.new(),
+        result: vec.Vec::<u32>.new(),
+        req: ragged.Ragged::<Check>.new(),
+        ens: ragged.Ragged::<Check>.new(),
+        olds: ragged.Ragged::<Old>.new(),
+    };
+    let old_s = modules.lookup(&nm.tab, mem.str_bytes("old"));
+    let inode = tree.item_node.as_slice();
+    // The contracts mark children of clauses, of `&&`, and of argument lists, none of which
+    // `mark_below` marks, so the two sets of marks never meet.
+    for i in 0..tree.items() {
+        let base = inode[i] as usize;
+        for g in base..inode[i + 1] as usize {
+            if has_clause(tree, base, g) { s.add_contract(t, nm, cut, tree, base, g, old_s); }
+        }
+    }
+    // A parent is above its children, so from the top row down a node's mark and the statement
+    // around it are set before the node is reached.
+    let mut i = tree.items();
+    while i > 0 {
+        i = i - 1;
+        let base = inode[i] as usize;
+        let mut g = inode[i + 1] as usize;
+        while g > base {
+            g = g - 1;
+            if s.bound.as_slice()[g] != B_NONE { s.of.as_mut_slice()[g] = g as% u32; }
+            s.mark_below(t, tree, base, g);
+            let o = s.of.as_slice()[g];
+            let ks = tree.kids.row(g);
+            for j in 0..ks.len() {
+                s.of.as_mut_slice()[base + ks[j] as usize] = o;
+            }
+        }
+    }
+    return s;
+}
