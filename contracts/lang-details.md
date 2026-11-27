@@ -485,6 +485,32 @@ A `scope`'s threads run until it is left: after a `spawn`, its captures stay bor
 path through the block, also on one that never leaves it (a `-> never` call, a loop without
 `break`), so main writing, moving, or `&mut`-borrowing a captured local there is E0501.
 
+## §3 Trait cycles
+
+A trait goal, "type T implements trait Tr", holds by one rule: an impl whose self type matches T
+and whose bounds hold (with T's parts for its params), or, for Flat, Frozen, and Send / Sync of a
+type without an impl of that trait for its head, the structural rule (every component the trait
+reaches holds it; `unsafe("..") impl<T: Sync> Sync for G<T> {}` makes `G<Cell<u32>>` not Sync,
+whatever G's fields). A recursive type makes a proof meet a goal again inside its own proof: a
+cycle. Send, Sync, Flat, and Frozen goals are coinductive; every other goal (Copy, a user trait,
+an operator trait) is inductive.
+
+- A goal met again inside its own proof holds through that path only when every goal of the
+  cycle is coinductive. `struct L { v: u32, next: P<L> }` with
+  `unsafe("..") impl<T: Send> Send for P<T> {}`: `L: Send` holds (the cycle `L: Send`,
+  `P<L>: Send`, `L: Send`).
+- A cycle through an inductive goal proves nothing, whichever of its goals is asked first. With
+  `impl<T: Send> Tr for Q<T> {}`, `unsafe("..") impl<T: Tr> Send for R<T> {}`, and
+  `struct S { f: R<Q<S>> }`, neither `S: Send` nor `Q<S>: Tr` holds: each needs the other, and the
+  cycle passes `Q<S>: Tr` (E0901 at a bound that asks either). Reason: a wrong yes for Send or
+  Sync lets a data race compile; a cycle grants a marker trait only by the type's own structure
+  and marker impls, never through a trait it would have to prove first.
+- Formally: a goal holds when it has a proof (a choice of rule for each goal reached) in which no
+  path, followed around its cycles, passes an inductive goal infinitely often: the least fixpoint
+  over the inductive goals of the greatest fixpoint over the coinductive ones. So every goal has
+  one answer, a property of the program: the same whatever is asked first, on every thread count
+  and run, in the checker, every dump, and both compiler stages.
+
 ## §3 Error trace
 
 `Result.unwrap` of an `Err` prints the task's trace under the panic line, oldest first:

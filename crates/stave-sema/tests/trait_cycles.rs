@@ -1,6 +1,9 @@
 //! Trait queries on cycles of types: answers held while the goals they rest on are in progress
 //! give the same answers as recomputing them, in any query order and on any thread count, and
-//! the work grows linearly with the length of a cycle (counted in goals, not seconds).
+//! the work grows linearly with the length of a cycle (counted in goals, not seconds). A cycle
+//! through an inductive goal (a user trait, Copy) proves nothing, whichever goal is asked first
+//! (contracts/lang-details.md "Trait cycles"): checked against an oracle that computes that
+//! meaning on the program's goal graph, apart from the solver.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -146,9 +149,13 @@ fn reach(tc: &Typeck, cx: &mut stave_sema::TypeTable, roots: &[TypeId]) -> Vec<T
 }
 
 fn struct_named(p: &Program, name: &str) -> DeclId {
+    decl_named(p, DeclKind::Struct, name)
+}
+
+fn decl_named(p: &Program, kind: DeclKind, name: &str) -> DeclId {
     (0..p.decls.len() as u32)
         .map(DeclId)
-        .find(|&d| p.decl(d).is_some_and(|x| x.kind == DeclKind::Struct && p.strings.get(x.name) == name))
+        .find(|&d| p.decl(d).is_some_and(|x| x.kind == kind && p.strings.get(x.name) == name))
         .expect(name)
 }
 
@@ -323,5 +330,562 @@ fn cycle_answers_and_diagnostics_do_not_depend_on_order_or_threads() {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
         let (p2, tc2) = pool.install(|| mem(src));
         assert_eq!(diags(&p2, &tc2), got, "{threads} threads");
+    }
+}
+
+/// The traits of the mixed family, by index: two coinductive, three inductive.
+const MIXED: [&str; 5] = ["Send", "Sync", "Tr0", "Tr1", "Copy"];
+
+/// A type a goal of the mixed family asks about: `S<j>`, `W<x><S<j>>`, `W<x><W<y><S<j>>>`.
+#[derive(Clone, Copy)]
+enum Ask {
+    S(usize),
+    W(usize, usize),
+    Ww(usize, usize, usize),
+}
+
+impl Ask {
+    fn text(self) -> String {
+        match self {
+            Ask::S(j) => format!("S{j}"),
+            Ask::W(x, j) => format!("W{x}<S{j}>"),
+            Ask::Ww(x, y, j) => format!("W{x}<W{y}<S{j}>>"),
+        }
+    }
+
+    fn ty(self, p: &Program, cx: &mut stave_sema::TypeTable) -> TypeId {
+        let s = |cx: &mut stave_sema::TypeTable, j: usize| {
+            cx.mk_adt(struct_named(p, &format!("S{j}")), Vec::new())
+        };
+        let w = |cx: &mut stave_sema::TypeTable, x: usize, t: TypeId| {
+            cx.mk_adt(struct_named(p, &format!("W{x}")), vec![GArg::Type(t)])
+        };
+        match self {
+            Ask::S(j) => s(cx, j),
+            Ask::W(x, j) => {
+                let t = s(cx, j);
+                w(cx, x, t)
+            }
+            Ask::Ww(x, y, j) => {
+                let t = s(cx, j);
+                let t = w(cx, y, t);
+                w(cx, x, t)
+            }
+        }
+    }
+}
+
+/// A program of the mixed family: wrappers `W<n><T> { p: *const T }`, each with impls of some of
+/// [`MIXED`] whose param is bounded by one of them or by none (Send / Sync impls `unsafe`), and
+/// structs `S0..Sk` holding wrappers of each other, `u32`, and raw pointers, some with impls of
+/// the user traits. So Send / Sync goals reach user trait and Copy goals and back: cycles of
+/// coinductive goals only, of inductive goals only, and mixed ones. `or`: also impls of Send,
+/// Sync, Tr0, Tr1 for every type (`impl<T: B> Tr0 for T`), so a goal has two rules (rejected,
+/// E0420 / E0903, but still in the solver's impl lists): the shape a wrong answer of one goal can
+/// hide behind another.
+#[derive(Clone)]
+struct Mixed {
+    src: String,
+    k: usize,
+    /// Per wrapper, per trait of [`MIXED`]: whether it has an impl, and the impl's bounds.
+    wrap: Vec<[Option<Vec<usize>>; 5]>,
+    /// Per struct: whether it has an impl of Tr0, of Tr1.
+    own: Vec<[bool; 2]>,
+    /// Per trait of [`MIXED`] but Copy: the bounds of its impl for every type, if any.
+    blanket: [Option<Vec<usize>>; 4],
+    /// Each struct and each wrapper type a field names.
+    asks: Vec<Ask>,
+}
+
+/// The bounds of one impl's param: none, one, or (`two`) two of [`MIXED`], few of them Copy (a
+/// struct is never Copy), so that many goals reach no failing one and only their cycles decide
+/// them.
+fn mixed_bounds(r: &mut Lcg, two: bool) -> Vec<usize> {
+    let pick = |r: &mut Lcg| match r.below(17) {
+        0..=5 => 0,
+        6..=9 => 1,
+        10..=12 => 2,
+        13..=15 => 3,
+        _ => 4,
+    };
+    if r.below(7) == 0 {
+        return Vec::new();
+    }
+    let mut b = vec![pick(r)];
+    if two && r.below(3) == 0 {
+        let c = pick(r);
+        if c != b[0] {
+            b.push(c);
+        }
+    }
+    b
+}
+
+fn bounds_text(b: &[usize]) -> String {
+    if b.is_empty() {
+        return String::new();
+    }
+    format!(": {}", b.iter().map(|&x| MIXED[x]).collect::<Vec<_>>().join(" + "))
+}
+
+fn mixed_family(seed: u64, or: bool) -> Mixed {
+    let mut r = Lcg(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    let k = 2 + r.below(5) as usize;
+    let m = 2 + r.below(3) as usize;
+    let mut src = String::from("trait Tr0 {}\ntrait Tr1 {}\n");
+    let mut blanket: [Option<Vec<usize>>; 4] = Default::default();
+    if or {
+        for (a, slot) in blanket.iter_mut().enumerate() {
+            if r.below(2) == 0 {
+                let mut b = mixed_bounds(&mut r, true);
+                if b.is_empty() {
+                    b.push(r.below(4) as usize);
+                }
+                let un = if a < 2 { "unsafe(\"test\") " } else { "" };
+                src.push_str(&format!("{un}impl<T{}> {} for T {{}}\n", bounds_text(&b), MIXED[a]));
+                *slot = Some(b);
+            }
+        }
+    }
+    let mut wrap = Vec::new();
+    for n in 0..m {
+        src.push_str(&format!("struct W{n}<T> {{ pub p: *const T }}\n"));
+        let mut row: [Option<Vec<usize>>; 5] = Default::default();
+        // few goals without an impl
+        for (a, slot) in row.iter_mut().enumerate() {
+            if r.below(10) < [1, 1, 2, 2, 5][a] {
+                continue;
+            }
+            let b = mixed_bounds(&mut r, or);
+            let un = if a < 2 { "unsafe(\"test\") " } else { "" };
+            src.push_str(&format!("{un}impl<T{}> {} for W{n}<T> {{}}\n", bounds_text(&b), MIXED[a]));
+            *slot = Some(b);
+        }
+        wrap.push(row);
+    }
+    let mut own = Vec::new();
+    let mut asks = Vec::new();
+    for i in 0..k {
+        let o = [r.below(2) == 0, r.below(2) == 0];
+        for (a, &yes) in o.iter().enumerate() {
+            if yes {
+                src.push_str(&format!("impl Tr{a} for S{i} {{}}\n"));
+            }
+        }
+        own.push(o);
+        asks.push(Ask::S(i));
+        // a cycle through an inductive goal needs a wrapper of a wrapper: the bound of the outer
+        // one's impl asks the inner one, whose impl's bound asks the struct
+        let nf = 1 + r.below(2);
+        let mut fields = Vec::new();
+        for f in 0..nf {
+            let j = r.below(k as u64) as usize;
+            let (x, y) = (r.below(m as u64) as usize, r.below(m as u64) as usize);
+            let ty = match r.below(20) {
+                0..=9 => {
+                    asks.push(Ask::Ww(x, y, j));
+                    Ask::Ww(x, y, j).text()
+                }
+                10..=14 => {
+                    asks.push(Ask::W(x, j));
+                    Ask::W(x, j).text()
+                }
+                15 | 16 => format!("W{x}<u32>"),
+                17 | 18 => "u32".to_string(),
+                _ => format!("*const S{j}"),
+            };
+            fields.push(format!("pub f{f}: {ty}"));
+        }
+        src.push_str(&format!("struct S{i} {{ {} }}\n", fields.join(", ")));
+    }
+    Mixed { src, k, wrap, own, blanket, asks }
+}
+
+/// The rule of goal (t, MIXED[a]) from the family's own record of its impls: the goal holds when
+/// every goal of one of these clauses does (none: it does not; an empty one: it does).
+fn mixed_rule(
+    p: &Program,
+    tc: &Typeck,
+    cx: &mut stave_sema::TypeTable,
+    m: &Mixed,
+    t: TypeId,
+    a: usize,
+) -> Vec<Vec<(TypeId, usize)>> {
+    let yes = |b: bool| if b { vec![Vec::new()] } else { Vec::new() };
+    // an impl for every type: its bound, on the same type
+    let mut out: Vec<Vec<(TypeId, usize)>> = m
+        .blanket
+        .get(a)
+        .cloned()
+        .flatten()
+        .map(|b| b.into_iter().map(|b| (t, b)).collect())
+        .into_iter()
+        .collect();
+    let own = match cx.kind(t).clone() {
+        TypeKind::Int { .. } => yes(a != 2 && a != 3),
+        TypeKind::Ptr { .. } => yes(a == 4),
+        TypeKind::Adt { def, args } => {
+            let name = p.strings.get(p.decl(def).unwrap().name).to_string();
+            let i: usize = name[1..].parse().unwrap();
+            let adt = tc.sigs.adt(def).unwrap();
+            let fs: Vec<TypeId> = adt.variants.iter().flat_map(|v| v.fields.iter()).map(|f| f.ty).collect();
+            let fields: Vec<(TypeId, usize)> =
+                fs.into_iter().map(|f| (cx.subst(f, &args, None), a)).collect();
+            if name.starts_with('S') {
+                match a {
+                    0 | 1 => vec![fields],
+                    2 | 3 => yes(m.own[i][a - 2]),
+                    _ => yes(false),
+                }
+            } else {
+                let GArg::Type(x) = args[0] else { panic!("{name}") };
+                match &m.wrap[i][a] {
+                    Some(b) => vec![b.iter().map(|&b| (x, b)).collect()],
+                    // no impl for the head: Send / Sync are structural, a user trait or Copy
+                    // does not hold
+                    None if a < 2 => vec![fields],
+                    None => yes(false),
+                }
+            }
+        }
+        k => panic!("{k:?}"),
+    };
+    out.extend(own);
+    out
+}
+
+/// The answers the language gives the goals `asked` and every goal they reach
+/// (contracts/lang-details.md "Trait cycles"): the least fixpoint over the inductive goals of
+/// the greatest fixpoint over the coinductive ones, by plain iteration on the goal graph.
+/// `all_co`: every goal taken as coinductive instead (what holds if a cycle through an
+/// inductive goal held).
+fn mixed_oracle(
+    p: &Program,
+    tc: &Typeck,
+    cx: &mut stave_sema::TypeTable,
+    m: &Mixed,
+    asked: &[(TypeId, usize)],
+    all_co: bool,
+) -> std::collections::HashMap<(TypeId, usize), bool> {
+    let mut index = std::collections::HashMap::new();
+    let mut nodes: Vec<(TypeId, usize)> = Vec::new();
+    let mut rules: Vec<Vec<Vec<(TypeId, usize)>>> = Vec::new();
+    let mut work = asked.to_vec();
+    while let Some(g) = work.pop() {
+        if index.contains_key(&g) {
+            continue;
+        }
+        index.insert(g, nodes.len());
+        nodes.push(g);
+        let rule = mixed_rule(p, tc, cx, m, g.0, g.1);
+        work.extend(rule.iter().flatten().copied());
+        rules.push(rule);
+    }
+    let co: Vec<bool> = nodes.iter().map(|g| all_co || g.1 < 2).collect();
+    let eval = |val: &[bool], i: usize| rules[i].iter().any(|c| c.iter().all(|g| val[index[g]]));
+    let mut x = vec![false; nodes.len()];
+    loop {
+        let mut y: Vec<bool> = (0..nodes.len()).map(|i| co[i] || eval(&x, i)).collect();
+        loop {
+            let next: Vec<bool> = (0..nodes.len()).map(|i| if co[i] { eval(&y, i) } else { y[i] }).collect();
+            if next == y {
+                break;
+            }
+            y = next;
+        }
+        if y == x {
+            break;
+        }
+        x = y;
+    }
+    nodes.into_iter().zip(x).collect()
+}
+
+fn mixed_traits(p: &Program, tc: &Typeck) -> [DeclId; 5] {
+    let l = &tc.sigs.lang;
+    [l.send, l.sync, decl_named(p, DeclKind::Trait, "Tr0"), decl_named(p, DeclKind::Trait, "Tr1"), l.copy]
+}
+
+fn shuffled(n: usize, seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut r = Lcg(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    for i in (1..order.len()).rev() {
+        order.swap(i, r.below(i as u64 + 1) as usize);
+    }
+    order
+}
+
+/// On every program of the mixed family (a third with impls for every type), every goal on every
+/// type the structs reach equals the oracle's answer: asked fresh (held or not), kept across
+/// queries in shuffled orders, and through the run-wide cache from 1, 2, and 16 threads, each
+/// asking in its own shuffled order.
+#[test]
+fn mixed_cycles_answer_as_the_oracle_in_every_order() {
+    let mut programs = 0;
+    let mut checked = 0;
+    let mut through_inductive = 0;
+    let mut by_blanket = 0;
+    for seed in 0..180u64 {
+        let or = seed % 3 == 2;
+        let m = mixed_family(seed, or);
+        let (p, tc) = mem(&format!("{}fn main() -> i32 {{ return 0; }}\n", m.src));
+        let errs: Vec<String> = diags(&p, &tc)
+            .into_iter()
+            .filter(|d| d.contains(" E") && !(or && (d.contains(" E0420 ") || d.contains(" E0903 "))))
+            .collect();
+        assert!(errs.is_empty(), "seed {seed}:\n{}\n{errs:#?}", m.src);
+        tc.sigs.queries.arm(0);
+        let w = World { prog: &p, sigs: &tc.sigs };
+        let mut cx = tc.types.clone();
+        let roots: Vec<TypeId> = (0..m.k).map(|i| Ask::S(i).ty(&p, &mut cx)).collect();
+        let types = reach(&tc, &mut cx, &roots);
+        let traits = mixed_traits(&p, &tc);
+        let goals: Vec<(TypeId, usize)> = types.iter().flat_map(|&t| (0..5).map(move |a| (t, a))).collect();
+        let want = mixed_oracle(&p, &tc, &mut cx, &m, &goals, false);
+        let co = mixed_oracle(&p, &tc, &mut cx, &m, &goals, true);
+        if or {
+            let plain = Mixed { blanket: Default::default(), ..m.clone() };
+            let without = mixed_oracle(&p, &tc, &mut cx, &plain, &goals, false);
+            by_blanket += goals.iter().filter(|g| want[g] != without[g]).count();
+        }
+        let tref = |a: usize| TraitRef { trait_decl: traits[a], args: Vec::new() };
+        let show =
+            |g: &(TypeId, usize), cx: &stave_sema::TypeTable| format!("{:?}: {}", cx.kind(g.0), MIXED[g.1]);
+        for g in &goals {
+            let fresh = w.implements(&mut cx, g.0, &tref(g.1), &[]);
+            assert_eq!(fresh, want[g], "seed {seed}: {}\n{}", show(g, &cx), m.src);
+            assert_eq!(w.implements_unheld(&mut cx, g.0, &tref(g.1), &[]), want[g], "seed {seed} unheld");
+        }
+        for round in 0..4u64 {
+            let (mut held, mut unheld) = (Answers::default(), Answers::unheld());
+            for i in shuffled(goals.len(), seed * 7 + round + 1) {
+                let g = &goals[i];
+                let a = w.implements_kept(&mut cx, g.0, &tref(g.1), &[], &mut held);
+                let b = w.implements_kept(&mut cx, g.0, &tref(g.1), &[], &mut unheld);
+                assert_eq!(
+                    (a, b),
+                    (want[g], want[g]),
+                    "seed {seed} round {round}: {}\n{}",
+                    show(g, &cx),
+                    m.src
+                );
+            }
+        }
+        for threads in [1u64, 2, 16] {
+            tc.sigs.queries.arm(cx.len());
+            std::thread::scope(|sc| {
+                for th in 0..threads {
+                    let (w, goals, want, tref) = (&w, &goals, &want, &tref);
+                    let mut cx = cx.clone();
+                    sc.spawn(move || {
+                        for i in shuffled(goals.len(), seed * 131 + th * 17 + threads) {
+                            let g = &goals[i];
+                            let got = w.implements(&mut cx, g.0, &tref(g.1), &[]);
+                            assert_eq!(got, want[g], "seed {seed}, {threads} threads, thread {th}, goal {i}");
+                        }
+                    });
+                }
+            });
+        }
+        tc.sigs.queries.arm(0);
+        programs += 1;
+        checked += goals.len();
+        through_inductive += goals.iter().filter(|g| want[g] != co[g]).count();
+    }
+    assert_eq!(programs, 180);
+    assert!(checked > 3000, "{checked} goals");
+    // goals that hold only if a cycle through an inductive goal held
+    assert!(
+        through_inductive > 100,
+        "{through_inductive} goals refused by a cycle through an inductive goal"
+    );
+    assert!(by_blanket > 100, "{by_blanket} goals decided by an impl for every type");
+}
+
+/// The checker's answers on the mixed family: each goal asked by a bound in a fn of its own, the
+/// fns in a shuffled order, checked on 1, 2, and 16 threads, twice each: E0901 exactly at
+/// the bounds the oracle refuses, in every run. The programs checked are 24 of the family, most
+/// with a bound refused by a cycle through an inductive goal.
+#[test]
+fn mixed_cycle_diagnostics_do_not_depend_on_order_or_threads() {
+    let pools: Vec<rayon::ThreadPool> =
+        [1, 2, 16].iter().map(|&n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap()).collect();
+    let mut refused = 0;
+    let mut through_inductive = 0;
+    let mut programs = 0;
+    for seed in 100..1000u64 {
+        if programs == 24 {
+            break;
+        }
+        let m = mixed_family(seed, false);
+        let all: Vec<(Ask, usize)> = m.asks.iter().flat_map(|&t| (0..5).map(move |a| (t, a))).collect();
+        let asks: Vec<(Ask, usize)> = shuffled(all.len(), seed).into_iter().map(|i| all[i]).collect();
+        let mut src = m.src.clone();
+        for (a, name) in MIXED.iter().enumerate() {
+            src.push_str(&format!("fn need{a}<T: {name}>() {{}}\n"));
+        }
+        let first = src.lines().count() as u32 + 1;
+        for (n, (t, a)) in asks.iter().enumerate() {
+            src.push_str(&format!("fn ask{n}() {{ need{a}::<{}>(); }}\n", t.text()));
+        }
+        src.push_str("fn main() -> i32 { return 0; }\n");
+        let (p, tc) = mem(&src);
+        let mut cx = tc.types.clone();
+        let goals: Vec<(TypeId, usize)> = asks.iter().map(|&(t, a)| (t.ty(&p, &mut cx), a)).collect();
+        let want = mixed_oracle(&p, &tc, &mut cx, &m, &goals, false);
+        let co = mixed_oracle(&p, &tc, &mut cx, &m, &goals, true);
+        let expect: Vec<u32> =
+            (0..goals.len()).filter(|&n| !want[&goals[n]]).map(|n| first + n as u32).collect();
+        let mixed = goals.iter().filter(|g| want[g] != co[g]).count();
+        if mixed == 0 && programs >= 4 {
+            continue;
+        }
+        programs += 1;
+        refused += expect.len();
+        through_inductive += mixed;
+        for (pi, pool) in pools.iter().enumerate() {
+            for run in 0..2 {
+                let (p, tc) = pool.install(|| mem(&src));
+                let got = diags(&p, &tc);
+                assert!(got.iter().all(|d| d.contains(" E0901 ")), "seed {seed}:\n{src}\n{got:#?}");
+                let lines: Vec<u32> =
+                    got.iter().map(|d| d.split(' ').next().unwrap().parse().unwrap()).collect();
+                assert_eq!(lines, expect, "seed {seed}, pool {pi}, run {run}:\n{src}\n{got:#?}");
+            }
+        }
+    }
+    assert_eq!(programs, 24);
+    assert!(refused > 100, "{refused} refused bounds");
+    assert!(
+        through_inductive > 30,
+        "{through_inductive} bounds refused by a cycle through an inductive goal"
+    );
+}
+
+/// Many independent mixed cycles (`S: Send` through `Q<S>: Tr` and back), each asked from its
+/// coinductive end in one fn and from its inductive end in another, checked on 1, 2, and 16
+/// threads ten times each: every bound is refused in every run.
+#[test]
+fn many_mixed_cycles_are_refused_in_every_run() {
+    let n = 40;
+    let mut src = String::from(
+        "trait Tr {}\nstruct Q<T> { pub p: *const T }\nimpl<T: Send> Tr for Q<T> {}\n\
+         struct R<T> { pub p: *const T }\nunsafe(\"test\") impl<T: Tr> Send for R<T> {}\n\
+         fn need_send<T: Send>() {}\nfn need_tr<T: Tr>() {}\n",
+    );
+    for i in 0..n {
+        src.push_str(&format!("struct S{i} {{ pub f: R<Q<S{i}>> }}\n"));
+    }
+    for i in 0..n {
+        src.push_str(&format!(
+            "fn a{i}() {{ need_send::<S{i}>(); }}\nfn b{i}() {{ need_tr::<Q<S{i}>>(); }}\n"
+        ));
+    }
+    src.push_str("fn main() -> i32 { return 0; }\n");
+    for threads in [1, 2, 16] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        for run in 0..10 {
+            let (p, tc) = pool.install(|| mem(&src));
+            let got = diags(&p, &tc);
+            assert_eq!(got.len(), 2 * n, "{threads} threads, run {run}: {got:#?}");
+            assert!(got.iter().all(|d| d.contains(" E0901 ")), "{got:#?}");
+        }
+    }
+}
+
+/// Mixed cycles of length n, every member asked from both ends: through one path
+/// (`S_i { f: R<Q<S_i+1>> }`), two paths (two such fields), and a cycle of Send goals that holds
+/// with a user trait goal off the cycle at each member. The goals computed by the check and by
+/// the kinds dump grow linearly with n, on one thread and on the default count, and so do those
+/// of kept queries asking the members in cycle order (each query reaches the members asked
+/// before it only at the end of the cycle, so each would recompute the cycle if the answers of
+/// the first one were not all kept).
+#[test]
+fn work_on_a_mixed_cycle_is_linear_in_its_length() {
+    let head = "trait Tr {}\nstruct Qc<T> { pub p: *const T }\nimpl<T: Send> Tr for Qc<T> {}\n\
+                struct R<T> { pub p: *const T }\nunsafe(\"test\") impl<T: Tr> Send for R<T> {}\n\
+                struct P<T> { pub p: *const T }\nunsafe(\"test\") impl<T: Send> Send for P<T> {}\n\
+                fn need_send<T: Send>() {}\nfn need_tr<T: Tr>() {}\n";
+    let make = |n: usize, form: usize| {
+        let mut s = String::from(head);
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let fields = match form {
+                0 => format!("pub f: R<Qc<S{j}>>"),
+                1 => format!("pub f: R<Qc<S{j}>>, pub g: R<Qc<S{j}>>"),
+                _ => format!("pub next: P<S{j}>, pub r: R<Qc<u32>>"),
+            };
+            s.push_str(&format!("struct S{i} {{ {fields} }}\n"));
+            s.push_str(&format!(
+                "fn a{i}() {{ need_send::<S{i}>(); }}\nfn b{i}() {{ need_tr::<Qc<S{i}>>(); }}\n"
+            ));
+        }
+        s.push_str("fn main() -> i32 { return 0; }\n");
+        s
+    };
+    let goals = |n: usize, form: usize| {
+        let (p, tc) = mem(&make(n, form));
+        let errs = diags(&p, &tc);
+        assert_eq!(errs.len(), if form == 2 { 0 } else { 2 * n }, "form {form} n={n}: {errs:#?}");
+        let checked = tc.sigs.queries.goals_computed();
+        stave_sema::dump_kinds(&p, &tc);
+        let dumped = tc.sigs.queries.goals_computed() - checked;
+        // nothing from the run: only what the kept answers hold answers the later goals
+        tc.sigs.queries.arm(0);
+        let w = World { prog: &p, sigs: &tc.sigs };
+        let mut cx = tc.types.clone();
+        let send = TraitRef { trait_decl: tc.sigs.lang.send, args: Vec::new() };
+        let tr = TraitRef { trait_decl: decl_named(&p, DeclKind::Trait, "Tr"), args: Vec::new() };
+        let qc = struct_named(&p, "Qc");
+        let before = tc.sigs.queries.goals_computed();
+        // a query recurses once per goal on its path: a stack like the checker's workers
+        std::thread::scope(|sc| {
+            let body = || {
+                let mut kept = Answers::default();
+                for i in 0..n {
+                    let s = cx.mk_adt(struct_named(&p, &format!("S{i}")), Vec::new());
+                    let q = cx.mk_adt(qc, vec![GArg::Type(s)]);
+                    assert_eq!(
+                        w.implements_kept(&mut cx, s, &send, &[], &mut kept),
+                        form == 2,
+                        "form {form} S{i}"
+                    );
+                    assert_eq!(
+                        w.implements_kept(&mut cx, q, &tr, &[], &mut kept),
+                        form == 2,
+                        "form {form} Qc<S{i}>"
+                    );
+                }
+            };
+            std::thread::Builder::new().stack_size(1 << 29).spawn_scoped(sc, body).unwrap().join().unwrap();
+        });
+        (checked, dumped, tc.sigs.queries.goals_computed() - before)
+    };
+    let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let per = 64;
+    for form in 0..3 {
+        for single in [true, false] {
+            let run = |n: usize| if single { one.install(|| goals(n, form)) } else { goals(n, form) };
+            let (c2, d2, k2) = run(2);
+            for n in [16, 400] {
+                let (c, d, k) = run(n);
+                let bound = per * (n as u64 - 2);
+                assert!(
+                    c - c2 <= bound,
+                    "form {form} n={n} one thread {single}: check computed {} goals over n=2",
+                    c - c2
+                );
+                assert!(
+                    d.saturating_sub(d2) <= bound,
+                    "form {form} n={n}: dump computed {} goals over n=2",
+                    d - d2
+                );
+                assert!(
+                    k - k2 <= bound,
+                    "form {form} n={n}: kept queries computed {} goals over n=2",
+                    k - k2
+                );
+            }
+        }
     }
 }
