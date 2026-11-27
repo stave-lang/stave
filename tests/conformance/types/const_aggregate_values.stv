@@ -36,6 +36,9 @@ const Q: P = P.{ a: 0 - 1, b: 0 }; //~ ERROR E0203
 
 const Y: usize = D.0.1[2]; //~ ERROR E0203
 
+// each step in order: the first index past the end stops it before the next index is evaluated
+const Y2: u16 = F[2][0 - 1]; //~ ERROR E0203
+
 fn fields(x: [u8; V.a[1] as usize], y: [u8; V.p.a], z: [u8; V.p.b]) -> [u8; 17] {
     return [0; V.p.a + V.p.b + V.a[1] as usize];
 }
