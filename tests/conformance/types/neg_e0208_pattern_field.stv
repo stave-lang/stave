@@ -1,0 +1,47 @@
+//~ CHECK-ONLY
+// A field a struct or struct-like variant pattern names must be one of its type's: E0208 at the
+// name, once per name, by value or through a reference. The pattern leaving a field out is not
+// reported beside it.
+struct S {
+    a: u32,
+    b: u32,
+}
+
+enum E {
+    V { x: u32 },
+    W(u32),
+}
+
+fn by_value(s: S) -> u32 {
+    let S.{ a, zz } = s; //~ ERROR E0208
+    return a;
+}
+
+fn two(s: S) -> u32 {
+    match s {
+        S.{ a, b, zz: 3, yy } => { //~ ERROR E0208
+            //~^ ERROR E0208
+            return a + b;
+        }
+    }
+}
+
+fn variant(e: E) -> u32 {
+    match e {
+        E.V.{ y, x } => { //~ ERROR E0208
+            return x;
+        }
+        E.W(_) => {
+            return 1;
+        }
+    }
+}
+
+fn through(s: &S) -> u32 {
+    let S.{ a, b, zz } = s; //~ ERROR E0208
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

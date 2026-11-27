@@ -15,7 +15,10 @@
 # given twice in a struct literal: E0105; a private field or column: E0106; a view argument for a
 # param without `view`: E0414 outside its `drop` case). The shapes with a message of their
 # own (LATER) are cut from stage0's lines; a private field or method reached by a value has
-# E0106's plain message, so the E0106 lines of stage1 need only be among stage0's.
+# E0106's plain message, so the E0106 lines of stage1 need only be among stage0's. E0208 for a
+# field a pattern names that its type lacks has the plain message of the member lookups stage1
+# does not report yet: of stage0's plain E0208 lines, those stage1 also has are kept, in stage0's
+# order and count, and compared with stage1's lines like the rest.
 #
 # Every root's `sigs.txt` and `kinds.txt` must be stage0's.
 #
@@ -63,7 +66,7 @@ S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E001
 # value of unknown type, or with a const pattern of a type the evaluator gives no value (`char`,
 # float, pointer, fn); it reports neither there.
 # Shapes of codes outside S1_CODES that stage1 has (E0208's pattern that leaves fields out; its
-# other shapes are member lookups').
+# plain shape, shared with member lookups, is kept where stage1 has the same line, below).
 S1_SHAPES='"code":"E0208".*"message":"a pattern of `'
 # Messages of the shapes of those codes that later stages raise.
 LATER='"code":"E0101".*"message":"[^"]*` is not a (type|trait)"|"code":"E0105".*"message":"field `[^"]*` of `[^"]*` is given twice in one struct literal"|"code":"E0106".*"message":"column `|"code":"E0414".*"message":"[^"]*is a view, (but|and) '
@@ -159,7 +162,13 @@ if [ "${1:-}" = "--one" ]; then
     echo "DIFF types $root $* (first: $(head -c 300 "$d/types.diff"))"
   else
     sigs="$(wc -l < "$d/0/sigs.txt") $(wc -l < "$d/0/kinds.txt")"
-    grep -E "^\{\"kind\":\"diagnostic\",(\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)|$S1_SHAPES)" "$d/0/diags.txt" | grep -vE "$LATER" > "$d/0/diags.in" || true
+    plain='^{"kind":"diagnostic","code":"E0208","severity":"error","message":"no method or field `'
+    grep "$plain" "$d/1/diags.txt" > "$d/1/diags.plain" || true
+    # stage0's lines of stage1's codes and shapes, and its plain E0208 lines stage1 also has, in
+    # stage0's order and count
+    { grep -nE "^\{\"kind\":\"diagnostic\",(\"code\":\"(($S1_CODES)\"|E0005\",\"severity\":\"error\",\"message\":\"brackets)|$S1_SHAPES)" "$d/0/diags.txt" | grep -vE "$LATER" || true
+      grep -nxFf "$d/1/diags.plain" "$d/0/diags.txt" || true
+    } | sort -t: -k1,1n | cut -d: -f2- > "$d/0/diags.in"
     priv='^{"kind":"diagnostic","code":"E0106"'
     grep -v "$priv" "$d/0/diags.in" > "$d/0/diags.rest" || true
     grep -v "$priv" "$d/1/diags.txt" > "$d/1/diags.rest" || true

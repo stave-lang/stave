@@ -226,7 +226,9 @@ pub fn evaluable(tab: &types.Table, t: u32) -> bool {
 // - `EV_MISMATCH` (E0201 case `no-cast`): the span has type x (`LIT_INT`: an int literal
 //   without a type) where type `ty` is required;
 // - `EV_NO_TYPE` (E0202): nothing gives the literal at the span a type;
-// - `EV_INFER` (E0202 case `infer`): nothing gives the array literal `[]` at the span its type.
+// - `EV_INFER` (E0202 case `infer`): nothing gives the array literal `[]` at the span its type;
+// - `EV_LOSSY` (E0204): the `as` at the span (the operator through the type) can lose
+//   information: from type `ty` to type x.
 pub struct Reports {
     pub code: vec.Vec<u8>,
     pub item: vec.Vec<u32>,
@@ -260,6 +262,7 @@ pub const EV_INDEX: u8 = 2;
 pub const EV_MISMATCH: u8 = 3;
 pub const EV_NO_TYPE: u8 = 4;
 pub const EV_INFER: u8 = 5;
+pub const EV_LOSSY: u8 = 6;
 pub const LIT_INT: u32 = 0xffff_fff0;
 
 // The first failure of an evaluation that reports nothing, as a `Reports` row (`code` 0: none).
@@ -1447,6 +1450,8 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                     let fb = cx.tab.int_bits(src);
                     let tb = cx.tab.int_bits(to);
                     if !((fs == ts && tb >= fb) || (!fs && ts && tb > fb)) {
+                        let optok = tree.tok.as_slice()[c] - 1;
+                        if cx.dfr.code == 0 { cx.dfr = Defer.{ code: EV_LOSSY, it: ev.it, lo: optok, hi: tree.tok_end.as_slice()[c] - 1, ty: src, x: to }; }
                         ev.fail(CV_FAIL);
                         return NO_TY;
                     }

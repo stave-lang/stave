@@ -1,0 +1,41 @@
+//~ CHECK-ONLY
+// A plain `as` in an array length or const generic argument of a signature or field type may not
+// lose information: E0204 from the operator through the target type, as in a body.
+struct S<const N: u8> {
+    a: u8,
+}
+
+struct F {
+    a: [u8; 3u32 as u8], //~ ERROR E0204
+}
+
+const M: u64 = 3;
+
+fn widen(x: [u8; 3u8 as usize], y: [u8; 3u64 as usize], z: [u8; 3i8 as% usize]) -> u32 {
+    return 0;
+}
+
+fn signed(x: [u8; 3i32 as usize]) -> u32 { //~ ERROR E0204
+    return 0;
+}
+
+fn narrow(x: [u8; (3usize as u8) as usize]) -> u32 { //~ ERROR E0204
+    return 0;
+}
+
+fn both(x: [u8; M as u8]) -> [u8; 3i64 as usize] { //~ ERROR E0204
+    //~^ ERROR E0204
+    return both(x);
+}
+
+fn sum(x: [u8; (3i32 as usize) + 4]) -> u32 { //~ ERROR E0204
+    return 0;
+}
+
+fn arg(x: S<{ 3u32 as u8 }>) -> u32 { //~ ERROR E0204
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}
