@@ -284,6 +284,16 @@ impl Schedule {
         self.runs.get(i).filter(|x| x.0 == point && x.1 == owner).map(|x| x.2)
     }
 
+    /// The owner whose value the drop of `owner` at `point` drops, whose flag a tested drop
+    /// tests ([`Schedule::set_runs`]); `None` where no path from the entry reaches it.
+    pub fn holder(&self, point: Point, owner: Owner) -> Option<Owner> {
+        if !self.sorted {
+            return self.runs.iter().find(|x| x.0 == point && x.1 == owner).map(|x| x.3);
+        }
+        let i = self.runs.partition_point(|x| (x.0, x.1) < (point, owner));
+        self.runs.get(i).filter(|x| x.0 == point && x.1 == owner).map(|x| x.3)
+    }
+
     /// The tested drops one instance keeps and the owners with a flag there: every tested drop
     /// ([`Runs::Flag`]) for which `deleted` (the row is in an arm the instance deletes) is
     /// false, and the owners whose values those drops drop.

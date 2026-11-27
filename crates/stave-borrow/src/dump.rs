@@ -7,8 +7,8 @@
 //! - blocks: the preorder of a depth-first walk from the entry that takes the successors in
 //!   order, then the blocks the entry does not reach (their calls, loans, and moves are read by
 //!   the lock-rank scan, the liveness, and the reports) by further walks, each from the block
-//!   with the least key among those left: first the ones no other block left leads to, then
-//!   any; the key of a block is the list of its statement nodes;
+//!   with the least key among those left that no block left leads to (among all, when only
+//!   cycles are left); the key of a block: its statement nodes, then its successors' numbers;
 //! - locals: the params by index, then the captures by binding node, then every other local in
 //!   the order the printed lines first name it (blocks, then findings); a local no line names
 //!   is not printed;
@@ -101,7 +101,7 @@ pub fn sections(
     }
 }
 
-/// Canonical numbers of one body's blocks, locals, and loans.
+/// Canonical numbers of one body's blocks, locals, loans, and types.
 struct Num {
     block: Vec<u32>,
     blocks: Vec<u32>,
@@ -109,9 +109,27 @@ struct Num {
     locals: Vec<LocalId>,
     loan: Vec<u32>,
     loans: Vec<LoanId>,
+    /// By local: its type.
+    lty: Vec<TypeId>,
+    /// The types of the places that print one ([`Num::shows_ty`]).
+    place_tys: Vec<TypeId>,
+    /// The type table, once it is made: places print their types from then on.
+    tnum: Option<FxHashMap<TypeId, u32>>,
 }
 
 impl Num {
+    /// Whether place `p` prints its type: a projection, or a type other than its local's.
+    fn shows_ty(&self, p: &Place) -> bool {
+        !p.proj.is_empty() || self.lty.get(p.local as usize) != Some(&p.ty)
+    }
+
+    fn place(&mut self, p: &Place) {
+        self.local(p.local);
+        if self.shows_ty(p) {
+            self.place_tys.push(p.ty);
+        }
+    }
+
     fn local(&mut self, l: LocalId) {
         if let Some(x) = self.local.get_mut(l as usize)
             && *x == u32::MAX
@@ -129,7 +147,7 @@ impl Num {
             *x = self.loans.len() as u32;
             self.loans.push(l);
             let loan = &body.loans[l as usize];
-            self.local(loan.place.local);
+            self.place(&loan.place);
             match loan.whole {
                 Some(w) => l = w,
                 None => return,
@@ -139,18 +157,18 @@ impl Num {
 
     fn op(&mut self, o: &Operand) {
         if o.kind != OpKind::Const {
-            self.local(o.place.local);
+            self.place(&o.place);
         }
     }
 
     fn stmt(&mut self, body: &Body, k: &StmtKind) {
         match k {
             StmtKind::Assign { dest, rv, .. } => {
-                self.local(dest.local);
+                self.place(dest);
                 match rv {
                     Rvalue::Use(o) => self.op(o),
                     Rvalue::Ref { place, loan, .. } => {
-                        self.local(place.local);
+                        self.place(place);
                         self.loan(body, *loan);
                     }
                     Rvalue::Agg(os) | Rvalue::Pure(os) | Rvalue::Call { args: os, .. } => {
@@ -164,7 +182,7 @@ impl Num {
                 self.loan(body, *active);
             }
             StmtKind::Read(o) | StmtKind::Return(o) => self.op(o),
-            StmtKind::Drop(p) => self.local(p.local),
+            StmtKind::Drop(p) => self.place(p),
             StmtKind::StorageDead(l) => self.local(*l),
         }
     }
@@ -202,7 +220,8 @@ impl Find<'_> {
 }
 
 /// Numbers every block: the preorder of the walk from the entry, then the blocks it does not
-/// reach by walks from the least-keyed block left, those without a predecessor left first.
+/// reach by walks from the least-keyed block left, one no block left leads to if there is one.
+/// The key: the block's statement nodes, then its successors' numbers (`u32::MAX`: none yet).
 fn number_blocks(b: &Body, num: &mut Num) {
     let walk = |num: &mut Num, from: u32| {
         let mut stack: Vec<u32> = vec![from];
@@ -217,25 +236,25 @@ fn number_blocks(b: &Body, num: &mut Num) {
     };
     walk(num, 0);
     let n = b.blocks.len();
-    if num.blocks.len() == n {
-        return;
-    }
-    let key = |x: usize| -> Vec<u32> { b.blocks[x].stmts.iter().map(|s| s.node).collect() };
-    let mut led = vec![false; n];
-    for (i, blk) in b.blocks.iter().enumerate() {
-        if num.block[i] == u32::MAX {
-            for &s in blk.term.succs() {
+    while num.blocks.len() < n {
+        let left: Vec<usize> = (0..n).filter(|&x| num.block[x] == u32::MAX).collect();
+        let mut led = vec![false; n];
+        for &x in &left {
+            for &s in b.blocks[x].term.succs() {
                 led[s as usize] = true;
             }
         }
-    }
-    let mut roots: Vec<usize> = (0..n).filter(|&x| num.block[x] == u32::MAX && !led[x]).collect();
-    roots.sort_by_cached_key(|&x| key(x));
-    for x in roots {
-        walk(num, x as u32);
-    }
-    while let Some(x) = (0..n).filter(|&x| num.block[x] == u32::MAX).min_by_key(|&x| key(x)) {
-        walk(num, x as u32);
+        let key = |x: usize| -> (Vec<u32>, Vec<u32>) {
+            let blk = &b.blocks[x];
+            (
+                blk.stmts.iter().map(|s| s.node).collect(),
+                blk.term.succs().iter().map(|&s| num.block[s as usize]).collect(),
+            )
+        };
+        let roots: Vec<usize> = left.iter().copied().filter(|&x| !led[x]).collect();
+        let pool = if roots.is_empty() { &left } else { &roots };
+        let start = pool.iter().copied().min_by_key(|&x| key(x)).unwrap_or(left[0]);
+        walk(num, start as u32);
     }
 }
 
@@ -248,6 +267,9 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
         locals: Vec::new(),
         loan: vec![u32::MAX; b.loans.len()],
         loans: Vec::new(),
+        lty: b.locals.iter().map(|l| l.ty).collect(),
+        place_tys: Vec::new(),
+        tnum: None,
     };
     number_blocks(b, &mut num);
     let mut params: Vec<(u32, LocalId)> = Vec::new();
@@ -274,10 +296,14 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
     finds.extend(b.bad_moves.iter().map(|(p, s, w)| Find::Move(p, *s, w)));
     finds.extend(b.guard_effects.iter().map(|(s, e)| Find::Guard(*s, e)));
     finds.extend(b.temp_writes.iter().map(|(s, _)| Find::TempWrite(*s)));
-    finds.sort_by_key(|f| f.key());
-    for f in &finds {
-        for p in f.places().into_iter().flatten() {
-            num.local(p.local);
+    // by (kind, file, offset), then by the text with every local not yet numbered as `l?`
+    let mut keyed: Vec<((u8, u32, u32), String, usize)> =
+        finds.iter().enumerate().map(|(i, f)| (f.key(), find_text(f, &num), i)).collect();
+    keyed.sort();
+    let find_order: Vec<usize> = keyed.into_iter().map(|x| x.2).collect();
+    for &i in &find_order {
+        for p in finds[i].places().into_iter().flatten() {
+            num.place(p);
         }
     }
 
@@ -285,6 +311,7 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
     let mut deep: Vec<TypeId> = b.deep_drops.iter().copied().collect();
     let mut roots: Vec<TypeId> = num.locals.iter().map(|&l| b.locals[l as usize].ty).collect();
     roots.extend_from_slice(&deep);
+    roots.extend_from_slice(&num.place_tys);
     let mut table: Vec<TypeId> = Vec::new();
     let mut seen: FxHashSet<TypeId> = FxHashSet::default();
     let mut kids = Vec::new();
@@ -310,6 +337,7 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
         }
         None => out.push('-'),
     };
+    num.tnum = Some(tnum.clone());
 
     for (j, &l) in num.locals.iter().enumerate() {
         let loc = &b.locals[l as usize];
@@ -437,6 +465,16 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
 
     let mut sched = b.schedule.clone();
     sched.seal();
+    let owner = |out: &mut String, o: Owner| match o {
+        Owner::Local(n) => tagged(out, "local", n),
+        Owner::Temp(s, m) => {
+            tagged(out, "temp", s);
+            out.push(' ');
+            made(out, m);
+        }
+        Owner::Part(i) => tagged(out, "part", i),
+        Owner::Old => out.push_str("old"),
+    };
     for r in sched.rows() {
         out.push_str("drop ");
         match r.point {
@@ -448,83 +486,35 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
             Point::Assign(n) => tagged(out, "assign", n),
         }
         out.push(' ');
-        match r.owner {
-            Owner::Local(n) => tagged(out, "local", n),
-            Owner::Temp(s, m) => {
-                tagged(out, "temp", s);
-                out.push(' ');
-                made(out, m);
-            }
-            Owner::Part(i) => tagged(out, "part", i),
-            Owner::Old => out.push_str("old"),
-        }
+        owner(out, r.owner);
         let _ = match r.head {
             Head::Any => write!(out, " any"),
             Head::Adt(d) => write!(out, " d{}", d.0),
             Head::Tuple(n) => write!(out, " tuple{n}"),
             Head::Array => write!(out, " array"),
         };
-        out.push_str(match sched.runs(r.point, r.owner) {
-            Some(Runs::Always) => " always\n",
-            Some(Runs::Never) => " never\n",
-            Some(Runs::Flag) => " flag\n",
-            None => " -\n",
+        let runs = sched.runs(r.point, r.owner);
+        out.push_str(match runs {
+            Some(Runs::Always) => " always",
+            Some(Runs::Never) => " never",
+            Some(Runs::Flag) => " flag",
+            None => " -",
         });
+        // due: the code must decide the drop; mostly the rows with an answer
+        match (sched.due().binary_search(&(r.point, r.owner)).is_ok(), runs.is_some()) {
+            (true, false) => out.push_str(" due"),
+            (false, true) => out.push_str(" undue"),
+            _ => {}
+        }
+        if let Some(h) = sched.holder(r.point, r.owner).filter(|h| *h != r.owner) {
+            out.push_str(" holder ");
+            owner(out, h);
+        }
+        out.push('\n');
     }
 
-    let mut lines: Vec<((u8, u32, u32), String)> = Vec::new();
-    for f in &finds {
-        let mut s = String::new();
-        let (kind, file, off) = f.key();
-        let _ = write!(s, "find {} {file} {off}", ["move", "guard", "temp-write"][kind as usize]);
-        match f {
-            Find::Move(p, _, why) => {
-                s.push(' ');
-                place(&mut s, &num, p);
-                match why {
-                    MoveOut::Behind => s.push_str(" behind"),
-                    MoveOut::Capture(c) => {
-                        let _ = write!(s, " capture {} {}", c.file.0, c.offset);
-                    }
-                    MoveOut::Drop(q) => {
-                        s.push_str(" drop ");
-                        place(&mut s, &num, q);
-                    }
-                    MoveOut::Static => s.push_str(" static"),
-                    MoveOut::Part(q, fix) => {
-                        s.push_str(" part ");
-                        place(&mut s, &num, q);
-                        s.push_str(match fix {
-                            PartFix::Reborrow => " reborrow",
-                            PartFix::Pattern(_) => " pattern",
-                            PartFix::Replace => " replace",
-                        });
-                    }
-                }
-            }
-            Find::Guard(_, e) => match e {
-                GuardEffect::Move(p) => {
-                    s.push_str(" move ");
-                    place(&mut s, &num, p);
-                }
-                GuardEffect::Assign(p) => {
-                    s.push_str(" assign ");
-                    place(&mut s, &num, p);
-                }
-                GuardEffect::MutBorrow(p) => {
-                    s.push_str(" mut-borrow ");
-                    place(&mut s, &num, p);
-                }
-                GuardEffect::Try => s.push_str(" try"),
-            },
-            Find::TempWrite(_) => {}
-        }
-        lines.push((f.key(), s));
-    }
-    lines.sort();
-    lines.dedup();
-    for (_, s) in lines {
-        out.push_str(&s);
+    for &i in &find_order {
+        out.push_str(&find_text(&finds[i], &num));
         out.push('\n');
     }
 
@@ -539,10 +529,65 @@ fn body_text(out: &mut String, ov: &Overlay<'_>, b: &Body) {
     }
 }
 
+/// The `find` line of `f` (without its newline).
+fn find_text(f: &Find<'_>, num: &Num) -> String {
+    let mut s = String::new();
+    let (kind, file, off) = f.key();
+    let _ = write!(s, "find {} {file} {off}", ["move", "guard", "temp-write"][kind as usize]);
+    match f {
+        Find::Move(p, _, why) => {
+            s.push(' ');
+            place(&mut s, num, p);
+            match why {
+                MoveOut::Behind => s.push_str(" behind"),
+                MoveOut::Capture(c) => {
+                    let _ = write!(s, " capture {} {}", c.file.0, c.offset);
+                }
+                MoveOut::Drop(q) => {
+                    s.push_str(" drop ");
+                    place(&mut s, num, q);
+                }
+                MoveOut::Static => s.push_str(" static"),
+                MoveOut::Part(q, fix) => {
+                    s.push_str(" part ");
+                    place(&mut s, num, q);
+                    s.push_str(match fix {
+                        PartFix::Reborrow => " reborrow",
+                        PartFix::Pattern(_) => " pattern",
+                        PartFix::Replace => " replace",
+                    });
+                }
+            }
+        }
+        Find::Guard(_, e) => match e {
+            GuardEffect::Move(p) => {
+                s.push_str(" move ");
+                place(&mut s, num, p);
+            }
+            GuardEffect::Assign(p) => {
+                s.push_str(" assign ");
+                place(&mut s, num, p);
+            }
+            GuardEffect::MutBorrow(p) => {
+                s.push_str(" mut-borrow ");
+                place(&mut s, num, p);
+            }
+            GuardEffect::Try => s.push_str(" try"),
+        },
+        Find::TempWrite(_) => {}
+    }
+    s
+}
+
 /// A number, or `-` for none.
 fn opt(out: &mut String, n: u32) {
+    opt_or(out, n, '-');
+}
+
+/// A number, or `none` for `u32::MAX`.
+fn opt_or(out: &mut String, n: u32, none: char) {
     if n == u32::MAX {
-        out.push('-');
+        out.push(none);
     } else {
         let _ = write!(out, "{n}");
     }
@@ -576,7 +621,8 @@ fn flags(out: &mut String, fs: &[(bool, &str)]) {
 }
 
 fn place(out: &mut String, num: &Num, p: &Place) {
-    let _ = write!(out, "l{}", num.local.get(p.local as usize).copied().unwrap_or(u32::MAX));
+    out.push('l');
+    opt_or(out, num.local.get(p.local as usize).copied().unwrap_or(u32::MAX), '?');
     for pr in &p.proj {
         let _ = match pr {
             Proj::Deref(DerefKind::Shared) => write!(out, ".*"),
@@ -587,6 +633,16 @@ fn place(out: &mut String, num: &Num, p: &Place) {
             Proj::Index => write!(out, ".[]"),
             Proj::Column(c) => write!(out, ".c{c}"),
         };
+    }
+    if let Some(tnum) = &num.tnum
+        && num.shows_ty(p)
+    {
+        match tnum.get(&p.ty) {
+            Some(t) => {
+                let _ = write!(out, ":t{t}");
+            }
+            None => out.push_str(":-"),
+        }
     }
 }
 

@@ -17,10 +17,10 @@ local l0 param0 9 t1 - - - -
 local l1 param1 14 t2 - - - -
 local l2 temp - t2 21 stmt - -
 local l3 temp 19 t3 21 stmt 108:113 -
-loan L0 19 l1.*m - reserved
-loan L1 19 l1.*m - mut
+loan L0 19 l1.*m:t4 - reserved
+loan L1 19 l1.*m:t4 - mut
 block b0 return
-  19 assign l2 init ref-mut l1.*m L0
+  19 assign l2 init ref-mut l1.*m:t4 L0
   19 activate l2 L0 L1
   19 assign l3 init call[move l2 19, copy l0 17] tok 110 flows - stores[]
   23 return const 23
@@ -84,8 +84,8 @@ local l15 temp 49 t1 51 stmt 81:84 -
 local l16 temp 58 t2 58 cond - -
 local l17 temp 68 t0 70 stmt - -
 local l18 temp 68 t0 70 stmt - -
-loan L0 31 l0.*m - -
-loan L1 34 l0.*m - mut
+loan L0 31 l0.*m:t5 - -
+loan L1 34 l0.*m:t5 - mut
 block b0 goto b1
   19 assign l3 init use const 19
   16 assign l4 init use copy l3 16
@@ -94,11 +94,11 @@ block b0 goto b1
 block b1 branch b2 b7
   28 assign l7 init pure[copy l4 26, const 27]
   28 assign l8 init use copy l7 28
-  31 assign l9 init ref l0.*m L0
+  31 assign l9 init ref l0.*m:t5 L0
   31 assign l10 init call[copy l9 31] tok 61 flows - stores[]
   32 assign l11 init pure[copy l8 28, copy l10 31]
 block b2 branch b3 b4
-  34 assign l12 init ref-mut l0.*m L1
+  34 assign l12 init ref-mut l0.*m:t5 L1
   37 assign l13 init call[copy l1 37, move l12 34, copy l4 35] tok 67 flows - stores[]
   43 assign l14 init pure[copy l4 40, const 42]
 block b3 goto b4
@@ -126,12 +126,12 @@ local l2 temp - t1 16 stmt - -
 local l3 temp 14 t3 16 stmt 123:130 -
 local l4 temp - t1 23 stmt - -
 local l5 temp 21 t3 23 stmt 132:139 -
-loan L0 11 l0.*m - mut
-loan L1 18 l0.*m - mut
+loan L0 11 l0.*m:t2 - mut
+loan L1 18 l0.*m:t2 - mut
 block b0 return
-  11 assign l2 init ref-mut l0.*m L0
+  11 assign l2 init ref-mut l0.*m:t2 L0
   14 assign l3 init call[copy l1 14, move l2 11, const 12] tok 125 flows - stores[]
-  18 assign l4 init ref-mut l0.*m L1
+  18 assign l4 init ref-mut l0.*m:t2 L1
   21 assign l5 init call[copy l1 21, move l4 18, const 19] tok 134 flows - stores[]
   25 return const 25
 body d26 4 23 ok
@@ -146,9 +146,9 @@ local l1 param1 10 t3 - - - -
 local l2 temp - t2 17 stmt - -
 local l3 temp 15 t5 17 stmt 191:196 -
 local l4 temp 19 t5 21 stmt 198:202 -
-loan L0 15 l0.* - -
+loan L0 15 l0.*:t4 - -
 block b0 return
-  15 assign l2 init ref l0.* L0
+  15 assign l2 init ref l0.*:t4 L0
   15 assign l3 init call[copy l2 15, const 13] tok 193 flows - stores[]
   19 assign l4 init call[copy l1 19] tok 200 flows - stores[]
   23 return const 23

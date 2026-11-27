@@ -219,12 +219,14 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
     successors in order, then the blocks the entry does not reach (code after a loop without
     `break`, a join every way into which exits): the checks read their calls, loans, and
     moves too (the lock-rank scan takes every call token, the liveness every use). They are
-    numbered by further walks of the same kind, each through the blocks not yet numbered and
-    from the one with the least key among them: first among the blocks no block left leads
-    to, then, when only cycles are left, among all. The key of a block is the list of its
-    statement nodes, compared as lists (`-` after every number, a shorter prefix first). Of two
-    blocks with equal keys the walk takes the builder's first, an order the corpus never shows
-    (two unreached starts with one key: none in 1135 roots). Locals `l<j>`: the
+    numbered by further walks of the same kind through the blocks not yet numbered, each from
+    the block with the least key among those left that no block left leads to (among all
+    left, when only cycles are left). The key of a block, taken when the walk starts: the list
+    of its statement nodes, then the list of its successors' numbers (`-` for one not yet
+    numbered), each compared as a list (`-` after every number, a prefix first). Two blocks
+    with equal keys differ at most in what their statements do at the same nodes; of such
+    the builder's first is taken (in the corpus every such pair prints alike). Locals
+    `l<j>`: the
     params by index, then the captures by binding node, then every other local in the order the
     lines below first name it (blocks in order, then the `find` lines); a local no line names is
     not printed. Loans `L<j>`: in the order the block lines first name them. Naming a loan for
@@ -255,7 +257,10 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
     `N KIND ..`, N the statement's node or `-`: `assign PLACE init|set RV`, `activate l<j>
     L<reserved> L<active>`, `read OPND`, `drop PLACE`, `dead l<j>`, `return OPND`.
     PLACE: `l<j>` then per projection `.*` `.*m` `.*r` (deref of `&`, `&mut`, raw), `.f<i>`
-    (field), `.v<v>:<i>` (field i of variant v), `.[]` (an element), `.c<i>` (an SoA column).
+    (field), `.v<v>:<i>` (field i of variant v), `.[]` (an element), `.c<i>` (an SoA column),
+    then `:t<j>` (`:-`: no type), the place's type, when it has a projection or a type other
+    than its local's: the checks read it (a drop or a write through a dereference of a type
+    whose drop reaches references accesses what it reaches).
     OPND: `copy PLACE N`, `move PLACE N`, `const N` (N the operand's node or `-`). RV: `use
     OPND`, `ref PLACE L<j>`, `ref-mut PLACE L<j>`, `agg[OPND, ..]`, `pure[OPND, ..]`,
     `call[OPND, ..] tok T flows F stores[S, ..]`: T the call's file token index (as `ast`
@@ -274,14 +279,30 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
     `bind N`, `assign N`. OWNER: `local N`, `temp S A:B` (S the statement node or `-`, A:B the
     value's first and last token, `-` for none), `part i`, `old`. HEAD: `any`, `d<D>`,
     `tuple<n>`, `array`. RUNS: `always`, `never`, `flag` (the init dataflow's answer), `-` (no
-    path from the entry reaches it).
-  - `find KIND F O ..`, by (KIND, F, O, text), unique: what the builder found and the checks
+    path from the entry reaches it). Then ` due` for a row with `-` that the code must decide
+    all the same (its drop statement is in a block the entry reaches, as for the old value
+    of some assignments), ` undue` for a row with an answer it need not decide. Then ` holder
+    OWNER` when the owner whose flag a tested drop tests is not the row's (an assignment's old
+    value: the local assigned).
+  - `find KIND F O ..`, by (KIND, F, O), then by the line's text with every local no line
+    before names written `l?` and no place type; the locals the lines name first are numbered
+    in this order. One line per finding (two equal findings print two equal lines). What the
+    builder found and the checks
     report, at the start `F O` of its span: `move F O PLACE WHY` (E0504; WHY `behind`,
     `capture F O`, `drop PLACE`, `static`, `part PLACE reborrow|pattern|replace`), `guard F O
     move|assign|mut-borrow PLACE` or `guard F O try` (E0505), `temp-write F O` (E0503 case
     `temporary`).
   - `deep t<j> ..`: the dropped types whose drop may run a destructor on a value holding
     references, by j; absent when there is none.
+  - Not printed, and not gated here: what only chooses or words a diagnostic, the spans of
+    statements, operands, loans, and locals, the move sites and the operands that move with
+    later operands, the exit spans, a non-temporary's open statement and the words naming
+    the statements an exit leaves, the text of a `pattern` fix and of a written temporary
+    (the E0501 / E0502 / E0503 / E0504 / E0512 case, label, and hole, and which of several
+    loans or moves is named). `diags` gates them, and `borrow` the reported loan. The order
+    of the drops at one point is the order of their `drop` statements in the blocks; the
+    lowering's use of it is gated by `lir`. A body's `from` returns and param stores are
+    signature facts (`sigs`).
 - `borrow`: one line per access of the borrow checker in every body that was borrow
   checked (bodies with a type error are skipped).
   - `N` is the node of the access: the place expression for `read`, `write`, `move`; for an

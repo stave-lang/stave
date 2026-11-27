@@ -17,10 +17,10 @@ local l0 param0 9 t1 - - - -
 local l1 param1 14 t2 - - - -
 local l2 temp - t2 21 stmt - -
 local l3 temp 19 t3 21 stmt 108:113 -
-loan L0 19 l1.*m - reserved
-loan L1 19 l1.*m - mut
+loan L0 19 l1.*m:t4 - reserved
+loan L1 19 l1.*m:t4 - mut
 block b0 return
-  19 assign l2 init ref-mut l1.*m L0
+  19 assign l2 init ref-mut l1.*m:t4 L0
   19 activate l2 L0 L1
   19 assign l3 init call[move l2 19, copy l0 17] tok 110 flows - stores[]
   23 return const 23
@@ -44,7 +44,7 @@ t0 int u 32
 t1 ref t0
 local l0 param0 4 t1 - - - -
 block b0 return
-  10 return copy l0.* 10
+  10 return copy l0.*:t0 10
 body d25 2 16 ok
 t0 int u 32
 t1 ref mut t0
@@ -52,9 +52,9 @@ local l0 param0 4 t1 - - - -
 local l1 temp 12 t0 14 stmt - -
 local l2 temp 12 t0 14 stmt - -
 block b0 return
-  12 assign l1 init pure[copy l0.*m 10, const 11]
+  12 assign l1 init pure[copy l0.*m:t0 10, const 11]
   12 assign l2 init use copy l1 12
-  7 assign l0.*m set use copy l2 12
+  7 assign l0.*m:t0 set use copy l2 12
   16 return const 16
 body d26 4 56 ok
 t0 int u 32
@@ -86,9 +86,9 @@ local l19 temp 53 t0 54 stmt - -
 local l20 temp 53 t0 54 stmt - -
 local l21 temp 53 t0 54 stmt - -
 loan L0 28 l1 - mut
-loan L1 28 l8.*m L0 mut
+loan L1 28 l8.*m:t0 L0 mut
 loan L2 35 l5 - mut
-loan L3 35 l11.*m L2 mut
+loan L3 35 l11.*m:t0 L2 mut
 loan L4 41 l7 - reserved
 loan L5 41 l7 - mut
 loan L6 47 l5 - -
@@ -101,10 +101,10 @@ block b0 return
   24 assign l6 init agg[const 22]
   20 assign l7 init use move l6 20
   28 assign l8 init ref-mut l1 L0
-  28 assign l9 init ref-mut l8.*m L1
+  28 assign l9 init ref-mut l8.*m:t0 L1
   30 assign l10 init call[move l9 28] tok 110 flows - stores[]
   35 assign l11 init ref-mut l5 L2
-  35 assign l12 init ref-mut l11.*m L3
+  35 assign l12 init ref-mut l11.*m:t0 L3
   37 assign l13 init call[move l12 35] tok 117 flows - stores[]
   41 assign l14 init ref-mut l7 L4
   41 activate l14 L4 L5
@@ -113,7 +113,7 @@ block b0 return
   49 assign l17 init call[copy l16 47] tok 133 flows - stores[]
   53 assign l18 init pure[copy l1 44, copy l17 49]
   53 assign l19 init pure[copy l18 53, copy l3 50]
-  53 assign l20 init pure[copy l19 53, copy l7.f0 52]
+  53 assign l20 init pure[copy l19 53, copy l7.f0:t0 52]
   53 assign l21 init use copy l20 53
   53 return copy l21 53
 body d27 5 15 ok
@@ -140,7 +140,7 @@ local l0 param0 3 t1 - - - -
 local l1 temp 11 t0 13 stmt - -
 local l2 temp 11 t0 13 stmt - -
 block b0 return
-  11 assign l1 init pure[copy l0.*m.f0 9, const 10]
+  11 assign l1 init pure[copy l0.*m.f0:t0 9, const 10]
   11 assign l2 init use copy l1 11
-  6 assign l0.*m.f0 set use copy l2 11
+  6 assign l0.*m.f0:t0 set use copy l2 11
   15 return const 15

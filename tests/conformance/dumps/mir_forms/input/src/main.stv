@@ -3,8 +3,8 @@
 // `break` and `continue`, a `match` with a guard and a binding moved in its arm, contract
 // clauses with `old(e)` and `result`, a static, a `scope` with two spawns, a closure with
 // captures and its environment, a nested closure, code after a loop without `break` (blocks
-// the entry does not reach), and the findings of E0504, E0505, and E0503 case `temporary`; a
-// body with a type error prints only its header.
+// the entry does not reach), an assignment over a value with drop glue, and the findings of
+// E0504, E0505, and E0503 case `temporary`; a body with a type error prints only its header.
 struct Res {
     pub id: u32,
 }
@@ -112,6 +112,15 @@ fn dead_tail(c: &mut Counter) -> u32 {
     }
     let n = c.get();
     return n;
+}
+
+fn reassign(k: u32) -> u32 {
+    let mut r = mk(k);
+    if k > 1 {
+        return r.id;
+    }
+    r = mk(k + 1);
+    return r.id;
 }
 
 fn deref_move(r: &Res) -> Res {

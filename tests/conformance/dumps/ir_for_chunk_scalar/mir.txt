@@ -17,10 +17,10 @@ local l0 param0 9 t1 - - - -
 local l1 param1 14 t2 - - - -
 local l2 temp - t2 21 stmt - -
 local l3 temp 19 t3 21 stmt 108:113 -
-loan L0 19 l1.*m - reserved
-loan L1 19 l1.*m - mut
+loan L0 19 l1.*m:t4 - reserved
+loan L1 19 l1.*m:t4 - mut
 block b0 return
-  19 assign l2 init ref-mut l1.*m L0
+  19 assign l2 init ref-mut l1.*m:t4 L0
   19 activate l2 L0 L1
   19 assign l3 init call[move l2 19, copy l0 17] tok 110 flows - stores[]
   23 return const 23
@@ -67,16 +67,16 @@ local l15 bind 45 t0 - - - matched
 local l16 temp 49 t3 49 cond - -
 local l17 temp 54 t2 56 stmt - -
 local l18 temp 54 t2 56 stmt - -
-loan L0 27 l0.* - -
+loan L0 27 l0.*:t5 - -
 block b0 goto b1
   17 assign l2 init call[copy l1 15] tok 23 flows - stores[]
   13 assign l3 init use copy l2 13
   22 assign l4 init use const 22
   19 assign l5 init use copy l4 19
-  27 assign l6 init ref l0.* L0
+  27 assign l6 init ref l0.*:t5 L0
 block b1 branch b2 b3
 block b2 goto b1
-  27 read copy l6.*.[] 27
+  27 read copy l6.*.[]:t0 27
   27 assign l7 init use const 27
   24 assign l8 init use copy l7 24
   34 assign l9 init pure[copy l8 31, copy l3 33]
@@ -91,7 +91,7 @@ block b3 branch b4 b10
 block b4 goto b5
 block b5 branch b6 b9
 block b6 branch b7 b8
-  27 read copy l6.*.[] 27
+  27 read copy l6.*.[]:t0 27
   45 assign l15 init use const 45
   49 assign l16 init pure[copy l15 46, copy l1 48]
 block b7 goto b8

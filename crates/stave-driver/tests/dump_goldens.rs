@@ -397,12 +397,18 @@ fn mir_dump_properties() {
     assert!(ok > 100, "{ok} ok sections");
 }
 
-/// The number of word `w` that names `<p><n>`, alone or as the root of a place (`l3.f1.*m`).
+/// The number of word `w` that names `<p><n>`, alone or as the root of a place (`l3.f1.*m:t2`),
+/// or, for `t`, as the type of a place.
 fn mir_ref(w: &str, p: char) -> Option<u32> {
+    let w = match (p, w.rsplit_once(":t")) {
+        ('t', Some((place, t))) if place.starts_with('l') => &w[w.len() - t.len() - 1..],
+        _ => w,
+    };
     let rest = w.strip_prefix(p)?;
     let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     let (n, tail) = rest.split_at(digits);
-    (!n.is_empty() && (tail.is_empty() || (p == 'l' && tail.starts_with('.')))).then(|| n.parse().unwrap())
+    let place = p == 'l' && (tail.starts_with('.') || tail.starts_with(':'));
+    (!n.is_empty() && (tail.is_empty() || place)).then(|| n.parse().unwrap())
 }
 
 /// The `<p><n>` a `mir` line names, in order.
@@ -481,19 +487,24 @@ fn check_section(case: &str, h: &str, lines: &[&str]) {
         }
     };
     walk(0, &mut done, &mut order);
-    let mut led = vec![false; n];
-    for b in (0..n).filter(|&b| !done[b]) {
-        for &s in &succs[b] {
-            led[s as usize] = true;
+    // the expected numbering is the identity, so a numbered block's number is its index
+    while order.len() < n {
+        let left: Vec<usize> = (0..n).filter(|&b| !done[b]).collect();
+        let mut led = vec![false; n];
+        for &b in &left {
+            for &s in &succs[b] {
+                led[s as usize] = true;
+            }
         }
-    }
-    let mut roots: Vec<usize> = (0..n).filter(|&b| !done[b] && !led[b]).collect();
-    roots.sort_by(|&x, &y| keys[x].cmp(&keys[y]));
-    for r in roots {
-        walk(r as u32, &mut done, &mut order);
-    }
-    while let Some(b) = (0..n).filter(|&b| !done[b]).min_by(|&x, &y| keys[x].cmp(&keys[y])) {
-        walk(b as u32, &mut done, &mut order);
+        let key = |b: usize| {
+            let next: Vec<u32> =
+                succs[b].iter().map(|&s| if done[s as usize] { s } else { u32::MAX }).collect();
+            (keys[b].clone(), next)
+        };
+        let roots: Vec<usize> = left.iter().copied().filter(|&b| !led[b]).collect();
+        let pool = if roots.is_empty() { &left } else { &roots };
+        let start = pool.iter().copied().min_by_key(|&b| key(b)).unwrap();
+        walk(start as u32, &mut done, &mut order);
     }
     assert_eq!(order, (0..n as u32).collect::<Vec<_>>(), "{case} {h}: blocks not in the walk order");
     // locals and loans: numbered where the statements first name them, a loan's place right
