@@ -175,8 +175,10 @@ impl tc_rows.Typeck {
             self.bind_params(sg, tree, d, g);
         } else {
             self.sc = consteval.no_scope();
+            // a type that lowers to the error type is the initializer's context (stage0's
+            // `const_body`)
             let ty = sg.cx.ty.as_slice()[d as usize];
-            let tk0 = self.known(ty);
+            let tk0 = if ty == ERR then ERR else self.known(ty);
             self.acc.as_mut_slice()[g] = tk0;
         }
         self.lw.clear_type_args();
@@ -354,7 +356,8 @@ impl tc_rows.Typeck {
         }
         if pk == K_CONST_DECL || pk == K_STATIC_DECL {
             if !is_expr(ck) { return false; }
-            self.set_hint_acc(c, r);
+            let ct = self.acc.as_slice()[r];
+            self.set_hint(c, if ct == ERR then err_hint(t, tree, c) else ct);
             return true;
         }
         if pk == K_STMT { return self.enter_stmt(sg, ds, nm, set, t, cut, tree, r, k, c); }
@@ -583,14 +586,15 @@ impl tc_rows.Typeck {
         } else {
             self.array_elem_after(tree, r, k - 1);
         }
-        self.set_hint_acc(c, r);
+        let et = self.acc.as_slice()[r];
+        self.set_hint(c, if et == ERR then err_hint(t, tree, c) else et);
     }
 
     // Element j of array literal row r is checked: its value decides the element type if none
-    // did yet.
+    // did yet (the error type too).
     fn array_elem_after(&mut self, tree: &ast.Ast, r: usize, j: usize) {
         if self.acc.as_slice()[r] != NONE { return; }
-        let v = self.resolve_at(self.base + tree.kids.row(r)[j] as usize);
+        let v = self.resolve_e_at(self.base + tree.kids.row(r)[j] as usize);
         if v == UNK || (!is_lit(v) && v != NONE && v != self.t_never) { self.acc.as_mut_slice()[r] = v; }
     }
 
@@ -599,13 +603,15 @@ impl tc_rows.Typeck {
         let ks = tree.kids.row(r);
         let n = ks.len();
         if n == 0 {
+            // `[]` takes a context of length 0; any other context, or none: E0202 `infer`
             if h == UNK { return UNK; }
             let tab = &sg.cx.tab;
-            if h != NONE && tab.tag_of(h) == types.TK_ARRAY {
+            if h != NONE && h != ERR && tab.tag_of(h) == types.TK_ARRAY {
                 let xs = tab.x(h);
                 if xs[0] == types.GA_VALUE && xs[1] == 0 && xs[2] == 0 { return h; }
             }
-            return self.err();
+            self.report(202, tc_rows.C_INFER, r as% u32, NONE, NONE, NONE);
+            return ERR;
         }
         if is_repeat(t, tree, self.base, r) {
             let e = self.base + ks[0] as usize;
@@ -642,12 +648,14 @@ impl tc_rows.Typeck {
                 let v = self.resolve_at(self.base + ks[j] as usize);
                 u = self.unify(&sg.cx.tab, u, v, self.base as% u32 + ks[j]);
             }
-            elem = self.force(u);
+            elem = self.force_e(u);
             if elem == UNK { return self.unknown(tree, r); }
         }
         for j in 0..n {
             self.coerce(&sg.cx.tab, self.base + ks[j] as usize, elem, NONE);
         }
+        // elements of the error type: the literal is of it (stage0's `array_lit`)
+        if elem == ERR { return ERR; }
         let len = n as u64;
         return array_ty(&mut sg.cx.tab, elem, types.GA_VALUE, (len >> 32) as% u32, len as% u32);
     }
@@ -1841,8 +1849,8 @@ fn in_loop(sg: &sigs.Sigs, t: &lex.Tokens, tree: &ast.Ast, r: usize) -> bool {
 }
 
 // The context of expression row c when stage0's is the error type: none for a form that reads a
-// context only as a shape the error type does not have (a number literal, a tuple, `&`, `!`,
-// `*`, a cast, a comparison, `&&` / `||`), `UNK` for any other form.
+// context only as a shape the error type does not have (a number literal, an array literal, a
+// tuple, `&`, `!`, `*`, a cast, a comparison, `&&` / `||`), `UNK` for any other form.
 fn err_hint(t: &lex.Tokens, tree: &ast.Ast, c: usize) -> u32 {
     let k = kind(tree, c);
     if k == K_CAST || k == K_CMP || k == K_AND || k == K_OR { return NONE; }
@@ -1850,7 +1858,7 @@ fn err_hint(t: &lex.Tokens, tree: &ast.Ast, c: usize) -> u32 {
     let ft = tk(t, a);
     if k == K_UNARY && (ft == terminals.T_AMP || ft == terminals.T_AMP_AMP || ft == terminals.T_BANG || ft == terminals.T_STAR) { return NONE; }
     if k != K_PRIMARY { return UNK; }
-    if ft == terminals.T_INT_LIT || ft == terminals.T_FLOAT_LIT { return NONE; }
+    if ft == terminals.T_INT_LIT || ft == terminals.T_FLOAT_LIT || ft == terminals.T_L_BRACKET { return NONE; }
     if ft == terminals.T_L_PAREN {
         let n = tree.kids.row(c).len();
         let close = tree.tok_end.as_slice()[c] - 1;
