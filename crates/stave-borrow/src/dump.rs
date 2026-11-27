@@ -5,7 +5,7 @@
 //! or recursion order of the builder, so a second builder with other data structures prints the
 //! same bytes for the same CFG:
 //! - blocks: the preorder of a depth-first walk from the entry that takes the successors in
-//!   order; a block the entry does not reach is not printed (no check visits it);
+//!   order; a block the entry does not reach is not printed;
 //! - locals: the params by index, then the captures by binding node, then every other local in
 //!   the order the printed lines first name it (blocks, then findings); a local no line names
 //!   is not printed;
@@ -675,5 +675,28 @@ fn stmt(out: &mut String, num: &Num, k: &StmtKind) {
             out.push_str(" return ");
             operand(out, num, o);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_states() {
+        let mut s = String::new();
+        header(&mut s, DeclId(7), None, 3, 40, State::Ok);
+        header(&mut s, DeclId(7), Some(2), 3, 31, State::Ok);
+        header(&mut s, DeclId(8), None, 4, 9, State::Error);
+        header(&mut s, DeclId(9), None, 5, 12, State::Unsupported("nested body"));
+        header(&mut s, DeclId(10), None, 6, 15, State::Internal("a value without a type"));
+        let want = [
+            "body d7 3 40 ok",
+            "body d7.2 3 31 ok",
+            "body d8 4 9 error",
+            "body d9 5 12 unsupported \"nested body\"",
+            "body d10 6 15 internal \"a value without a type\"",
+        ];
+        assert_eq!(s, want.map(|l| format!("{l}\n")).concat());
     }
 }

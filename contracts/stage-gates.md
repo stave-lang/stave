@@ -199,20 +199,40 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
     `unsupported "<why>"` (a form the builder cannot model: the program is not accepted),
     `internal "<why>"` (the builder disagrees with the type checker). Only an `ok` section
     has more lines, and only an `ok` fn has nested sections. Const and static initializers
-    have no section.
+    have no section, nor has a body whose item has no bracket table or no body block (none
+    in a program without errors).
+    - `internal` wins over `unsupported`. Of several reasons of one kind the first wins in
+      the order the builder makes the CFG statements (evaluation order: the `requires`
+      clauses and `old(e)` values at entry, then the body, the receiver first, operands left
+      to right, a call's arguments before the call, the `ensures` clauses at each return).
+    - `unsupported` reasons: `` `for` over a type without `next` ``, `` `for` over a type that
+      is not a `for` source ``, `pattern nesting too deep`, `expression nesting too deep`
+      (the type checker's nesting limit, counted as stave-borrow `cfg` counts it), `` `old`
+      outside an `ensures` clause ``, and `nested body` for a fn one of whose closure or
+      `spawn` bodies is unsupported.
+    - `internal` reasons name the disagreement (a value without a type, a temporary or
+      statement the temporaries table does not hold, a capture the capture analysis holds
+      otherwise, a pattern shape stave-sema `drops` rejects); a nested body's reason is its
+      fn's. The text is stage0's diagnosis of its own bug: a second compiler prints the
+      state, and the gate compares an `internal` header up to the reason.
   - Numbering. Blocks `b<j>`: the preorder of a depth-first walk from the entry that takes the
     successors in order; a block the entry does not reach is not printed. Locals `l<j>`: the
     params by index, then the captures by binding node, then every other local in the order the
     lines below first name it (blocks in order, then the `find` lines); a local no line names is
-    not printed. Loans `L<j>`: in the order the block lines first name them (a loan's `whole`
-    loan right after it). Types `t<j>`: as in `types`, the rank in the canonical type-key order
-    among the types the section names and the components of their keys, dense from `t0`; the
-    error type and no type print `-`.
+    not printed. Loans `L<j>`: in the order the block lines first name them. Naming a loan for
+    the first time names, right after it, the local of its place and then its `whole` loan
+    (with that loan's place local, and so on), though the block line shows neither: an
+    `activate` line, for one, numbers the locals its loans borrow. Types `t<j>`: as in
+    `types`, the rank in the canonical type-key order among the types the section names and
+    the components of their keys, dense from `t0`; the error type and no type print `-` (as a
+    key component the error type prints `t<n>`, n the number of table lines, as in `sigs`).
+    Wherever a field may be `-` (no node, token, or statement), `-` sorts after every number.
   - `t<j> KEY`, by j; KEY as in `types`.
   - `local l<j> ROLE N TY STMT END MADE FLAGS`, by j. ROLE: `param<i>`, `capture`, `bind` (a
     pattern binding), `temp`, `env` (a closure literal's environment, N the literal), `join` (a
     `scope` statement's join value, N the statement), `static` (the storage of a `static` the
-    body names, N `-`), `result` (the returned value the `ensures` clauses read), `anon` (a
+    body names, N `-`), `result` (the returned value the `ensures` clauses read, N the
+    first `Ensures` node, the binding node of `result`), `anon` (a
     local of no node: a chunk loop's block value, a returned value copied out of a part). N: the
     binding node, a temporary's expression node, or `-`. STMT, END, MADE: a temporary's
     innermost open statement node (`-`: none), what ends it (`stmt cond guard branch arm
@@ -234,7 +254,12 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
     `a`), F `-` (no origins), `all` (every argument's), or `[i, copy i, ..]` (per named param:
     the argument index); S `a<b` / `a<copy b`, then ` view` when the target points to a view.
   - `loop b<head> b<exit>|- [b<j> ..]`, by (head, exit): each loop the entry reaches, with
-    its exit (`-`: none reached) and its blocks, sorted.
+    its exit (`-`: none reached) and its blocks, sorted. The blocks of a loop are syntactic:
+    its head and every block its condition, body, and (`for`) step make, those of the forms
+    and of the exits (`return`, `?`, `break`, `continue`) inside it included; its exit block
+    (where the code after the loop goes on) is not. So a block only an exit inside the loop
+    reaches is one, though no path leads from it back to the head. The checks read this set:
+    an edge to the head from one of its blocks starts the next iteration.
   - `drop POINT OWNER HEAD RUNS`, one per row of the body's drop schedule (stave-sema
     `drops`), sorted by (POINT, OWNER, HEAD) in the order the forms are listed here, then by
     their numbers. POINT: `end`, `return T`, `try T`, `jump T` (T the exit's file token index),
