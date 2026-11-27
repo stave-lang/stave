@@ -26,7 +26,8 @@
 // The forms evaluated: int literals, `true` and `false`, a const item by path, a bare const
 // generic parameter as a whole length or argument, parentheses, the operators `+ - * / %` (and
 // their `%` and `|` forms), `& | ^ << >> <<%` (`& | ^` on `bool`s too), unary `-`, `~`, `!`,
-// comparisons, `&&`, `||`, `if then else`, `as` / `as%` / `as|` between int types, and arrays
+// comparisons, `&&`, `||`, `if then else`, `as` / `as%` / `as|` between int types (one step or a
+// chain of them), and arrays
 // of ints or `bool`s: literals `[a, b]`, `[e; n]`, `[]`, and an index into one. A form outside
 // these makes the evaluation `UNSUP` (stage1 does not decide it: the caller writes no dump).
 //
@@ -1073,10 +1074,6 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 continue;
             }
             if k == K_CAST {
-                if ks.len() != 2 {
-                    ev.fail(CV_UNSUP);
-                    continue;
-                }
                 fr.push(cur, hint, NO_TY);
                 cur = base + ks[0] as usize;
                 hint = NONE;
@@ -1456,7 +1453,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                         return NO_TY;
                     }
                 }
-                ev.cast_to.as_mut_slice()[fnode - ev.lo] = to;
+                ev.cast_to.as_mut_slice()[c - ev.lo] = to;
                 src = to;
             }
             ret = src as u64;
@@ -1679,12 +1676,18 @@ fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize,
                 ev.vmag.as_mut_slice()[x] = rm;
             }
         } else if k == K_CAST {
+            // each step in turn, its target type kept at its `Type` row
             let c = base + ks[0] as usize - ev.lo;
-            let to = ev.cast_to.as_slice()[x];
-            let op = tk(t, tree.tok.as_slice()[base + ks[1] as usize] - 1);
-            let cn = ev.vneg.as_slice()[c];
-            let cm = ev.vmag.as_slice()[c];
-            let (rn, rm) = if op == terminals.T_AS_PERCENT then wrap(word(cn, cm), cx.tab.is_signed(to), cx.tab.int_bits(to)) else clamp(&cx.tab, to, cn, cm, false);
+            let mut rn = ev.vneg.as_slice()[c];
+            let mut rm = ev.vmag.as_slice()[c];
+            for j in 1..ks.len() {
+                let tn = base + ks[j] as usize;
+                let to = ev.cast_to.as_slice()[tn - ev.lo];
+                let op = tk(t, tree.tok.as_slice()[tn] - 1);
+                let (sn, sm) = if op == terminals.T_AS_PERCENT then wrap(word(rn, rm), cx.tab.is_signed(to), cx.tab.int_bits(to)) else clamp(&cx.tab, to, rn, rm, false);
+                rn = sn;
+                rm = sm;
+            }
             ev.vneg.as_mut_slice()[x] = rn;
             ev.vmag.as_mut_slice()[x] = rm;
         } else if is_chain(k) {
