@@ -736,30 +736,14 @@ impl<'a> FnCx<'a> {
             self.fail_at(at, "`runtime.panic` has no contract failure fn");
             return;
         };
-        let f = self.req(Req::Inst(InstKey { decl: d, args: Vec::new() }));
         self.f.last_site = None;
         let here = self.site(self.icx.a(e));
         let saved = self.f.b.site();
         self.f.b.set_site(here);
-        self.contract_fail_call(f, s, at);
-        self.f.b.set_site(saved);
-    }
-
-    fn contract_fail_call(&mut self, f: stave_ir::FuncId, s: Operand, at: Option<u32>) {
-        match at {
-            None => {
-                self.f.b.call(f, None, &[s]);
-            }
-            Some(tok) => {
-                let site = self.site(tok);
-                let k = self.f.b.int(site.0 as i128);
-                if let Operand::Const(ci) = k {
-                    self.f.site_consts.push(ci);
-                }
-                self.f.b.call(f, None, &[k, s]);
-            }
-        }
+        let row = at.map(|tok| self.site(tok));
+        self.call_runtime(d, &[s], row, at);
         self.f.b.unreachable();
+        self.f.b.set_site(saved);
     }
 
     /// The `old(e)` snapshot of the call whose `(` is `paren`.
