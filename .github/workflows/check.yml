@@ -34,29 +34,39 @@ jobs:
             ! printf '%s\n' "$files" | grep -qE '^(LANG\.md$|contracts/)'; then
             echo docs_only=true >> "$GITHUB_OUTPUT"
           fi
-  # The two halves of `run.sh check` run side by side: together they are longer than one job
-  # may take on a slow runner.
+  # The parts of `run.sh check` run side by side: one after another they are longer than a job
+  # may take on a slow runner. The matrices of `test` and `gates` together list every part, and
+  # the shards of one step list every K of the same N. A failing leg does not cancel the others.
   test:
     needs: scope
     if: needs.scope.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
       # AArch64 programs built by the tests run under user-mode emulation.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user binutils-aarch64-linux-gnu
-      - run: sh tools/ci-step/run.sh check-test
+      - run: sh tools/ci-step/run.sh check-test ${{ matrix.shard }}
   gates:
     needs: scope
     if: needs.scope.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        step: [check-gates-rest, stage1-ir-gate 1/2, stage1-ir-gate 2/2]
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user binutils-aarch64-linux-gnu
-      - run: sh tools/ci-step/run.sh check-gates
+      - run: sh tools/ci-step/run.sh ${{ matrix.step }}
   # The required status check is this job: it runs on every event and succeeds only when the
-  # scope is known and each half either passed or was left out for a markdown-only diff.
+  # scope is known and every leg either passed or was left out for a markdown-only diff. The
+  # result of a matrix job is `success` only when each of its legs succeeded.
   check:
     needs: [scope, test, gates]
     if: always()

@@ -27,14 +27,20 @@
 # with its message. (Exit 3, a phase module the verifier refuses, is `stave test stage1`'s, by a
 # fault put into one phase.)
 #
-# Pipeline: `stage1 ir opt --dump-phase=clean --verify-phases` on every release `checked` text of
-# the round trip, under the table's limits and under `rounds=3 threshold=100 cap=20000`: exit 0,
-# and stage0 loads the module.
+# Pipeline: on every release `checked` text of the round trip, under the table's limits and under
+# `rounds=3 threshold=100 cap=20000`: `stage1 ir opt --dump-phase=clean --verify-phases` (the
+# module after C*) and plain `stage1 ir opt` (the output, every pass), each exits 0 and stage0
+# loads its module. stage0 runs the base passes only, so the output has no stage0 text to equal.
 #
 # Corpus: the roots of the stage1 gate (every package and other `.stv` file below
 # tests/conformance), the bench programs, and the stage1 package itself (the largest text: its
 # read + print time is printed against stage0's `stave ir fmt`).
-#   tools/ci-step/run.sh stage1-ir-gate
+#
+# Shards: with K/N the round trip takes every N-th root, starting at root K, and the base passes,
+# the pipeline, and the mutants run on the texts of those roots: the N shards together cover every
+# root. Each shard runs all the optimizer goldens and command line cases, and its own
+# STAVE_IR_MUTANTS mutants.
+#   tools/ci-step/run.sh stage1-ir-gate [K/N]
 # Internal: stage1-ir-gate.sh --one N ROOT compares one root (run in parallel by xargs).
 set -eu
 cd "$(dirname "$0")/../.."
@@ -77,6 +83,14 @@ if [ "${1:-}" = "--one" ]; then
     done
   done
   exit 0
+fi
+
+SHARD="${1:-1/1}"
+K="${SHARD%/*}"
+N="${SHARD#*/}"
+if [ "$SHARD" != "$K/$N" ] || ! [ "$K" -ge 1 ] 2>/dev/null || ! [ "$K" -le "$N" ] 2>/dev/null; then
+  echo "stage1-ir-gate: bad shard \`$SHARD\`: want K/N with 1 <= K <= N" >&2
+  exit 2
 fi
 
 if [ "$PROFILE" = release ]; then cargo build -q --locked --release -p stave-cli; else cargo build -q --locked -p stave-cli; fi
@@ -245,8 +259,10 @@ find "$CONF" -name stave.toml | sed 's|/stave.toml$||' | sort > "$OUT/pkgs.txt"
     if [ -f "$b/stave.toml" ] || { [ -f "$b" ] && [ "${b%.stv}" != "$b" ]; }; then echo "$b"; fi
   done
   echo "$ROOT/stage1"
-} | awk '{ print NR, $0 }' > "$LIST"
+} | awk -v k="$K" -v n="$N" '(NR - k) % n == 0 { print NR, $0 }' > "$LIST"
 
+# the later stages find their inputs below w/: nothing of an earlier run may be left there
+rm -rf "$OUT/w"
 start=$(date +%s)
 xargs -P "$(nproc)" -L 1 sh "$0" --one < "$LIST" > "$OUT/result.txt"
 end=$(date +%s)
@@ -265,14 +281,14 @@ total=$(grep -vc '^EMPTY' "$OUT/result.txt" || true)
 empty=$(grep -c '^EMPTY' "$OUT/result.txt" || true)
 same=$(grep -c '^SAME' "$OUT/result.txt" || true)
 bytes=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
-echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots, $((end - start)) s; $empty empty files stage0 wrote (no text)"
+echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots (shard $SHARD), $((end - start)) s; $empty empty files stage0 wrote (no text)"
 if grep -v '^SAME\|^EMPTY' "$OUT/result.txt"; then fail=1; fi
 
 # Base passes (opt-passes.md section 9 "Base"): `stage1 ir opt --passes=base` on every `release`
 # `ir` text of the round trip that has stage0's `opt` dump beside it equals that dump byte for
 # byte; on every tests/opt case with a `passes` file it equals the case's `output.ir`.
 find "$OUT/w" -path '*-release/ir.txt' -size +0 | sort > "$OUT/base-inputs.txt"
-xargs -P "$(nproc)" -I F sh -c '
+xargs -P "$(nproc)" -I '{}' sh -c '
   o="$(dirname "$2")/opt.txt"
   [ -s "$o" ] || exit 0
   t=$(basename "$(dirname "$2")" | sed "s/-release\$//")
@@ -280,7 +296,7 @@ xargs -P "$(nproc)" -I F sh -c '
     if cmp -s "$o" "$2.base"; then echo "SAME $t $(wc -c < "$2") $2"; else echo "DIFF $t $2 (first: $(cmp "$o" "$2.base" 2>&1 | head -1))"; fi
   else
     echo "FAIL $t $2 ($(head -c 300 "$2.base.err"))"
-  fi' sh "$S1" F < "$OUT/base-inputs.txt" > "$OUT/base.txt"
+  fi' sh "$S1" '{}' < "$OUT/base-inputs.txt" > "$OUT/base.txt"
 bcases=0
 bsame=0
 for c in "$ROOT"/tests/opt/*/; do
@@ -311,26 +327,34 @@ if [ -n "$bbig" ]; then
   echo "stage1-ir-gate: base passes on the largest release text $(wc -c < "$bbig") bytes ($bbig): stage0 ir opt $(( (t1 - t0) / 1000000 )) ms, stage1 ir opt --passes=base $(( (t2 - t1) / 1000000 )) ms"
 fi
 
-# Pipeline on the corpus (opt-passes.md section 9 "Gates"): `stage1 ir opt --dump-phase=clean
-# --verify-phases` on every `release` `checked` text of the round trip, under the table's limits
-# and under a second set that inlines more and over several rounds, exits 0 and its module loads
-# in stage0 (`stave ir check`).
+# Pipeline on the corpus (opt-passes.md section 9 "Gates"): on every `release` `checked` text of
+# the round trip, under the table's limits and under a second set that inlines more and over
+# several rounds, `stage1 ir opt --dump-phase=clean --verify-phases` (it stops after C*) and plain
+# `stage1 ir opt` (the output) exit 0 and their modules load in stage0 (`stave ir check`).
 for set in table "rounds=3 threshold=100 cap=20000"; do
   lims=""
   if [ "$set" != table ]; then for l in $set; do lims="$lims --limit $l"; done; fi
-  start=$(date +%s)
-  xargs -P "$(nproc)" -I F sh -c '
-    o="$2.pipe"
-    # shellcheck disable=SC2086
-    if "$1" ir opt --dump-phase=clean --verify-phases $4 "$2" > "$o" 2> "$o.err" && "$3" ir check "$o" 2>> "$o.err"; then
-      echo "OK $2"
-    else
-      echo "FAIL $2 ($(head -c 300 "$o.err" | tr "\n" " "))"
+  for module in "after C*" output; do
+    flags="$lims"
+    checked="exit 0, loaded by stage0"
+    if [ "$module" != output ]; then
+      flags="--dump-phase=clean --verify-phases$lims"
+      checked="exit 0, verified at every phase, loaded by stage0"
     fi
-    rm -f "$o"' sh "$S1" F "$S0" "$lims" < "$OUT/base-inputs.txt" > "$OUT/pipe.txt"
-  end=$(date +%s)
-  echo "stage1-ir-gate: opt pipeline ($set limits) on the corpus: $(grep -c '^OK' "$OUT/pipe.txt" || true) / $(wc -l < "$OUT/base-inputs.txt") release texts exit 0, verified at every phase, loaded by stage0, $((end - start)) s"
-  if grep -v '^OK' "$OUT/pipe.txt"; then fail=1; fi
+    start=$(date +%s)
+    xargs -P "$(nproc)" -I '{}' sh -c '
+      o="$2.pipe"
+      # shellcheck disable=SC2086
+      if "$1" ir opt $4 "$2" > "$o" 2> "$o.err" && "$3" ir check "$o" 2>> "$o.err"; then
+        echo "OK $2"
+      else
+        echo "FAIL $2 (ir opt $4: $(head -c 300 "$o.err" | tr "\n" " "))"
+      fi
+      rm -f "$o"' sh "$S1" '{}' "$S0" "$flags" < "$OUT/base-inputs.txt" > "$OUT/pipe.txt"
+    end=$(date +%s)
+    echo "stage1-ir-gate: opt pipeline ($set limits) on the corpus, module $module: $(grep -c '^OK' "$OUT/pipe.txt" || true) / $(wc -l < "$OUT/base-inputs.txt") release texts $checked, $((end - start)) s"
+    if grep -v '^OK' "$OUT/pipe.txt"; then fail=1; fi
+  done
 done
 
 # the largest text: stage1 read + print against stage0's
