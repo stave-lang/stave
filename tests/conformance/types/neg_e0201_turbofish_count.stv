@@ -1,0 +1,73 @@
+//~ CHECK-ONLY
+// Generic arguments written on a fn, a struct or enum, or a method named through its type take
+// exactly the item's own params: another count is E0201 `type-args` at them, and the path
+// counts as written without them. A generic param that the arguments and the context then
+// leave unbound is E0202 `infer` at the call or the fn value.
+struct S<T> {
+    a: T,
+}
+
+enum E<T> {
+    A(T),
+    B,
+}
+
+trait Tr<T> {
+    fn m(self) -> T;
+}
+
+impl Tr<u8> for u8 {
+    fn m(self) -> u8 {
+        return self;
+    }
+}
+
+impl<T> S<T> {
+    fn mk<U>(x: U) -> u32 {
+        return 0;
+    }
+}
+
+fn gen<T>() -> u32 {
+    return 0;
+}
+
+fn idf<T>(x: T) -> T {
+    return x;
+}
+
+fn two<T, U>(x: T) -> u32 {
+    return 0;
+}
+
+fn plain(x: u8) -> u8 {
+    return x;
+}
+
+fn calls() -> u32 {
+    let a = idf::<u8, u8>(1u8); //~ ERROR E0201
+    let b = plain::<u8>(1u8); //~ ERROR E0201
+    let c = gen::<u8, u8>(); //~ ERROR E0201
+    //~^ ERROR E0202
+    let d = two::<u8>(1u8); //~ ERROR E0201
+    //~^ ERROR E0202
+    let e: fn(u8) -> u8 = idf::<u8, u8>; //~ ERROR E0201
+    let f = idf::<u8, u8>; //~ ERROR E0201
+    //~^ ERROR E0202
+    let g = S::<u8>.mk::<u8, u8>(1u8); //~ ERROR E0201
+    let h = S.mk::<u8, u8>(1u8); //~ ERROR E0201
+    //~^ ERROR E0202
+    return 0;
+}
+
+fn types() -> u32 {
+    let s = S::<u8, u8>.{ a: 1u8 }; //~ ERROR E0201
+    let j: E<u8> = E::<u8, u8>.B; //~ ERROR E0201
+    let k = E::<u8, u8>.A(1u8); //~ ERROR E0201
+    let l = gen(); //~ ERROR E0202
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

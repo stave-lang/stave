@@ -312,7 +312,7 @@ impl tc_rows.Typeck {
         if dk == decls.DK_TRAIT {
             // `Tr::<A>`: the written type arguments, a row of `binds` kept in `blo` (NONE: none)
             let mut row = NONE;
-            if ga != NONE {
+            if ga != NONE && self.targs_fit(tree, ga, own_count(sg, target)) {
                 let mut out = vec.Vec::<u32>.new();
                 if !sigs.lower_gargs(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, ga, target, self.sc, &mut out) { return; }
                 row = self.binds.len() as% u32;
@@ -360,8 +360,10 @@ impl tc_rows.Typeck {
     // A bindings row for a call of callee (a fn, or a method named through a type) with the
     // generic arguments written at `GenericArgs` row ga (NONE: none): a method's impl params come
     // first, bound from matching the impl's self type against inst (NONE: left unbound, as when
-    // the type is written without arguments or does not match), then its own. UNK: not checked
-    // yet (a wrong argument count, an argument that does not lower, an impl only partly bound).
+    // the type is written without arguments or does not match), then its own. Arguments of
+    // another count than callee's own params are E0201 `type-args` and count as not written (a
+    // fn: no row, NONE). UNK: not checked yet (an argument that does not lower, an impl only
+    // partly bound).
     pub fn targs_row(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, callee: u32, ga: u32, inst: u32) -> u32 {
         let method = ds.kind.as_slice()[callee as usize] == decls.DK_METHOD;
         let imp = if method then ds.parent.as_slice()[callee as usize] else NONE;
@@ -371,6 +373,8 @@ impl tc_rows.Typeck {
         let olo = gl[callee as usize] as usize;
         let ohi = gl[callee as usize + 1] as usize;
         let np = phi - plo;
+        let fit = ga == NONE || self.targs_fit(tree, ga, ohi - olo);
+        if !fit && !method { return NONE; }
         let b = self.binds.len();
         for _ in 0..np + ohi - olo {
             self.binds.push(NONE);
@@ -384,8 +388,19 @@ impl tc_rows.Typeck {
                 }
             }
         }
-        if ga != NONE && !self.own_targs(sg, ds, nm, set, t, cut, tree, callee, ga, b + np) { return UNK; }
+        if ga != NONE && fit && !self.own_targs(sg, ds, nm, set, t, cut, tree, callee, ga, b + np) { return UNK; }
         return b as% u32;
+    }
+
+    // Whether the generic arguments at `GenericArgs` row ga number n, the params they are for;
+    // else E0201 `type-args` at them (stage0's `turbofish`).
+    fn targs_fit(&mut self, tree: &ast.Ast, ga: u32, n: usize) -> bool {
+        let given = tree.kids.row(ga as usize).len();
+        if given == n { return true; }
+        let lo = tree.tok.as_slice()[ga as usize];
+        let hi = tree.tok_end.as_slice()[ga as usize] - 1;
+        self.report_span(201, tc_rows.C_TYPE_ARGS, lo, hi, NONE, n as% u32, given as% u32, NONE);
+        return false;
     }
 
     // Binds callee's own generic params, from row slot at in `binds`, to the generic arguments
@@ -406,8 +421,10 @@ impl tc_rows.Typeck {
     }
 
     // The type of struct or enum d with the generic arguments written at `GenericArgs` row ga;
-    // UNK when they do not lower.
+    // NONE (as if none were written) for another count than d's params, UNK when they do not
+    // lower.
     fn adt_of(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, d: u32, ga: u32) -> u32 {
+        if !self.targs_fit(tree, ga, own_count(sg, d)) { return NONE; }
         let mut out = vec.Vec::<u32>.new();
         if !sigs.lower_gargs(&mut sg.cx, &mut self.lw, tree, t, nm, set, cut, ds, self.it, ga, d, self.sc, &mut out) { return UNK; }
         let n = out.len() / 3;
@@ -466,7 +483,11 @@ impl tc_rows.Typeck {
         }
         if row != NONE {
             for i in 0..n {
-                if self.binds.as_slice()[row as usize + i] == NONE { return self.err(); }
+                if self.binds.as_slice()[row as usize + i] == NONE {
+                    // a param neither written nor given by the context: E0202 `infer` at r
+                    self.report(202, tc_rows.C_INFER, r as% u32, NONE, NONE, NONE);
+                    return ERR;
+                }
             }
         }
         self.fn_item.as_mut_slice()[r] = true;
@@ -594,7 +615,7 @@ impl tc_rows.Typeck {
                     let ch = if close + 1 == end then self.hint.as_slice()[r] else NONE;
                     self.set_chain(r, S_VAL, UNK);
                     if close == q + 1 {
-                        let v = if b == NONE then self.call_value(sg, ds, tree, m, inst, NONE) else self.gen_call(sg, ds, tree, m, b, NONE, ch, inst);
+                        let v = if b == NONE then self.call_value(sg, ds, tree, m, inst, NONE) else self.gen_call(sg, ds, tree, m, b, NONE, ch, inst, r as% u32);
                         self.set_chain(r, S_VAL, v);
                         p = close + 1;
                         continue;
@@ -672,7 +693,7 @@ impl tc_rows.Typeck {
                     let inst = if st == S_TCALL then SELF_VAR else self.binds.as_slice()[b as usize + n];
                     let ch = if close + 1 == end then self.hint.as_slice()[r] else NONE;
                     if close == p + 1 {
-                        let v = self.gen_call(sg, ds, tree, m, b, NONE, ch, inst);
+                        let v = self.gen_call(sg, ds, tree, m, b, NONE, ch, inst, r as% u32);
                         self.set_chain(r, S_VAL, v);
                         p = close + 1;
                         continue;
@@ -739,7 +760,7 @@ impl tc_rows.Typeck {
                 let b = if callee == NONE then NONE else if pre != NONE then pre else self.call_binds(sg, ds, callee, vch);
                 if b == UNK && close == p + 1 { callee = NONE; }
                 if close == p + 1 {
-                    let v = if b == NONE then self.call_value(sg, ds, tree, callee, NONE, NONE) else self.gen_call(sg, ds, tree, callee, b, NONE, ch, NONE);
+                    let v = if b == NONE then self.call_value(sg, ds, tree, callee, NONE, NONE) else self.gen_call(sg, ds, tree, callee, b, NONE, ch, NONE, r as% u32);
                     self.set_chain(r, S_VAL, v);
                     p = close + 1;
                     continue;
@@ -852,7 +873,7 @@ impl tc_rows.Typeck {
             let inst = self.pos.as_slice()[c];
             let b = self.blo.as_slice()[c];
             let ch = self.hint.as_slice()[c];
-            let v = if b == NONE || callee == NONE then self.call_value(sg, ds, tree, callee, inst, c as% u32) else self.gen_call(sg, ds, tree, callee, b, c as% u32, ch, inst);
+            let v = if b == NONE || callee == NONE then self.call_value(sg, ds, tree, callee, inst, c as% u32) else self.gen_call(sg, ds, tree, callee, b, c as% u32, ch, inst, r as% u32);
             self.set_chain(r, S_VAL, v);
             return;
         }
@@ -876,7 +897,7 @@ impl tc_rows.Typeck {
                 let ft = self.pos.as_slice()[c];
                 v = self.call_value(sg, ds, tree, FN_VALUE, ft, c as% u32);
             } else {
-                v = self.gen_call(sg, ds, tree, d, b, c as% u32, ch, NONE);
+                v = self.gen_call(sg, ds, tree, d, b, c as% u32, ch, NONE, NONE);
             }
             self.set_chain(r, S_VAL, v);
         }
@@ -1591,8 +1612,9 @@ impl tc_rows.Typeck {
 
     // The value of a generic call of callee with bindings row b, the arguments of `Args` row args
     // (NONE: none), the call's context ch, on a receiver whose `Self` is sf (NONE: a call
-    // without one).
-    fn gen_call(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, callee: u32, b: u32, args: u32, ch: u32, sf: u32) -> u32 {
+    // without one). A binding still missing is E0202 `infer` at chain row at (NONE: a form not
+    // checked for it, unknown).
+    fn gen_call(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, tree: &ast.Ast, callee: u32, b: u32, args: u32, ch: u32, sf: u32, at: u32) -> u32 {
         let nargs = if args == NONE then 0usize else tree.kids.row(args as usize).len();
         if nargs != self.gen_arity(sg, tree, args, callee, sf) { return self.err(); }
         if b == UNK {
@@ -1646,7 +1668,13 @@ impl tc_rows.Typeck {
         }
         if lit_err { return UNK; }
         for i in 0..n {
-            if self.binds.as_slice()[bs + i] == NONE { return self.err(); }
+            if self.binds.as_slice()[bs + i] != NONE { continue; }
+            if at == NONE { return self.err(); }
+            // stage0 binds what is missing to the error type: a result that is such a param is
+            // of it, one that holds one is not modeled
+            self.report(202, tc_rows.C_INFER, at, NONE, NONE, NONE);
+            if !self.unresolved(&sg.cx.tab, ret, bs, n) { break; }
+            return if sg.cx.tab.tag_of(ret) == types.TK_PARAM then ERR else UNK;
         }
         let rt = self.subst_binds(sg, ret, bs, n);
         return self.known(rt);
