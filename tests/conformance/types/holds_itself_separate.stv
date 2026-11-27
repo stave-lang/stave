@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// E0423 for every separate cycle in one run: `B` holds `A<B>`, which holds `B` (its `t`), a
+// cycle apart from `A`'s own (`n`) that stays once `n` is behind a pointer, so both are
+// reported. The same cycle at other args (`L<u8>`, `L<u16>`, `W<u32>`) is reported once, also
+// with two fields on it; one strongly connected component is reported once (`M`, `N`).
+struct A<T> { n: Option<A<T>>, t: T } //~ ERROR E0423
+
+struct B { x: A<B> } //~ ERROR E0423
+
+struct C { y: A<C> } //~ ERROR E0423
+
+struct E { s: Option<E>, a: A<E> } //~ ERROR E0423
+
+struct R0 { a: A<R1> } //~ ERROR E0423
+
+struct R1 { a: A<R2> }
+
+struct R2 { a: A<R0> }
+
+struct L<T> { x: Option<L<T>>, y: Option<L<T>> } //~ ERROR E0423
+
+struct M { x: Option<M>, n: N } //~ ERROR E0423
+
+struct N { m: M }
+
+struct W<T> { a: T, w: Option<W<T>> } //~ ERROR E0423
+
+struct K { w: W<K> } //~ ERROR E0423
+
+struct H { p: *const A<H> }
+
+fn f(a: &L<u8>, b: &L<u16>, w: &W<u32>, v: &W<W<u8>>, h: &A<H>) -> u32 {
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

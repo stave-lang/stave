@@ -27,9 +27,12 @@
 //! Every component with a cycle that any walk closes is reported ([`holds_itself`]): at the
 //! first declaration in source order that writes, in a field, a type of the component (`D<u32>`
 //! in `struct D<T> { n: Option<D<u32>> }`; not `Option`, whose field is its bare param), else at
-//! the first declaration with an instance in it; once per declaration, and not again for a
-//! component holding an instance of a declaration already reported (the same cycle at other
-//! args). A component with no struct or enum in it (none exists) is E0005 where the walk met it. So a type that only
+//! the first declaration with an instance in it. Components are taken in that order of reports;
+//! each is first cut at the fields of every declaration reported before that lie on its reported
+//! cycle (a fix there fixes every instance), and is reported on the cycles it has left, if any:
+//! the same cycle at other args is reported once, a separate cycle through an instance of a
+//! reported declaration is reported too. A component with no struct or enum in it (none
+//! exists) is E0005 where the walk met it. So a type that only
 //! reaches a cycle (a struct with a field of it) is not reported itself, nor is any type on or
 //! above a cycle too deep (E0005): it has no depth, and its cycle has its report.
 
@@ -78,11 +81,9 @@ struct Walk<'a, 'g> {
     open: Vec<TypeId>,
     is_open: FxHashSet<TypeId>,
     next_index: u32,
-    /// The types on a by-value cycle: the preorder number of their component's root.
-    on_cycle: FxHashMap<TypeId, u32>,
-    /// The components with a cycle, as closed: the root's number, the members, and the place
-    /// whose walk closed it ([`Walk::site`]).
-    components: Vec<(u32, Vec<TypeId>, Option<Span>)>,
+    /// The components with a cycle, as closed: the members and the place whose walk closed it
+    /// ([`Walk::site`]).
+    components: Vec<(Vec<TypeId>, Option<Span>)>,
     /// The place being measured (a declaration, a body node, a call site).
     site: Option<Span>,
 }
@@ -131,7 +132,6 @@ impl<'a, 'g> Walk<'a, 'g> {
             open: Vec::new(),
             is_open: FxHashSet::default(),
             next_index: 0,
-            on_cycle: FxHashMap::default(),
             components: Vec::new(),
             site: None,
         }
@@ -307,12 +307,9 @@ impl<'a, 'g> Walk<'a, 'g> {
             let cycle = self_part || members.len() > 1;
             for &u in &members {
                 self.is_open.remove(&u);
-                if cycle {
-                    self.on_cycle.insert(u, index);
-                }
             }
             if cycle {
-                self.components.push((index, members, self.site));
+                self.components.push((members, self.site));
             }
         }
         self.depth.insert(t, d);
@@ -409,82 +406,191 @@ fn written_parts(w: &mut Walk<'_, '_>, ft: TypeId) -> Vec<TypeId> {
     out
 }
 
-/// The declaration a component is reported at: its name, the declaration, and the field label.
-type Report = (Span, DeclId, Option<Span>);
+/// The fields of `m`, if it is an ADT instance: its declaration and, per field (variants in
+/// order), its index, span, written type, and type after substitution (`None` for one taller
+/// than the type table holds: [`Walk::parts`] leaves it out too).
+type InstFields = (DeclId, Vec<(usize, Span, TypeId, Option<TypeId>)>);
 
-/// E0423 for every component with a cycle the walk closed (module docs), once per declaration;
+fn inst_fields(sigs: &Sigs, w: &mut Walk<'_, '_>, m: TypeId) -> Option<InstFields> {
+    let TypeKind::Adt { def, args } = w.cx.kind(m).clone() else { return None };
+    let adt = sigs.adt(def)?;
+    let fields: Vec<(Span, TypeId)> =
+        adt.variants.iter().flat_map(|v| v.fields.iter().map(|f| (f.span, f.ty))).collect();
+    let out = fields
+        .into_iter()
+        .enumerate()
+        .map(|(i, (span, ft))| {
+            let st = (crate::types::subst_height(&w.cx, ft, &args) <= MAX_TYPE_DEPTH)
+                .then(|| w.cx.subst(ft, &args, None));
+            (i, span, ft, st)
+        })
+        .collect();
+    Some((def, out))
+}
+
+/// The cycles of a graph on `0..adj.len()`: per node, the number of its strongly connected
+/// component if that has a cycle (two nodes or more, or an edge to itself). Tarjan's algorithm
+/// on an explicit stack.
+fn cyclic_sccs(adj: &[Vec<u32>]) -> Vec<Option<u32>> {
+    let n = adj.len();
+    let (mut index, mut low, mut on) = (vec![u32::MAX; n], vec![0u32; n], vec![false; n]);
+    let (mut open, mut out) = (Vec::new(), vec![None; n]);
+    let (mut next, mut comps) = (0u32, 0u32);
+    for s in 0..n {
+        if index[s] != u32::MAX {
+            continue;
+        }
+        index[s] = next;
+        low[s] = next;
+        next += 1;
+        open.push(s);
+        on[s] = true;
+        let mut frames: Vec<(usize, usize)> = vec![(s, 0)];
+        while let Some(top) = frames.last_mut() {
+            let v = top.0;
+            if let Some(&u) = adj[v].get(top.1) {
+                top.1 += 1;
+                let u = u as usize;
+                if index[u] == u32::MAX {
+                    index[u] = next;
+                    low[u] = next;
+                    next += 1;
+                    open.push(u);
+                    on[u] = true;
+                    frames.push((u, 0));
+                } else if on[u] {
+                    low[v] = low[v].min(index[u]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(p, _)) = frames.last() {
+                low[p] = low[p].min(low[v]);
+            }
+            if low[v] == index[v] {
+                let at = open.iter().rposition(|&x| x == v).unwrap_or(open.len());
+                let members = open.split_off(at);
+                let cycle = members.len() > 1 || adj[v].contains(&(v as u32));
+                for &x in &members {
+                    on[x] = false;
+                    if cycle {
+                        out[x] = Some(comps);
+                    }
+                }
+                comps += cycle as u32;
+            }
+        }
+    }
+    out
+}
+
+/// The declaration a cycle is reported at: whether a field of it writes a type of the cycle
+/// (it is the one to change), its name, the declaration, the field (index and span), and the
+/// cycle's number.
+type Pick = (bool, Span, DeclId, Option<(usize, Span)>, u32);
+
+/// The declaration to report among `members` (module docs). `sub` numbers the cycles left once
+/// the fields in `cut` hold nothing; a field counts if its type is on its holder's cycle.
+fn pick(
+    prog: &Program,
+    sigs: &Sigs,
+    w: &mut Walk<'_, '_>,
+    members: &[TypeId],
+    sub: &FxHashMap<TypeId, u32>,
+    cut: &FxHashSet<(DeclId, usize)>,
+) -> Option<Pick> {
+    let mut best: Option<Pick> = None;
+    for &m in members {
+        let Some(&s) = sub.get(&m) else { continue };
+        let Some((def, fields)) = inst_fields(sigs, w, m) else { continue };
+        let Some(decl) = prog.decl(def) else { continue };
+        let (mut writes, mut field) = (false, None);
+        for (i, span, ft, st) in fields {
+            if cut.contains(&(def, i)) || st.and_then(|st| sub.get(&st)) != Some(&s) {
+                continue;
+            }
+            let named = written_parts(w, ft).iter().any(|x| sub.get(x) == Some(&s));
+            if field.is_none() || (named && !writes) {
+                field = Some((i, span));
+                writes |= named;
+            }
+            if writes {
+                break;
+            }
+        }
+        let better = match &best {
+            None => true,
+            Some((bw, bs, bd, ..)) => (!writes, decl.name_span, def.0) < (!*bw, *bs, bd.0),
+        };
+        if better {
+            best = Some((writes, decl.name_span, def, field, s));
+        }
+    }
+    best
+}
+
+/// E0423 for every component with a cycle the walk closed (module docs), once per cycle;
 /// E0005 case `type` where the walk met a component without a struct or enum.
 fn holds_itself(prog: &Program, sigs: &Sigs, w: &mut Walk<'_, '_>) -> Vec<Diagnostic> {
     let comps = std::mem::take(&mut w.components);
-    // per component: whether a field of the declaration writes a member (it is the one to
-    // change), the report, and the place whose walk closed the component
-    let mut picks: Vec<(bool, Option<Report>, Option<Span>)> = Vec::new();
-    for (c, members, site) in &comps {
-        let mut best: Option<(bool, Span, DeclId, Option<Span>)> = None;
-        for &m in members {
-            let TypeKind::Adt { def, args } = w.cx.kind(m).clone() else { continue };
-            let (Some(decl), Some(adt)) = (prog.decl(def), sigs.adt(def)) else { continue };
-            let fields: Vec<(Span, TypeId)> =
-                adt.variants.iter().flat_map(|v| v.fields.iter().map(|f| (f.span, f.ty))).collect();
-            let (mut writes, mut field) = (false, None);
-            for (span, ft) in fields {
-                if crate::types::subst_height(&w.cx, ft, &args) > MAX_TYPE_DEPTH {
-                    continue;
-                }
-                let st = w.cx.subst(ft, &args, None);
-                if w.on_cycle.get(&st) != Some(c) {
-                    continue;
-                }
-                let named = written_parts(w, ft).iter().any(|x| w.on_cycle.get(x) == Some(c));
-                if field.is_none() || (named && !writes) {
-                    field = Some(span);
-                    writes |= named;
-                }
-                if writes {
-                    break;
-                }
-            }
-            let cand = (writes, decl.name_span, def, field);
-            let better = match &best {
-                None => true,
-                Some((bw, bs, bd, _)) => (!writes, decl.name_span, def.0) < (!*bw, *bs, bd.0),
-            };
-            if better {
-                best = Some(cand);
-            }
-        }
-        picks.push(match best {
-            Some((writes, at, def, field)) => (writes, Some((at, def, field)), *site),
-            None => (false, None, *site),
-        });
-    }
-    // components a declaration writes first, then by the place of the report: a component
-    // with an instance of a declaration already reported is a form of that declaration's cycle
-    // (its instance with other args)
+    let none = FxHashSet::default();
+    // components a declaration writes first, then by the place of the report
+    let picks: Vec<Option<Pick>> = comps
+        .iter()
+        .map(|(members, _)| {
+            let all: FxHashMap<TypeId, u32> = members.iter().map(|&m| (m, 0)).collect();
+            pick(prog, sigs, w, members, &all, &none)
+        })
+        .collect();
     let mut order: Vec<usize> = (0..picks.len()).collect();
-    order.sort_by_key(|&i| (!picks[i].0, picks[i].1.map(|(at, d, _)| (at, d.0))));
-    let mut done: FxHashSet<DeclId> = FxHashSet::default();
+    order.sort_by_key(|&i| picks[i].map(|(writes, at, d, ..)| (!writes, at, d.0)));
+    // The fields of each reported declaration that are on its cycle. A later component whose
+    // every cycle passes through one of them is that cycle at other args (fixing the field
+    // fixes it); one with a cycle left is reported on what is left.
+    let mut cut: FxHashSet<(DeclId, usize)> = FxHashSet::default();
     let mut out = Vec::new();
     for i in order {
-        match picks[i] {
-            (_, Some((at, def, field)), _) => {
-                let covered = comps[i]
-                    .1
-                    .iter()
-                    .any(|&m| matches!(w.cx.kind(m), TypeKind::Adt { def: d, .. } if done.contains(d)));
-                if covered || !done.insert(def) {
-                    continue;
-                }
-                let name = prog.decl_path(def);
-                let roles: Vec<(&str, Span)> = field.map(|f| ("field", f)).into_iter().collect();
-                out.extend(mk("E0423", None, &[("name", &name)], at, &roles));
+        let (members, site) = &comps[i];
+        if picks[i].is_none() {
+            if let Some(at) = site {
+                out.extend(mk("E0005", Some("type"), &[], *at, &[]));
             }
-            (_, None, site) => {
-                if let Some(at) = site {
-                    out.extend(mk("E0005", Some("type"), &[], at, &[]));
+            continue;
+        }
+        let at_of: FxHashMap<TypeId, u32> = members.iter().enumerate().map(|(k, &m)| (m, k as u32)).collect();
+        let mut fields_of = Vec::with_capacity(members.len());
+        let mut adj: Vec<Vec<u32>> = Vec::with_capacity(members.len());
+        for &m in members {
+            let f = inst_fields(sigs, w, m);
+            let edges: Vec<u32> = match &f {
+                Some((def, fs)) => fs
+                    .iter()
+                    .filter(|(k, ..)| !cut.contains(&(*def, *k)))
+                    .filter_map(|&(.., st)| st.and_then(|st| at_of.get(&st).copied()))
+                    .collect(),
+                None => w.parts(m).iter().filter_map(|p| at_of.get(p).copied()).collect(),
+            };
+            w.tall_part = false;
+            fields_of.push(f);
+            adj.push(edges);
+        }
+        let sub: FxHashMap<TypeId, u32> =
+            cyclic_sccs(&adj).into_iter().zip(members).filter_map(|(s, &m)| s.map(|s| (m, s))).collect();
+        let Some((_, at, def, field, s)) = pick(prog, sigs, w, members, &sub, &cut) else { continue };
+        for (m, f) in members.iter().zip(&fields_of) {
+            let Some((d, fs)) = f else { continue };
+            if *d != def || sub.get(m) != Some(&s) {
+                continue;
+            }
+            for &(k, .., st) in fs {
+                if st.and_then(|st| sub.get(&st)) == Some(&s) {
+                    cut.insert((def, k));
                 }
             }
         }
+        let name = prog.decl_path(def);
+        let roles: Vec<(&str, Span)> = field.map(|(_, f)| ("field", f)).into_iter().collect();
+        out.extend(mk("E0423", None, &[("name", &name)], at, &roles));
     }
     out
 }
