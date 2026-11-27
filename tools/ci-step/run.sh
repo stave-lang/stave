@@ -14,12 +14,22 @@ fi
 cd "$(dirname "$0")/../.."
 export PATH="$HOME/.cargo/bin:$PATH"
 step="${1:-}"; [ $# -gt 0 ] && shift
+usage() {
+  echo "usage: run.sh fmt|stave-fmt|clippy|build|test|test-shard 1|2|interp-gate|interp-gate-slow|stage1-gate|stage1-ir-gate [K/N]|stage1-opt-gate|stage1-test|gen|gen-check|lang-budget|dup-gate|check|check-test [1|2]|check-gates|check-gates-rest|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2
+  exit 2
+}
 case "$step" in
   fmt)     cargo fmt --all --check ;;
   stave-fmt) cargo run -q --locked -p stave-cli -- fmt --check std runtime stage1/src stage1/prims stage1/ir stage1/opt ;;
   clippy)  cargo clippy --locked --workspace --all-targets -- -D warnings ;;
   build)   cargo build --locked --workspace "$@" ;;
   test)    cargo test --locked --workspace "$@" ;;
+  # `test` in two shards: each builds every test binary and starts its own
+  # (tools/ci-step/test-shard.sh).
+  test-shard)
+           case "${1:-}" in 1|2) ;; *) usage ;; esac
+           STAVE_TEST_SHARD="$1" cargo test --locked --workspace \
+             --config "target.'cfg(unix)'.runner=['sh', '$PWD/tools/ci-step/test-shard.sh']" ;;
   # The accepted programs under borrow tracking (minutes);
   # `test` leaves this ignored test out.
   interp-gate)
@@ -39,7 +49,8 @@ case "$step" in
   # stage1 dumps and diagnostics against stage0's on the conformance corpus and stage1 itself.
   stage1-gate) sh tools/ci-step/stage1-gate.sh ;;
   # stage1's IR library against stage0's IR text: round trip of every dumped text, mutant verdicts.
-  stage1-ir-gate) sh tools/ci-step/stage1-ir-gate.sh ;;
+  # K/N: only shard K of N of the corpus roots; the N shards together cover every root.
+  stage1-ir-gate) sh tools/ci-step/stage1-ir-gate.sh "$@" ;;
   # stage1 optimizing itself: `ir emit --release`, `stage1 ir opt`, `ir build` make `stage1-fast`; its
   # output is the normal stage1's, and the conformance run programs built through the optimizer behave
   # as the plain release builds. Prints counts and times; not part of `check`.
@@ -58,11 +69,20 @@ case "$step" in
            else
              cargo run -q --locked -p stave-cli -- "$@" --baseline tools/ci-step/dup-baseline.txt
            fi ;;
-  # `check` in two halves that need nothing from each other, so they can run on two machines.
+  # `check` in parts that need nothing from each other, so each can run on its own machine:
+  # `check-test` (whole, or shard 1 with the lints and shard 2), `check-gates-rest`, and
+  # `stage1-ir-gate` (whole or in shards).
   check-test)
-           "$0" fmt; "$0" stave-fmt; "$0" clippy; "$0" test ;;
+           case "${1:-}" in
+             ''|1) "$0" fmt; "$0" stave-fmt; "$0" clippy ;;
+             2) ;;
+             *) usage ;;
+           esac
+           if [ -n "${1:-}" ]; then "$0" test-shard "$1"; else "$0" test; fi ;;
+  check-gates-rest)
+           "$0" interp-gate; "$0" stage1-gate; "$0" stage1-test; "$0" gen-check; "$0" lang-budget; "$0" dup-gate ;;
   check-gates)
-           "$0" interp-gate; "$0" stage1-gate; "$0" stage1-ir-gate; "$0" stage1-test; "$0" gen-check; "$0" lang-budget; "$0" dup-gate ;;
+           "$0" check-gates-rest; "$0" stage1-ir-gate ;;
   check)   "$0" check-test; "$0" check-gates ;;
   unsafe-diff) sh tools/ci-step/unsafe-diff.sh ;;
   # Scores a directory of answers (`--answers DIR`, `DIR/<task>/answer.stv`) against
@@ -74,5 +94,5 @@ case "$step" in
              --work target/agent-eval/work "$@" ;;
   bench)   sh bench/run.sh "$@" ;;
   cargo)   cargo "$@" ;;
-  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|stage1-gate|stage1-ir-gate|stage1-opt-gate|stage1-test|gen|gen-check|lang-budget|dup-gate|check|check-test|check-gates|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
+  *)       usage ;;
 esac

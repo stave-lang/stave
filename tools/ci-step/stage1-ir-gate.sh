@@ -35,7 +35,12 @@
 # Corpus: the roots of the stage1 gate (every package and other `.stv` file below
 # tests/conformance), the bench programs, and the stage1 package itself (the largest text: its
 # read + print time is printed against stage0's `stave ir fmt`).
-#   tools/ci-step/run.sh stage1-ir-gate
+#
+# Shards: with K/N the round trip takes every N-th root, starting at root K, and the base passes,
+# the pipeline, and the mutants run on the texts of those roots: the N shards together cover every
+# root. Each shard runs all the optimizer goldens and command line cases, and its own
+# STAVE_IR_MUTANTS mutants.
+#   tools/ci-step/run.sh stage1-ir-gate [K/N]
 # Internal: stage1-ir-gate.sh --one N ROOT compares one root (run in parallel by xargs).
 set -eu
 cd "$(dirname "$0")/../.."
@@ -78,6 +83,14 @@ if [ "${1:-}" = "--one" ]; then
     done
   done
   exit 0
+fi
+
+SHARD="${1:-1/1}"
+K="${SHARD%/*}"
+N="${SHARD#*/}"
+if [ "$SHARD" != "$K/$N" ] || ! [ "$K" -ge 1 ] 2>/dev/null || ! [ "$K" -le "$N" ] 2>/dev/null; then
+  echo "stage1-ir-gate: bad shard \`$SHARD\`: want K/N with 1 <= K <= N" >&2
+  exit 2
 fi
 
 if [ "$PROFILE" = release ]; then cargo build -q --locked --release -p stave-cli; else cargo build -q --locked -p stave-cli; fi
@@ -246,8 +259,10 @@ find "$CONF" -name stave.toml | sed 's|/stave.toml$||' | sort > "$OUT/pkgs.txt"
     if [ -f "$b/stave.toml" ] || { [ -f "$b" ] && [ "${b%.stv}" != "$b" ]; }; then echo "$b"; fi
   done
   echo "$ROOT/stage1"
-} | awk '{ print NR, $0 }' > "$LIST"
+} | awk -v k="$K" -v n="$N" '(NR - k) % n == 0 { print NR, $0 }' > "$LIST"
 
+# the later stages find their inputs below w/: nothing of an earlier run may be left there
+rm -rf "$OUT/w"
 start=$(date +%s)
 xargs -P "$(nproc)" -L 1 sh "$0" --one < "$LIST" > "$OUT/result.txt"
 end=$(date +%s)
@@ -266,7 +281,7 @@ total=$(grep -vc '^EMPTY' "$OUT/result.txt" || true)
 empty=$(grep -c '^EMPTY' "$OUT/result.txt" || true)
 same=$(grep -c '^SAME' "$OUT/result.txt" || true)
 bytes=$(awk '$1 == "SAME" { s += $5 } END { print s + 0 }' "$OUT/result.txt")
-echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots, $((end - start)) s; $empty empty files stage0 wrote (no text)"
+echo "stage1-ir-gate: round trip $same / $total texts equal ($bytes bytes) from $runs roots (shard $SHARD), $((end - start)) s; $empty empty files stage0 wrote (no text)"
 if grep -v '^SAME\|^EMPTY' "$OUT/result.txt"; then fail=1; fi
 
 # Base passes (opt-passes.md section 9 "Base"): `stage1 ir opt --passes=base` on every `release`
