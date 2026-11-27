@@ -27,6 +27,7 @@ import diag_syn;
 import diag_tc;
 import dump;
 import files;
+import holds;
 import intern;
 import ir_cmd;
 import items;
@@ -303,6 +304,7 @@ fn main() -> i32 {
     diag_names.names(&mut d, &rows, &md, &ds, &nm, &set);
     let mut sg = sigs.build(&fl, &md, &ds, &nm, &set, &toks, &cut, &tree, &res);
     diag_sigs.sigs_diags(&mut d, &sg, &ds, &nm, &lx, &set, &toks, &cut);
+    holds.alias_cycles(&mut d, &sg, &ds, &md, &nm, &lx, &set, &toks, &tree);
     diag_kinds.impl_diags(&mut d, &mut sg, &ds, &md, &nm, &fl, &lx, &set, &toks, &tree);
     // Kinds, then the body checker (it extends the kinds' type table), when every signature's
     // const forms are evaluated. The body checker evaluates const forms of its own, so whether
@@ -314,6 +316,7 @@ fn main() -> i32 {
         let (_, order) = dump.sigs_order(&sg, &ds);
         let k = kinds.build(&mut sg, &ds, &fl, &md, &nm, order.as_slice());
         diag_kinds.const_drops(&mut d, &k, order.as_slice(), &sg, &ds, &nm, &lx, &set, &toks, &tree);
+        holds.holds_itself(&mut d, &mut sg, &ds, &md, &nm, &lx, &set, &toks, &tree);
         kd = Option.Some(k);
         let x86 = target.alias.as_bytes()[0] == 120;
         let base = sigs.baseline(target.name.as_bytes());

@@ -55,7 +55,7 @@ fn pkg_of(ds: &decls.Decls, md: &modules.Modules, d: u32) -> u32 {
 }
 
 // The dotted path of decl d (`main.Area`, `std.core.Copy`, `main.S.impl`).
-fn decl_path(out: &mut vec.Vec<u8>, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, d: u32) {
+pub fn decl_path(out: &mut vec.Vec<u8>, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, d: u32) {
     let mut chain = vec.Vec::<u32>.new();
     let mut x = d;
     while x != NONE {
@@ -720,7 +720,7 @@ fn copy_checks(d: &mut diag.Diags, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &mo
 }
 
 // The node row of the k-th payload type of tuple variant v.
-fn payload_type(tree: &ast.Ast, ds: &decls.Decls, v: u32, k: usize) -> u32 {
+pub fn payload_type(tree: &ast.Ast, ds: &decls.Decls, v: u32, k: usize) -> u32 {
     let base = tree.item_node.as_slice()[ds.item.as_slice()[v as usize] as usize] as usize;
     let g = base + ds.node.as_slice()[v as usize] as usize;
     let ks = tree.kids.row(g);

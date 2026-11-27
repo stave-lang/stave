@@ -1,0 +1,71 @@
+// Tests of `holds`: every separate struct or enum cycle reported once, the same cycle at other
+// args not again, a long ring of structs as one report, and alias cycles in the order signature
+// building meets them (a fn type's return before its params).
+import diag;
+import files;
+import holds;
+import sigs;
+import test_kit;
+import text;
+import std.debug;
+import std.mem;
+import std.vec;
+
+// The messages of E0423 for src, one per line.
+fn holds_messages(src: &str) -> vec.Vec<u8> {
+    let o = test_kit.single(src);
+    let fl = files.FileList.empty();
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let mut d = diag.Diags.new();
+    holds.alias_cycles(&mut d, &sg, &o.ds, &o.md, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
+    holds.holds_itself(&mut d, &mut sg, &o.ds, &o.md, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
+    debug.assert(!d.bad.get(), "every row builds from its template");
+    let mut out = vec.Vec::<u8>.new();
+    for i in 0..d.len() {
+        d.message(i, &mut out);
+        out.push(10);
+    }
+    return out;
+}
+
+fn lines(m: &[u8]) -> u32 {
+    let mut n: u32 = 0;
+    for k in 0..m.len() {
+        if m[k] == 10 { n = n + 1; }
+    }
+    return n;
+}
+
+test fn separate_cycles() {
+    let m = holds_messages("struct A<T> { n: Option<A<T>>, t: T }\nstruct B { x: A<B> }\nstruct L<T> { x: Option<L<T>>, y: Option<L<T>> }\nstruct M { x: Option<M>, n: N }\nstruct N { m: M }\nstruct O { m: M }\nstruct P { p: *const P }\nfn f(a: &L<u8>, b: &L<u16>) -> u32 {\n    return 0;\n}\nfn main() -> i32 {\n    return 0;\n}\n");
+    let ms = m.as_slice();
+    debug.assert(lines(ms) == 4, "`A`, `B`, `L` once at two args, `M` once for its component");
+    debug.assert(test_kit.has(ms, "`main.A` holds itself by value: it has no finite size\n"), "a generic cycle");
+    debug.assert(test_kit.has(ms, "`main.B` holds itself by value: it has no finite size\n"), "a separate cycle through an instance of a reported declaration");
+    debug.assert(!test_kit.has(ms, "`main.O`") && !test_kit.has(ms, "`main.P`"), "neither a holder of a cycle nor a cycle through a pointer");
+}
+
+test fn long_ring() {
+    let mut src = vec.Vec::<u8>.new();
+    let n: u32 = 3000;
+    for i in 0..n {
+        src.extend_from_slice(mem.str_bytes("struct S"));
+        text.push_u32(&mut src, i);
+        src.extend_from_slice(mem.str_bytes(" { n: S"));
+        text.push_u32(&mut src, (i + 1) % n);
+        src.extend_from_slice(mem.str_bytes(", p: *const S"));
+        text.push_u32(&mut src, (i * 7) % n);
+        src.extend_from_slice(mem.str_bytes(" }\n"));
+    }
+    src.extend_from_slice(mem.str_bytes("fn main() -> i32 {\n    return 0;\n}\n"));
+    let m = holds_messages(text.string_of(src.as_slice()).as_str());
+    debug.assert(lines(m.as_slice()) == 1, "one component, one report");
+    debug.assert(test_kit.has(m.as_slice(), "`main.S0` holds itself by value"), "at its first declaration");
+}
+
+test fn alias_cycles_in_lowering_order() {
+    let m = holds_messages("type G = *const F;\ntype H = *const F;\ntype F = fn(G) -> H;\ntype P = (u8, P);\nfn main() -> i32 {\n    return 0;\n}\n");
+    let ms = m.as_slice();
+    debug.assert(lines(ms) == 3, "`F -> H -> F` and `G -> F -> G` are two cycles, `P` a third");
+    debug.assert(test_kit.has(ms, "type alias `main.H` names itself") && test_kit.has(ms, "type alias `main.G` names itself"), "the return first: the cycle through `H` is met before the one through `G`");
+}
