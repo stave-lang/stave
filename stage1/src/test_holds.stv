@@ -70,3 +70,8 @@ test fn alias_cycles_in_lowering_order() {
     debug.assert(lines(ms) == 3, "`F -> H -> F` and `G -> F -> G` are two cycles, `P` a third");
     debug.assert(test_kit.has(ms, "type alias `main.H` names itself") && test_kit.has(ms, "type alias `main.G` names itself"), "the return first: the cycle through `H` is met before the one through `G`");
 }
+
+test fn cycle_beside_an_unevaluated_length() {
+    let m = holds_messages("struct S { s: S, a: [u8; (1usize, 2usize).0] }\nfn main() -> i32 {\n    return 0;\n}\n");
+    debug.assert(lines(m.as_slice()) == 1 && test_kit.has(m.as_slice(), "`main.S` holds itself by value"), "the cycle does not depend on a length stage1 does not evaluate");
+}
