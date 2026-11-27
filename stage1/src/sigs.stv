@@ -276,8 +276,8 @@ pub const W_RUNTIME: u32 = 5;
 // The diagnostics of signature building, as rows: the code, the item, the first and last global
 // token of the primary span, and by code:
 // - E0201 (case `const-param-type`): a = the const generic param's row, `ty` its type;
-// - E0201 case `type-args` (`D_E0201_ARGS`): the span is the type path, a = the number of generic
-//   arguments its type takes, b = the number written;
+// - E0201 case `type-args` (`D_E0201_ARGS`): the span is the type or trait path, a = the number
+//   of generic arguments its type or trait takes, b = the number written;
 // - E0203: the span is a const generic argument's int literal, `ty` its param's type;
 // - E0413: b = the const or static, `ty` its type;
 // - E0410: a = the field's name token (NONE: a tuple payload element, `_`), b = the struct or
@@ -469,13 +469,19 @@ impl Lw {
     // The type path at row g of item it is given `given` generic arguments, its type takes
     // `count`: an E0201 `type-args`, and the type is the error type.
     fn type_args(&mut self, tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, it: u32, g: usize, count: u32, given: usize) {
+        self.args_count(tree, t, cut, it, g, count, given);
+        self.vals.push(ERR);
+    }
+
+    // The path at row g of item it is given `given` generic arguments where `count` are taken:
+    // an E0201 `type-args` record.
+    fn args_count(&mut self, tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, it: u32, g: usize, count: u32, given: usize) {
         let (lo, hi) = span_of(tree, t, cut, g);
         self.ta_it.push(it);
         self.ta_lo.push(lo);
         self.ta_hi.push(hi);
         self.ta_count.push(count);
         self.ta_given.push(given as% u32);
-        self.vals.push(ERR);
     }
 
     pub fn type_args_len(&self) -> usize {
@@ -1217,7 +1223,14 @@ fn trait_ref_at(sg: &mut Sigs, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: 
     if ds.kind.as_slice()[d as usize] != decls.DK_TRAIT { return NONE; }
     let ga = child(tree, base, g, K_GENERIC_ARGS);
     let mut args = vec.Vec::<u32>.new();
-    if !lower_gargs(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, ga, d, sc, &mut args) { return NONE; }
+    if !lower_gargs(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, ga, d, sc, &mut args) {
+        // a wrong argument count: E0201 `type-args` at the trait path
+        let glo = sg.cx.gens.lo.as_slice()[d as usize];
+        let ghi = sg.cx.gens.lo.as_slice()[d as usize + 1];
+        let n = if ga == NONE then 0usize else tree.kids.row(ga as usize).len();
+        lw.args_count(tree, t, cut, it, g, ghi - glo, n);
+        return NONE;
+    }
     sg.b_trait.push(d);
     sg.b_args.push_row(args.as_slice());
     return (sg.b_trait.len() - 1) as% u32;
@@ -1890,7 +1903,7 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
         last = a;
         sg.rows.add(D_E0203, lw.ev_it.as_slice()[x], a, a, NONE, NONE, lw.ev_ty.as_slice()[x], consteval.no_scope());
     }
-    // E0201 `type-args` once per type path the signatures lowered
+    // E0201 `type-args` once per type or trait path the signatures lowered
     let tperm = sort.sort_perm(lw.ta_lo.as_slice());
     let mut tlast = NONE;
     for j in 0..tperm.len() {
