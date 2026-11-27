@@ -202,7 +202,8 @@ impl Cg<'_, '_> {
         })
     }
 
-    /// Active lanes only: inactive lanes read as zero and their memory is not touched.
+    /// Active lanes only: inactive lanes read as zero and their memory is not touched. The
+    /// access takes its lanes from the value the bounds check read, whatever the mask holds.
     pub(super) fn v_load_masked(
         &mut self,
         s: Operand,
@@ -213,7 +214,6 @@ impl Cg<'_, '_> {
     ) -> Res<()> {
         let sh = self.vshape(rt)?;
         let packed = self.vmaskmov(sh);
-        let mm = if packed.is_none() { Some(self.vmem(m)?) } else { None };
         let (base, len) = self.vbase(s)?;
         let ig = self.read_g(i)?;
         let x = self.vget(m, sh.size)?;
@@ -221,8 +221,7 @@ impl Cg<'_, '_> {
         self.vmask_bits(bits, x, sh)?;
         self.vmasked_check(bits, ig, len)?;
         let mem = Mem::index(base, ig, scale_of(sh.w), 0);
-        let Some(mm) = mm else {
-            let Some((op, _)) = packed else { return Err(bad("internal: masked load")) };
+        if let Some((op, _)) = packed {
             // a mask of fewer than 16 bytes has zeros above it: those lanes are inactive
             if self.vform(sh.wide())? == Form::Y {
                 self.a.vex_bin(op, y(x), y(x), mem)?;
@@ -230,12 +229,12 @@ impl Cg<'_, '_> {
                 self.a.vex_bin(op, x, x, mem)?;
             }
             return self.vput(rv, x, sh.size);
-        };
+        }
         let d = self.def_mem(rv)?;
         self.zero_mem(d, sh.size)?;
         for k in 0..sh.n {
             let skip = self.a.new_label();
-            self.a.alu_mi(AluOp::Cmp, Size::B, lane(mm, k, sh.w)?, 0)?;
+            self.a.test_ri(Size::D, bits, 1 << k)?;
             self.a.jcc(Cond::E, skip)?;
             self.sized_load(S0, lane(mem, k, sh.w)?, sh.w as u8, false)?;
             self.a.mov_mr(size_of(sh.w), lane(d, k, sh.w)?, S0)?;
