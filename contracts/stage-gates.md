@@ -20,6 +20,7 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
 | `sigs` | decl | `d<D> KIND MODULE PARENT NAME I N INDEX FLAGS SIG` and, once, the type table `T key` of the types the decl lines name | T table, then D |
 | `kinds` | `sigs` table type, impl, (type, trait) with a candidate impl | `t<T> FLAGS depth D SIZE`, `impl d<D> trait .. head .. gen N methods[..]`, `apply t<T> d<D> [d<D> ..]` | T, then (trait, head, I), then (T, trait D) |
 | `types` | expression node | `I N T` and, once, the type table `T key` | T table, then I, N |
+| `mir` | body, then its types, locals, loans, blocks, statements, loops, drops, findings | `body d<D>[.<k>] I N STATE`, then the body's lines (below) | D, k |
 | `borrow` | access | `I N access-kind verdict loan` | I, N, access-kind |
 | `lir` | IR text line | the IR text at level `lowered` ([checked-ir.md](checked-ir.md): after lowering and the IR verifier, before the removal of proven checks) | section order (checked-ir.md "Sections"), then instance id, block, inst |
 | `ir` | IR text line | the IR text at level `checked` (checked-ir.md: after the removal of the checks that have a witness, before the release passes) | as `lir` |
@@ -185,6 +186,69 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
   ([checked-ir.md](checked-ir.md), for example `int s 32`, `ref mut t4`). T is the rank among
   these types in the canonical type-key order, dense from `t0` (as for `sigs`), and prints as
   `t<T>` in both line kinds.
+- `mir`: the borrow checker's CFG (stave-borrow `cfg`) of every fn and method body with a
+  signature, one section per body, as the builder made it, before any check. Every number in a
+  section is the rank of a key the section's own text fixes, never an order a builder makes
+  things in, so two builders with different data structures print the same bytes for the same
+  CFG. A section depends only on its body.
+  - Header `body d<D>[.<k>] I N STATE`. D the decl, I the item, N the `FnDecl` node; a closure
+    or `spawn` body adds `.<k>`, the `k` of its IR function `@<inst>.<k>` (checked-ir.md
+    "Closures": the index of its `fn` / `spawn` token among the closure bodies of the fn,
+    nested ones included), and N is its `Primary` / `Stmt` node. Sections by D; a fn's nested
+    bodies follow it by k. `STATE`: `ok`, `error` (a type error: not borrow checked),
+    `unsupported "<why>"` (a form the builder cannot model: the program is not accepted),
+    `internal "<why>"` (the builder disagrees with the type checker). Only an `ok` section
+    has more lines, and only an `ok` fn has nested sections. Const and static initializers
+    have no section.
+  - Numbering. Blocks `b<j>`: the preorder of a depth-first walk from the entry that takes the
+    successors in order; a block the entry does not reach is not printed. Locals `l<j>`: the
+    params by index, then the captures by binding node, then every other local in the order the
+    lines below first name it (blocks in order, then the `find` lines); a local no line names is
+    not printed. Loans `L<j>`: in the order the block lines first name them (a loan's `whole`
+    loan right after it). Types `t<j>`: as in `types`, the rank in the canonical type-key order
+    among the types the section names and the components of their keys, dense from `t0`; the
+    error type and no type print `-`.
+  - `t<j> KEY`, by j; KEY as in `types`.
+  - `local l<j> ROLE N TY STMT END MADE FLAGS`, by j. ROLE: `param<i>`, `capture`, `bind` (a
+    pattern binding), `temp`, `env` (a closure literal's environment, N the literal), `join` (a
+    `scope` statement's join value, N the statement), `static` (the storage of a `static` the
+    body names, N `-`), `result` (the returned value the `ensures` clauses read), `anon` (a
+    local of no node: a chunk loop's block value, a returned value copied out of a part). N: the
+    binding node, a temporary's expression node, or `-`. STMT, END, MADE: a temporary's
+    innermost open statement node (`-`: none), what ends it (`stmt cond guard branch arm
+    clause old` of stave-sema `temps`, `loop` for a `for` iterator, `-`), and the token range
+    `A:B` of the value it holds when that is not its node's (`-`); every other local prints
+    `- - -`. FLAGS joined by `,` in this order, or `-`: `mut capture-mut guard matched
+    static-root`.
+  - `loan L<j> N PLACE WHOLE FLAGS`, by j: the creation node, the borrowed place, the loan it
+    reborrows whole (`L<k>` or `-`), FLAGS `mut reserved capture cast` or `-`.
+  - `block b<j> TERM`, by j, TERM `goto b<j>`, `branch b<j> ..` (successors in order),
+    `return`, `unreachable`; then one line per statement, in order, two spaces then
+    `N KIND ..`, N the statement's node or `-`: `assign PLACE init|set RV`, `activate l<j>
+    L<reserved> L<active>`, `read OPND`, `drop PLACE`, `dead l<j>`, `return OPND`.
+    PLACE: `l<j>` then per projection `.*` `.*m` `.*r` (deref of `&`, `&mut`, raw), `.f<i>`
+    (field), `.v<v>:<i>` (field i of variant v), `.[]` (an element), `.c<i>` (an SoA column).
+    OPND: `copy PLACE N`, `move PLACE N`, `const N` (N the operand's node or `-`). RV: `use
+    OPND`, `ref PLACE L<j>`, `ref-mut PLACE L<j>`, `agg[OPND, ..]`, `pure[OPND, ..]`,
+    `call[OPND, ..] tok T flows F stores[S, ..]`: T the call's file token index (as `ast`
+    `a`), F `-` (no origins), `all` (every argument's), or `[i, copy i, ..]` (per named param:
+    the argument index); S `a<b` / `a<copy b`, then ` view` when the target points to a view.
+  - `loop b<head> b<exit>|- [b<j> ..]`, by (head, exit): each loop the entry reaches, with
+    its exit (`-`: none reached) and its blocks, sorted.
+  - `drop POINT OWNER HEAD RUNS`, one per row of the body's drop schedule (stave-sema
+    `drops`), sorted by (POINT, OWNER, HEAD) in the order the forms are listed here, then by
+    their numbers. POINT: `end`, `return T`, `try T`, `jump T` (T the exit's file token index),
+    `bind N`, `assign N`. OWNER: `local N`, `temp S A:B` (S the statement node or `-`, A:B the
+    value's first and last token, `-` for none), `part i`, `old`. HEAD: `any`, `d<D>`,
+    `tuple<n>`, `array`. RUNS: `always`, `never`, `flag` (the init dataflow's answer), `-` (no
+    path from the entry reaches it).
+  - `find KIND F O ..`, by (KIND, F, O, text), unique: what the builder found and the checks
+    report, at the start `F O` of its span: `move F O PLACE WHY` (E0504; WHY `behind`,
+    `capture F O`, `drop PLACE`, `static`, `part PLACE reborrow|pattern|replace`), `guard F O
+    move|assign|mut-borrow PLACE` or `guard F O try` (E0505), `temp-write F O` (E0503 case
+    `temporary`).
+  - `deep t<j> ..`: the dropped types whose drop may run a destructor on a value holding
+    references, by j; absent when there is none.
 - `borrow`: one line per access of the borrow checker in every body that was borrow
   checked (bodies with a type error are skipped).
   - `N` is the node of the access: the place expression for `read`, `write`, `move`; for an

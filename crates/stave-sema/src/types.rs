@@ -788,15 +788,25 @@ impl Interner for TypeTable {
 
 /// Structural comparison in the canonical key order (the error type last).
 fn cmp_types(kinds: &[TypeKind], a: TypeId, b: TypeId) -> Ordering {
+    cmp_by(&|t: TypeId| kinds.get(t.idx()), a, b)
+}
+
+/// The canonical key order of [`TypeTable::canonicalize`] over any table, an overlay's own
+/// types included: a dump that numbers a body's types by rank sorts with it.
+pub fn cmp_type_keys<I: Interner + ?Sized>(cx: &I, a: TypeId, b: TypeId) -> Ordering {
+    cmp_by(&|t: TypeId| Some(cx.kind(t)), a, b)
+}
+
+fn cmp_by<'k, F: Fn(TypeId) -> Option<&'k TypeKind>>(kind: &F, a: TypeId, b: TypeId) -> Ordering {
     if a == b {
         return Ordering::Equal;
     }
-    let (Some(ka), Some(kb)) = (kinds.get(a.idx()), kinds.get(b.idx())) else { return a.cmp(&b) };
+    let (Some(ka), Some(kb)) = (kind(a), kind(b)) else { return a.cmp(&b) };
     let (ta, tb) = (ka.tag(), kb.tag());
     if ta != tb {
         return ta.cmp(&tb);
     }
-    let ct = |x: TypeId, y: TypeId| cmp_types(kinds, x, y);
+    let ct = |x: TypeId, y: TypeId| cmp_by(kind, x, y);
     let cl = |xs: &[TypeId], ys: &[TypeId]| -> Ordering {
         for (x, y) in xs.iter().zip(ys) {
             let o = ct(*x, *y);
@@ -1144,7 +1154,7 @@ pub fn type_key_text(table: &TypeTable, t: TypeId) -> String {
 
 /// [`type_key_text`] with every component type printed as `t<num(component)>` (a dump that
 /// numbers a subset of the table by rank).
-pub fn type_key_text_as(table: &TypeTable, t: TypeId, num: &dyn Fn(TypeId) -> u32) -> String {
+pub fn type_key_text_as<I: Interner + ?Sized>(table: &I, t: TypeId, num: &dyn Fn(TypeId) -> u32) -> String {
     let tid = |x: &TypeId| format!("t{}", num(*x));
     let lanes = |n: &Lanes| match n {
         Lanes::Fixed(k) => k.to_string(),

@@ -227,6 +227,8 @@ pub struct Options {
     pub emit_ir: bool,
     /// Collect the borrow checker's per-access lines (the `borrow` dump).
     pub borrow_dump: bool,
+    /// Print the borrow CFG of every body (the `mir` dump).
+    pub mir_dump: bool,
     /// Lower with the borrow side table (`Body::borrows`), for the interpreter's borrow
     /// tracking. The module is then not the canonical checked IR.
     pub borrow_marks: bool,
@@ -259,6 +261,7 @@ impl Options {
             keep_lowered: false,
             emit_ir: false,
             borrow_dump: false,
+            mir_dump: false,
             borrow_marks: false,
             tracked: crate::interp::borrow_from_env(),
             unchecked_borrows: false,
@@ -566,7 +569,11 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
 
     // ---- borrowck (per body, parallel; bodies with a type error are skipped).
     let t0 = Instant::now();
-    let bc = stave_borrow::check(&program, &tc, stave_borrow::Options { dump: opts.borrow_dump });
+    let bc = stave_borrow::check(
+        &program,
+        &tc,
+        stave_borrow::Options { dump: opts.borrow_dump, mir: opts.mir_dump },
+    );
     timings.push(timing(Stage::Borrowck, ms(t0.elapsed()), bc.checked));
     prof::part(".cfg-cpu", bc.phases[0]);
     prof::part(".dataflow-cpu", bc.phases[1]);

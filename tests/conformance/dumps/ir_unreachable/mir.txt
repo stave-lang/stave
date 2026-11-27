@@ -1,0 +1,82 @@
+body d14 7 17 ok
+t0 int s 32
+t1 ref t0
+t2 ref mut t3
+t3 param 0
+local l0 param0 9 t1 - - - -
+local l1 param1 14 t2 - - - -
+block b0 return
+  17 return const 17
+body d16 8 23 ok
+t0 str
+t1 ref t0
+t2 ref mut t4
+t3 tuple
+t4 param 0
+local l0 param0 9 t1 - - - -
+local l1 param1 14 t2 - - - -
+local l2 temp - t2 21 stmt - -
+local l3 temp 19 t3 21 stmt 108:113 -
+loan L0 19 l1.*m - reserved
+loan L1 19 l1.*m - mut
+block b0 return
+  19 assign l2 init ref-mut l1.*m L0
+  19 activate l2 L0 L1
+  19 assign l3 init call[move l2 19, copy l0 17] tok 110 flows - stores[]
+  23 return const 23
+body d20 12 13 ok
+t0 str
+t1 ref t0
+t2 ref mut t3
+t3 adt d17
+local l0 param0 5 t2 - - - -
+local l1 param1 10 t1 - - - -
+block b0 return
+  13 return const 13
+body d21 9 7 ok
+t0 str
+t1 ref t0
+local l0 param0 4 t1 - - - -
+block b0 return
+  7 return const 7
+body d22 1 45 ok
+t0 int u 32
+t1 bool
+t2 never
+local l0 param0 2 t0 - - - -
+local l1 temp 10 t1 10 cond - -
+local l2 temp 34 t1 34 cond - -
+local l3 temp 36 t2 38 stmt 56:58 -
+block b0 branch b1 b2
+  10 assign l1 init pure[copy l0 7, const 9]
+block b1 return
+  11 return const 11
+block b2 goto b3
+block b3 goto b4
+block b4 branch b5 b6
+  34 assign l2 init pure[copy l0 31, const 33]
+block b5 unreachable
+  36 assign l3 init call[] tok 57 flows - stores[]
+block b6 return
+  42 return copy l0 42
+loop b3 b4 [b3]
+body d23 0 6 ok
+block b0 goto b1
+block b1 goto b1
+loop b1 - [b1]
+body d24 2 15 ok
+t0 int u 32
+t1 int s 32
+t2 bool
+local l0 temp 6 t0 13 stmt 74:77 -
+local l1 temp 9 t2 13 stmt - -
+local l2 temp 12 t1 13 stmt - -
+block b0 branch b1 b3
+  6 assign l0 init call[const 4] tok 75 flows - stores[]
+  9 assign l1 init pure[copy l0 6, const 8]
+block b1 goto b2
+  10 assign l2 init use const 10
+block b2 return
+  12 return copy l2 12
+block b3 goto b2
+  11 assign l2 init use const 11

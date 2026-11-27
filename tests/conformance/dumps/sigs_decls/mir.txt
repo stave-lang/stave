@@ -1,0 +1,138 @@
+body d14 24 17 ok
+t0 int s 32
+t1 ref t0
+t2 ref mut t3
+t3 param 0
+local l0 param0 9 t1 - - - -
+local l1 param1 14 t2 - - - -
+block b0 return
+  17 return const 17
+body d16 25 23 ok
+t0 str
+t1 ref t0
+t2 ref mut t4
+t3 tuple
+t4 param 0
+local l0 param0 9 t1 - - - -
+local l1 param1 14 t2 - - - -
+local l2 temp - t2 21 stmt - -
+local l3 temp 19 t3 21 stmt 108:113 -
+loan L0 19 l1.*m - reserved
+loan L1 19 l1.*m - mut
+block b0 return
+  19 assign l2 init ref-mut l1.*m L0
+  19 activate l2 L0 L1
+  19 assign l3 init call[move l2 19, copy l0 17] tok 110 flows - stores[]
+  23 return const 23
+body d20 29 13 ok
+t0 str
+t1 ref t0
+t2 ref mut t3
+t3 adt d17
+local l0 param0 5 t2 - - - -
+local l1 param1 10 t1 - - - -
+block b0 return
+  13 return const 13
+body d21 26 7 ok
+t0 str
+t1 ref t0
+local l0 param0 4 t1 - - - -
+block b0 return
+  7 return const 7
+body d24 17 25 ok
+t0 int u 8
+t1 ref t3
+t2 array t0 constparam 0
+t3 adt d25 t4 constparam 0
+t4 adt d42
+local l0 param0 13 t1 - - - -
+local l1 temp 22 t2 23 stmt - -
+block b0 return
+  22 assign l1 init agg[const 20]
+  22 return copy l1 22
+body d28 14 38 ok
+t0 int u 8
+t1 int u 16
+t2 int s 32
+t3 ref t7
+t4 array t0 8
+t5 array t1 8
+t6 array t2 4
+t7 slice t8
+t8 param 0
+local l0 param0 13 t3 - - - -
+local l1 param1 18 t4 - - - -
+local l2 param2 21 t6 - - - -
+local l3 param3 30 t5 - - - -
+block b0 return
+  35 return const 35
+body d31 18 32 ok
+t0 int u 32
+t1 fntype t0 -> t0
+t2 fntype t0 -> t0
+local l0 param0 6 t1 - - - -
+local l1 param1 15 t2 - - - -
+local l2 param2 18 t0 - - - -
+local l3 temp 27 t0 30 stmt 429:432 -
+local l4 temp 29 t0 30 stmt 427:433 -
+block b0 return
+  27 assign l3 init call[copy l1 27, copy l2 25] tok 430 flows - stores[]
+  29 assign l4 init call[copy l0 29, copy l3 27] tok 428 flows - stores[]
+  29 return copy l4 29
+body d33 16 16 ok
+t0 int u 32
+t1 ref t2
+t2 slice t0
+local l0 param0 5 t1 - - - -
+block b0 return
+  13 return const 13
+body d35 15 13 ok
+t0 float 32
+t1 vec t0 8
+local l0 param0 2 t1 - - - -
+block b0 return
+  10 return copy l0 10
+body d50 19 6 ok
+block b0 return
+  3 return const 3
+body d52 10 13 ok
+t0 ref t1
+t1 adt d42
+local l0 param0 5 t0 - - - -
+block b0 return
+  10 return const 10
+body d54 11 14 ok
+t0 int u 32
+t1 ref mut t2
+t2 adt d36
+local l0 param0 8 t1 - - - -
+local l1 param1 11 t0 - - - -
+block b0 return
+  14 return const 14
+body d56 12 30 ok
+t0 ref t2
+t1 ref t3
+t2 adt d25 t3 constparam 1
+t3 param 0
+local l0 param0 15 t0 - - - -
+local l1 temp - t1 28 stmt - -
+loan L0 27 l0.*.f0.[] - -
+block b0 return
+  27 assign l1 init ref l0.*.f0.[] L0
+  27 return copy l1 27
+body d58 13 20 ok
+t0 str
+t1 ref t0
+t2 ref mut t3
+t3 adt d39
+local l0 param0 6 t2 - - - -
+local l1 param1 11 t1 - - - -
+block b0 return
+  14 assign l0.*m.f0 set use copy l1 16
+  20 return const 20
+body d59 13 35 ok
+t0 ref t1
+t1 adt d39
+local l0 param0 22 t0 - - - -
+block b0 return
+  32 return copy l0.*.f0 32

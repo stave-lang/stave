@@ -79,7 +79,7 @@ fn golden_lib() -> String {
 /// The stand-in library of a dump case: `kinds_` cases use `_lib_kinds` (the marker traits,
 /// `std.cell`, and `std.sync`), the others `_lib`.
 fn golden_lib_of(case: &str) -> String {
-    if case.starts_with("kinds_") {
+    if case.starts_with("kinds_") || case.starts_with("mir_") {
         repo().join("tests/conformance/dumps/_lib_kinds").display().to_string()
     } else {
         golden_lib()
@@ -229,8 +229,8 @@ fn single_file_argument() {
 /// Lines of `tests/conformance/dumps/_lib` (std/core.stv, std/io.stv, std/string.stv, runtime/empty.stv).
 const STD_LINES: u64 = 40;
 
-const GOLDEN_DUMPS: &str = "--dump=tokens,items,ast,strings,names,sigs,kinds,types,diags,stats";
-const GOLDEN_FILES: [&str; 9] = [
+const GOLDEN_DUMPS: &str = "--dump=tokens,items,ast,strings,names,sigs,kinds,types,mir,diags,stats";
+const GOLDEN_FILES: [&str; 10] = [
     "tokens.txt",
     "items.txt",
     "ast.txt",
@@ -239,6 +239,7 @@ const GOLDEN_FILES: [&str; 9] = [
     "sigs.txt",
     "kinds.txt",
     "types.txt",
+    "mir.txt",
     "diags.txt",
 ];
 
@@ -254,6 +255,7 @@ fn dumps_match_goldens_under_stave_threads_and_shuffle() {
         "sigs_errors",
         "kinds_layout",
         "kinds_errors",
+        "mir_forms",
     ] {
         let lib = golden_lib_of(case);
         for (threads, shuffle) in [("1", ""), ("2", ""), ("12", ""), ("12", "7"), ("3", "3735928559")] {
