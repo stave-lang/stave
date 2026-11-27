@@ -1695,7 +1695,7 @@ pub fn has_params(tab: &types.Table, ty: u32) -> bool {
 }
 
 // The type of generic argument row ga lowered as a type argument (the error type for a const).
-fn lower_garg_ty(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: usize, sc: consteval.Scope) -> u32 {
+pub fn lower_garg_ty(cx: &mut consteval.Cx, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, ga: usize, sc: consteval.Scope) -> u32 {
     let f0 = lw.op.len();
     let g0 = lw.gas.len();
     lw.frame(OP_GARG, ga, NONE, 0);

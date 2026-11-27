@@ -304,7 +304,7 @@ fn main() -> i32 {
     diag_names.names(&mut d, &rows, &md, &ds, &nm, &set);
     let mut sg = sigs.build(&fl, &md, &ds, &nm, &set, &toks, &cut, &tree, &res);
     diag_sigs.sigs_diags(&mut d, &sg, &ds, &nm, &lx, &set, &toks, &cut);
-    holds.alias_cycles(&mut d, &sg, &ds, &md, &nm, &lx, &set, &toks, &tree);
+    holds.holds_itself(&mut d, &mut sg, &ds, &md, &nm, &lx, &set, &toks, &tree);
     diag_kinds.impl_diags(&mut d, &mut sg, &ds, &md, &nm, &fl, &lx, &set, &toks, &tree);
     // Kinds, then the body checker (it extends the kinds' type table), when every signature's
     // const forms are evaluated. The body checker evaluates const forms of its own, so whether
@@ -312,19 +312,21 @@ fn main() -> i32 {
     let sigs_ok = sg.cx.skip == consteval.CV_NONE;
     let mut kd: Option<kinds.Kinds> = Option.None;
     let mut tc: Option<tc_rows.Typeck> = Option.None;
+    let mut typing = vec.Vec::<u64>.new();
     if sigs_ok {
         let (_, order) = dump.sigs_order(&sg, &ds);
         let k = kinds.build(&mut sg, &ds, &fl, &md, &nm, order.as_slice());
         diag_kinds.const_drops(&mut d, &k, order.as_slice(), &sg, &ds, &nm, &lx, &set, &toks, &tree);
-        holds.holds_itself(&mut d, &mut sg, &ds, &md, &nm, &lx, &set, &toks, &tree);
         kd = Option.Some(k);
         let x86 = target.alias.as_bytes()[0] == 120;
         let base = sigs.baseline(target.name.as_bytes());
         let c = typeck.build(&mut sg, &ds, &fl, &md, &nm, &set, &toks, &cut, &tree, x86, base);
         diag_tc.typeck_diags(&mut d, &c, &sg, &ds, &md, &nm, &lx, &set, &toks, &tree);
+        typing = holds.typing_errors(&c, &ds, &tree);
         tc = Option.Some(c);
     }
     // after the body checker: it evaluates const forms too
+    holds.alias_cycles(&mut d, &mut sg, &ds, &md, &nm, &lx, &set, &toks, &cut, &tree, typing.as_slice());
     diag_sigs.eval_diags(&mut d, &sg, &ds, &nm, &lx, &set, &toks, &cut);
     let ft = diag_out.file_table(&fl, root_dir(cli.root.as_str()).as_str());
     let rows = d.order(ft.rank.as_slice());

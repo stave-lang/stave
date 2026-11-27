@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// No E0423 where the walk does not go: a static is no const operand (E0904), and a const's
+// typing stops at its first error (E0202), before the alias it would lower.
+type C = [u8; M]; //~ ERROR E0904
+
+static M: usize = size_of::<C>();
+
+type A = [u8; N];
+
+const N: usize = 3 as B; //~ ERROR E0202
+
+type B = [usize; size_of::<A>()];
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// E0423 whatever the array lengths a struct holds evaluate to: the cycle is through its first
+// field.
+struct S { s: S, a: [u8; (1usize, 2usize).0] } //~ ERROR E0423
+
+const P: (usize, usize) = (1, 2);
+
+struct T { t: T, a: [u8; P.0] } //~ ERROR E0423
+
+fn main() -> i32 {
+    return 0;
+}

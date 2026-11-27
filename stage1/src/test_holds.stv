@@ -17,7 +17,8 @@ fn holds_messages(src: &str) -> vec.Vec<u8> {
     let fl = files.FileList.empty();
     let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
     let mut d = diag.Diags.new();
-    holds.alias_cycles(&mut d, &sg, &o.ds, &o.md, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
+    let none = vec.Vec::<u64>.new();
+    holds.alias_cycles(&mut d, &mut sg, &o.ds, &o.md, &o.nm, &o.lx, &o.set, &o.toks, &o.cut, &o.tree, none.as_slice());
     holds.holds_itself(&mut d, &mut sg, &o.ds, &o.md, &o.nm, &o.lx, &o.set, &o.toks, &o.tree);
     debug.assert(!d.bad.get(), "every row builds from its template");
     let mut out = vec.Vec::<u8>.new();
