@@ -1,0 +1,56 @@
+//~ CHECK-ONLY
+// A trait named in a bound or an impl header takes exactly its declared generic arguments:
+// E0201 `type-args` at the trait path, wherever the bound is written.
+struct S<T> {
+    a: T,
+}
+
+struct U {
+    a: u8,
+}
+
+trait Tr<T> {
+    fn m(self) -> u32;
+}
+
+trait Q {
+    fn q(self) -> u32;
+}
+
+trait R<T: Tr> { //~ ERROR E0201
+    fn r<V: Q<V>>(self, v: V) -> u32; //~ ERROR E0201
+}
+
+impl Tr for U { //~ ERROR E0201
+    fn m(self) -> u32 {
+        return 0;
+    }
+}
+
+impl Q<u8> for U { //~ ERROR E0201
+    fn q(self) -> u32 {
+        return 0;
+    }
+}
+
+impl<T: Copy<u8>> S<T> { //~ ERROR E0201
+    fn n<V: Tr<u8, u8, u8>>(self, v: V) -> u32 { //~ ERROR E0201
+        return 0;
+    }
+}
+
+fn missing<T: view + Tr>(x: T) -> u32 { //~ ERROR E0201
+    return 0;
+}
+
+fn extra<T: Tr<u8>, V: Q, W: Q<u8, u8>>(x: T) -> u32 { //~ ERROR E0201
+    return 0;
+}
+
+enum E<T: Q<u8>> { //~ ERROR E0201
+    A(T),
+}
+
+fn main() -> i32 {
+    return 0;
+}

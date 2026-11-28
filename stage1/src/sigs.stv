@@ -7,12 +7,13 @@
 // Passes, each over whole columns (the order is the dependency order of the facts):
 // 1. generic params: one row per `GenericParam` of each decl's own list, by D;
 // 2. the declared type of each const param;
-// 3. aliases, consts, and statics in dependency rounds (an alias target or a const's type may
-//    name another alias or const; a const's value may use other consts); what a cycle leaves
-//    has no value (consts) or the error type (aliases);
+// 3. aliases, consts, statics, and the field types of structs without generic params in
+//    dependency rounds (an alias target, a const's type, or a field type may name another alias
+//    or const; a const's value may use other consts and waits for the structs it holds by
+//    value); what a cycle leaves has no value (consts) or the error type (aliases);
 // 4. impl self types and traits;
 // 5. bounds of every generic param (`Self` is the impl's self type, or a trait's `Self`);
-// 6. fn signatures, field types, and variant payloads, by D.
+// 6. fn signatures, the field types step 3 left, and variant payloads, by D.
 // A written type is lowered with an explicit stack over its nodes (`lower`): a frame per node
 // to visit and one per node to finish from its components' results.
 import ast;
@@ -54,6 +55,7 @@ pub const SF_VARIADIC: u16 = 32;
 pub const SF_BUILT: u16 = 64;
 
 const K_TYPE: u8 = node_kinds.KIND_TYPE;
+const K_STRUCT_LIT: u8 = node_kinds.KIND_STRUCT_LIT;
 const K_TYPE_BASE: u8 = node_kinds.KIND_TYPE_BASE;
 const K_GENERIC_ARGS: u8 = node_kinds.KIND_GENERIC_ARGS;
 const K_GENERIC_ARG: u8 = node_kinds.KIND_GENERIC_ARG;
@@ -276,8 +278,8 @@ pub const W_RUNTIME: u32 = 5;
 // The diagnostics of signature building, as rows: the code, the item, the first and last global
 // token of the primary span, and by code:
 // - E0201 (case `const-param-type`): a = the const generic param's row, `ty` its type;
-// - E0201 case `type-args` (`D_E0201_ARGS`): the span is the type path, a = the number of generic
-//   arguments its type takes, b = the number written;
+// - E0201 case `type-args` (`D_E0201_ARGS`): the span is the type or trait path, a = the number
+//   of generic arguments its type or trait takes, b = the number written;
 // - E0203: the span is a const generic argument's int literal, `ty` its param's type;
 // - E0413: b = the const or static, `ty` its type;
 // - E0410: a = the field's name token (NONE: a tuple payload element, `_`), b = the struct or
@@ -469,13 +471,19 @@ impl Lw {
     // The type path at row g of item it is given `given` generic arguments, its type takes
     // `count`: an E0201 `type-args`, and the type is the error type.
     fn type_args(&mut self, tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, it: u32, g: usize, count: u32, given: usize) {
+        self.args_count(tree, t, cut, it, g, count, given);
+        self.vals.push(ERR);
+    }
+
+    // The path at row g of item it is given `given` generic arguments where `count` are taken:
+    // an E0201 `type-args` record.
+    fn args_count(&mut self, tree: &ast.Ast, t: &lex.Tokens, cut: &items.Items, it: u32, g: usize, count: u32, given: usize) {
         let (lo, hi) = span_of(tree, t, cut, g);
         self.ta_it.push(it);
         self.ta_lo.push(lo);
         self.ta_hi.push(hi);
         self.ta_count.push(count);
         self.ta_given.push(given as% u32);
-        self.vals.push(ERR);
     }
 
     pub fn type_args_len(&self) -> usize {
@@ -1217,7 +1225,14 @@ fn trait_ref_at(sg: &mut Sigs, lw: &mut Lw, tree: &ast.Ast, t: &lex.Tokens, nm: 
     if ds.kind.as_slice()[d as usize] != decls.DK_TRAIT { return NONE; }
     let ga = child(tree, base, g, K_GENERIC_ARGS);
     let mut args = vec.Vec::<u32>.new();
-    if !lower_gargs(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, ga, d, sc, &mut args) { return NONE; }
+    if !lower_gargs(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, ga, d, sc, &mut args) {
+        // a wrong argument count: E0201 `type-args` at the trait path
+        let glo = sg.cx.gens.lo.as_slice()[d as usize];
+        let ghi = sg.cx.gens.lo.as_slice()[d as usize + 1];
+        let n = if ga == NONE then 0usize else tree.kids.row(ga as usize).len();
+        lw.args_count(tree, t, cut, it, g, ghi - glo, n);
+        return NONE;
+    }
     sg.b_trait.push(d);
     sg.b_args.push_row(args.as_slice());
     return (sg.b_trait.len() - 1) as% u32;
@@ -1710,7 +1725,7 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
     let n = ds.decls();
     let gens = consteval.Gens.{ lo: vec.Vec::<u32>.new(), name: vec.Vec::<u32>.new(), node: vec.Vec::<u32>.new(), is_const: vec.Vec::<bool>.new(), cty: vec.Vec::<u32>.new(), is_view: vec.Vec::<bool>.new() };
     let consts = consteval.Consts.new(n);
-    let cx = consteval.Cx.{ tab: types.Table.new(), uses: consteval.Uses.new(res), parent: consteval.parents(tree), gens: gens, consts: consts, ty: col.filled(n, ERR), ready: col.filled(n, false), skip: consteval.CV_NONE, lay: lay, sc: consteval.no_scope(), hits: 0, wait: col.filled(n, false), rep: consteval.Reports.new(), dfr: consteval.no_defer() };
+    let cx = consteval.Cx.{ tab: types.Table.new(), uses: consteval.Uses.new(res), parent: consteval.parents(tree), gens: gens, consts: consts, ty: col.filled(n, ERR), ready: col.filled(n, false), skip: consteval.CV_NONE, lay: lay, sc: consteval.no_scope(), hits: 0, wait: col.filled(n, false), rep: consteval.Reports.new(), dfr: consteval.no_defer(), leaf_memo: vec.Vec::<u64>.new(), sf_lo: vec.Vec::<u32>.new(), sf_n: vec.Vec::<u32>.new(), sf_pool: vec.Vec::<u32>.new(), fpos: vec.Vec::<u32>.new() };
     let mut sg = Sigs.{
         cx: cx,
         sflags: col.filled(n, 0u16),
@@ -1773,14 +1788,19 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
             }
         }
     }
-    // 3. aliases, consts, statics in dependency rounds
+    // 3. aliases, consts, statics, and the field types of structs without generic params in
+    // dependency rounds (a const's value needs the field types of the structs it holds by value)
     let mut pend = vec.Vec::<u32>.new();
     for d in 0..n {
         let k = ds.kind.as_slice()[d];
-        if (k == decls.DK_TYPE_ALIAS || k == decls.DK_CONST || k == decls.DK_STATIC) && decl_row(tree, ds, d) != NONE { pend.push(d as% u32); }
+        let plain = k == decls.DK_STRUCT && sg.cx.gens.lo.as_slice()[d] == sg.cx.gens.lo.as_slice()[d + 1];
+        if (k == decls.DK_TYPE_ALIAS || k == decls.DK_CONST || k == decls.DK_STATIC || plain) && decl_row(tree, ds, d) != NONE { pend.push(d as% u32); }
     }
     let mut done = col.filled(n, false);
     let mut round = vec.Vec::<u32>.new();
+    let mut seen = col.filled(n, 0u32);
+    let mut typed = col.filled(n, false);
+    let mut stamp: u32 = 0;
     loop {
         round.clear();
         for j in 0..pend.len() {
@@ -1789,13 +1809,24 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
             if deps_done(&sg.cx, ds, done.as_slice(), ds.item.as_slice()[d as usize]) { round.push(d); }
         }
         if round.len() == 0 { break; }
+        let mut moved = false;
         for j in 0..round.len() {
             let d = round.as_slice()[j];
             let h0 = sg.cx.hits;
-            alias_or_const(&mut sg, &mut lw, ds, nm, set, t, cut, tree, d);
+            let mut ok = true;
+            if ds.kind.as_slice()[d as usize] == decls.DK_STRUCT {
+                struct_fields_now(&mut sg, &mut lw, ds, nm, set, t, cut, tree, d);
+            } else {
+                stamp = stamp + 1;
+                ok = alias_or_const(&mut sg, &mut lw, ds, nm, set, t, cut, tree, done.as_slice(), seen.as_mut_slice(), typed.as_mut_slice(), stamp, d, false);
+            }
             if sg.cx.hits > h0 { sg.cx.wait.as_mut_slice()[d as usize] = true; }
-            done.as_mut_slice()[d as usize] = true;
+            if ok {
+                done.as_mut_slice()[d as usize] = true;
+                moved = true;
+            }
         }
+        if !moved { break; }
     }
     // what a cycle leaves: no const value, an alias of the error type; the types of the consts
     // and statics left are lowered with that
@@ -1805,9 +1836,11 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
     }
     for j in 0..pend.len() {
         let d = pend.as_slice()[j];
-        if done.as_slice()[d as usize] || ds.kind.as_slice()[d as usize] == decls.DK_TYPE_ALIAS { continue; }
+        let k = ds.kind.as_slice()[d as usize];
+        if done.as_slice()[d as usize] || k == decls.DK_TYPE_ALIAS || k == decls.DK_STRUCT { continue; }
         let h0 = sg.cx.hits;
-        alias_or_const(&mut sg, &mut lw, ds, nm, set, t, cut, tree, d);
+        stamp = stamp + 1;
+        let _ = alias_or_const(&mut sg, &mut lw, ds, nm, set, t, cut, tree, done.as_slice(), seen.as_mut_slice(), typed.as_mut_slice(), stamp, d, true);
         if sg.cx.hits > h0 { sg.cx.wait.as_mut_slice()[d as usize] = true; }
         if ds.kind.as_slice()[d as usize] == decls.DK_CONST { sg.cx.consts.state.as_mut_slice()[d as usize] = consteval.CV_FAIL; }
     }
@@ -1868,7 +1901,8 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
             build_fn(&mut sg, &mut lw, fl, md, ds, nm, set, t, cut, tree, d as% u32);
             continue;
         }
-        if g != NONE && (k == decls.DK_FIELD || k == decls.DK_VARIANT) {
+        let early = k == decls.DK_FIELD && sg.sflags.as_slice()[d] & SF_BUILT != 0;
+        if g != NONE && (k == decls.DK_FIELD || k == decls.DK_VARIANT) && !early {
             let h0 = sg.cx.hits;
             field_or_variant(&mut sg, &mut lw, ds, nm, set, t, cut, tree, d, g);
             if sg.cx.hits > h0 { sg.cx.wait.as_mut_slice()[d] = true; }
@@ -1890,7 +1924,7 @@ fn build_round(fl: &files.FileList, md: &modules.Modules, ds: &decls.Decls, nm: 
         last = a;
         sg.rows.add(D_E0203, lw.ev_it.as_slice()[x], a, a, NONE, NONE, lw.ev_ty.as_slice()[x], consteval.no_scope());
     }
-    // E0201 `type-args` once per type path the signatures lowered
+    // E0201 `type-args` once per type or trait path the signatures lowered
     let tperm = sort.sort_perm(lw.ta_lo.as_slice());
     let mut tlast = NONE;
     for j in 0..tperm.len() {
@@ -2015,8 +2049,76 @@ fn static_str(cx: &consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Int
     return is_ref_str(&cx.tab, cx.ty.as_slice()[d as usize]);
 }
 
-// An alias target, or a const's or static's type and a const's value.
-fn alias_or_const(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, d: u32) {
+// The field types of struct d, lowered once its aliases and consts are done (step 6 does not
+// lower them again).
+fn struct_fields_now(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, d: u32) {
+    let (lo, hi) = consteval.fields_of(&mut sg.cx, ds, d);
+    for k in lo..hi {
+        let f = sg.cx.sf_pool.as_slice()[k] as usize;
+        let g = decl_row(tree, ds, f);
+        if g == NONE || sg.sflags.as_slice()[f] & SF_BUILT != 0 { continue; }
+        let h0 = sg.cx.hits;
+        field_or_variant(sg, lw, ds, nm, set, t, cut, tree, f, g);
+        if sg.cx.hits > h0 { sg.cx.wait.as_mut_slice()[f] = true; }
+    }
+}
+
+// Whether the value of a const of type ty with initializer row e (item it) needs the field types
+// of a struct not done yet: one it holds by value (through arrays, tuples, and fields), from its
+// type or a struct literal it writes, as the evaluator reads them. `seen` marks the structs
+// walked with `stamp`.
+fn waits_on_struct(sg: &Sigs, ds: &decls.Decls, tree: &ast.Ast, t: &lex.Tokens, done: &[bool], seen: &mut [u32], stamp: u32, it: u32, e: usize, ty: u32) -> bool {
+    let cx = &sg.cx;
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let mut stack = vec.Vec::<u32>.new();
+    let mut adts = vec.Vec::<u32>.new();
+    stack.push(ty);
+    for r in e - tree.size.as_slice()[e] as usize..e + 1 {
+        if kind(tree, r) != K_STRUCT_LIT { continue; }
+        let p = cx.parent.as_slice()[r] as usize;
+        let head = base + tree.kids.row(p)[0] as usize;
+        // the struct the path before `.{` names
+        let last = tree.tok.as_slice()[r] - 1;
+        let u = cx.uses.at_end(it, (head - base) as% u32, t.start.as_slice()[last as usize]);
+        if u == NONE || cx.uses.tag.as_slice()[u as usize] != resolve.TAG_DECL { continue; }
+        adts.push(cx.uses.target.as_slice()[u as usize]);
+    }
+    loop {
+        let mut sd = NONE;
+        if adts.len() > 0 {
+            sd = adts.as_slice()[adts.len() - 1];
+            adts.truncate(adts.len() - 1);
+        } else if stack.len() > 0 {
+            let x = stack.as_slice()[stack.len() - 1];
+            stack.truncate(stack.len() - 1);
+            if x == ERR || x == NONE { continue; }
+            let tag = cx.tab.tag_of(x);
+            if tag == types.TK_ARRAY {
+                stack.push(cx.tab.a_of(x));
+                continue;
+            }
+            if tag == types.TK_TUPLE {
+                stack.extend_from_slice(cx.tab.x(x));
+                continue;
+            }
+            if tag != types.TK_ADT || cx.tab.x(x).len() != 0 { continue; }
+            sd = cx.tab.a_of(x);
+        } else {
+            return false;
+        }
+        if ds.kind.as_slice()[sd as usize] != decls.DK_STRUCT || cx.gens.lo.as_slice()[sd as usize] != cx.gens.lo.as_slice()[sd as usize + 1] || seen[sd as usize] == stamp { continue; }
+        seen[sd as usize] = stamp;
+        if !done[sd as usize] { return true; }
+        let lo = cx.sf_lo.as_slice()[sd as usize] as usize;
+        for k in lo..lo + cx.sf_n.as_slice()[sd as usize] as usize {
+            stack.push(cx.ty.as_slice()[cx.sf_pool.as_slice()[k] as usize]);
+        }
+    }
+}
+
+// An alias target, or a const's or static's type and a const's value: false when the value
+// waits on a struct (`waits_on_struct`, unless `force`: a cycle's leftovers), nothing kept.
+fn alias_or_const(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Interned, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, done: &[bool], seen: &mut [u32], typed: &mut [bool], stamp: u32, d: u32, force: bool) -> bool {
     let du = d as usize;
     let it = ds.item.as_slice()[du];
     let base = tree.item_node.as_slice()[it as usize] as usize;
@@ -2028,25 +2130,31 @@ fn alias_or_const(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Inte
         let ty = if tn == NONE then ERR else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, tn as usize, true, sc);
         sg.cx.ty.as_mut_slice()[du] = ty;
         sg.cx.ready.as_mut_slice()[du] = true;
-        return;
+        return true;
     }
-    let ty = if tn == NONE then ERR else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, tn as usize, false, consteval.no_scope());
-    sg.cx.ty.as_mut_slice()[du] = ty;
-    sg.cx.consts.ty.as_mut_slice()[du] = ty;
     let e = expr_child(tree, base, g);
-    // E0413: no reference or view, but a `&str` a string literal or such a const gives
-    if ty != ERR && is_view_in(&sg.cx, ds, ty, consteval.no_scope()) && !(is_ref_str(&sg.cx.tab, ty) && e != NONE && static_str(&sg.cx, tree, t, nm, ds, it, base, e as usize)) {
-        let (lo, hi) = span_of(tree, t, cut, tn as usize);
-        sg.rows.add(D_E0413, it, lo, hi, NONE, d, ty, consteval.no_scope());
+    // the type once (a const that waits keeps it for its next round)
+    if !typed[du] {
+        typed[du] = true;
+        let ty = if tn == NONE then ERR else lower(&mut sg.cx, lw, tree, t, nm, set, cut, ds, it, tn as usize, false, consteval.no_scope());
+        sg.cx.ty.as_mut_slice()[du] = ty;
+        sg.cx.consts.ty.as_mut_slice()[du] = ty;
+        // E0413: no reference or view, but a `&str` a string literal or such a const gives
+        if ty != ERR && is_view_in(&sg.cx, ds, ty, consteval.no_scope()) && !(is_ref_str(&sg.cx.tab, ty) && e != NONE && static_str(&sg.cx, tree, t, nm, ds, it, base, e as usize)) {
+            let (lo, hi) = span_of(tree, t, cut, tn as usize);
+            sg.rows.add(D_E0413, it, lo, hi, NONE, d, ty, consteval.no_scope());
+        }
     }
-    if k != decls.DK_CONST { return; }
+    let ty = sg.cx.ty.as_slice()[du];
+    if k != decls.DK_CONST { return true; }
     if e == NONE || ty == ERR {
         sg.cx.consts.state.as_mut_slice()[du] = consteval.CV_FAIL;
-        return;
+        return true;
     }
-    if !consteval.evaluable(&sg.cx.tab, ty) {
+    if !force && waits_on_struct(sg, ds, tree, t, done, seen, stamp, it, e as usize, ty) { return false; }
+    if !consteval.evaluable(&mut sg.cx, ds, ty) {
         sg.cx.consts.state.as_mut_slice()[du] = consteval.CV_UNSUP;
-        return;
+        return true;
     }
     sg.cx.sc = consteval.no_scope();
     let (st, _, neg, mag) = consteval.eval(&mut sg.cx, tree, t, nm, set, cut, ds, it, e as usize, ty);
@@ -2060,4 +2168,5 @@ fn alias_or_const(sg: &mut Sigs, lw: &mut Lw, ds: &decls.Decls, nm: &intern.Inte
         c.an.as_mut_slice()[du] = c.at_n;
         c.arep.as_mut_slice()[du] = c.at_rep;
     }
+    return true;
 }

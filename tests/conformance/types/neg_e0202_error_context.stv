@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// A context of the error type (a `let`, `const`, or `static` type that failed to lower, an
+// array element after one of the error type) gives an array literal no element type: its
+// literals have no type context and `[]` cannot be inferred (E0202). A plain literal there takes
+// the error type silently. `[]` also needs a context of length 0 where it has one.
+struct S<T> {
+    a: T,
+}
+
+fn none() -> [u8; 2] {
+    return []; //~ ERROR E0202
+}
+
+fn lets<const N: usize>() -> u32 {
+    let a: [S; N] = []; //~ ERROR E0201
+    //~^ ERROR E0202
+    let b: [u8; N] = []; //~ ERROR E0202
+    let c: S = [0, 0]; //~ ERROR E0201
+    //~^ ERROR E0202
+    let d: S = 0; //~ ERROR E0201
+    let e: S = [[1, 2], []]; //~ ERROR E0201
+    //~^ ERROR E0202
+    //~^^ ERROR E0202
+    let f: [u8; 0] = [];
+    let g = []; //~ ERROR E0202
+    return 0;
+}
+
+const C: [u8; 3u32 as u8] = [0, 0, 0]; //~ ERROR E0204
+//~^ ERROR E0202
+
+static G: [u8; 3i32 as usize] = [0, 0, 0]; //~ ERROR E0204
+//~^ ERROR E0202
+
+const D: [u8; 3u32 as u8] = []; //~ ERROR E0204
+//~^ ERROR E0202
+
+const E: S = 0; //~ ERROR E0201
+
+fn main() -> i32 {
+    return 0;
+}

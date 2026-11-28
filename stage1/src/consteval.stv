@@ -26,9 +26,14 @@
 // The forms evaluated: int literals, `true` and `false`, a const item by path, a bare const
 // generic parameter as a whole length or argument, parentheses, the operators `+ - * / %` (and
 // their `%` and `|` forms), `& | ^ << >> <<%` (`& | ^` on `bool`s too), unary `-`, `~`, `!`,
-// comparisons, `&&`, `||`, `if then else`, `as` / `as%` / `as|` between int types, and arrays
-// of ints or `bool`s: literals `[a, b]`, `[e; n]`, `[]`, and an index into one. A form outside
-// these makes the evaluation `UNSUP` (stage1 does not decide it: the caller writes no dump).
+// comparisons, `&&`, `||`, `if then else`, `as` / `as%` / `as|` between int types (one step or a
+// chain of them), and aggregates of ints and `bool`s: arrays (`[a, b]`, `[e; n]`, `[]`), tuples,
+// and structs without generic params (`S.{ f: e }`), read by index, tuple element, and field
+// after a const path or another value. An aggregate value is its leaves in order in the one pool
+// of `Consts` (a repeat keeps one element's): a const's value and its parts are read in place,
+// never copied; an evaluation keeps only its result's leaves there. The steps of an access
+// chain are applied in order, each index evaluated at its step. A form outside these makes the evaluation `UNSUP` (stage1 does
+// not decide it: the caller writes no dump).
 //
 // `size_of::<T>()` / `align_of::<T>()` of a type without parameters is a layout request (`Lay`,
 // keyed by the call's node row): decided, it is T's size or alignment (or a failure: T has no
@@ -46,6 +51,7 @@ import source;
 import ir.types;
 import prims.col;
 import prims.search;
+import prims.sort;
 import std.idx;
 import std.mem;
 import std.vec;
@@ -82,6 +88,7 @@ const K_AND: u8 = node_kinds.KIND_AND_EXPR;
 const K_OR: u8 = node_kinds.KIND_OR_EXPR;
 const K_CMP: u8 = node_kinds.KIND_CMP_EXPR;
 const K_IF: u8 = node_kinds.KIND_IF_EXPR;
+const K_STRUCT_LIT: u8 = node_kinds.KIND_STRUCT_LIT;
 
 // The resolutions of every use, by (item, key node), then offset: `resolve`'s rows with a
 // search key.
@@ -184,9 +191,9 @@ pub fn no_scope() -> Scope {
 }
 
 // The values of const items, per decl D: state, declared type, scalar value (sign, magnitude; a
-// `bool` is 0 or 1), and for an array its elements in the pool (`alo`, NONE: none; `an` of them,
-// or one repeated `an` times when `arep`). `at_*`: the array the last evaluation gave (`at_lo`
-// NONE: a scalar), its elements pushed onto the pool.
+// `bool` is 0 or 1), and for an aggregate its leaves in the pool (`alo`, NONE: none; `an` of
+// them, or when `arep` the leaves of one element of an array that repeats it). `at_*`: the
+// aggregate the last evaluation gave (`at_lo` NONE: a scalar), its leaves pushed onto the pool.
 pub struct Consts {
     pub state: vec.Vec<u8>,
     pub ty: vec.Vec<u32>,
@@ -208,12 +215,13 @@ impl Consts {
     }
 }
 
-// Whether the evaluator gives a const of type t its value: an int, a `bool`, an array of them.
-pub fn evaluable(tab: &types.Table, t: u32) -> bool {
+// Whether the evaluator gives a const of type t its value: an int, a `bool`, an array of them,
+// and arrays, tuples, and structs without generic params of such values within `MAX_LEAVES`.
+pub fn evaluable(cx: &mut Cx, ds: &decls.Decls, t: u32) -> bool {
     if t == NONE || t == types.ERR { return false; }
-    let tag = tab.tag_of(t);
-    if tag == types.TK_ARRAY { return scalar_elem(tab, tab.a_of(t)) && arr_len(tab, t) != NO_TY; }
-    return tag == types.TK_INT || tag == types.TK_BOOL;
+    let tag = cx.tab.tag_of(t);
+    if tag == types.TK_ARRAY && scalar_elem(&cx.tab, cx.tab.a_of(t)) { return arr_len(&cx.tab, t) != NO_TY; }
+    return value_ty(cx, ds, t);
 }
 
 // The diagnostics of const evaluation, one row each (stage0 reports them where the evaluation
@@ -383,6 +391,15 @@ pub struct Cx {
     // what const evaluations reported, and the running one's failure that reports nothing
     pub rep: Reports,
     pub dfr: Defer,
+    // per type T (grown on demand): the leaves of a value of T once decided (`NO_TY`: not yet)
+    pub leaf_memo: vec.Vec<u64>,
+    // per decl D (grown on demand): a struct's fields in declaration order, rows
+    // `sf_lo[D]..sf_lo[D] + sf_n[D]` of `sf_pool` (`sf_lo` NONE: not listed yet), and a listed
+    // field's position among them
+    pub sf_lo: vec.Vec<u32>,
+    pub sf_n: vec.Vec<u32>,
+    pub sf_pool: vec.Vec<u32>,
+    pub fpos: vec.Vec<u32>,
 }
 
 impl Cx {
@@ -597,12 +614,34 @@ struct Ev {
     gpar: vec.Vec<u32>,
     gfix: vec.Vec<u32>,
     gfirst: vec.Vec<u32>,
-    pneg: vec.Vec<bool>,
-    pmag: vec.Vec<u64>,
     // per node: settled and evaluated already (a repeat count, inline)
     done: vec.Vec<bool>,
+    // per node: an aggregate form (`F_*`); a struct literal's field expression: its field's
+    // position
+    form: vec.Vec<u8>,
+    part: vec.Vec<u32>,
+    // the steps of access chains (`F_CHAIN`: `aux` holds start and count): an index child's row
+    // offset, or `STEP_PART | k` for part k; the type each step applies to
+    sp: vec.Vec<u32>,
+    sty: vec.Vec<u32>,
+    // per node: the access chain whose index step evaluates it (NONE: the evaluation in node
+    // order does)
+    own: vec.Vec<u32>,
     out: u8,
 }
+
+// Aggregate forms: an access chain (parts, fields, and indexes after a head), a tuple literal, a
+// struct literal (its `StructLit` row; the `Postfix` row takes its value).
+const F_CHAIN: u8 = 1;
+const F_TUPLE: u8 = 2;
+const F_STRUCT: u8 = 3;
+const F_SCOPY: u8 = 4;
+const STEP_PART: u32 = 0x8000_0000;
+
+// Decide frames of aggregate forms, in `Frames.acc`: none of them is a type or a group.
+const ACC_CHAIN: u64 = 0xfffe_0000_0000_0001;
+const ACC_TUPLE: u64 = 0xfffe_0000_0000_0002;
+const ACC_STRUCT: u64 = 0xfffe_0000_0000_0003;
 
 const NO_TY: u64 = 0xffff_ffff_ffff_ffff;
 const LIT: u64 = 0x1_0000_0000;
@@ -729,7 +768,8 @@ impl Ev {
         self.set_arr(x, lo as usize, n, rep);
     }
 
-    // Node x is an array of n scalars from the pool on, one repeated when `rep`.
+    // Node x is an aggregate of n leaves from the pool on (`rep`: an array's one element, the
+    // leaves of each).
     fn set_arr(&mut self, x: usize, lo: usize, n: u32, rep: bool) {
         self.vlo.as_mut_slice()[x] = lo as% u32;
         self.vn.as_mut_slice()[x] = n;
@@ -759,6 +799,152 @@ impl Frames {
 fn const_value(cx: &Cx, d: u32) -> (u8, u32, bool, u64) {
     let c = &cx.consts;
     return (c.state.as_slice()[d as usize], c.ty.as_slice()[d as usize], c.neg.as_slice()[d as usize], c.mag.as_slice()[d as usize]);
+}
+
+// Node x (an offset) takes the value of const d, decided: false when d has none (the evaluation
+// fails as stage0's: a const without a value has its own error, one not evaluated here is
+// not decided either).
+fn const_into(cx: &Cx, ev: &mut Ev, x: usize, d: u32) -> bool {
+    let (st, ty, neg, mag) = const_value(cx, d);
+    if st != CV_OK {
+        ev.fail(if st == CV_UNSUP || st == CV_LAYOUT then st else CV_FAIL);
+        return false;
+    }
+    let tag = cx.tab.tag_of(ty);
+    let al = cx.consts.alo.as_slice()[d as usize];
+    if tag == types.TK_INT || tag == types.TK_BOOL {
+        ev.vneg.as_mut_slice()[x] = neg;
+        ev.vmag.as_mut_slice()[x] = mag;
+    } else if al != NONE {
+        // an aggregate: its leaves where the const keeps them (the pool is shared, values in it
+        // are never changed)
+        let an = cx.consts.an.as_slice()[d as usize];
+        let rep = cx.consts.arep.as_slice()[d as usize];
+        ev.set_arr(x, al as usize, an, rep);
+    } else {
+        ev.fail(CV_UNSUP);
+        return false;
+    }
+    ev.lit.as_mut_slice()[x] = 2;
+    ev.nty.as_mut_slice()[x] = ty as u64;
+    return true;
+}
+
+// The type of access chain g (`F_CHAIN`, its steps from the token in `aux` on), its head
+// decided: each step is typed in order and recorded (`Ev.sp`, `Ev.sty`). A step its type does
+// not have fails as stage0's (no value, nothing reported); one the evaluator holds no value for
+// is not decided here.
+fn chain_ty(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, set: &source.SourceSet, cut: &items.Items, nm: &intern.Interned, ds: &decls.Decls, ev: &mut Ev, g: usize) -> u64 {
+    let base = ev.base;
+    let x = g - ev.lo;
+    let ks = tree.kids.row(g);
+    let end = tree.tok_end.as_slice()[g];
+    let h0 = ev.nty.as_slice()[base + ks[0] as usize - ev.lo];
+    let r0 = ev.resolve(h0);
+    let mut cur = r0 as% u32;
+    let mut p = ev.aux.as_slice()[x] as% u32;
+    let start = ev.sp.len();
+    let mut kid: usize = 1;
+    while p < end {
+        let tag = cx.tab.tag_of(cur);
+        if tk(t, p) == terminals.T_L_BRACKET {
+            let ie = base + ks[kid] as usize;
+            if tag != types.TK_ARRAY {
+                ev.fail(CV_FAIL);
+                return NO_TY;
+            }
+            let el = cx.tab.a_of(cur);
+            if arr_len(&cx.tab, cur) == NO_TY || !value_ty(cx, ds, el) {
+                ev.fail(CV_UNSUP);
+                return NO_TY;
+            }
+            ev.sp.push((ie - ev.lo) as% u32);
+            ev.sty.push(cur);
+            cur = cx.tab.a_of(cur);
+            p = tree.tok_end.as_slice()[ie] + 1;
+            kid = kid + 1;
+            continue;
+        }
+        let mut k: usize = 0;
+        let mut pt = NONE;
+        if tk(t, p + 1) == terminals.T_INT_LIT {
+            // a tuple element
+            let (s, e) = lit_text(t, set, cut, ev.it, p + 1);
+            let f = cut.file.as_slice()[ev.it as usize] as usize;
+            let (v, big, suf) = parse_int(&set.file(f)[s..e]);
+            if tag != types.TK_TUPLE || big || suf != 0 || v >= cx.tab.x(cur).len() as u64 {
+                ev.fail(CV_FAIL);
+                return NO_TY;
+            }
+            k = v as usize;
+            pt = cx.tab.x(cur)[k];
+        } else {
+            // a field of a struct value
+            if tag != types.TK_ADT || ds.kind.as_slice()[cx.tab.a_of(cur) as usize] != decls.DK_STRUCT {
+                ev.fail(CV_FAIL);
+                return NO_TY;
+            }
+            if !plain_struct(cx, ds, cur) {
+                ev.fail(CV_UNSUP);
+                return NO_TY;
+            }
+            let sd = cx.tab.a_of(cur);
+            let (f, fk) = field_named(cx, ds, sd, name_of(nm, p + 1));
+            if f == NONE {
+                ev.fail(CV_FAIL);
+                return NO_TY;
+            }
+            k = fk as usize;
+            pt = cx.ty.as_slice()[f as usize];
+        }
+        if !value_ty(cx, ds, pt) {
+            ev.fail(CV_UNSUP);
+            return NO_TY;
+        }
+        ev.sp.push(STEP_PART | k as% u32);
+        ev.sty.push(cur);
+        cur = pt;
+        p = p + 2;
+    }
+    ev.aux.as_mut_slice()[x] = ((start as u64) << 32) | (ev.sp.len() - start) as u64;
+    return cur as u64;
+}
+
+// The type of field k of struct d.
+fn field_ty(cx: &mut Cx, ds: &decls.Decls, d: u32, k: u32) -> u32 {
+    let (lo, _) = fields_of(cx, ds, d);
+    let f = cx.sf_pool.as_slice()[lo + k as usize];
+    return cx.ty.as_slice()[f as usize];
+}
+
+// Element k of a tuple hint of n elements (NONE: none).
+fn tuple_hint(tab: &types.Table, h: u32, n: usize, k: usize) -> u32 {
+    if h == NONE || h == types.ERR || tab.tag_of(h) != types.TK_TUPLE || tab.x(h).len() != n { return NONE; }
+    return tab.x(h)[k];
+}
+
+// Pushes the leaves of node x's value (of type ty) onto the pool, a repeat as every element:
+// false past `MAX_LEAVES`.
+fn expand(cx: &mut Cx, ev: &Ev, x: usize, ty: u32) -> bool {
+    let vl = ev.vlo.as_slice()[x];
+    let c = &mut cx.consts;
+    if vl == NONE {
+        c.pneg.push(ev.vneg.as_slice()[x]);
+        c.pmag.push(ev.vmag.as_slice()[x]);
+        return true;
+    }
+    let n = ev.vn.as_slice()[x] as u64;
+    let reps = if ev.vrep.as_slice()[x] then arr_len(&cx.tab, ty) else 1u64;
+    if n != 0 && reps > MAX_LEAVES / n { return false; }
+    for _ in 0..reps {
+        for j in 0..n as usize {
+            let neg = c.pneg.as_slice()[vl as usize + j];
+            let mag = c.pmag.as_slice()[vl as usize + j];
+            c.pneg.push(neg);
+            c.pmag.push(mag);
+        }
+    }
+    return true;
 }
 
 // The decl a path at row g (a `Primary` head, a `Postfix` of path steps only, or a `TypeBase`)
@@ -852,8 +1038,32 @@ fn names_generic(cx: &Cx, tree: &ast.Ast, it: u32, base: usize, g: usize) -> boo
 // outcome. What fails an operation it evaluates (overflow, an index past the end) is reported
 // (`Cx.rep`); the first failure that reports nothing is kept (`Cx.dfr`).
 pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32) -> (u8, u32, bool, u64) {
+    // the leaves this evaluation adds to the shared pool past p0: only its result's stay
+    let p0 = cx.consts.pmag.len();
     cx.dfr = no_defer();
     cx.consts.at_lo = NONE;
+    let r = eval_in(cx, tree, t, nm, set, cut, ds, it, g, want);
+    let c = &mut cx.consts;
+    let vl = c.at_lo;
+    if vl != NONE && vl as usize >= p0 {
+        for k in 0..c.at_n as usize {
+            let neg = c.pneg.as_slice()[vl as usize + k];
+            let mag = c.pmag.as_slice()[vl as usize + k];
+            c.pneg.as_mut_slice()[p0 + k] = neg;
+            c.pmag.as_mut_slice()[p0 + k] = mag;
+        }
+        c.at_lo = p0 as% u32;
+        c.pneg.truncate(p0 + c.at_n as usize);
+        c.pmag.truncate(p0 + c.at_n as usize);
+    } else {
+        // a scalar, a failure, or a part of an earlier const's value (shared)
+        c.pneg.truncate(p0);
+        c.pmag.truncate(p0);
+    }
+    return r;
+}
+
+fn eval_in(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, it: u32, g: usize, want: u32) -> (u8, u32, bool, u64) {
     let base = tree.item_node.as_slice()[it as usize] as usize;
     let a = tree.tok.as_slice()[g];
     if kind(tree, g) == K_PRIMARY && tk(t, a) == terminals.T_INT_LIT && tree.tok_end.as_slice()[g] == a + 1 {
@@ -881,8 +1091,11 @@ pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, s
         gfix: vec.Vec::<u32>.new(),
         gfirst: vec.Vec::<u32>.new(),
         done: col.filled(n, false),
-        pneg: vec.Vec::<bool>.new(),
-        pmag: vec.Vec::<u64>.new(),
+        form: col.filled(n, 0u8),
+        part: col.filled(n, NONE),
+        sp: vec.Vec::<u32>.new(),
+        sty: vec.Vec::<u32>.new(),
+        own: col.filled(n, NONE),
         out: CV_OK,
     };
     let top = decide(cx, tree, t, nm, set, cut, ds, &mut ev, g, want);
@@ -894,20 +1107,15 @@ pub fn eval(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, s
         return (CV_FAIL, types.ERR, false, 0);
     }
     if !settle(cx, tree, t, &mut ev, lo, g, 0) { return (ev.out, types.ERR, false, 0); }
-    let r = value(cx, tree, t, &mut ev, lo, g);
+    let r = value(cx, tree, t, ds, &mut ev, lo, g, NONE);
     if r != CV_OK { return (r, types.ERR, false, 0); }
     let x = g - lo;
     let vl = ev.vlo.as_slice()[x];
     if vl != NONE {
         let c = &mut cx.consts;
-        c.at_lo = c.pmag.len() as% u32;
+        c.at_lo = vl;
         c.at_n = ev.vn.as_slice()[x];
         c.at_rep = ev.vrep.as_slice()[x];
-        let cnt = if c.at_rep then 1usize else c.at_n as usize;
-        for k in 0..cnt {
-            c.pneg.push(ev.pneg.as_slice()[vl as usize + k]);
-            c.pmag.push(ev.pmag.as_slice()[vl as usize + k]);
-        }
     }
     return (CV_OK, ev.nty.as_slice()[x] as% u32, ev.vneg.as_slice()[x], ev.vmag.as_slice()[x]);
 }
@@ -971,16 +1179,264 @@ fn array_ty(tab: &mut types.Table, elem: u32, n: u64) -> u32 {
     return tab.intern(types.TK_ARRAY, elem, 0);
 }
 
-// The index form `C[i]` at Postfix row g: a head `Primary` and one index step, its last.
-fn is_index(tree: &ast.Ast, t: &lex.Tokens, base: usize, g: usize) -> bool {
-    let ks = tree.kids.row(g);
-    if ks.len() != 2 { return false; }
-    let head = base + ks[0] as usize;
-    let ie = base + ks[1] as usize;
-    if kind(tree, head) != K_PRIMARY { return false; }
-    let open = tree.tok_end.as_slice()[head];
-    return tk(t, open) == terminals.T_L_BRACKET && tree.tok.as_slice()[ie] == open + 1 && tree.tok_end.as_slice()[ie] + 1 == tree.tok_end.as_slice()[g];
+// The most leaves a value holds expanded (a repeat keeps one element): past it, or past the
+// bytes the compile-time data limit surely admits (a leaf takes at most 8 bytes with its
+// padding), an aggregate is a form not evaluated here.
+const MAX_LEAVES: u64 = 1u64 << 22;
+
+// The deepest type an aggregate value is decided for (deeper: not evaluated here).
+const MAX_AGG_DEPTH: u32 = 200;
+
+// The fields of struct d in declaration order: rows `lo..hi` of `Cx.sf_pool`, listed once.
+pub fn fields_of(cx: &mut Cx, ds: &decls.Decls, d: u32) -> (usize, usize) {
+    while cx.sf_lo.len() < ds.decls() {
+        cx.sf_lo.push(NONE);
+        cx.sf_n.push(0);
+        cx.fpos.push(NONE);
+    }
+    let lo0 = cx.sf_lo.as_slice()[d as usize];
+    if lo0 != NONE { return (lo0 as usize, lo0 as usize + cx.sf_n.as_slice()[d as usize] as usize); }
+    let mut fs = vec.Vec::<u32>.new();
+    let mut ix = vec.Vec::<u32>.new();
+    let mk = ds.mem_key.as_slice();
+    let mut k = search.lower_bound(mk, search.pair(d, 0));
+    while k < mk.len() && (mk[k] >> 32) as% u32 == d {
+        let f = ds.mem_decl.as_slice()[k];
+        if ds.kind.as_slice()[f as usize] == decls.DK_FIELD {
+            fs.push(f);
+            ix.push(ds.index.as_slice()[f as usize]);
+        }
+        k = k + 1;
+    }
+    let perm = sort.sort_perm(ix.as_slice());
+    let lo = cx.sf_pool.len();
+    for j in 0..perm.len() {
+        let f = fs.as_slice()[perm.as_slice()[j] as usize];
+        cx.sf_pool.push(f);
+        cx.fpos.as_mut_slice()[f as usize] = j as% u32;
+    }
+    cx.sf_lo.as_mut_slice()[d as usize] = lo as% u32;
+    cx.sf_n.as_mut_slice()[d as usize] = fs.len() as% u32;
+    return (lo, lo + fs.len());
 }
+
+// The field of struct d named S and its position, or (NONE, NONE).
+fn field_named(cx: &mut Cx, ds: &decls.Decls, d: u32, s: u32) -> (u32, u32) {
+    let _ = fields_of(cx, ds, d);
+    let mk = ds.mem_key.as_slice();
+    let k = search.lower_bound(mk, search.pair(d, s));
+    if s == NONE || k == mk.len() || mk[k] != search.pair(d, s) { return (NONE, NONE); }
+    let f = ds.mem_decl.as_slice()[k];
+    if ds.kind.as_slice()[f as usize] != decls.DK_FIELD { return (NONE, NONE); }
+    return (f, cx.fpos.as_slice()[f as usize]);
+}
+
+// Whether t is a struct whose values the evaluator holds: one without generic params, every
+// field type lowered.
+fn plain_struct(cx: &Cx, ds: &decls.Decls, t: u32) -> bool {
+    if cx.tab.tag_of(t) != types.TK_ADT || cx.tab.x(t).len() != 0 { return false; }
+    let d = cx.tab.a_of(t);
+    if ds.kind.as_slice()[d as usize] != decls.DK_STRUCT { return false; }
+    return cx.gens.lo.as_slice()[d as usize] == cx.gens.lo.as_slice()[d as usize + 1];
+}
+
+// The leaves of a value of type t (ints and `bool`s, in order: array elements, tuple elements,
+// struct fields by declaration), saturated past `MAX_LEAVES`; `NO_TY` when the evaluator holds
+// no value of t. A count once decided is kept per type (a field type, once lowered, is final;
+// `NO_TY` is not kept: a field may be lowered later).
+rec fn leaves(cx: &mut Cx, ds: &decls.Decls, t: u32, depth: u32) -> u64 {
+    if t == NONE || t == types.ERR || depth > MAX_AGG_DEPTH { return NO_TY; }
+    if (t as usize) < cx.leaf_memo.len() && cx.leaf_memo.as_slice()[t as usize] != NO_TY { return cx.leaf_memo.as_slice()[t as usize]; }
+    let tag = cx.tab.tag_of(t);
+    if tag == types.TK_INT || tag == types.TK_BOOL { return 1; }
+    let mut r: u64 = NO_TY;
+    if tag == types.TK_ARRAY {
+        let n = arr_len(&cx.tab, t);
+        if n == NO_TY { return NO_TY; }
+        let el = cx.tab.a_of(t);
+        let e = leaves(cx, ds, el, depth + 1);
+        if e == NO_TY { return NO_TY; }
+        r = if e != 0 && n > MAX_LEAVES / e then MAX_LEAVES + 1 else n * e;
+    } else {
+        let mut parts = vec.Vec::<u32>.new();
+        if tag == types.TK_TUPLE {
+            parts.extend_from_slice(cx.tab.x(t));
+        } else if plain_struct(cx, ds, t) {
+            let sd = cx.tab.a_of(t);
+            let (lo, hi) = fields_of(cx, ds, sd);
+            for k in lo..hi {
+                let f = cx.sf_pool.as_slice()[k];
+                parts.push(cx.ty.as_slice()[f as usize]);
+            }
+        } else {
+            return NO_TY;
+        }
+        let mut sum: u64 = 0;
+        for k in 0..parts.len() {
+            let e = leaves(cx, ds, parts.as_slice()[k], depth + 1);
+            if e == NO_TY { return NO_TY; }
+            sum = sum + e;
+            if sum > MAX_LEAVES {
+                sum = MAX_LEAVES + 1;
+                break;
+            }
+        }
+        r = sum;
+    }
+    while cx.leaf_memo.len() <= t as usize {
+        cx.leaf_memo.push(NO_TY);
+    }
+    cx.leaf_memo.as_mut_slice()[t as usize] = r;
+    return r;
+}
+
+// Whether the evaluator holds a value of type t within its limits.
+fn value_ty(cx: &mut Cx, ds: &decls.Decls, t: u32) -> bool {
+    if scalar_elem(&cx.tab, t) { return true; }
+    let n = leaves(cx, ds, t, 0);
+    return n != NO_TY && n <= MAX_LEAVES;
+}
+
+// Part k of tuple or struct type t: (its type, its first leaf among t's).
+fn part_of(cx: &mut Cx, ds: &decls.Decls, t: u32, k: usize) -> (u32, u64) {
+    let mut parts = vec.Vec::<u32>.new();
+    if cx.tab.tag_of(t) == types.TK_TUPLE {
+        parts.extend_from_slice(&cx.tab.x(t)[0..k + 1]);
+    } else {
+        let sd = cx.tab.a_of(t);
+        let (lo, _) = fields_of(cx, ds, sd);
+        for j in 0..k + 1 {
+            let f = cx.sf_pool.as_slice()[lo + j];
+            parts.push(cx.ty.as_slice()[f as usize]);
+        }
+    }
+    let mut off: u64 = 0;
+    for j in 0..k {
+        off = off + leaves(cx, ds, parts.as_slice()[j], 0);
+    }
+    return (parts.as_slice()[k], off);
+}
+
+// The array of n elements of type elem, decided at a literal: the error type when its bytes
+// pass the compile-time data limit (stage0: E0904 case `size`), NONE when the evaluator holds no
+// such value.
+fn array_of(cx: &mut Cx, ds: &decls.Decls, elem: u32, n: u64) -> u32 {
+    if scalar_elem(&cx.tab, elem) { return array_ty(&mut cx.tab, elem, n); }
+    let e = leaves(cx, ds, elem, 0);
+    if e == NO_TY || (e != 0 && n > MAX_LEAVES / e) { return NONE; }
+    cx.tab.begin();
+    cx.tab.push_garg(types.GA_VALUE, (n >> 32) as% u32, n as% u32);
+    return cx.tab.intern(types.TK_ARRAY, elem, 0);
+}
+
+// The decl a const path heads Postfix row g with (NONE: none) and the token after that path: the
+// head identifier and the `. name` segments after it that resolve.
+fn const_head(cx: &Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, it: u32, base: usize, g: usize) -> (u32, u32) {
+    let head = base + tree.kids.row(g)[0] as usize;
+    let a = tree.tok.as_slice()[head];
+    if kind(tree, head) != K_PRIMARY || tk(t, a) != terminals.T_IDENT || tree.kids.row(head).len() != 0 { return (NONE, tree.tok_end.as_slice()[head]); }
+    let hn = (head - base) as% u32;
+    let mut u = use_at(cx, it, hn, t.start.as_slice()[a as usize]);
+    if u == NONE { return (NONE, a + 1); }
+    let mut p = a + 1;
+    while tk(t, p) == terminals.T_DOT && tk(t, p + 1) == terminals.T_IDENT {
+        let v = use_at(cx, it, hn, t.start.as_slice()[p as usize + 1]);
+        if v == NONE { break; }
+        u = v;
+        p = p + 2;
+    }
+    if cx.uses.tag.as_slice()[u as usize] != resolve.TAG_DECL { return (NONE, p); }
+    let d = cx.uses.target.as_slice()[u as usize];
+    if ds.kind.as_slice()[d as usize] != decls.DK_CONST { return (NONE, p); }
+    return (d, p);
+}
+
+// The row of the use keyed at node n of item it whose segment starts at byte offset off, or
+// NONE.
+fn use_at(cx: &Cx, it: u32, n: u32, off: u32) -> u32 {
+    let (lo, hi) = cx.uses.range(it, n);
+    for k in lo..hi {
+        if cx.uses.off.as_slice()[k] == off { return k as% u32; }
+    }
+    return NONE;
+}
+
+// Whether the steps of Postfix row g from token p on are all a part (`.0`), a field (`. name`
+// not followed by a call or generic arguments), or an index (`[e]`, an expression child), and
+// there is at least one.
+fn access_steps(tree: &ast.Ast, t: &lex.Tokens, base: usize, g: usize, p0: u32) -> bool {
+    let end = tree.tok_end.as_slice()[g];
+    let ks = tree.kids.row(g);
+    let mut kid: usize = 1;
+    let mut p = p0;
+    if p >= end { return false; }
+    while p < end {
+        let a = tk(t, p);
+        if a == terminals.T_DOT && tk(t, p + 1) == terminals.T_INT_LIT {
+            p = p + 2;
+        } else if a == terminals.T_DOT && tk(t, p + 1) == terminals.T_IDENT {
+            let n = tk(t, p + 2);
+            if p + 2 < end && (n == terminals.T_L_PAREN || n == terminals.T_COLON_COLON) { return false; }
+            p = p + 2;
+        } else if a == terminals.T_L_BRACKET {
+            if kid >= ks.len() { return false; }
+            let ie = base + ks[kid] as usize;
+            if !is_expr_kind(kind(tree, ie)) || tree.tok.as_slice()[ie] != p + 1 { return false; }
+            p = tree.tok_end.as_slice()[ie] + 1;
+            kid = kid + 1;
+        } else {
+            return false;
+        }
+    }
+    return p == end && kid == ks.len();
+}
+
+// The struct literal form at Postfix row g: a path of identifiers resolving to a struct the
+// evaluator holds values of, then `.{ .. }` naming each of its fields once; the struct, else
+// NONE, or `BAD_LIT` for a literal of such a struct that names a field it lacks or leaves one
+// out (stage0: no value, nothing reported). Each field expression's field position goes into
+// `Ev.part`.
+fn struct_lit(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, ds: &decls.Decls, ev: &mut Ev, base: usize, g: usize) -> u32 {
+    let ks = tree.kids.row(g);
+    if ks.len() != 2 { return NONE; }
+    let head = base + ks[0] as usize;
+    let sl = base + ks[1] as usize;
+    if kind(tree, head) != K_PRIMARY || kind(tree, sl) != K_STRUCT_LIT || tree.kids.row(head).len() != 0 { return NONE; }
+    let a = tree.tok.as_slice()[head];
+    if tk(t, a) != terminals.T_IDENT { return NONE; }
+    let open = tree.tok.as_slice()[sl];
+    if tk(t, open) != terminals.T_DOT_L_BRACE || tree.tok_end.as_slice()[sl] != tree.tok_end.as_slice()[g] { return NONE; }
+    // identifiers `a . b . c` up to the literal, the last one resolved to a struct
+    let mut last = a;
+    let mut p = a + 1;
+    while p + 1 < open && tk(t, p) == terminals.T_DOT && tk(t, p + 1) == terminals.T_IDENT {
+        last = p + 1;
+        p = p + 2;
+    }
+    if p != open { return NONE; }
+    let u = cx.uses.at_end(ev.it, (head - base) as% u32, t.start.as_slice()[last as usize]);
+    if u == NONE || cx.uses.tag.as_slice()[u as usize] != resolve.TAG_DECL { return NONE; }
+    let d = cx.uses.target.as_slice()[u as usize];
+    if ds.kind.as_slice()[d as usize] != decls.DK_STRUCT || cx.gens.lo.as_slice()[d as usize] != cx.gens.lo.as_slice()[d as usize + 1] { return NONE; }
+    let (flo, fhi) = fields_of(cx, ds, d);
+    let es = tree.kids.row(sl);
+    let mut seen = col.filled(fhi - flo, false);
+    for j in 0..es.len() {
+        let e = base + es[j] as usize;
+        let s = name_of(nm, tree.tok.as_slice()[e] - 2);
+        let (f, k) = field_named(cx, ds, d, s);
+        if f == NONE { return BAD_LIT; }
+        if seen.as_slice()[k as usize] { return NONE; }
+        let ft = cx.ty.as_slice()[f as usize];
+        if !value_ty(cx, ds, ft) { return NONE; }
+        seen.as_mut_slice()[k as usize] = true;
+        ev.part.as_mut_slice()[e - ev.lo] = k;
+    }
+    if es.len() != fhi - flo { return BAD_LIT; }
+    return d;
+}
+
+const BAD_LIT: u32 = 0xffff_fffe;
 
 // The decide pass from row g with hint `want`: the type of g (a T or a group).
 fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.SourceSet, cut: &items.Items, ds: &decls.Decls, ev: &mut Ev, g: usize, want: u32) -> u64 {
@@ -1073,21 +1529,77 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 continue;
             }
             if k == K_CAST {
-                if ks.len() != 2 {
-                    ev.fail(CV_UNSUP);
-                    continue;
-                }
                 fr.push(cur, hint, NO_TY);
                 cur = base + ks[0] as usize;
                 hint = NONE;
                 continue;
             }
-            if k == K_POSTFIX && is_index(tree, t, base, cur) {
-                // the array first, without an expected type
-                fr.push(cur, hint, NO_TY);
-                cur = base + ks[0] as usize;
-                hint = NONE;
-                continue;
+            if k == K_POSTFIX {
+                // an access chain: a const path, or a head decided without an expected type,
+                // then parts, fields, and indexes (each a `usize`), typed in order at the end
+                let head = base + ks[0] as usize;
+                let ha = tree.tok.as_slice()[head];
+                let (cd, p0) = const_head(cx, tree, t, ds, it, base, cur);
+                let single = cd == NONE && (tk(t, ha) != terminals.T_IDENT || p0 == ha + 1);
+                let p1 = if cd != NONE then p0 else tree.tok_end.as_slice()[head];
+                if (cd != NONE || single) && access_steps(tree, t, base, cur, p1) {
+                    let x = cur - ev.lo;
+                    ev.form.as_mut_slice()[x] = F_CHAIN;
+                    ev.aux.as_mut_slice()[x] = p1 as u64;
+                    // its index expressions are evaluated by its steps, in order
+                    for j in 1..ks.len() {
+                        let ie = base + ks[j] as usize;
+                        for y in ie - tree.size.as_slice()[ie] as usize..ie + 1 {
+                            ev.own.as_mut_slice()[y - ev.lo] = cur as% u32;
+                        }
+                    }
+                    if cd == NONE {
+                        fr.push(cur, hint, ACC_CHAIN);
+                        cur = head;
+                        hint = NONE;
+                        continue;
+                    }
+                    let hx = head - ev.lo;
+                    if !const_into(cx, ev, hx, cd) { continue; }
+                    if ks.len() == 1 {
+                        ret = chain_ty(cx, tree, t, set, cut, nm, ds, ev, cur);
+                        if ev.out != CV_OK { continue; }
+                        ev.nty.as_mut_slice()[x] = ret;
+                        entering = false;
+                        continue;
+                    }
+                    fr.push(cur, hint, ACC_CHAIN);
+                    let fk1 = fr.k.len() - 1;
+                    fr.k.as_mut_slice()[fk1] = 2;
+                    cur = base + ks[1] as usize;
+                    hint = cx.tab.usize_t();
+                    continue;
+                }
+                // a struct literal: its fields decided under their types, in the written order
+                let sd = struct_lit(cx, tree, t, nm, ds, ev, base, cur);
+                if sd == BAD_LIT {
+                    ev.fail(CV_FAIL);
+                    continue;
+                }
+                if sd != NONE {
+                    let sl = base + ks[1] as usize;
+                    ev.form.as_mut_slice()[cur - ev.lo] = F_SCOPY;
+                    ev.form.as_mut_slice()[sl - ev.lo] = F_STRUCT;
+                    ev.aux.as_mut_slice()[sl - ev.lo] = sd as u64;
+                    let es = tree.kids.row(sl);
+                    if es.len() == 0 {
+                        cx.tab.begin();
+                        ret = cx.tab.intern(types.TK_ADT, sd, 0) as u64;
+                        ev.nty.as_mut_slice()[sl - ev.lo] = ret;
+                        ev.nty.as_mut_slice()[cur - ev.lo] = ret;
+                        entering = false;
+                        continue;
+                    }
+                    fr.push(sl, hint, ACC_STRUCT);
+                    cur = base + es[0] as usize;
+                    hint = field_ty(cx, ds, sd, ev.part.as_slice()[cur - ev.lo]);
+                    continue;
+                }
             }
             if k == K_PRIMARY {
                 let op = tk(t, a);
@@ -1112,7 +1624,14 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                         cur = base + ks[0] as usize;
                         continue;
                     }
-                    ev.fail(CV_UNSUP);
+                    if ks.len() == 0 {
+                        ev.fail(CV_UNSUP);
+                        continue;
+                    }
+                    // a tuple: each element under the expected tuple's element, else forced
+                    fr.push(cur, hint, ACC_TUPLE);
+                    cur = base + ks[0] as usize;
+                    hint = tuple_hint(&cx.tab, hint, ks.len(), 0);
                     continue;
                 }
                 if op == terminals.T_L_BRACKET {
@@ -1123,13 +1642,13 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                             ev.defer(cx, tree, EV_INFER, cur, NONE, NONE);
                             continue;
                         }
-                        if !scalar_elem(&cx.tab, eh) {
+                        if !value_ty(cx, ds, eh) {
                             ev.fail(CV_UNSUP);
                             continue;
                         }
                         let x = cur - ev.lo;
                         ev.lit.as_mut_slice()[x] = 2;
-                        let pl = ev.pmag.len();
+                        let pl = cx.consts.pmag.len();
                         ev.set_arr(x, pl, 0, false);
                         ret = hint as u64;
                         ev.nty.as_mut_slice()[x] = ret;
@@ -1201,35 +1720,9 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 }
                 let dk = ds.kind.as_slice()[d as usize];
                 if dk == decls.DK_CONST {
-                    let (st, ty, neg, mag) = const_value(cx, d);
-                    if st != CV_OK {
-                        ev.fail(if st == CV_UNSUP || st == CV_LAYOUT then st else CV_FAIL);
-                        continue;
-                    }
-                    let x = cur - ev.lo;
-                    let tag = cx.tab.tag_of(ty);
-                    let al = cx.consts.alo.as_slice()[d as usize];
-                    if tag == types.TK_INT || tag == types.TK_BOOL {
-                        ev.vneg.as_mut_slice()[x] = neg;
-                        ev.vmag.as_mut_slice()[x] = mag;
-                    } else if al != NONE {
-                        // an array: its elements into this evaluation's pool
-                        let an = cx.consts.an.as_slice()[d as usize];
-                        let rep = cx.consts.arep.as_slice()[d as usize];
-                        let pl = ev.pmag.len();
-                        let cnt = if rep then 1u32 else an;
-                        for j in 0..cnt as usize {
-                            ev.pneg.push(cx.consts.pneg.as_slice()[al as usize + j]);
-                            ev.pmag.push(cx.consts.pmag.as_slice()[al as usize + j]);
-                        }
-                        ev.set_arr(x, pl, an, rep);
-                    } else {
-                        ev.fail(CV_UNSUP);
-                        continue;
-                    }
-                    ev.lit.as_mut_slice()[x] = 2;
-                    ret = ty as u64;
-                    ev.nty.as_mut_slice()[x] = ret;
+                    let cx0 = cur - ev.lo;
+                    if !const_into(cx, ev, cx0, d) { continue; }
+                    ret = ev.nty.as_slice()[cur - ev.lo];
                     entering = false;
                     continue;
                 }
@@ -1260,7 +1753,84 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
         // the next child of the frame: `nk` with hint `nh`
         let mut nk: usize = 0;
         let mut nh = NONE;
-        if (is_chain(fk) || fk == K_CAST || fk == K_AND || fk == K_OR || fk == K_CMP) && fks.len() == 1 {
+        let facc = fr.acc.as_slice()[f];
+        if facc == ACC_TUPLE {
+            let c = base + fks[kk - 1] as usize;
+            let w = tuple_hint(&cx.tab, fh, fks.len(), kk - 1);
+            if w != NONE {
+                if !ev.coerce(cx, tree, c, ret, w) { return NO_TY; }
+            } else {
+                let r = ev.resolve(ret);
+                if r & LIT != 0 {
+                    ev.no_type(cx, tree, r);
+                    return NO_TY;
+                }
+            }
+            if kk < fks.len() {
+                nk = kk;
+                nh = tuple_hint(&cx.tab, fh, fks.len(), kk);
+            } else {
+                let mut es = vec.Vec::<u32>.new();
+                for j in 0..fks.len() {
+                    let v = ev.nty.as_slice()[base + fks[j] as usize - ev.lo];
+                    let r = ev.resolve(v);
+                    if r & LIT != 0 || !value_ty(cx, ds, r as% u32) {
+                        ev.fail(CV_UNSUP);
+                        return NO_TY;
+                    }
+                    es.push(r as% u32);
+                }
+                cx.tab.begin();
+                for j in 0..es.len() {
+                    cx.tab.push(es.as_slice()[j]);
+                }
+                let tt = cx.tab.intern(types.TK_TUPLE, 0, 0);
+                if !value_ty(cx, ds, tt) {
+                    ev.fail(CV_UNSUP);
+                    return NO_TY;
+                }
+                ret = tt as u64;
+                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+                ev.form.as_mut_slice()[fnode - ev.lo] = F_TUPLE;
+            }
+        } else if facc == ACC_CHAIN {
+            let c = base + fks[kk - 1] as usize;
+            if kk == 1 {
+                // the head decided: a value of a type
+                let r = ev.resolve(ret);
+                if r & LIT != 0 {
+                    ev.no_type(cx, tree, r);
+                    return NO_TY;
+                }
+            } else {
+                let us = cx.tab.usize_t();
+                if !ev.coerce(cx, tree, c, ret, us) { return NO_TY; }
+            }
+            if kk < fks.len() {
+                nk = kk;
+                nh = cx.tab.usize_t();
+            } else {
+                ret = chain_ty(cx, tree, t, set, cut, nm, ds, ev, fnode);
+                if ev.out != CV_OK { return NO_TY; }
+                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+            }
+        } else if facc == ACC_STRUCT {
+            // fnode: the `StructLit` row; its struct in `aux`
+            let sd = ev.aux.as_slice()[fnode - ev.lo] as% u32;
+            let c = base + fks[kk - 1] as usize;
+            let ft = field_ty(cx, ds, sd, ev.part.as_slice()[c - ev.lo]);
+            if !ev.coerce(cx, tree, c, ret, ft) { return NO_TY; }
+            if kk < fks.len() {
+                nk = kk;
+                nh = field_ty(cx, ds, sd, ev.part.as_slice()[base + fks[kk] as usize - ev.lo]);
+            } else {
+                cx.tab.begin();
+                ret = cx.tab.intern(types.TK_ADT, sd, 0) as u64;
+                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
+                let pf = cx.parent.as_slice()[fnode] as usize;
+                ev.nty.as_mut_slice()[pf - ev.lo] = ret;
+            }
+        } else if (is_chain(fk) || fk == K_CAST || fk == K_AND || fk == K_OR || fk == K_CMP) && fks.len() == 1 {
             ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
         } else if is_chain(fk) {
             let acc = if kk == 1 then ret else ev.unify(cx, tree, base + fks[kk - 1] as usize, fr.acc.as_slice()[f], ret);
@@ -1314,31 +1884,6 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 ret = bool_t as u64;
             }
             ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
-        } else if fk == K_POSTFIX {
-            if kk == 1 {
-                // the array; then the index, a `usize`
-                let b = ev.resolve(ret);
-                if b & LIT != 0 {
-                    ev.no_type(cx, tree, b);
-                    return NO_TY;
-                }
-                if cx.tab.tag_of(b as% u32) != types.TK_ARRAY {
-                    ev.fail(CV_FAIL);
-                    return NO_TY;
-                }
-                if !scalar_elem(&cx.tab, cx.tab.a_of(b as% u32)) || arr_len(&cx.tab, b as% u32) == NO_TY {
-                    ev.fail(CV_UNSUP);
-                    return NO_TY;
-                }
-                ev.aux.as_mut_slice()[fnode - ev.lo] = b;
-                nk = 1;
-                nh = cx.tab.usize_t();
-            } else {
-                let us = cx.tab.usize_t();
-                if !ev.coerce(cx, tree, base + fks[1] as usize, ret, us) { return NO_TY; }
-                ret = cx.tab.a_of(ev.aux.as_slice()[fnode - ev.lo] as% u32) as u64;
-                ev.nty.as_mut_slice()[fnode - ev.lo] = ret;
-            }
         } else if fk == K_PRIMARY && tk(t, ftok) == terminals.T_L_BRACKET {
             let eh = elem_hint(&cx.tab, fh);
             let rep = fks.len() == 2 && tk(t, tree.tok_end.as_slice()[base + fks[0] as usize]) == terminals.T_SEMI;
@@ -1355,7 +1900,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                     if !ev.coerce(cx, tree, base + fks[0] as usize, ret, eh) { return NO_TY; }
                     elem = eh;
                 }
-                if !scalar_elem(&cx.tab, elem) {
+                if !value_ty(cx, ds, elem) {
                     ev.fail(CV_UNSUP);
                     return NO_TY;
                 }
@@ -1369,7 +1914,8 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 let mark = fr.acc.as_slice()[f];
                 let clo = c - tree.size.as_slice()[c] as usize;
                 if !settle(cx, tree, t, ev, clo, c, (mark & 0xffff_ffff) as usize) { return NO_TY; }
-                let r = value(cx, tree, t, ev, clo, c);
+                let ow = ev.own.as_slice()[c - ev.lo];
+                let r = value(cx, tree, t, ds, ev, clo, c, ow);
                 if r != CV_OK {
                     ev.fail(r);
                     return NO_TY;
@@ -1377,9 +1923,9 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                 for x in clo..c + 1 {
                     ev.done.as_mut_slice()[x - ev.lo] = true;
                 }
-                let at = array_ty(&mut cx.tab, (mark >> 32) as% u32, ev.vmag.as_slice()[c - ev.lo]);
-                if at == types.ERR {
-                    ev.fail(CV_FAIL);
+                let at = array_of(cx, ds, (mark >> 32) as% u32, ev.vmag.as_slice()[c - ev.lo]);
+                if at == types.ERR || at == NONE {
+                    ev.fail(if at == NONE then CV_UNSUP else CV_FAIL);
                     return NO_TY;
                 }
                 ret = at as u64;
@@ -1413,13 +1959,13 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                         let v = ev.nty.as_slice()[c - ev.lo];
                         if !ev.coerce(cx, tree, c, v, elem) { return NO_TY; }
                     }
-                    if !scalar_elem(&cx.tab, elem) {
+                    if !value_ty(cx, ds, elem) {
                         ev.fail(CV_UNSUP);
                         return NO_TY;
                     }
-                    let at = array_ty(&mut cx.tab, elem, fks.len() as u64);
-                    if at == types.ERR {
-                        ev.fail(CV_FAIL);
+                    let at = array_of(cx, ds, elem, fks.len() as u64);
+                    if at == types.ERR || at == NONE {
+                        ev.fail(if at == NONE then CV_UNSUP else CV_FAIL);
                         return NO_TY;
                     }
                     ret = at as u64;
@@ -1456,7 +2002,7 @@ fn decide(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set
                         return NO_TY;
                     }
                 }
-                ev.cast_to.as_mut_slice()[fnode - ev.lo] = to;
+                ev.cast_to.as_mut_slice()[c - ev.lo] = to;
                 src = to;
             }
             ret = src as u64;
@@ -1591,7 +2137,7 @@ fn settle(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize
 // `&&` / `||` past the one that decides it are skipped. An operation that would trap at run time
 // (overflow, division by zero, `MIN / -1`, an index past the end) is reported here, stage0's
 // E0203 at it.
-fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize, last: usize) -> u8 {
+rec fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ds: &decls.Decls, ev: &mut Ev, first: usize, last: usize, owner: u32) -> u8 {
     let base = ev.base;
     // rows below `skip` are not evaluated
     let mut skip = first;
@@ -1599,41 +2145,96 @@ fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize,
         if row < skip { continue; }
         let x = row - ev.lo;
         let ty = ev.nty.as_slice()[x];
-        if ty == NO_TY || ev.done.as_slice()[x] { continue; }
+        if ty == NO_TY || ev.done.as_slice()[x] || ev.own.as_slice()[x] != owner { continue; }
         let l = ev.lit.as_slice()[x];
         let k = kind(tree, row);
         let ks = tree.kids.row(row);
         let tt = ty as% u32;
+        let fm = ev.form.as_slice()[x];
         if l == 1 {
             ev.vneg.as_mut_slice()[x] = ev.lneg.as_slice()[x];
             ev.vmag.as_mut_slice()[x] = ev.lmag.as_slice()[x];
         } else if l == 2 {} else if k == K_PRIMARY && tk(t, tree.tok.as_slice()[row]) == terminals.T_L_BRACKET {
-            let pl = ev.pmag.len();
+            // the elements' leaves; a repeat keeps its one element's
+            let pl = cx.consts.pmag.len();
             let rep = ks.len() == 2 && tk(t, tree.tok_end.as_slice()[base + ks[0] as usize]) == terminals.T_SEMI;
             let cnt = if rep then 1usize else ks.len();
             for j in 0..cnt {
                 let c = base + ks[j] as usize - ev.lo;
-                let cn = ev.vneg.as_slice()[c];
-                let cm = ev.vmag.as_slice()[c];
-                ev.pneg.push(cn);
-                ev.pmag.push(cm);
+                let ct = ev.nty.as_slice()[c] as% u32;
+                if !expand(cx, ev, c, ct) { return CV_UNSUP; }
             }
-            let n = if rep then arr_len(&cx.tab, tt) as% u32 else ks.len() as% u32;
+            let n = (cx.consts.pmag.len() - pl) as% u32;
             ev.set_arr(x, pl, n, rep);
-        } else if k == K_POSTFIX {
-            // `a[i]`: an index past the end traps `Bounds` at run time
-            let a = base + ks[0] as usize - ev.lo;
-            let ie = base + ks[1] as usize;
-            let i = ev.vmag.as_slice()[ie - ev.lo];
-            let n = ev.vn.as_slice()[a];
-            if i >= n as u64 {
-                let at = ev.aux.as_slice()[x] as% u32;
-                cx.rep.add(EV_INDEX, ev.it, tree.tok.as_slice()[ie], tree.tok_end.as_slice()[ie] - 1, at, n);
-                return CV_FAIL;
+        } else if fm == F_TUPLE || fm == F_STRUCT {
+            // the parts' leaves in order: tuple elements, struct fields by declaration
+            let pl = cx.consts.pmag.len();
+            let mut at = vec.Vec::<u32>.new();
+            for j in 0..ks.len() {
+                at.push((base + ks[j] as usize - ev.lo) as% u32);
             }
-            let p = ev.vlo.as_slice()[a] as usize + (if ev.vrep.as_slice()[a] then 0usize else i as usize);
-            ev.vneg.as_mut_slice()[x] = ev.pneg.as_slice()[p];
-            ev.vmag.as_mut_slice()[x] = ev.pmag.as_slice()[p];
+            if fm == F_STRUCT {
+                for j in 0..ks.len() {
+                    let c = base + ks[j] as usize - ev.lo;
+                    at.as_mut_slice()[ev.part.as_slice()[c] as usize] = c as% u32;
+                }
+            }
+            for j in 0..at.len() {
+                let c = at.as_slice()[j] as usize;
+                let ct = ev.nty.as_slice()[c] as% u32;
+                if !expand(cx, ev, c, ct) { return CV_UNSUP; }
+            }
+            let n = (cx.consts.pmag.len() - pl) as% u32;
+            ev.set_arr(x, pl, n, false);
+        } else if fm == F_SCOPY {
+            ev.copy_val(x, base + ks[1] as usize - ev.lo);
+        } else if fm == F_CHAIN {
+            // from the head's value, each step in turn: an index past the end traps `Bounds` at
+            // run time
+            let h = base + ks[0] as usize - ev.lo;
+            let mut neg = ev.vneg.as_slice()[h];
+            let mut mag = ev.vmag.as_slice()[h];
+            let mut vl = ev.vlo.as_slice()[h];
+            let mut vn = ev.vn.as_slice()[h];
+            let mut rep = ev.vrep.as_slice()[h];
+            let a = ev.aux.as_slice()[x];
+            let st = (a >> 32) as usize;
+            for s in st..st + (a & 0xffff_ffff) as usize {
+                let e = ev.sp.as_slice()[s];
+                let bt = ev.sty.as_slice()[s];
+                let mut pt = NONE;
+                let mut p: u64 = 0;
+                if e & STEP_PART != 0 {
+                    let (q, off) = part_of(cx, ds, bt, (e & ~STEP_PART) as usize);
+                    pt = q;
+                    p = vl as u64 + off;
+                } else {
+                    // the index evaluated here, after the steps before it
+                    let ie = e as usize + ev.lo;
+                    let r = value(cx, tree, t, ds, ev, ie - tree.size.as_slice()[ie] as usize, ie, row as% u32);
+                    if r != CV_OK { return r; }
+                    let i = ev.vmag.as_slice()[e as usize];
+                    let n = arr_len(&cx.tab, bt);
+                    if i >= n {
+                        cx.rep.add(EV_INDEX, ev.it, tree.tok.as_slice()[ie], tree.tok_end.as_slice()[ie] - 1, bt, n as% u32);
+                        return CV_FAIL;
+                    }
+                    pt = cx.tab.a_of(bt);
+                    p = vl as u64 + (if rep then 0u64 else i * leaves(cx, ds, pt, 0));
+                }
+                if scalar_elem(&cx.tab, pt) {
+                    neg = cx.consts.pneg.as_slice()[p as usize];
+                    mag = cx.consts.pmag.as_slice()[p as usize];
+                    vl = NONE;
+                } else {
+                    vl = p as% u32;
+                    vn = leaves(cx, ds, pt, 0) as% u32;
+                }
+                rep = false;
+            }
+            ev.vneg.as_mut_slice()[x] = neg;
+            ev.vmag.as_mut_slice()[x] = mag;
+            ev.set_arr(x, vl as usize, vn, rep);
         } else if k == K_IF {
             let c = base + ks[0] as usize - ev.lo;
             let arm = if ev.vmag.as_slice()[c] == 1 then ks[1] else ks[2];
@@ -1679,12 +2280,18 @@ fn value(cx: &mut Cx, tree: &ast.Ast, t: &lex.Tokens, ev: &mut Ev, first: usize,
                 ev.vmag.as_mut_slice()[x] = rm;
             }
         } else if k == K_CAST {
+            // each step in turn, its target type kept at its `Type` row
             let c = base + ks[0] as usize - ev.lo;
-            let to = ev.cast_to.as_slice()[x];
-            let op = tk(t, tree.tok.as_slice()[base + ks[1] as usize] - 1);
-            let cn = ev.vneg.as_slice()[c];
-            let cm = ev.vmag.as_slice()[c];
-            let (rn, rm) = if op == terminals.T_AS_PERCENT then wrap(word(cn, cm), cx.tab.is_signed(to), cx.tab.int_bits(to)) else clamp(&cx.tab, to, cn, cm, false);
+            let mut rn = ev.vneg.as_slice()[c];
+            let mut rm = ev.vmag.as_slice()[c];
+            for j in 1..ks.len() {
+                let tn = base + ks[j] as usize;
+                let to = ev.cast_to.as_slice()[tn - ev.lo];
+                let op = tk(t, tree.tok.as_slice()[tn] - 1);
+                let (sn, sm) = if op == terminals.T_AS_PERCENT then wrap(word(rn, rm), cx.tab.is_signed(to), cx.tab.int_bits(to)) else clamp(&cx.tab, to, rn, rm, false);
+                rn = sn;
+                rm = sm;
+            }
             ev.vneg.as_mut_slice()[x] = rn;
             ev.vmag.as_mut_slice()[x] = rm;
         } else if is_chain(k) {

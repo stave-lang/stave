@@ -1,0 +1,41 @@
+//~ CHECK-ONLY
+// A chain of casts in a const-expr is evaluated step by step: each plain `as` may not lose
+// information (E0204 at the first step that can), and `as%` / `as|` wrap or saturate at their
+// own step. A literal operand of the first cast has no type context (E0202).
+struct S<const N: u8> {
+    a: u8,
+}
+
+const W: usize = 300u16 as% u8 as usize;
+
+const N: u8 = 300 as u8; //~ ERROR E0202
+
+const P: usize = 3 as u8 as usize; //~ ERROR E0202
+
+fn narrow(x: [u8; 3u32 as u8 as usize]) -> u32 { //~ ERROR E0204
+    return 0;
+}
+
+fn inner(x: [u8; (3u32 as u8) as u16 as usize]) -> u32 { //~ ERROR E0204
+    return 0;
+}
+
+fn later(x: S<{ 3u8 as u16 as u8 }>) -> u32 { //~ ERROR E0204
+    return 0;
+}
+
+fn untyped(x: [u8; 1 as u8 as usize]) -> u32 { //~ ERROR E0202
+    return 0;
+}
+
+fn wrapped(x: [u8; W]) -> [u8; 44] {
+    return x;
+}
+
+fn saturated(x: [u8; 300u16 as| u8 as u16 as usize]) -> [u8; 255] {
+    return x;
+}
+
+fn main() -> i32 {
+    return 0;
+}
