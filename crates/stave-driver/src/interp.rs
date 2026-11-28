@@ -100,7 +100,7 @@ pub fn run(
     let entry = find(Known::StartEntry)?;
     let trap = find(Known::Trap)?;
     let mut host = BufferHost::new(abi);
-    host.values.insert(stave_ir::intrinsics::Kind::MainAddr, u64::from(stub.0));
+    host.values.insert(stave_ir::intrinsics::Kind::MainAddr, stave_ir::fn_word(stub));
     host.values.insert(stave_ir::intrinsics::Kind::SignalHandlerAddr, 0);
     for (k, v) in files {
         host.files.insert(k.as_bytes().to_vec(), v.clone());

@@ -740,7 +740,7 @@ fn cast_of_fn_values_is_rejected() {
         let k = b.int(5);
         b.ret(Some(k));
     });
-    // `@g as usize` verifies and runs: the interpreter's code address of `@g` is its index
+    // `@g as usize` verifies and runs: the interpreter's code address of `@g` is its code word
     let f = define(&mut m, &[1], "t.f", &[], Some(us), |b, _| {
         let fg = b.func(g);
         let x = b.cast(stave_ir::CastKind::Exact, us, fg);
@@ -748,7 +748,7 @@ fn cast_of_fn_values_is_rejected() {
     });
     assert_eq!(errs(&m), Vec::<String>::new());
     let v = ret_val(run(&m, f, vec![]));
-    assert!(matches!(v, stave_ir::Val::S(x) if x == u64::from(g.0)), "{v:?}");
+    assert!(matches!(v, stave_ir::Val::S(x) if x == stave_ir::fn_word(g)), "{v:?}");
     // a fn value operand
     let mut m2 = m.clone();
     define(&mut m2, &[2], "t.h", &[fnt], Some(us), |b, _| {

@@ -1264,3 +1264,72 @@ fn reserved_intrinsic_name_rejected() {
     });
     assert!(verify_module(&m).is_err());
 }
+
+/// `vec.load_aligned`, `vec.store_aligned`, `vec.store_stream`, and `mem.store_stream` run only
+/// at an address that is a multiple of the size they move; the unaligned forms run anywhere.
+#[test]
+fn aligned_and_streaming_accesses_fault_off_alignment() {
+    // `@t.f(s: &mut [u32 align 16], i)` runs `op` on four lanes at `i`. `None`: a
+    // `mem.store_stream` of a `u32x4` (`vector`) or a `u32` at element `i`. Returns the result
+    // and the address of the slice's allocation.
+    let run = |op: Option<VecOp>, vector: bool, off: u64, i: u64| {
+        let mut m = Module::new();
+        let u = m.types.u32();
+        let sl = m.types.intern(TypeKey::Slice { elem: u, align: Some(16) });
+        let rs = m.types.ref_(true, sl);
+        let us = m.types.usize();
+        let k = vk(&mut m, int(false, 32), 4);
+        let v = m.types.intern(k);
+        let (pu, pv) = (m.types.ptr(true, u), m.types.ptr(true, v));
+        let f = define(&mut m, &[0], "t.f", &[rs, us], None, |b, _| {
+            let (s, i) = (b.param(0).unwrap(), b.param(1).unwrap());
+            let c = b.int(100);
+            match op {
+                Some(o) if !o.is_store() => {
+                    b.op(Op::Vec(o), v, &[s.into(), i.into()]);
+                }
+                Some(o) => {
+                    let x = b.op(Op::Vec(VecOp::Splat), v, &[c]);
+                    b.inst(Op::Vec(o), None, &[s.into(), i.into(), x.into()]);
+                }
+                None => {
+                    let e = b.op(Op::ElemAddr, pu, &[s.into(), i.into()]);
+                    if vector {
+                        let p = b.cast(CastKind::Exact, pv, e);
+                        let x = b.op(Op::Vec(VecOp::Splat), v, &[c]);
+                        b.inst(Op::StoreStream, None, &[p.into(), x.into()]);
+                    } else {
+                        b.inst(Op::StoreStream, None, &[e.into(), c]);
+                    }
+                }
+            }
+            b.ret(None);
+        });
+        let mut it = Interp::new(&m, host(), Config::default()).expect("verify");
+        let a = it.mem.alloc(64, 16).unwrap();
+        (it.run(f, vec![Val::Pair(a + off, 8), Val::S(i)]), a)
+    };
+    let vector = [VecOp::LoadAligned, VecOp::StoreAligned, VecOp::StoreStream].map(|o| (Some(o), true, 16));
+    for (op, vector, need) in vector.into_iter().chain([(None, true, 16), (None, false, 4)]) {
+        for (off, i) in [(0, 0), (0, 4), (16, 0), (4, 0), (8, 4), (2, 0)] {
+            let (o, a) = run(op, vector, off, i);
+            let addr = a + off + 4 * i;
+            let what = format!("{op:?} {vector} +{off} [{i}]: {o:?}");
+            if addr % need == 0 {
+                assert_eq!(o, Ok(Outcome::Return(None)), "{what}");
+            } else {
+                assert!(
+                    matches!(o, Err(stave_ir::InterpError::MisalignedFault { addr: at, align, .. })
+                        if at == addr && align == need),
+                    "{what}"
+                );
+            }
+        }
+    }
+    for op in [VecOp::Load, VecOp::Store] {
+        for off in [2, 4, 8] {
+            let (o, _) = run(Some(op), true, off, 0);
+            assert_eq!(o, Ok(Outcome::Return(None)), "{op:?} +{off}");
+        }
+    }
+}

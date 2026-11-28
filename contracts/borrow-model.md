@@ -719,6 +719,7 @@ What the tracking mode does not see, or sees later than the rules say:
   and two such pointers are never in conflict with each other.
 - **Memory errors.** Out-of-bounds accesses, reads of bytes never written, leaks, and a second
   `free` are the memory checking mode's, not this model's. Neither mode reports a misaligned
-  access, or a read of a slot that a `p.read()` of a Copy type left uninitialized, though both
-  are undefined behaviour (LANG.md §3).
+  plain load or store, or a read of a slot that a `p.read()` of a Copy type left uninitialized,
+  though both are undefined behaviour (LANG.md §3). The interpreter itself, in every mode,
+  faults a misaligned atomic, aligned vector access, or streaming store.
 - **Foreign code.** Accesses made by `extern "C"` code and by the kernel are not seen.

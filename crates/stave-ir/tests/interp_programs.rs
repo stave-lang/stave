@@ -462,3 +462,187 @@ fn verify_failure_blocks_interpretation() {
     assert!(matches!(o, Err(InterpError::Verify(_))));
     assert!(h.is_none());
 }
+
+/// A scalar type of the fn types in the reinterpreting calls below.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Sc {
+    U32,
+    U64,
+    Usize,
+}
+
+/// What a fn value is made of, with the params of its fn `@t.f`: a fn item, or a closure body,
+/// whose last param is its environment.
+#[derive(Clone, Copy)]
+enum Made {
+    Item(&'static [Sc]),
+    Closure(&'static [Sc]),
+}
+
+/// `@t.main` makes a fn value of `@t.f(..) -> u32` (its first param plus its last), stores it,
+/// reads the words back as a `fn(used) -> ret` through a cast pointer, and calls that with ones.
+/// A closure's environment word is 7. Returns the run's result and `@t.f`.
+fn call_as(
+    made: Made,
+    used: &[Sc],
+    ret: Sc,
+    features: stave_target::FeatureSet,
+) -> (Result<Outcome, InterpError>, stave_ir::FuncId) {
+    let mut m = Module::new();
+    let (u32t, u64t, usize_t) = (m.types.u32(), m.types.u64(), m.types.usize());
+    let ty = move |s: Sc| match s {
+        Sc::U32 => u32t,
+        Sc::U64 => u64t,
+        Sc::Usize => usize_t,
+    };
+    let (params, closure) = match made {
+        Made::Item(p) => (p, false),
+        Made::Closure(p) => (p, true),
+    };
+    let ps: Vec<_> = params.iter().map(|&s| ty(s)).collect();
+    let f = define(&mut m, &[1], "t.f", &ps, Some(u32t), |b, _| {
+        let first = b.param(0).unwrap();
+        let last = b.param(params.len() - 1).unwrap();
+        let last = b.cast(stave_ir::CastKind::Wrap, u32t, last);
+        let r = b.binary(Op::Add, u32t, first, last);
+        b.ret(Some(r.into()));
+    });
+    let own = ps[..ps.len() - usize::from(closure)].to_vec();
+    let made_t = m.types.fn_type(own, u32t, stave_target::FeatureSet::EMPTY);
+    let used_params = used.iter().map(|&s| ty(s)).collect();
+    let used_t = m.types.fn_type(used_params, ty(ret), features);
+    let slot_t = m.types.ref_(true, made_t);
+    let read_t = m.types.ptr(false, used_t);
+    let ret_t = ty(ret);
+    let main = define(&mut m, &[2], "t.main", &[], Some(ret_t), |b, _| {
+        let s = b.slot(slot_t);
+        if closure {
+            let env = b.int(7);
+            let fv = b.fn_make(made_t, f, env);
+            b.store(s, fv);
+        } else {
+            b.store(s, Operand::Func(f));
+        }
+        let p = b.cast(stave_ir::CastKind::Exact, read_t, s);
+        let fv = b.load(used_t, p);
+        let args: Vec<Operand> = used.iter().map(|_| b.int(1)).collect();
+        let r = b.call_ind(fv, Some(ret_t), &args).unwrap();
+        b.ret(Some(r.into()));
+    });
+    (interp::run(&m, main, vec![], host(), Config::default()).0, f)
+}
+
+#[test]
+fn fn_value_is_called_only_at_the_params_and_return_it_was_made_at() {
+    use Sc::{U32, U64, Usize};
+    let none = stave_target::FeatureSet::EMPTY;
+    // features are no part of the shape of a fn value
+    let avx2 = stave_target::FeatureSet::of(stave_target::Feature::Avx2);
+    let legal: [(Made, &[Sc], _, u64); 4] = [
+        (Made::Item(&[U32]), &[U32], none, 2),
+        (Made::Item(&[U32]), &[U32], avx2, 2),
+        (Made::Item(&[U32, Usize]), &[U32, Usize], none, 2),
+        (Made::Closure(&[U32, Usize]), &[U32], none, 8),
+    ];
+    for (made, used, features, want) in legal {
+        let (o, _) = call_as(made, used, U32, features);
+        assert_eq!(o, Ok(Outcome::Return(Some(Val::S(want)))), "{used:?}");
+    }
+    let wrong: [(Made, &[Sc], Sc); 6] = [
+        // another param type, same arity
+        (Made::Item(&[U32]), &[U64], U32),
+        // another return type
+        (Made::Item(&[U32]), &[U32], U64),
+        // a param more, a param less
+        (Made::Item(&[U32]), &[U32, U32], U32),
+        (Made::Item(&[U32]), &[], U32),
+        // a fn item with one param more would take the environment word for it
+        (Made::Item(&[U32, Usize]), &[U32], U32),
+        // a closure's environment param is none of its fn type
+        (Made::Closure(&[U32, Usize]), &[U32, Usize], U32),
+    ];
+    for (made, used, ret) in wrong {
+        let (o, f) = call_as(made, used, ret, none);
+        assert!(
+            matches!(o, Err(InterpError::FnSignatureFault { callee, .. }) if callee == f),
+            "{used:?} -> {ret:?}: {o:?}"
+        );
+    }
+}
+
+#[test]
+fn words_not_made_from_a_fn_are_no_fn_value() {
+    // `@t.main` calls the words `[code, 0]` as a `fn() -> u32`; fn 0 is a `fn() -> u32`
+    let call = |code: u64| {
+        let mut m = Module::new();
+        let (u32t, usize_t) = (m.types.u32(), m.types.usize());
+        let fnt = m.types.fn_type(vec![], u32t, stave_target::FeatureSet::EMPTY);
+        let words = m.types.array(usize_t, 2);
+        let slot_t = m.types.ref_(true, words);
+        let read_t = m.types.ptr(false, fnt);
+        define(&mut m, &[1], "t.f", &[], Some(u32t), |b, _| {
+            let k = b.int(5);
+            b.ret(Some(k));
+        });
+        let main = define(&mut m, &[2], "t.main", &[], Some(u32t), |b, _| {
+            let s = b.slot(slot_t);
+            let (c, env) = (b.int(i128::from(code)), b.int(0));
+            let w = b.op(Op::Make, words, &[c, env]);
+            b.store(s, w);
+            let p = b.cast(stave_ir::CastKind::Exact, read_t, s);
+            let fv = b.load(fnt, p);
+            let r = b.call_ind(fv, Some(u32t), &[]).unwrap();
+            b.ret(Some(r.into()));
+        });
+        interp::run(&m, main, vec![], host(), Config::default()).0
+    };
+    let f = stave_ir::FuncId(0);
+    assert_eq!(call(stave_ir::fn_word(f)), Ok(Outcome::Return(Some(Val::S(5)))));
+    // indices of fns, and the code word of a fn the module does not have
+    for code in [0, 1, u64::from(u32::MAX), stave_ir::fn_word(stave_ir::FuncId(99))] {
+        assert_eq!(call(code), Err(InterpError::BadFnValue(code)));
+    }
+}
+
+#[test]
+fn misaligned_atomics_fault() {
+    for (op, extra) in [("load", 0), ("xchg", 1), ("add", 1), ("cas", 2)] {
+        for size in [4u64, 8] {
+            // `@t.f(off)`: the atomic on the word `off` bytes into a zeroed `[u64; 3]`
+            let mut m = Module::new();
+            let (usize_t, u64t) = (m.types.usize(), m.types.u64());
+            let val = if size == 8 { u64t } else { m.types.u32() };
+            let arr = m.types.array(u64t, 3);
+            let slot_t = m.types.ref_(true, arr);
+            let id = m.intrinsic(&format!("atomic_{op}_u{}", size * 8));
+            let f = define(&mut m, &[0], "t.f", &[usize_t], Some(val), |b, _| {
+                let off = b.param(0).unwrap();
+                let s = b.slot(slot_t);
+                let zero = b.int(0);
+                let z = b.op(Op::Make, arr, &[zero, zero, zero]);
+                b.store(s, z);
+                let base = b.cast(stave_ir::CastKind::Exact, usize_t, s);
+                let at = b.binary(Op::Add, usize_t, base, off);
+                let mut args: Vec<Operand> = vec![at.into()];
+                for _ in 0..extra {
+                    args.push(b.int(1));
+                }
+                let r = b.intrinsic(id, Some(val), &args).unwrap();
+                b.ret(Some(r.into()));
+            });
+            for off in [0, 1, 2, 4, 8] {
+                let (o, _) = interp::run(&m, f, vec![Val::S(off)], host(), Config::default());
+                let what = format!("{op} u{} +{off}: {o:?}", size * 8);
+                if off % size == 0 {
+                    assert_eq!(o, Ok(Outcome::Return(Some(Val::S(0)))), "{what}");
+                } else {
+                    assert!(
+                        matches!(o, Err(InterpError::MisalignedFault { align, addr, .. })
+                            if align == size && addr % size == off % size),
+                        "{what}"
+                    );
+                }
+            }
+        }
+    }
+}
