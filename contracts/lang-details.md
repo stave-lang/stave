@@ -543,8 +543,11 @@ and fn ABI are unchanged, and it has no effect (`without`).
 
 - Slice methods of `std.slice` are SIMD inside: regular code, explicit SIMD stays in std, no
   auto-vectorization cliffs.
-- Release builds treat `&mut T` as noalias and `&T` (T `Frozen`) as read-only: borrow rules
-  become free optimizer facts.
+- Borrow rules are free optimizer facts. Planned: release builds treat `&mut T` as noalias and
+  `&T` (T `Frozen`) as read-only; no release pass uses either yet. One fact is used today, in
+  every build: the removal of checks (bounds and contract checks) reads an int field behind a
+  `&` param (T not `UnsafeCell`) as fixed while the fn runs (soundness.md "Removed checks: the
+  first failure").
 
 ## §3 Unspecified results
 

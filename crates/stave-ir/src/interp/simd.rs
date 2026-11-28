@@ -5,7 +5,6 @@ use super::{Interp, InterpError, R, malformed};
 use crate::arith;
 use crate::host::Host;
 use crate::ir::{Body, CastKind, FuncId, Operand, PanicKind, Site};
-use crate::mem::Fault;
 use crate::simd::{self, LaneTy, VecOp};
 use crate::types::TypeId;
 
@@ -103,8 +102,11 @@ impl<H: Host> Interp<'_, H> {
                 let raw = self.mem.read_uint(at, w).map_err(Self::fault(func, site))?;
                 // a mask lane is all zeros or all ones; any other pattern is undefined behaviour
                 if raw != 0 && raw != ones {
-                    return Err(InterpError::Fault {
-                        fault: Fault { addr: at, len: w, write: false },
+                    return Err(InterpError::MaskLaneFault {
+                        addr: at,
+                        lane: k as u32,
+                        bits,
+                        value: raw,
                         func,
                         site,
                     });

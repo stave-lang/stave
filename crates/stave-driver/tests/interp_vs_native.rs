@@ -416,7 +416,7 @@ fn simd_programs_run_in_the_interpreter() {
 }
 
 /// A mask loaded from memory with a lane that is neither all zeros nor all ones is undefined
-/// behaviour: the interpreter reports a fault at the load.
+/// behaviour: the interpreter reports a fault at the load that names the lane.
 #[test]
 fn malformed_mask_load_is_an_interpreter_fault() {
     let p = repo().join("tests/conformance/simd/ub_mask_bits.stv");
@@ -424,10 +424,118 @@ fn malformed_mask_load_is_an_interpreter_fault() {
         let out = lower_only(&p, target);
         let m = out.for_interp().unwrap();
         match interp::run(m, "main.main", target, &[], &[], Limits::default()) {
-            Err(e) => assert!(e.contains("Fault"), "{target}: {e}"),
+            Err(e) => assert!(
+                e.contains("MaskLaneFault") && e.contains("lane: 2, bits: 32, value: 1,"),
+                "{target}: {e}"
+            ),
             Ok(r) => panic!("{target}: ran to the end\n{}", show(&r.ran)),
         }
     }
+}
+
+/// (lane bits, lanes): a sample of the vectors that `load_masked` reads lane by lane on some
+/// x86-64 level (128 bits or less before AVX; 8- and 16-bit lanes at every level below the v4
+/// set).
+const MASKED_LOAD_SHAPES: &[(u32, u32)] =
+    &[(8, 2), (8, 16), (8, 32), (16, 8), (16, 16), (32, 2), (32, 4), (64, 2)];
+
+/// A program that loads through a mask whose lane 0 is all ones, whose last lane is `bad`, and
+/// whose other lanes are zero: first from a slice that holds every lane, then from a slice of one
+/// element. Element 0 is 7, the others 99.
+fn masked_load_source(bits: u32, n: u32, bad: u64) -> String {
+    let (t, ones, last) = (format!("u{bits}"), u64::MAX >> (64 - bits), n - 1);
+    format!(
+        r#"import std.io;
+
+fn show(v: {t}x{n}) {{
+    let mut out: [{t}; {n}] = [0; {n}];
+    v.store(&mut out, 0);
+    for k in 0..out.len() {{
+        let x = out[k];
+        io.print(f" {{x}}");
+    }}
+    io.print("\n");
+}}
+
+fn main() -> i32 {{
+    let mut xs: [{t}; {n}] = [99; {n}];
+    xs[0] = 7;
+    let mut raw: [{t}; {n}] = [0; {n}];
+    raw[0] = {ones};
+    raw[{last}] = {bad};
+    let p = &raw as *const [{t}; {n}] as *const mask{bits}x{n};
+    let m = unsafe("the last lane is neither all zeros nor all ones: undefined behaviour") *p;
+    show({t}x{n}.load_masked(&xs, 0, m));
+    show({t}x{n}.load_masked(&xs[0..1], 0, m));
+    return 0;
+}}
+"#
+    )
+}
+
+/// Which bit of an ill-formed mask lane a backend tests is open, but `load_masked` bounds-checks
+/// and reads the same lanes, so it never reads past its slice. The interpreter faults at the mask
+/// load. A native build takes the lane as active (the load of the short slice traps `Bounds`) or
+/// as inactive (neither load reads it).
+#[test]
+fn malformed_mask_load_masked_reads_only_checked_lanes() {
+    struct Case {
+        name: String,
+        path: PathBuf,
+        vector_bits: u32,
+        /// The accepted (exit status, stdout) pairs.
+        accepted: Vec<(i32, String)>,
+    }
+    let tmp = TempDir::new("ivn-mask").unwrap();
+    // `u32x4`, lane 1 = 1, a slice of one element: the exit status is the sum of the lanes read
+    let probe = repo().join("tests/conformance/simd/ub_mask_load_masked.stv");
+    let mut cases = vec![Case {
+        name: "ub_mask_load_masked".into(),
+        path: probe,
+        vector_bits: 128,
+        accepted: vec![(10, String::new()), (101, String::new())],
+    }];
+    for &(bits, n) in MASKED_LOAD_SHAPES {
+        // the lowest bit alone, and the sign bit alone (the same pattern kind in 8-bit lanes)
+        for bad in [1u64, 1 << (bits - 1)] {
+            let name = format!("mask{bits}x{n}_{bad:#x}");
+            let path = tmp.path().join(format!("{name}.stv"));
+            std::fs::write(&path, masked_load_source(bits, n, bad)).unwrap();
+            let line = |last: u32| format!(" 7{} {last}\n", " 0".repeat(n as usize - 2));
+            let accepted = vec![(101, line(99)), (0, line(0).repeat(2))];
+            cases.push(Case { name, path, vector_bits: bits * n, accepted });
+        }
+    }
+    let mut failures = Vec::new();
+    for target in ["x86_64-linux", "x86_64-linux-v3", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
+        let how = runner(target);
+        let width = if target.to_string() == "x86_64-linux-v3" { 256 } else { 128 };
+        for c in cases.iter().filter(|c| c.vector_bits <= width) {
+            let name = &c.name;
+            let out = lower_only(&c.path, target);
+            match interp::run(out.for_interp().unwrap(), "main.main", target, &[], &[], Limits::default()) {
+                Err(e) if e.contains("MaskLaneFault") => {}
+                Err(e) => failures.push(format!("{name} [{target}]: interpreter: {e}")),
+                Ok(r) => failures.push(format!("{name} [{target}]: interpreter ran on\n{}", show(&r.ran))),
+            }
+            let Some(runner) = how else { continue };
+            for (release, mode) in [(false, "debug"), (true, "release")] {
+                let built = build(&c.path, target, release);
+                let bin = tmp.path().join(format!("{name}-{target}-{mode}"));
+                built.image.as_ref().unwrap().write_file(&bin).unwrap();
+                let spec = RunSpec { args: &[], runner, cwd: Some(tmp.path()), inherit: false };
+                let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
+                let trap = String::from_utf8_lossy(&got.stderr).starts_with("panic: Bounds ");
+                let ok = c.accepted.iter().any(|(exit, stdout)| {
+                    got.exit == *exit && got.stdout == stdout.as_bytes() && trap == (*exit == 101)
+                });
+                if !ok {
+                    failures.push(format!("{name} [{target} {mode}]\n{}", show(&got)));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
 }
 
 /// The check-only SIMD positives lower to verified checked IR on both arches.

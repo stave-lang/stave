@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// A mask lane that is neither all zeros nor all ones is undefined behaviour, and a backend may
+// test any bit of it. `load_masked` bounds-checks and reads the same lanes: lane 1 of the mask
+// holds 1 and the slice has one element, so native code traps `Bounds` or reads lane 0 alone,
+// and the IR interpreter stops with a fault at the mask load
+// (crates/stave-driver/tests/interp_vs_native.rs).
+fn main() -> i32 {
+    let xs: [u32; 4] = [10, 77, 0, 0];
+    let raw: [u32; 4] = [4294967295, 1, 0, 0];
+    let p = &raw as *const [u32; 4] as *const mask32x4;
+    let m = unsafe("lane 1 is neither all zeros nor all ones: undefined behaviour") *p;
+    let v = u32x4.load_masked(&xs[0..1], 0, m);
+    return v.reduce_add_wrap() as% i32;
+}
