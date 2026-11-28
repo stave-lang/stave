@@ -111,8 +111,9 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
     `maskWxN.all()`, `maskWxN.none()`.
 - Generic spelling: `vec<T, N>` / `mask<W, N>` is E0609 (write `f32x8` / `mask32x8`); a generic lane
   type T is planned (case `generic-lane` today).
-- `Txn` / `maskWxn` (sizeless) need `needs(sve)` in v1 (E0710). Restrictions are
-  E0711–E0716 (see diagnostic-codes.md).
+- `Txn` / `maskWxn` (sizeless) need a scalable-vector feature of the target, in v1 `needs(sve)`
+  (E0710). The lane count is fixed per run for the fn's feature set; two feature sets of one
+  process may have different counts. Restrictions are E0711–E0716 (see diagnostic-codes.md).
 - **ABI rule:** a vector type in a signature (fn, fn type, closure) requires `needs` covering
   its width, the target baseline counting (E0703). Every function and `dispatch` arm of one signature has one ABI. `extern "C"`
   signatures may not contain vectors (E0804).

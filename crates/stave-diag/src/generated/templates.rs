@@ -4309,7 +4309,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0710",
         severity: Severity::Error,
         area: "features",
-        rule: "sizeless vector used without `needs(sve)` (planned)",
+        rule: "sizeless vector used without a scalable-vector feature of the target (v1: `needs(sve)`) (planned)",
         retired: false,
         located: true,
         holes: &[
