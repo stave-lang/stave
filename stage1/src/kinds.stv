@@ -102,7 +102,7 @@ fn impl_methods(ds: &decls.Decls) -> (vec.Vec<u64>, vec.Vec<u32>) {
     return (sk, si);
 }
 
-fn real(t: u32) -> bool {
+pub fn real(t: u32) -> bool {
     return t != types.ERR && t != layout.TALL && t != NONE;
 }
 

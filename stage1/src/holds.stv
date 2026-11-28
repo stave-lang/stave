@@ -1,0 +1,1285 @@
+// Types that hold themselves by value (E0423), from the signatures alone.
+//
+// Struct and enum cycles. The parts held by value (struct fields and enum payloads after
+// substitution; array, range, vector, and tuple elements) form a graph over the types the
+// declarations write: per declaration of an item that parsed, in source order, a fn's params and
+// return, a struct's or enum's own type (its params as args, used or not) and field types, an
+// alias target, an impl self type, a const's or static's type; closed over components and
+// fields. Its strongly connected components with a cycle are found by Tarjan's algorithm on
+// explicit stacks, in the order of stage0's depth walk: per root, a depth-first walk over parts,
+// the components of each type it leaves queued last in, first out (none below a type deeper than
+// the limit that reaches no cycle: nothing is measured there). That order only decides between
+// components reported at one declaration.
+//
+// A component is reported at the first declaration (by name span) of an instance in it with a
+// field that writes a type of it (the field type as written, through tuple, array, and range
+// elements and type arguments), else at the first with an instance in it; the label at that
+// field (the first that writes, else the first whose type is in the component). Components are
+// taken in that order, each re-split on its own members with the fields cut that earlier reports
+// put on their cycles (every field of the reported declaration whose type is in the reported
+// sub-component, at each of its instances there): one with no cycle left is the same cycle at
+// other args and is not reported, one with a cycle left is reported on what is left. Each
+// component is handled once: the cost is linear in the parts graph, plus, per member, the
+// written parts of its declaration's fields.
+//
+// Alias cycles (case `alias`), as stage0 meets them while it builds signatures on demand: every
+// decl in decl order is built (an explicit stack of actions stands for stage0's recursion), a
+// signature lowering what it writes in source order (a fn type's return before its params). A
+// written alias or an evaluated const is built first; a struct, enum, or trait has its generics
+// lowered; a static is no const operand; a const initializer is evaluated under a valid type
+// and stops at its first error; `size_of::<T>()` / `align_of::<T>()` lays out T, building each
+// struct or enum it meets, and stops at the first part without a layout. Reaching an alias whose
+// target is being lowered closes a cycle: unless that alias is on one reported before, it is
+// reported once, at the first of the aliases being lowered from that one on, by name span.
+import ast;
+import decls;
+import diag;
+import diag_kinds;
+import consteval;
+import diag_tc;
+import dump;
+import generated.node_kinds;
+import generated.terminals;
+import intern;
+import items;
+import kinds;
+import layout;
+import lex;
+import modules;
+import resolve;
+import sigs;
+import source;
+import tc_rows;
+import ir.types;
+import prims.col;
+import prims.ragged;
+import prims.search;
+import prims.sort;
+import std.idx;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = idx.NONE;
+const ERR: u32 = types.ERR;
+const TALL: u32 = layout.TALL;
+const MAX_DEPTH: u32 = layout.MAX_DEPTH;
+
+// The depth walk: per type its state, the open types, and a frame per type being measured.
+struct Walk {
+    seen: vec.Vec<bool>,
+    // per type: its depth once measured (NONE before), whether it reaches a by-value cycle
+    dep: vec.Vec<u32>,
+    cyc: vec.Vec<bool>,
+    active: vec.Vec<bool>,
+    open: vec.Vec<bool>,
+    index: vec.Vec<u32>,
+    next_index: u32,
+    // the measure running met a type in progress or one that reaches a cycle
+    met: bool,
+    queue: vec.Vec<u32>,
+    // the open types, in preorder
+    stack: vec.Vec<u32>,
+    // per frame: the type, its depth so far, the outer `met`, its parts `parts[lo..hi]` and the
+    // next one, its preorder number and low link, whether one of its parts is itself
+    f_t: vec.Vec<u32>,
+    f_d: vec.Vec<u32>,
+    f_outer: vec.Vec<bool>,
+    f_lo: vec.Vec<u32>,
+    f_hi: vec.Vec<u32>,
+    f_next: vec.Vec<u32>,
+    f_index: vec.Vec<u32>,
+    f_low: vec.Vec<u32>,
+    f_self: vec.Vec<bool>,
+    parts: vec.Vec<u32>,
+    kids: vec.Vec<u32>,
+    // the components with a cycle as they close, members in preorder
+    comps: ragged.Ragged<u32>,
+}
+
+fn new_walk() -> Walk {
+    return Walk.{
+        seen: vec.Vec::<bool>.new(),
+        dep: vec.Vec::<u32>.new(),
+        cyc: vec.Vec::<bool>.new(),
+        active: vec.Vec::<bool>.new(),
+        open: vec.Vec::<bool>.new(),
+        index: vec.Vec::<u32>.new(),
+        next_index: 0,
+        met: false,
+        queue: vec.Vec::<u32>.new(),
+        stack: vec.Vec::<u32>.new(),
+        f_t: vec.Vec::<u32>.new(),
+        f_d: vec.Vec::<u32>.new(),
+        f_outer: vec.Vec::<bool>.new(),
+        f_lo: vec.Vec::<u32>.new(),
+        f_hi: vec.Vec::<u32>.new(),
+        f_next: vec.Vec::<u32>.new(),
+        f_index: vec.Vec::<u32>.new(),
+        f_low: vec.Vec::<u32>.new(),
+        f_self: vec.Vec::<bool>.new(),
+        parts: vec.Vec::<u32>.new(),
+        kids: vec.Vec::<u32>.new(),
+        comps: ragged.Ragged::<u32>.new(),
+    };
+}
+
+impl Walk {
+    fn grow(&mut self, n: usize) {
+        while self.seen.len() < n {
+            self.seen.push(false);
+            self.dep.push(NONE);
+            self.cyc.push(false);
+            self.active.push(false);
+            self.open.push(false);
+            self.index.push(NONE);
+        }
+    }
+
+    // The top frame's type holds a part of depth pd.
+    fn add_part(&mut self, pd: u32) {
+        let top = self.f_t.len() - 1;
+        let up = if pd >= NONE - 1 then pd else pd + 1;
+        if up > self.f_d.as_slice()[top] { self.f_d.as_mut_slice()[top] = up; }
+    }
+
+    fn pop_frame(&mut self) {
+        let n = self.f_t.len() - 1;
+        self.f_t.truncate(n);
+        self.f_d.truncate(n);
+        self.f_outer.truncate(n);
+        self.f_lo.truncate(n);
+        self.f_hi.truncate(n);
+        self.f_next.truncate(n);
+        self.f_index.truncate(n);
+        self.f_low.truncate(n);
+        self.f_self.truncate(n);
+    }
+}
+
+// Starts measuring t: its depth when known without its parts, else NONE and a frame that
+// measures them (t's fields made).
+fn enter(w: &mut Walk, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, t: u32) -> u32 {
+    w.grow(tab.len());
+    let i = t as usize;
+    let known = w.dep.as_slice()[i];
+    if known != NONE {
+        if w.cyc.as_slice()[i] { w.met = true; }
+        return known;
+    }
+    let h = tab.height.as_slice()[i];
+    if w.active.as_slice()[i] {
+        w.met = true;
+        return h;
+    }
+    w.active.as_mut_slice()[i] = true;
+    let outer = w.met;
+    w.met = false;
+    let mut d = h;
+    let lo = w.parts.len();
+    let tag = tab.tag_of(t);
+    if tag == types.TK_ARRAY || tag == types.TK_RANGE || tag == types.TK_VECTOR {
+        w.parts.push(tab.a_of(t));
+    } else if tag == types.TK_TUPLE {
+        w.parts.extend_from_slice(tab.x(t));
+    } else if tag == types.TK_ADT && sh.kind_of(tab.a_of(t)) != layout.SK_NONE {
+        pa.make(tab, sh, t);
+        let fs = pa.fields(t);
+        for k in 0..fs.len() {
+            // a field taller than the table holds makes its holder too deep
+            if fs[k] == TALL {
+                d = MAX_DEPTH + 1;
+            } else {
+                w.parts.push(fs[k]);
+            }
+        }
+        w.grow(tab.len());
+    }
+    let ix = w.next_index;
+    w.next_index = ix + 1;
+    w.index.as_mut_slice()[i] = ix;
+    w.open.as_mut_slice()[i] = true;
+    w.stack.push(t);
+    w.f_t.push(t);
+    w.f_d.push(d);
+    w.f_outer.push(outer);
+    w.f_lo.push(lo as% u32);
+    w.f_hi.push(w.parts.len() as% u32);
+    w.f_next.push(lo as% u32);
+    w.f_index.push(ix);
+    w.f_low.push(ix);
+    w.f_self.push(false);
+    return NONE;
+}
+
+// Ends the measure of t once its parts are measured: closes its component if it roots one,
+// records its depth and whether it reaches a cycle, and queues its components unless it is too
+// deep without reaching a cycle.
+fn leave(w: &mut Walk, tab: &types.Table, t: u32, d: u32, outer: bool, ix: u32, low: u32, self_part: bool) {
+    let i = t as usize;
+    w.active.as_mut_slice()[i] = false;
+    if low == ix {
+        let mut at = w.stack.len();
+        while at > 0 {
+            at = at - 1;
+            if w.stack.as_slice()[at] == t { break; }
+        }
+        let n = w.stack.len() - at;
+        for k in at..w.stack.len() {
+            let m = w.stack.as_slice()[k] as usize;
+            w.open.as_mut_slice()[m] = false;
+        }
+        if self_part || n > 1 {
+            for k in at..w.stack.len() {
+                let m = w.stack.as_slice()[k];
+                w.comps.push(m);
+            }
+            w.comps.end_row();
+        }
+        w.stack.truncate(at);
+    }
+    w.dep.as_mut_slice()[i] = d;
+    let c = w.met;
+    if c { w.cyc.as_mut_slice()[i] = true; }
+    w.met = c || outer;
+    if d > MAX_DEPTH && !c { return; }
+    tab.kids(t, &mut w.kids);
+    for k in 0..w.kids.len() {
+        let x = w.kids.as_slice()[k];
+        if !w.seen.as_slice()[x as usize] { w.queue.push(x); }
+    }
+}
+
+// The depth-first walk over parts from u.
+fn measure(w: &mut Walk, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, u: u32) {
+    if enter(w, tab, sh, pa, u) != NONE { return; }
+    loop {
+        let top = w.f_t.len() - 1;
+        let nx = w.f_next.as_slice()[top];
+        if nx < w.f_hi.as_slice()[top] {
+            w.f_next.as_mut_slice()[top] = nx + 1;
+            let p = w.parts.as_slice()[nx as usize];
+            // a field of the error type is one level deep
+            if p == ERR {
+                w.add_part(1);
+                continue;
+            }
+            if w.open.as_slice()[p as usize] {
+                let x = w.index.as_slice()[p as usize];
+                if x < w.f_low.as_slice()[top] { w.f_low.as_mut_slice()[top] = x; }
+                if p == w.f_t.as_slice()[top] { w.f_self.as_mut_slice()[top] = true; }
+            }
+            let pd = enter(w, tab, sh, pa, p);
+            if pd != NONE { w.add_part(pd); }
+            continue;
+        }
+        let t = w.f_t.as_slice()[top];
+        let d = w.f_d.as_slice()[top];
+        let outer = w.f_outer.as_slice()[top];
+        let ix = w.f_index.as_slice()[top];
+        let low = w.f_low.as_slice()[top];
+        let self_part = w.f_self.as_slice()[top];
+        let lo = w.f_lo.as_slice()[top] as usize;
+        w.pop_frame();
+        w.parts.truncate(lo);
+        leave(w, tab, t, d, outer, ix, low, self_part);
+        if w.f_t.len() == 0 { return; }
+        let up = w.f_t.len() - 1;
+        if low < w.f_low.as_slice()[up] { w.f_low.as_mut_slice()[up] = low; }
+        w.add_part(d);
+    }
+}
+
+// Measures root r and everything it reaches.
+fn check_root(w: &mut Walk, tab: &mut types.Table, sh: &layout.Shapes, pa: &mut layout.Parts, r: u32) {
+    w.queue.push(r);
+    while w.queue.len() > 0 {
+        let u = w.queue.as_slice()[w.queue.len() - 1];
+        w.queue.truncate(w.queue.len() - 1);
+        w.grow(tab.len());
+        if w.seen.as_slice()[u as usize] { continue; }
+        w.seen.as_mut_slice()[u as usize] = true;
+        measure(w, tab, sh, pa, u);
+    }
+}
+
+// The type of struct or enum d with its own params as args.
+fn own_type(tab: &mut types.Table, sg: &sigs.Sigs, d: u32, args: &mut vec.Vec<u32>) -> u32 {
+    let lo = sg.cx.gens.lo.as_slice()[d as usize] as usize;
+    let hi = sg.cx.gens.lo.as_slice()[d as usize + 1] as usize;
+    args.clear();
+    for r in lo..hi {
+        args.push(if sg.cx.gens.is_const.as_slice()[r] then NONE else tab.key(types.TK_PARAM, (r - lo) as% u32, 0));
+    }
+    tab.begin();
+    for k in 0..args.len() {
+        let pt = args.as_slice()[k];
+        if pt == NONE {
+            tab.push_garg(types.GA_PARAM, k as% u32, 0);
+        } else {
+            tab.push_garg(types.GA_TYPE, pt, 0);
+        }
+    }
+    return tab.intern(types.TK_ADT, d, 0);
+}
+
+// Whether decl d is a declaration of an item that parsed.
+fn parsed(ds: &decls.Decls, tree: &ast.Ast, d: usize) -> bool {
+    let it = ds.item.as_slice()[d];
+    return it != NONE && ds.module.as_slice()[d] != NONE && tree.ok(it as usize);
+}
+
+// The roots of the walk, in the order of their spans (module docs).
+fn roots(tab: &mut types.Table, sg: &sigs.Sigs, sh: &layout.Shapes, ds: &decls.Decls, md: &modules.Modules, tree: &ast.Ast) -> vec.Vec<u32> {
+    let mut keys = vec.Vec::<u64>.new();
+    let mut ids = vec.Vec::<u32>.new();
+    for d in 0..ds.decls() {
+        let k = ds.kind.as_slice()[d];
+        let root = dump.is_fn(k) || k == decls.DK_STRUCT || k == decls.DK_ENUM || k == decls.DK_TYPE_ALIAS || k == decls.DK_IMPL || k == decls.DK_CONST || k == decls.DK_STATIC;
+        if !root || !parsed(ds, tree, d) { continue; }
+        let f = md.mod_file.as_slice()[ds.module.as_slice()[d] as usize];
+        keys.push(search.pair(f, ds.off.as_slice()[d]));
+        ids.push(d as% u32);
+    }
+    let perm = sort.sort_perm(keys.as_slice());
+    let mut out = vec.Vec::<u32>.new();
+    let mut args = vec.Vec::<u32>.new();
+    for j in 0..perm.len() {
+        let d = ids.as_slice()[perm.as_slice()[j] as usize];
+        let du = d as usize;
+        let k = ds.kind.as_slice()[du];
+        if dump.is_fn(k) {
+            if du < sg.params.rows() { out.extend_from_slice(sg.params.row(du)); }
+            out.push(sg.cx.ty.as_slice()[du]);
+        } else if k == decls.DK_STRUCT || k == decls.DK_ENUM {
+            out.push(own_type(tab, sg, d, &mut args));
+            let vlo = sh.v_lo.as_slice()[du] as usize;
+            let vhi = sh.v_lo.as_slice()[du + 1] as usize;
+            for v in vlo..vhi {
+                out.extend_from_slice(sh.fields.row(v));
+            }
+        } else {
+            out.push(sg.cx.ty.as_slice()[du]);
+        }
+    }
+    return out;
+}
+
+// Visit stamps over the types, for the written parts of one field at a time.
+struct Marks {
+    stamp: vec.Vec<u32>,
+    epoch: u32,
+    stack: vec.Vec<u32>,
+    kids: vec.Vec<u32>,
+}
+
+// Whether the field type ft as written names a type of sub-component s: the field type, then
+// through tuple, array, and range elements and type arguments (not behind a pointer, reference,
+// slice, or fn type).
+fn names(tab: &types.Table, ft: u32, sub: &[u32], s: u32, mk: &mut Marks) -> bool {
+    if ft == ERR || ft == NONE { return false; }
+    mk.epoch = mk.epoch + 1;
+    mk.stack.clear();
+    mk.stack.push(ft);
+    while mk.stack.len() > 0 {
+        let x = mk.stack.as_slice()[mk.stack.len() - 1];
+        mk.stack.truncate(mk.stack.len() - 1);
+        let xi = x as usize;
+        if mk.stamp.as_slice()[xi] == mk.epoch { continue; }
+        mk.stamp.as_mut_slice()[xi] = mk.epoch;
+        if sub[xi] == s { return true; }
+        let tag = tab.tag_of(x);
+        if tag == types.TK_ARRAY || tag == types.TK_RANGE {
+            mk.stack.push(tab.a_of(x));
+        } else if tag == types.TK_TUPLE || tag == types.TK_ADT {
+            tab.kids(x, &mut mk.kids);
+            mk.stack.extend_from_slice(mk.kids.as_slice());
+        }
+    }
+    return false;
+}
+
+// The position of decl d's first field in the flat field columns of `sh`.
+fn field_base(sh: &layout.Shapes, d: u32) -> usize {
+    return sh.fields.start(sh.v_lo.as_slice()[d as usize] as usize);
+}
+
+// A report place: (writes, file, start, size, decl) ordered with a writing field first.
+fn before(a: (bool, u32, u32, u32, u32), b: (bool, u32, u32, u32, u32)) -> bool {
+    let (aw, af, as_, az, ad) = a;
+    let (bw, bf, bs, bz, bd) = b;
+    if aw != bw { return aw; }
+    if af != bf { return af < bf; }
+    if as_ != bs { return as_ < bs; }
+    if az != bz { return az < bz; }
+    return ad < bd;
+}
+
+// The declaration to report a component at (module docs) among its members: (decl or NONE, the
+// field's flat index or NONE, whether that field writes a type of the component, the
+// sub-component). `sub` numbers the sub-components of the members (NONE: on no cycle); a field
+// counts if it is not cut and its type is in its holder's sub-component.
+fn pick(tab: &types.Table, sh: &layout.Shapes, pa: &layout.Parts, ds: &decls.Decls, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, members: &[u32], sub: &[u32], cut: &[bool], mk: &mut Marks) -> (u32, u32, bool, u32) {
+    let mut best = (false, 0u32, 0u32, 0u32, NONE);
+    let mut b_field = NONE;
+    let mut b_sub = NONE;
+    for j in 0..members.len() {
+        let m = members[j];
+        let s = sub[m as usize];
+        if s == NONE || tab.tag_of(m) != types.TK_ADT { continue; }
+        let def = tab.a_of(m);
+        if sh.kind_of(def) == layout.SK_NONE { continue; }
+        let fs = pa.fields(m);
+        let mut writes = false;
+        let mut field = NONE;
+        if fs.len() > 0 {
+            let base = field_base(sh, def);
+            for k in 0..fs.len() {
+                let st = fs[k];
+                if cut[base + k] || !kinds.real(st) || sub[st as usize] != s { continue; }
+                let named = names(tab, sh.fields.data()[base + k], sub, s, mk);
+                if field == NONE || (named && !writes) {
+                    field = k as% u32;
+                    writes = writes || named;
+                }
+                if writes { break; }
+            }
+        }
+        let (nf, ns, nz) = decls.span(ds, md, lx, set, t, def);
+        let here = (writes, nf, ns, nz, def);
+        let (_, _, _, _, bd) = best;
+        if bd == NONE || before(here, best) {
+            best = here;
+            b_field = field;
+            b_sub = s;
+        }
+    }
+    let (bw, _, _, _, bd) = best;
+    return (bd, b_field, bw, b_sub);
+}
+
+// The cyclic strongly connected components of a graph on 0..n (edges of v:
+// `dst[lo[v]..lo[v + 1]]`): per node the number of its component if that has a cycle (two nodes
+// or more, or an edge to itself), else NONE. Tarjan's algorithm on explicit stacks.
+fn cyclic_sccs(n: usize, lo: &[u32], dst: &[u32]) -> vec.Vec<u32> {
+    let mut index = col.filled(n, NONE);
+    let mut low = col.filled(n, 0u32);
+    let mut on = col.filled(n, false);
+    let mut out = col.filled(n, NONE);
+    let mut open = vec.Vec::<u32>.new();
+    let mut fv = vec.Vec::<u32>.new();
+    let mut fe = vec.Vec::<u32>.new();
+    let mut next: u32 = 0;
+    let mut comps: u32 = 0;
+    for s in 0..n {
+        if index.as_slice()[s] != NONE { continue; }
+        index.as_mut_slice()[s] = next;
+        low.as_mut_slice()[s] = next;
+        next = next + 1;
+        open.push(s as% u32);
+        on.as_mut_slice()[s] = true;
+        fv.push(s as% u32);
+        fe.push(lo[s]);
+        while fv.len() > 0 {
+            let top = fv.len() - 1;
+            let v = fv.as_slice()[top] as usize;
+            let e = fe.as_slice()[top];
+            if e < lo[v + 1] {
+                fe.as_mut_slice()[top] = e + 1;
+                let u = dst[e as usize] as usize;
+                if index.as_slice()[u] == NONE {
+                    index.as_mut_slice()[u] = next;
+                    low.as_mut_slice()[u] = next;
+                    next = next + 1;
+                    open.push(u as% u32);
+                    on.as_mut_slice()[u] = true;
+                    fv.push(u as% u32);
+                    fe.push(lo[u]);
+                } else if on.as_slice()[u] && index.as_slice()[u] < low.as_slice()[v] {
+                    low.as_mut_slice()[v] = index.as_slice()[u];
+                }
+                continue;
+            }
+            fv.truncate(top);
+            fe.truncate(top);
+            if top > 0 {
+                let p = fv.as_slice()[top - 1] as usize;
+                let lv = low.as_slice()[v];
+                if lv < low.as_slice()[p] { low.as_mut_slice()[p] = lv; }
+            }
+            if low.as_slice()[v] != index.as_slice()[v] { continue; }
+            let mut at = open.len();
+            while at > 0 {
+                at = at - 1;
+                if open.as_slice()[at] as usize == v { break; }
+            }
+            let mut cycle = open.len() - at > 1;
+            for x in lo[v] as usize..lo[v + 1] as usize {
+                if dst[x] as usize == v { cycle = true; }
+            }
+            for k in at..open.len() {
+                let x = open.as_slice()[k] as usize;
+                on.as_mut_slice()[x] = false;
+                if cycle { out.as_mut_slice()[x] = comps; }
+            }
+            if cycle { comps = comps + 1; }
+            open.truncate(at);
+        }
+    }
+    return out;
+}
+
+// perm reordered stably by keys[perm[j]].
+fn then_by(perm: &[u32], keys: &[u64]) -> vec.Vec<u32> {
+    let mut ks = vec.Vec::<u64>.with_capacity(perm.len());
+    for j in 0..perm.len() {
+        ks.push(keys[perm[j] as usize]);
+    }
+    let p = sort.sort_perm(ks.as_slice());
+    let mut out = vec.Vec::<u32>.with_capacity(perm.len());
+    for j in 0..p.len() {
+        out.push(perm[p.as_slice()[j] as usize]);
+    }
+    return out;
+}
+
+// The span of flat field k of struct or enum def: a record field's name, a payload's type.
+fn field_span(ds: &decls.Decls, md: &modules.Modules, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, params: &ragged.Ragged<u32>, keys: &[u64], ids: &[u32], def: u32, k: u32) -> (u32, u32, u32) {
+    let (lo, hi) = layout.run_of(keys, def);
+    let mut at: u32 = 0;
+    for j in lo..hi {
+        let e = ids[j];
+        let ek = ds.kind.as_slice()[e as usize];
+        if ek == decls.DK_FIELD {
+            if at == k { return decls.span(ds, md, lx, set, t, e); }
+            at = at + 1;
+        } else if ek == decls.DK_VARIANT && ds.flags.as_slice()[e as usize] & decls.F_TUPLE != 0 {
+            let n = if (e as usize) < params.rows() then params.row(e as usize).len() as% u32 else 0u32;
+            if k < at + n { return diag_tc.node_span(tree, lx, set, t, diag_kinds.payload_type(tree, ds, e, (k - at) as usize)); }
+            at = at + n;
+        } else if ek == decls.DK_VARIANT {
+            let (a, b) = layout.run_of(keys, e);
+            for x in a..b {
+                let f = ids[x];
+                if ds.kind.as_slice()[f as usize] != decls.DK_FIELD { continue; }
+                if at == k { return decls.span(ds, md, lx, set, t, f); }
+                at = at + 1;
+            }
+        }
+    }
+    return decls.span(ds, md, lx, set, t, def);
+}
+
+// E0423 for every struct or enum cycle (module docs). The type table grows (own types, fields
+// after substitution) and is put back.
+pub fn holds_itself(d: &mut diag.Diags, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast) {
+    let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());
+    holds_in(d, &mut tab, sg, ds, md, nm, lx, set, t, tree);
+    sg.cx.tab = tab;
+}
+
+fn holds_in(d: &mut diag.Diags, tab: &mut types.Table, sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast) {
+    let nopend = col.filled(ds.decls(), false);
+    let sh = layout.shapes(ds, sg.cx.ty.as_slice(), &sg.params, nopend.as_slice());
+    let mut pa = layout.Parts.new();
+    let rs = roots(tab, sg, &sh, ds, md, tree);
+    let mut w = new_walk();
+    for j in 0..rs.len() {
+        let r = rs.as_slice()[j];
+        if kinds.real(r) { check_root(&mut w, tab, &sh, &mut pa, r); }
+    }
+    let nc = w.comps.rows();
+    if nc == 0 { return; }
+    let n = tab.len();
+    let mut sub = col.filled(n, NONE);
+    let mut pos = col.filled(n, NONE);
+    let mut cut = col.filled(sh.fields.data().len(), false);
+    let mut mk = Marks.{ stamp: col.filled(n, 0u32), epoch: 0, stack: vec.Vec::<u32>.new(), kids: vec.Vec::<u32>.new() };
+    // the place of each whole component; components without a struct or enum first (E0005, a
+    // later stage's)
+    let mut k_flag = vec.Vec::<u64>.with_capacity(nc);
+    let mut k_at = vec.Vec::<u64>.with_capacity(nc);
+    let mut k_size = vec.Vec::<u64>.with_capacity(nc);
+    let mut k_decl = vec.Vec::<u64>.with_capacity(nc);
+    for c in 0..nc {
+        let ms = w.comps.row(c);
+        for j in 0..ms.len() {
+            sub.as_mut_slice()[ms[j] as usize] = 0;
+        }
+        let (def, _, writes, _) = pick(tab, &sh, &pa, ds, md, lx, set, t, ms, sub.as_slice(), cut.as_slice(), &mut mk);
+        for j in 0..ms.len() {
+            sub.as_mut_slice()[ms[j] as usize] = NONE;
+        }
+        if def == NONE {
+            k_flag.push(0);
+            k_at.push(0);
+            k_size.push(0);
+            k_decl.push(0);
+            continue;
+        }
+        let (f, s, z) = decls.span(ds, md, lx, set, t, def);
+        k_flag.push(if writes then 1u64 else 2u64);
+        k_at.push(search.pair(f, s));
+        k_size.push(z as u64);
+        k_decl.push(def as u64);
+    }
+    let mut order = col.iota(nc);
+    order = then_by(order.as_slice(), k_decl.as_slice());
+    order = then_by(order.as_slice(), k_size.as_slice());
+    order = then_by(order.as_slice(), k_at.as_slice());
+    order = then_by(order.as_slice(), k_flag.as_slice());
+    let (mkeys, mids) = layout.members(ds);
+    let mut e_lo = vec.Vec::<u32>.new();
+    let mut e_dst = vec.Vec::<u32>.new();
+    let mut path = vec.Vec::<u8>.new();
+    for j in 0..nc {
+        let c = order.as_slice()[j] as usize;
+        if k_flag.as_slice()[c] == 0 { continue; }
+        let ms = w.comps.row(c);
+        for k in 0..ms.len() {
+            pos.as_mut_slice()[ms[k] as usize] = k as% u32;
+        }
+        // the parts graph on the members, without the fields cut
+        e_lo.clear();
+        e_dst.clear();
+        for k in 0..ms.len() {
+            e_lo.push(e_dst.len() as% u32);
+            let m = ms[k];
+            let tag = tab.tag_of(m);
+            if tag == types.TK_ADT {
+                let def = tab.a_of(m);
+                if sh.kind_of(def) == layout.SK_NONE { continue; }
+                let fs = pa.fields(m);
+                if fs.len() == 0 { continue; }
+                let base = field_base(&sh, def);
+                for x in 0..fs.len() {
+                    if cut.as_slice()[base + x] || !kinds.real(fs[x]) { continue; }
+                    let p = pos.as_slice()[fs[x] as usize];
+                    if p != NONE { e_dst.push(p); }
+                }
+            } else if tag == types.TK_ARRAY || tag == types.TK_RANGE || tag == types.TK_VECTOR {
+                let p = pos.as_slice()[tab.a_of(m) as usize];
+                if p != NONE { e_dst.push(p); }
+            } else if tag == types.TK_TUPLE {
+                let xs = tab.x(m);
+                for x in 0..xs.len() {
+                    let p = pos.as_slice()[xs[x] as usize];
+                    if p != NONE { e_dst.push(p); }
+                }
+            }
+        }
+        e_lo.push(e_dst.len() as% u32);
+        let subs = cyclic_sccs(ms.len(), e_lo.as_slice(), e_dst.as_slice());
+        for k in 0..ms.len() {
+            sub.as_mut_slice()[ms[k] as usize] = subs.as_slice()[k];
+        }
+        let (def, field, _, s) = pick(tab, &sh, &pa, ds, md, lx, set, t, ms, sub.as_slice(), cut.as_slice(), &mut mk);
+        if def != NONE {
+            // a fix at the reported declaration fixes every instance of this cycle
+            for k in 0..ms.len() {
+                let m = ms[k];
+                if tab.tag_of(m) != types.TK_ADT || tab.a_of(m) != def || sub.as_slice()[m as usize] != s { continue; }
+                let fs = pa.fields(m);
+                if fs.len() == 0 { continue; }
+                let base = field_base(&sh, def);
+                for x in 0..fs.len() {
+                    if kinds.real(fs[x]) && sub.as_slice()[fs[x] as usize] == s { cut.as_mut_slice()[base + x] = true; }
+                }
+            }
+            let (nf, ns, nz) = decls.span(ds, md, lx, set, t, def);
+            path.clear();
+            diag_kinds.decl_path(&mut path, ds, md, nm, def);
+            d.begin(423, "");
+            d.arg("name", path.as_slice());
+            if field != NONE {
+                let (ff, fs2, fz) = field_span(ds, md, lx, set, t, tree, &sg.params, mkeys.as_slice(), mids.as_slice(), def, field);
+                d.role("field", ff, fs2, fz);
+            }
+            d.end(nf, ns, nz);
+        }
+        for k in 0..ms.len() {
+            sub.as_mut_slice()[ms[k] as usize] = NONE;
+            pos.as_mut_slice()[ms[k] as usize] = NONE;
+        }
+    }
+}
+
+// Actions of the signature walk (module docs), run last pushed first; each holds three words.
+// ENSURE d: build decl d's signature. END d: d is built. GEN d: lower d's generics, once.
+// NODE row it s: lower the syntax at `row` of item `it`, in evaluation session s (NONE: none).
+// ALIAS d: d's target is being lowered. VALUE c s: const c's value is read in session s.
+// LAY_OF row it s: lay out the type written at `row` for session s. LAY t s depth, FIELDS t s
+// depth, DONE t s: lay out type t for session s.
+const A_ENSURE: u8 = 0;
+const A_END: u8 = 1;
+const A_GEN: u8 = 2;
+const A_NODE: u8 = 3;
+const A_ALIAS: u8 = 4;
+const A_LAY_OF: u8 = 5;
+const A_LAY: u8 = 6;
+const A_FIELDS: u8 = 7;
+const A_DONE: u8 = 8;
+const A_VALUE: u8 = 9;
+
+struct Ens {
+    op: vec.Vec<u8>,
+    xa: vec.Vec<u32>,
+    xb: vec.Vec<u32>,
+    xc: vec.Vec<u32>,
+    // per decl: 0 not built, 1 being built, 2 built; its generics lowered; on a reported cycle
+    state: vec.Vec<u8>,
+    gen: vec.Vec<bool>,
+    on_cycle: vec.Vec<bool>,
+    // the aliases whose targets are being lowered, outermost first
+    aliases: vec.Vec<u32>,
+    // the typing errors const evaluation reported: pair(item, token), sorted
+    err_at: vec.Vec<u64>,
+    // per evaluation session (the typing of one const-expr, stopped by its first failure):
+    // whether it failed, the token of its first typing error (NONE: none); per type: the session
+    // that is laying it out, and whether it is laid out there
+    failed: vec.Vec<bool>,
+    s_cut: vec.Vec<u32>,
+    lay_mark: vec.Vec<u32>,
+    lay_done: vec.Vec<bool>,
+    kids: vec.Vec<u32>,
+    path: vec.Vec<u8>,
+}
+
+impl Ens {
+    fn push(&mut self, op: u8, a: u32, b: u32, c: u32) {
+        self.op.push(op);
+        self.xa.push(a);
+        self.xb.push(b);
+        self.xc.push(c);
+    }
+
+    // The actions pushed from `start` on run in the order pushed.
+    fn reverse_from(&mut self, start: usize) {
+        let mut i = start;
+        let mut j = self.op.len();
+        while i + 1 < j {
+            j = j - 1;
+            let o = self.op.as_slice()[i];
+            let o2 = self.op.as_slice()[j];
+            self.op.as_mut_slice()[i] = o2;
+            self.op.as_mut_slice()[j] = o;
+            let a = self.xa.as_slice()[i];
+            let a2 = self.xa.as_slice()[j];
+            self.xa.as_mut_slice()[i] = a2;
+            self.xa.as_mut_slice()[j] = a;
+            let b = self.xb.as_slice()[i];
+            let b2 = self.xb.as_slice()[j];
+            self.xb.as_mut_slice()[i] = b2;
+            self.xb.as_mut_slice()[j] = b;
+            let c = self.xc.as_slice()[i];
+            let c2 = self.xc.as_slice()[j];
+            self.xc.as_mut_slice()[i] = c2;
+            self.xc.as_mut_slice()[j] = c;
+            i = i + 1;
+        }
+    }
+
+    fn grow(&mut self, n: usize) {
+        while self.lay_mark.len() < n {
+            self.lay_mark.push(NONE);
+            self.lay_done.push(false);
+        }
+    }
+
+    fn fail(&mut self, s: u32) {
+        self.failed.as_mut_slice()[s as usize] = true;
+    }
+
+    // A session for the const-expr at row g: its cut is the first typing error inside it.
+    fn session(&mut self, tree: &ast.Ast, it: u32, g: usize) -> u32 {
+        let lo = tree.tok.as_slice()[g];
+        let hi = tree.tok_end.as_slice()[g];
+        let k = search.lower_bound(self.err_at.as_slice(), search.pair(it, lo));
+        let mut cut = NONE;
+        if k < self.err_at.len() && self.err_at.as_slice()[k] < search.pair(it, hi) { cut = (self.err_at.as_slice()[k] & 0xffff_ffff) as% u32; }
+        self.failed.push(false);
+        self.s_cut.push(cut);
+        return (self.failed.len() - 1) as% u32;
+    }
+}
+
+// The node row of decl d (NONE for a decl of no item that parsed).
+fn decl_node(ds: &decls.Decls, tree: &ast.Ast, d: usize) -> u32 {
+    if !parsed(ds, tree, d) || ds.node.as_slice()[d] == NONE { return NONE; }
+    return tree.item_node.as_slice()[ds.item.as_slice()[d] as usize] + ds.node.as_slice()[d];
+}
+
+fn has_generics(k: u8) -> bool {
+    return dump.is_fn(k) || k == decls.DK_STRUCT || k == decls.DK_ENUM || k == decls.DK_IMPL || k == decls.DK_TYPE_ALIAS;
+}
+
+// Pushes NODE for the `Type` child of row g, if any.
+fn push_type_of(e: &mut Ens, tree: &ast.Ast, base: usize, it: u32, g: usize) {
+    let c = consteval.child(tree, base, g, node_kinds.KIND_TYPE);
+    if c != NONE { e.push(A_NODE, c, it, NONE); }
+}
+
+// ENSURE x, as stage0 builds a signature: the generics, then by kind a fn's params and return,
+// a struct's or enum's fields, an impl's self type and trait, a trait's generics, a const's or
+// static's type and (under a valid type) initializer, an alias's target. Reaching an alias whose
+// target is being lowered closes a cycle.
+fn ensure(e: &mut Ens, d: &mut diag.Diags, sg: &sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, tree: &ast.Ast, keys: &[u64], ids: &[u32], x: u32) {
+    let xu = x as usize;
+    let k = ds.kind.as_slice()[xu];
+    let st = e.state.as_slice()[xu];
+    if st != 0 {
+        if st == 1 && k == decls.DK_TYPE_ALIAS && !e.on_cycle.as_slice()[xu] {
+            let mut at = e.aliases.len();
+            for j in 0..e.aliases.len() {
+                if e.aliases.as_slice()[j] == x {
+                    at = j;
+                    break;
+                }
+            }
+            if at < e.aliases.len() { report_alias(e, d, ds, md, nm, lx, set, t, at); }
+        }
+        return;
+    }
+    e.state.as_mut_slice()[xu] = 1;
+    let start = e.op.len();
+    if has_generics(k) || k == decls.DK_TRAIT { e.push(A_GEN, x, 0, 0); }
+    let g = decl_node(ds, tree, xu);
+    if g != NONE {
+        let it = ds.item.as_slice()[xu];
+        let base = tree.item_node.as_slice()[it as usize] as usize;
+        let gu = g as usize;
+        if dump.is_fn(k) {
+            let p = ds.parent.as_slice()[xu];
+            if k != decls.DK_FN && p != NONE {
+                e.push(A_GEN, p, 0, 0);
+                if ds.kind.as_slice()[p as usize] == decls.DK_IMPL { e.push(A_ENSURE, p, 0, 0); }
+            }
+            let ps = consteval.child(tree, base, gu, node_kinds.KIND_PARAMS);
+            if ps != NONE {
+                let ks = tree.kids.row(ps as usize);
+                for j in 0..ks.len() {
+                    let c = base + ks[j] as usize;
+                    if tree.kind.as_slice()[c] == node_kinds.KIND_PARAM { push_type_of(e, tree, base, it, c); }
+                }
+            }
+            let mut xp = consteval.child(tree, base, gu, node_kinds.KIND_X_PARAMS);
+            while xp != NONE {
+                let pp = consteval.child(tree, base, xp as usize, node_kinds.KIND_PARAM);
+                if pp != NONE { push_type_of(e, tree, base, it, pp as usize); }
+                xp = consteval.child(tree, base, xp as usize, node_kinds.KIND_X_PARAMS);
+            }
+            let rc = consteval.child(tree, base, gu, node_kinds.KIND_RET_CLAUSE);
+            if rc != NONE {
+                push_type_of(e, tree, base, it, rc as usize);
+            } else {
+                let nk = tree.kind.as_slice()[gu];
+                if nk == node_kinds.KIND_EXTERN_FN || nk == node_kinds.KIND_EXTERN_ITEM { push_type_of(e, tree, base, it, gu); }
+            }
+        } else if k == decls.DK_STRUCT || k == decls.DK_ENUM {
+            let (lo, hi) = layout.run_of(keys, x);
+            for j in lo..hi {
+                let m = ids[j] as usize;
+                let mk = ds.kind.as_slice()[m];
+                let mn = decl_node(ds, tree, m);
+                if mn == NONE { continue; }
+                if mk == decls.DK_FIELD {
+                    push_type_of(e, tree, base, it, mn as usize);
+                } else if mk == decls.DK_VARIANT && ds.flags.as_slice()[m] & decls.F_TUPLE != 0 {
+                    let ks = tree.kids.row(mn as usize);
+                    for q in 0..ks.len() {
+                        let c = base + ks[q] as usize;
+                        if tree.kind.as_slice()[c] == node_kinds.KIND_TYPE { e.push(A_NODE, c as% u32, it, NONE); }
+                    }
+                } else if mk == decls.DK_VARIANT {
+                    let (a, b) = layout.run_of(keys, m as% u32);
+                    for q in a..b {
+                        let f = ids[q] as usize;
+                        let fnode = decl_node(ds, tree, f);
+                        if ds.kind.as_slice()[f] == decls.DK_FIELD && fnode != NONE { push_type_of(e, tree, base, it, fnode as usize); }
+                    }
+                }
+            }
+        } else if k == decls.DK_IMPL {
+            let sn = ds.impl_self_ty.as_slice()[xu];
+            if sn != NONE { e.push(A_NODE, (base as% u32) + sn, it, NONE); }
+            let tn = ds.impl_trait_ty.as_slice()[xu];
+            if tn != NONE { e.push(A_NODE, (base as% u32) + tn, it, NONE); }
+        } else if k == decls.DK_CONST || k == decls.DK_STATIC {
+            push_type_of(e, tree, base, it, gu);
+            // an initializer is evaluated only under a valid type that is no view; the
+            // evaluation stops at its first error
+            let ty = sg.cx.ty.as_slice()[xu];
+            let is_view = ty != ERR && sigs.is_view_in(&sg.cx, ds, ty, consteval.no_scope()) && !is_ref_str(&sg.cx.tab, ty);
+            if ty != ERR && !is_view {
+                let ks = tree.kids.row(gu);
+                for j in 0..ks.len() {
+                    let c = base + ks[j] as usize;
+                    if consteval.is_expr_kind(tree.kind.as_slice()[c]) {
+                        e.push(A_NODE, c as% u32, it, NONE);
+                        break;
+                    }
+                }
+            }
+        } else if k == decls.DK_TYPE_ALIAS {
+            e.push(A_ALIAS, x, 0, 0);
+            push_type_of(e, tree, base, it, gu);
+        }
+    }
+    e.push(A_END, x, 0, 0);
+    e.reverse_from(start);
+}
+
+fn is_ref_str(tab: &types.Table, ty: u32) -> bool {
+    return tab.tag_of(ty) == types.TK_REF && tab.tag_of(tab.b_of(ty)) == types.TK_STR;
+}
+
+// GEN x, as stage0 lowers generics once per decl: a method's parent's generics and self type
+// first, then the const params' types, an impl's self type, and the bounds.
+fn generics(e: &mut Ens, ds: &decls.Decls, tree: &ast.Ast, x: u32) {
+    let xu = x as usize;
+    if e.gen.as_slice()[xu] { return; }
+    e.gen.as_mut_slice()[xu] = true;
+    let start = e.op.len();
+    let k = ds.kind.as_slice()[xu];
+    let p = ds.parent.as_slice()[xu];
+    if (k == decls.DK_METHOD || k == decls.DK_TRAIT_METHOD) && p != NONE {
+        e.push(A_GEN, p, 0, 0);
+        if ds.kind.as_slice()[p as usize] == decls.DK_IMPL { e.push(A_ENSURE, p, 0, 0); }
+    }
+    let g = decl_node(ds, tree, xu);
+    if g != NONE {
+        let it = ds.item.as_slice()[xu];
+        let base = tree.item_node.as_slice()[it as usize] as usize;
+        let gs = consteval.child(tree, base, g as usize, node_kinds.KIND_GENERICS);
+        if gs != NONE {
+            let ks = tree.kids.row(gs as usize);
+            for j in 0..ks.len() {
+                let c = base + ks[j] as usize;
+                if tree.kind.as_slice()[c] == node_kinds.KIND_GENERIC_PARAM { push_type_of(e, tree, base, it, c); }
+            }
+            let sn = if k == decls.DK_IMPL then ds.impl_self_ty.as_slice()[xu] else NONE;
+            if sn != NONE { e.push(A_NODE, (base as% u32) + sn, it, NONE); }
+            for j in 0..ks.len() {
+                let c = base + ks[j] as usize;
+                if tree.kind.as_slice()[c] != node_kinds.KIND_GENERIC_PARAM { continue; }
+                let b = consteval.child(tree, base, c, node_kinds.KIND_BOUND);
+                if b != NONE { e.push(A_NODE, b, it, NONE); }
+            }
+        }
+    }
+    e.reverse_from(start);
+}
+
+// Whether the token names `size_of` or `align_of`.
+fn layout_name(nm: &intern.Interned, tok: u32) -> bool {
+    let s = nm.tok_str.as_slice()[tok as usize];
+    if s == NONE || s as usize >= nm.tab.len() { return false; }
+    let b = nm.tab.text(s as usize);
+    return b.eq(mem.str_bytes("size_of")) || b.eq(mem.str_bytes("align_of"));
+}
+
+// NODE row it s: the decl the syntax at `row` names first (an alias or a const is built, a
+// variant's or struct literal's ADT too; a struct, enum, or trait in a type or bound has its
+// generics lowered; a static is no const operand), then its children in source order, a fn
+// type's return before its params. A const-expr outside one is typed in a session of its own,
+// in source order up to its first failure: a typing error, a const operand without a value, a
+// `size_of::<T>()` / `align_of::<T>()` (T is lowered, then laid out) of an erroneous or generic
+// T or of one without a layout.
+fn node(e: &mut Ens, sg: &sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, row: u32, it: u32, s0: u32) {
+    let r = row as usize;
+    let k = tree.kind.as_slice()[r];
+    let mut sess = s0;
+    if sess == NONE && consteval.is_expr_kind(k) { sess = e.session(tree, it, r); }
+    if sess != NONE {
+        if e.failed.as_slice()[sess as usize] { return; }
+        let cut = e.s_cut.as_slice()[sess as usize];
+        if cut != NONE && tree.tok.as_slice()[r] > cut { return; }
+    }
+    let base = tree.item_node.as_slice()[it as usize] as usize;
+    let u = &sg.cx.uses;
+    if k == node_kinds.KIND_POSTFIX {
+        let ks = tree.kids.row(r);
+        if ks.len() > 0 {
+            let head = base + ks[0] as usize;
+            let ha = tree.tok.as_slice()[head];
+            let (ulo, uhi) = u.range(it, (head - base) as% u32);
+            if tree.kind.as_slice()[head] == node_kinds.KIND_PRIMARY && t.kind.as_slice()[ha as usize] as% u8 == terminals.T_IDENT && ulo == uhi && layout_name(nm, ha) {
+                // one type argument, else the typing fails before it lowers any
+                let ga = consteval.child(tree, base, head, node_kinds.KIND_GENERIC_ARGS);
+                if ga == NONE || tree.kids.row(ga as usize).len() != 1 || sess == NONE { return; }
+                let arg = (base as% u32) + tree.kids.row(ga as usize)[0];
+                e.push(A_LAY_OF, arg, it, sess);
+                e.push(A_NODE, arg, it, sess);
+                return;
+            }
+        }
+    }
+    let start = e.op.len();
+    let ur = u.last(it, (r - base) as% u32);
+    if ur != NONE && u.tag.as_slice()[ur as usize] == resolve.TAG_DECL {
+        let y = u.target.as_slice()[ur as usize];
+        let yk = ds.kind.as_slice()[y as usize];
+        let in_type = k == node_kinds.KIND_TYPE_BASE || k == node_kinds.KIND_BOUND_ITEM;
+        if yk == decls.DK_CONST && sess != NONE && !in_type {
+            e.push(A_ENSURE, y, 0, 0);
+            e.push(A_VALUE, y, sess, 0);
+        } else if yk == decls.DK_TYPE_ALIAS || yk == decls.DK_CONST {
+            e.push(A_ENSURE, y, 0, 0);
+        } else if yk == decls.DK_TRAIT || ((yk == decls.DK_STRUCT || yk == decls.DK_ENUM) && in_type) {
+            e.push(A_GEN, y, 0, 0);
+        } else if yk == decls.DK_STRUCT || yk == decls.DK_ENUM {
+            e.push(A_ENSURE, y, 0, 0);
+        } else if yk == decls.DK_VARIANT && !in_type {
+            let p = ds.parent.as_slice()[y as usize];
+            if p != NONE { e.push(A_ENSURE, p, 0, 0); }
+        }
+    }
+    e.kids.clear();
+    let ks = tree.kids.row(r);
+    for j in 0..ks.len() {
+        e.kids.push((base + ks[j] as usize) as% u32);
+    }
+    // `fn(..) -> R`: its last `Type` child, after `->`, is the return
+    if k == node_kinds.KIND_TYPE_BASE && t.kind.as_slice()[tree.tok.as_slice()[r] as usize] as% u8 == terminals.T_KW_FN {
+        let mut q = e.kids.len();
+        while q > 0 && tree.kind.as_slice()[e.kids.as_slice()[q - 1] as usize] != node_kinds.KIND_TYPE {
+            q = q - 1;
+        }
+        if q > 0 {
+            let ret = e.kids.as_slice()[q - 1];
+            let a = tree.tok.as_slice()[ret as usize];
+            if a > 0 && t.kind.as_slice()[(a - 1) as usize] as% u8 == terminals.T_MINUS_GT {
+                let mut j = q - 1;
+                while j > 0 {
+                    let prev = e.kids.as_slice()[j - 1];
+                    e.kids.as_mut_slice()[j] = prev;
+                    j = j - 1;
+                }
+                e.kids.as_mut_slice()[0] = ret;
+            }
+        }
+    }
+    for j in 0..e.kids.len() {
+        let c = e.kids.as_slice()[j];
+        e.push(A_NODE, c, it, sess);
+    }
+    e.reverse_from(start);
+}
+
+// LAY ty s depth, as stage0 lays out a type for `size_of`: the parts in layout order, each ADT's
+// signature built when first met; the first part without a layout ends the session (a generic
+// param, an unsized type, an array of no value length, an ADT being built, the error type, a
+// part nested past the depth limit).
+fn lay(e: &mut Ens, tab: &types.Table, sh: &layout.Shapes, ty: u32, s: u32, depth: u32) {
+    if e.failed.as_slice()[s as usize] { return; }
+    if depth >= MAX_DEPTH || !kinds.real(ty) {
+        e.fail(s);
+        return;
+    }
+    e.grow(tab.len());
+    let i = ty as usize;
+    if e.lay_mark.as_slice()[i] == s {
+        if !e.lay_done.as_slice()[i] { e.fail(s); }
+        return;
+    }
+    let tag = tab.tag_of(ty);
+    if tag == types.TK_REF || tag == types.TK_PTR || tag == types.TK_FN || tag == types.TK_INT || tag == types.TK_FLOAT || tag == types.TK_BOOL || tag == types.TK_CHAR || tag == types.TK_NEVER {
+        return;
+    }
+    if tag == types.TK_MASK && tab.b_of(ty) != types.LANES_N { return; }
+    let start = e.op.len();
+    if tag == types.TK_ADT && sh.kind_of(tab.a_of(ty)) != layout.SK_NONE {
+        let def = tab.a_of(ty);
+        let st = e.state.as_slice()[def as usize];
+        if st == 1 {
+            e.fail(s);
+            return;
+        }
+        e.lay_mark.as_mut_slice()[i] = s;
+        e.lay_done.as_mut_slice()[i] = false;
+        if st == 0 { e.push(A_ENSURE, def, 0, 0); }
+        e.push(A_FIELDS, ty, s, depth);
+        e.reverse_from(start);
+        return;
+    }
+    let ok = tag == types.TK_RANGE || tag == types.TK_TUPLE || (tag == types.TK_VECTOR && tab.b_of(ty) != types.LANES_N) || (tag == types.TK_ARRAY && tab.x(ty)[0] == types.GA_VALUE);
+    if !ok {
+        e.fail(s);
+        return;
+    }
+    e.lay_mark.as_mut_slice()[i] = s;
+    e.lay_done.as_mut_slice()[i] = false;
+    if tag == types.TK_TUPLE {
+        let xs = tab.x(ty);
+        for j in 0..xs.len() {
+            e.push(A_LAY, xs[j], s, depth + 1);
+        }
+    } else {
+        e.push(A_LAY, tab.a_of(ty), s, depth + 1);
+    }
+    e.push(A_DONE, ty, s, 0);
+    e.reverse_from(start);
+}
+
+// E0423 case `alias` for the cycle of the aliases stacked from position `at` on, at the first
+// by name span.
+fn report_alias(e: &mut Ens, d: &mut diag.Diags, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, at: usize) {
+    let mut first = NONE;
+    let mut fs = (0u32, 0u32, 0u32);
+    for k in at..e.aliases.len() {
+        let a = e.aliases.as_slice()[k];
+        e.on_cycle.as_mut_slice()[a as usize] = true;
+        let (f, st, sz) = decls.span(ds, md, lx, set, t, a);
+        let (bf, bs, bz) = fs;
+        if first == NONE || f < bf || (f == bf && (st < bs || (st == bs && (sz < bz || (sz == bz && a < first))))) {
+            first = a;
+            fs = (f, st, sz);
+        }
+    }
+    let (f, st, sz) = fs;
+    e.path.clear();
+    diag_kinds.decl_path(&mut e.path, ds, md, nm, first);
+    d.begin(423, "alias");
+    d.arg("name", e.path.as_slice());
+    d.end(f, st, sz);
+}
+
+// The typing errors the body checker found in const and static initializers it checked (those
+// signature building left without a value): pair(item, first token).
+pub fn typing_errors(tc: &tc_rows.Typeck, ds: &decls.Decls, tree: &ast.Ast) -> vec.Vec<u64> {
+    let g = &tc.dg;
+    let mut out = vec.Vec::<u64>.new();
+    for k in 0..g.code.len() {
+        let x = g.d.as_slice()[k];
+        if x == NONE || x as usize >= ds.decls() { continue; }
+        let xk = ds.kind.as_slice()[x as usize];
+        if xk != decls.DK_CONST && xk != decls.DK_STATIC { continue; }
+        let lo = g.lo.as_slice()[k];
+        let n = g.n.as_slice()[k];
+        let tok = if lo != NONE then lo else if n != NONE then tree.tok.as_slice()[n as usize] else NONE;
+        if tok != NONE { out.push(search.pair(ds.item.as_slice()[x as usize], tok)); }
+    }
+    return out;
+}
+
+// E0423 case `alias` (module docs). The type table grows (the types `size_of` lays out) and is
+// put back as it is.
+pub fn alias_cycles(d: &mut diag.Diags, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, nm: &intern.Interned, lx: &lex.Lexer, set: &source.SourceSet, t: &lex.Tokens, cut: &items.Items, tree: &ast.Ast, typing: &[u64]) {
+    let n = ds.decls();
+    let mut e = Ens.{ op: vec.Vec::<u8>.new(), xa: vec.Vec::<u32>.new(), xb: vec.Vec::<u32>.new(), xc: vec.Vec::<u32>.new(), state: col.filled(n, 0u8), gen: col.filled(n, false), on_cycle: col.filled(n, false), aliases: vec.Vec::<u32>.new(), err_at: vec.Vec::<u64>.new(), failed: vec.Vec::<bool>.new(), s_cut: vec.Vec::<u32>.new(), lay_mark: vec.Vec::<u32>.new(), lay_done: vec.Vec::<bool>.new(), kids: vec.Vec::<u32>.new(), path: vec.Vec::<u8>.new() };
+    // typing errors; a value out of range or a bad index is found after typing
+    let mut at = vec.Vec::<u64>.new();
+    for r in 0..sg.cx.rep.len() {
+        let c = sg.cx.rep.code.as_slice()[r];
+        if c == consteval.EV_RANGE || c == consteval.EV_INDEX { continue; }
+        at.push(search.pair(sg.cx.rep.item.as_slice()[r], sg.cx.rep.lo.as_slice()[r]));
+    }
+    at.extend_from_slice(typing);
+    let perm = sort.sort_perm(at.as_slice());
+    for j in 0..perm.len() {
+        e.err_at.push(at.as_slice()[perm.as_slice()[j] as usize]);
+    }
+    let (keys, ids) = layout.members(ds);
+    let nopend = col.filled(n, false);
+    let sh = layout.shapes(ds, sg.cx.ty.as_slice(), &sg.params, nopend.as_slice());
+    let mut pa = layout.Parts.new();
+    let mut lw = sigs.Lw.new();
+    // what lowering a `size_of` argument again records is dropped: signature building has it
+    let (n_rep, n_lay, hits, skip) = (sg.cx.rep.len(), sg.cx.lay.len(), sg.cx.hits, sg.cx.skip);
+    for x in 0..n {
+        e.push(A_ENSURE, x as% u32, 0, 0);
+        while e.op.len() > 0 {
+            let top = e.op.len() - 1;
+            let op = e.op.as_slice()[top];
+            let a = e.xa.as_slice()[top];
+            let b = e.xb.as_slice()[top];
+            let c = e.xc.as_slice()[top];
+            e.op.truncate(top);
+            e.xa.truncate(top);
+            e.xb.truncate(top);
+            e.xc.truncate(top);
+            if op == A_ENSURE {
+                ensure(&mut e, d, sg, ds, md, nm, lx, set, t, tree, keys.as_slice(), ids.as_slice(), a);
+            } else if op == A_END {
+                e.state.as_mut_slice()[a as usize] = 2;
+                let na = e.aliases.len();
+                if na > 0 && e.aliases.as_slice()[na - 1] == a { e.aliases.truncate(na - 1); }
+            } else if op == A_GEN {
+                generics(&mut e, ds, tree, a);
+            } else if op == A_NODE {
+                node(&mut e, sg, ds, nm, t, tree, a, b, c);
+            } else if op == A_ALIAS {
+                e.aliases.push(a);
+            } else if op == A_VALUE {
+                if sg.cx.consts.state.as_slice()[a as usize] == consteval.CV_FAIL { e.fail(b); }
+            } else if op == A_LAY_OF {
+                if e.failed.as_slice()[c as usize] { continue; }
+                let s = c;
+                let owner = ds.item_decl.as_slice()[b as usize];
+                let sc = if owner == NONE then consteval.no_scope() else sigs.scope_of(&sg.cx, ds, owner, NONE);
+                let ty = sigs.lower_garg_ty(&mut sg.cx, &mut lw, tree, t, nm, set, cut, ds, b, a as usize, sc);
+                if !kinds.real(ty) || has_params(&sg.cx.tab, ty) {
+                    e.fail(s);
+                } else {
+                    lay(&mut e, &sg.cx.tab, &sh, ty, s, 0);
+                }
+            } else if op == A_LAY {
+                lay(&mut e, &sg.cx.tab, &sh, a, b, c);
+            } else if op == A_FIELDS {
+                if e.failed.as_slice()[b as usize] { continue; }
+                pa.make(&mut sg.cx.tab, &sh, a);
+                let start = e.op.len();
+                let fs = pa.fields(a);
+                for j in 0..fs.len() {
+                    e.push(A_LAY, fs[j], b, c + 1);
+                }
+                e.push(A_DONE, a, b, 0);
+                e.reverse_from(start);
+            } else if op == A_DONE {
+                if !e.failed.as_slice()[b as usize] { e.lay_done.as_mut_slice()[a as usize] = true; }
+            }
+        }
+    }
+    restore(&mut sg.cx, n_rep, n_lay, hits, skip);
+}
+
+fn restore(cx: &mut consteval.Cx, n_rep: usize, n_lay: usize, hits: u32, skip: u8) {
+    cx.rep.code.truncate(n_rep);
+    cx.rep.item.truncate(n_rep);
+    cx.rep.lo.truncate(n_rep);
+    cx.rep.hi.truncate(n_rep);
+    cx.rep.ty.truncate(n_rep);
+    cx.rep.x.truncate(n_rep);
+    cx.lay.row.truncate(n_lay);
+    cx.lay.st.truncate(n_lay);
+    cx.lay.size.truncate(n_lay);
+    cx.lay.aln.truncate(n_lay);
+    cx.lay.it.truncate(n_lay);
+    cx.lay.sc.truncate(n_lay);
+    cx.lay.met.truncate(n_lay);
+    cx.hits = hits;
+    cx.skip = skip;
+}
+
+// Whether type ty names a generic param, `Self`, or a const param.
+fn has_params(tab: &types.Table, ty: u32) -> bool {
+    let mut stack = vec.Vec::<u32>.new();
+    let mut kids = vec.Vec::<u32>.new();
+    stack.push(ty);
+    while stack.len() > 0 {
+        let x = stack.as_slice()[stack.len() - 1];
+        stack.truncate(stack.len() - 1);
+        let tag = tab.tag_of(x);
+        if tag == types.TK_PARAM || tag == types.TK_CONSTPARAM || tag == types.TK_SELF { return true; }
+        if tag == types.TK_ARRAY || tag == types.TK_ADT {
+            let xs = tab.x(x);
+            let mut k: usize = 0;
+            while k + 2 < xs.len() {
+                if xs[k] == types.GA_PARAM { return true; }
+                k = k + 3;
+            }
+        }
+        tab.kids(x, &mut kids);
+        stack.extend_from_slice(kids.as_slice());
+    }
+    return false;
+}

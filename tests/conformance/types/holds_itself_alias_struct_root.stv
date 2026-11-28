@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// E0423 case `alias`: a struct's field starts the walk at `A3`; from there two cycles close,
+// each reported at its first alias.
+type A2 = A1; //~ ERROR E0423
+
+type A1 = (A0, A3); //~ ERROR E0423
+
+type A0 = (*const A2, A1, A3);
+
+type A3 = A1;
+
+struct S1 { x: *const A3 }
+
+fn main() -> i32 {
+    return 0;
+}

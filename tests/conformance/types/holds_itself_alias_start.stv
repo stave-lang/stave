@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// E0423 case `alias`: one component of aliases, entered from a fn signature; the cycles the
+// walk closes from there are reported, not those another start would close.
+type A0 = (A1,);
+
+type A4 = A2;
+
+type A2 = A3; //~ ERROR E0423
+
+type A1 = A2;
+
+fn f1(x: *const A0) -> u8 {
+    return 0;
+}
+
+type A3 = ((A1), *const A3, (A4));
+
+fn main() -> i32 {
+    return 0;
+}

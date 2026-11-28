@@ -543,7 +543,7 @@ fn gen_roots(sg: &sigs.Sigs, d: usize, out: &mut vec.Vec<u32>) {
     }
 }
 
-fn is_fn(k: u8) -> bool {
+pub fn is_fn(k: u8) -> bool {
     return k == decls.DK_FN || k == decls.DK_METHOD || k == decls.DK_TRAIT_METHOD;
 }
 

@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// E0423 case `alias` where signature building meets the cycle: every decl starts it, in decl
+// order. `f1`'s signature builds `A3` first, whose length builds `C0`, whose `size_of` lowers
+// `A3` again: a cycle at the alias (without `f1`, `C0` is built first and the cycle closes at
+// the const instead).
+type A3 = [u8; C0]; //~ ERROR E0423
+
+fn f1(x: *const A3) -> u8 {
+    return 0;
+}
+
+const C0: usize = size_of::<A3>();
+
+fn main() -> i32 {
+    return 0;
+}

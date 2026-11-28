@@ -6,7 +6,8 @@
 # `tokens.txt`, `items.txt`, `ast.txt`, `strings.txt`, `names.txt`, `sigs.txt`, and `kinds.txt` of
 # the two byte for byte, `types.txt` by key (below), and stage1's `diags.txt` with stage0's
 # restricted to the codes of the stages stage1 has (S1_CODES: read, lex, item cut, parse, modules,
-# decls, resolve, manifests, signatures, impl checks, and the body checker's E0201 E0202 E0203
+# decls, resolve, manifests, signatures, impl checks, types that hold themselves by value (E0423),
+# and the body checker's E0201 E0202 E0203
 # E0204 E0206 E0413, its pattern checks E0300 E0301 E0302) and the shapes of other codes it has
 # (S1_SHAPES). Every dump covers the whole program, so each root also compares std, runtime, and
 # the arch package.
@@ -61,7 +62,7 @@ export STAVE_STD_DIR="$ROOT"
 # as the bracket depth form (the item cut); its expression and type forms are later stages'.
 TYPES_EXACT_MIN=1075
 TYPES_UNKNOWN_PPM=6
-S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0201|E0202|E0203|E0204|E0206|E0300|E0301|E0302|E0413|E0410|E0414|E0415|E0416|E0419|E0420|E0421|E0422|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0905|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
+S1_CODES='E0001|E0002|E0003|E0004|E0006|E0011|E0012|E0013|E0014|E0015|E0016|E0017|E0018|E0019|E0020|E0021|E0022|E0023|E0024|E0025|E0026|E0027|E0028|E0029|E0101|E0102|E0103|E0104|E0105|E0106|E0107|E0201|E0202|E0203|E0204|E0206|E0300|E0301|E0302|E0413|E0410|E0414|E0415|E0416|E0419|E0420|E0421|E0422|E0423|E0514|E0515|E0520|E0521|E0708|E0709|E0810|E0811|E0903|E0905|E0906|E0907|E1002|E1003|E1203|E1404|E1408'
 # Deferred cut of E0300 / E0301: stage1 does not decide a match or a `let` / `for` pattern under a
 # value of unknown type, or with a const pattern of a type the evaluator gives no value (`char`,
 # float, pointer, fn); it reports neither there.

@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// E0423 case `alias` through a layout: `size_of` / `align_of` in an alias's length lays out a
+// struct or enum, which builds its fields; a field naming the alias being lowered closes a
+// cycle (`A`; `C` through an instance). One built before the alias has no layout (E0911).
+type A = [u8; //~ ERROR E0423
+    size_of::<S>()]; //~ ERROR E0911
+
+struct S { a: A }
+
+type B = [u8;
+    align_of::<E>()]; //~ ERROR E0911
+
+enum E { X(B), Y }
+
+type C = [u8; //~ ERROR E0423
+    size_of::<W<u8>>()]; //~ ERROR E0911
+
+struct W<T> { c: C, t: T }
+
+type D = [u8;
+    size_of::<P>()]; //~ ERROR E0911
+
+struct P { d: *const D }
+
+fn main() -> i32 {
+    return 0;
+}
