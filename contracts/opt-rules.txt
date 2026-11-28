@@ -19,9 +19,13 @@
 # Each rule is tested against the IR interpreter oracle: exhaustively on 8-bit types, randomly on
 # wider ones. Rule order is the file order (determinism).
 #
-# If-conversion is a rule family here too: a diamond whose two arms are
-# pure, trap-free, and below an integer cost limit becomes a `select`. No rule ever rewrites a
-# `select` (user-written or produced) into a branch.
+# If-conversion: the optimizer may turn a value `if` (a diamond that joins one value) whose two
+# arms are pure (no store, no call with an effect) and trap-free into a `select`, by a per-target
+# cost rule (a rule family here, with an integer cost limit). The value is the same either way,
+# so only timing can tell; whether a given `if` becomes a `select` is not promised. Never the
+# reverse, and this is promised: no rule rewrites a `select`, user-written or produced, into a
+# branch, so a written `select` stays branch-free. An `if` with an arm that can trap, store, or
+# call a fn with an effect stays a branch.
 
 (add.wrap x (const 0))       => x
 (mul.wrap x (const pow2 k))  => (shl.wrap x (const k))
