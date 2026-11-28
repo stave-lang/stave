@@ -433,8 +433,9 @@ fn malformed_mask_load_is_an_interpreter_fault() {
     }
 }
 
-/// (lane bits, lanes) of vectors that `load_masked` reads lane by lane on some x86-64 level: 128
-/// bits or less before AVX, and 8- and 16-bit lanes at every level below the v4 set.
+/// (lane bits, lanes): a sample of the vectors that `load_masked` reads lane by lane on some
+/// x86-64 level (128 bits or less before AVX; 8- and 16-bit lanes at every level below the v4
+/// set).
 const MASKED_LOAD_SHAPES: &[(u32, u32)] =
     &[(8, 2), (8, 16), (8, 32), (16, 8), (16, 16), (32, 2), (32, 4), (64, 2)];
 
