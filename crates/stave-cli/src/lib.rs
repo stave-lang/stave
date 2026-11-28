@@ -45,6 +45,7 @@ pub mod effects_report;
 pub mod fix;
 pub mod fmt;
 pub mod ir;
+pub mod loops_report;
 pub mod lowering;
 pub mod unsafe_report;
 
@@ -159,6 +160,7 @@ fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         (Cmd::Daemon, _) => not_implemented("daemon evict", "needs the stage1 daemon", err),
         (Cmd::UnsafeReport, _) => unsafe_report::run(a, out, err),
         (Cmd::Effects, _) => effects_report::run(a, out, err),
+        (Cmd::Loops, _) => loops_report::run(a, out, err),
         (Cmd::Dup, _) => dup::run(a, out, err),
         (Cmd::Fix, _) => fix::run(a, out, err),
         (Cmd::Fmt, _) => fmt::run(a, out, err),

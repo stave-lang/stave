@@ -47,6 +47,7 @@ use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::ids::{BindingRef, DeclId, ItemId};
 use crate::itemcx::{Brackets, ItemCx};
+use crate::loops::{LoopForm, LoopRow};
 use crate::resolve::Res;
 use crate::sigs::{self, DeclSig, FnSig, GenericParam, NameCx, SigBuilder, Sigs, TyEnv};
 use crate::traits::{Adjust, MethodRef, World};
@@ -176,6 +177,9 @@ pub struct TypedBody {
     /// or a reference to one. Decided once on the definition (a generic `T` or `&T` is never a
     /// vector annotation, whatever an instance gives it); every other `for` is an element loop.
     pub chunk_loops: Vec<u32>,
+    /// One row per loop statement, sorted by node: what the loop report lists
+    /// ([`crate::loops::report`]).
+    pub loop_rows: Vec<crate::loops::LoopRow>,
     /// The `if`s whose condition is a constant condition ([`crate::constcond`]), by node: the one
     /// classification the call graph answers per instance and lowering and the effect pass read.
     pub const_ifs: Vec<crate::constcond::ConstIf>,
@@ -956,6 +960,7 @@ fn empty_body(j: Job) -> TypedBody {
         implicit: Vec::new(),
         for_kinds: Vec::new(),
         chunk_loops: Vec::new(),
+        loop_rows: Vec::new(),
         const_ifs: Vec::new(),
         moves: Vec::new(),
         drops: Vec::new(),
@@ -1201,6 +1206,7 @@ pub(crate) struct Ck<'a> {
     pub implicit: Vec<(u32, Target)>,
     pub for_kinds: Vec<(u32, crate::loops::ForKind)>,
     pub chunk_loops: Vec<u32>,
+    pub loop_rows: Vec<LoopRow>,
     /// `c.select(a, b)` on a `bool`: the token of its target and the type of its operands, which
     /// is its result type once the literals among them are fixed.
     pub selects: Vec<(u32, Ty)>,
@@ -1292,6 +1298,7 @@ fn check_body(w: World<'_>, global: &TypeTable, icx: ItemCx<'_>, j: Job) -> Body
         implicit: Vec::new(),
         for_kinds: Vec::new(),
         chunk_loops: Vec::new(),
+        loop_rows: Vec::new(),
         selects: Vec::new(),
         call_args: Vec::new(),
         assign_lhs: Vec::new(),
@@ -2310,6 +2317,11 @@ impl<'a> Ck<'a> {
                 k.sort_unstable();
                 k
             },
+            loop_rows: {
+                let mut r = std::mem::take(&mut self.loop_rows);
+                r.sort_unstable_by_key(|x| x.node);
+                r
+            },
             const_ifs,
             moves,
             drops: std::mem::take(&mut self.drops),
@@ -2616,12 +2628,14 @@ impl<'a> Ck<'a> {
                 None => false,
             }
         } else if t == Term::KwWhile as u8 {
+            self.loop_rows.push(LoopRow { node: s, form: LoopForm::While });
             if let (Some(&c), Some(&b)) = (kids.first(), kids.get(1)) {
                 self.cond(c);
                 self.loop_body(b);
             }
             false
         } else if t == Term::KwLoop as u8 {
+            self.loop_rows.push(LoopRow { node: s, form: LoopForm::Loop });
             match kids.first() {
                 Some(&b) => !self.loop_body(b),
                 None => false,

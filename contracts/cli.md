@@ -14,6 +14,7 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 | `stave test [PKG_DIR] [--release] [--target T] [--filter S [--exact]] [--runner CMD] [--input N]` | Build and run `test fn`s and the conformance files. `--filter S` selects those whose name contains `S`; with `--exact`, the one named `S` (`main.sums`; `--exact` without `--filter`: exit 2). `--input N` runs only input N of the selected `test fn`: a selection of no `test fn`, of several, or of one without parameters is exit 2, and so is a PKG_DIR without `stave.toml`. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
 | `stave unsafe-report [PKG_DIR] [--json]` | List the unsafe inventory |
 | `stave effects [PKG_DIR] [--json]` | List the effect set of each fn of the program's own packages |
+| `stave loops [PKG_DIR] [--json] [--all]` | List the loops of the root package with their form and class |
 | `stave dup [PKG_DIR] [--target T] [--all] [--min-size N] [--json \| --baseline FILE \| --write-baseline FILE]` | List the classes of fns with the same code and the re-declared consts; with `--baseline`, fail on a new class |
 | `stave caps-report [PKG_DIR] [--json]` | Planned: per package, the OS capability classes its code can reach |
 | `stave bounds-report [PKG_DIR] [--target T] [--json]` | Planned: every bounds check kept in release code, with the reason |
@@ -149,6 +150,42 @@ Outputs and statuses of the code-generating commands:
   `col` as in `unsafe-report`, at the fn's name (a closure: its `fn` token); `fn` is the
   checked-IR path, with the type args of an instance (`main.id<u32>`), a closure `<fn>.<k>`.
   Deny-clause violations (E1401, E1403) are printed on stderr after the report, exit 1.
+
+- `stave loops [PKG_DIR] [--json] [--all]`: lists loops; it changes no acceptance and no build.
+  Checks the program as `stave check` does (always stage0, host baseline); with error diagnostics
+  they go to stderr (`--json`: as JSON lines), nothing to stdout, exit 1. Otherwise stdout has one
+  line per loop statement of the root package (`--all`: of every package, dependencies, `std`, and
+  `runtime` included), in canonical (file F, offset) order, then a summary line. A generic fn's
+  loops are listed once, whatever its instances; a fn the target does not build has none. Human:
+  `<file>:<line>:<col> <fn> <form> <class>[ <reason>]`; `--json`: one object per line,
+  `{"file":"src/a.stv","line":12,"col":5,"fn":"a.norm","form":"range","class":"indexed","reason":"","sources":["xs","ys","&mut out"],"folds":[]}`.
+  `file` as in `unsafe-report`; `line`, `col` locate the `for`, `while`, or `loop` keyword; `fn`
+  is the checked-IR path of the enclosing fn (a closure's loops: of the fn that holds it).
+
+  | Field | Values |
+  |---|---|
+  | `form` | `chunk` (a chunk loop); `range` (a `for` over a range); `element` (over an array or `[T]`); `iter` (over an iterator); `while`; `loop` |
+  | `class` | `chunk`; `indexed`: a `range` loop that reads or writes an element of an array or `[T]` at exactly its loop variable (nothing more of its body is judged); `sequential`: a `range` loop that does not, or an `element` loop; `unread`: `while`, `loop`, `iter` (not analysed) |
+  | `reason` | `sequential`: `not-indexed`; else empty |
+  | `sources` | the places of an `indexed` loop (below), `&mut ` before a written one; else empty |
+  | `folds` | empty |
+
+  An array, slice, or column place is a **source** of a `range` loop over `i` when it does not
+  change in the loop and every use of it in the body is `place[i]`. The place starts at a local or
+  param bound outside the body, a const, or a `static` that is not `mut`, and goes through fields,
+  columns, indices with one value through the loop (an int literal, an immutable local bound
+  outside the body, such a const or `static`), and `vec.Vec`'s `as_slice()` and `as_mut_slice()`
+  (one place: the vector's elements). Any other use of the place, of a part of it, or of
+  something that holds it makes it no source: any other method, the whole value, another index
+  (two indices are not told apart), an f-string hole whose path starts at the place's first name
+  (`{s.n}` for `s.xs`). A use of another field outside f-strings does not. It is written when a
+  `place[i]` use assigns the element or a part of it, borrows it `&mut`, or calls a `&mut self`
+  method on it. `sources` spells a place as its first use does, a written one as its first writing
+  use; the read sources come first, then the written ones, each group in order of first element
+  use. A `mut` loop variable gives no source; other uses of `i` change nothing.
+
+  The last line: `loops: <n> chunk, <n> indexed, <n> sequential, <n> unread`; `--json`:
+  `{"summary":true,"chunk":1,"indexed":17,"sequential":5,"unread":3}`.
 
 - `stave dup [PKG_DIR] [--target T] [--all] [--min-size N] [--json]`: checks the program as
   `stave check` does (always stage0; `--target` selects the arch packages and the fns built,

@@ -18,7 +18,7 @@ use crate::builtins::{self, ArgTy};
 use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::ids::{DeclId, Sym};
-use crate::loops::{ForKind, ForSource};
+use crate::loops::{ForKind, ForSource, LoopForm, LoopRow};
 use crate::prim::{Builtin, Lanes, Prim};
 use crate::resolve::{DeferKind, Res};
 use crate::sigs::{GenericParam, TraitRef, VariantShape};
@@ -4252,6 +4252,9 @@ impl<'a> Ck<'a> {
         });
         if chunk {
             self.chunk_loops.push(f);
+        }
+        if let Some(kind) = src.kind() {
+            self.loop_rows.push(LoopRow { node: f, form: LoopForm::of_for(chunk, kind) });
         }
         {
             let text = icx.node_spelled(iter);
