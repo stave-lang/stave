@@ -139,7 +139,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0707 | fn value coercion would drop features not proven where it happens (by the `needs` of the enclosing fn or the target baseline) |
 | E0708 | unknown feature name, or a feature not owned by any arch (`cuda` is owned by x86-64, AArch64, and `gpu-sm86`) |
 | E0709 | an entry point (`main`, a `test fn`, an `extern` export, an allocator fn, a runtime entry fn: code that runs with no typed call site, on any CPU of the target) or a trait method declares `needs`. Case `test`: a `test fn` |
-| E0710 | sizeless vector used without a scalable-vector feature of the target (v1: `needs(sve)`). Planned |
+| E0710 | sizeless vector used without `needs(sve)`. Planned |
 | E0711 | sizeless vector as an ADT field. Planned |
 | E0712 | sizeless vector as an array element. Planned |
 | E0713 | sizeless vector as a global or const. Planned |

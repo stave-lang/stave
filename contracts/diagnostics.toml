@@ -1697,7 +1697,7 @@ fix = { description = "remove `needs(...)`: move the body to a fn with `needs(..
 code = "E0710"
 severity = "error"
 area = "features"
-rule = "sizeless vector used without a scalable-vector feature of the target (v1: `needs(sve)`) (planned)"
+rule = "sizeless vector used without `needs(sve)` (planned)"
 holes = { type = "type" }
 message = "sizeless vector `{type}` used without `needs(sve)`"
 labels = [{ at = "primary", text = "sizeless vector" }]
