@@ -1,0 +1,140 @@
+// Tests of `bkinds` over a program with a stand-in std core: the bits of param types of plain,
+// generic, Copy-bounded, and view-bounded fns (one generic param type answered in three
+// environments), drop glue and destructors reaching references, fn values through fields,
+// auto-ref types, types only a body names, substituted fields, and a type whose field did not
+// lower (unknown).
+import bkinds;
+import dump;
+import files;
+import kinds;
+import sigs;
+import tc_rows;
+import test_kit;
+import typeck;
+import ir.types;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = bkinds.NONE;
+const K: u16 = bkinds.B_KNOWN;
+const FREE: u16 = bkinds.B_FREE;
+const COPY: u16 = bkinds.B_COPY;
+const DROP: u16 = bkinds.B_DROP;
+const REF: u16 = bkinds.B_REF;
+const FN: u16 = bkinds.B_FN;
+const DIMPL: u16 = bkinds.B_DROP_IMPL;
+const DEEP: u16 = bkinds.B_DEEP;
+
+const CORE: &str = "pub enum Option<T: view> { Some(T), None }\npub trait Copy {}\npub trait Drop {\n    fn drop(&mut self);\n}\n";
+
+const MAIN: &str = "struct P { a: u32 }\nstruct C { a: u32 }\nimpl Copy for C {}\nstruct R { fd: i32 }\nimpl Drop for R {\n    fn drop(&mut self) {}\n}\nstruct HasR { r: R, n: u8 }\nview struct V { p: &u32 }\nview struct VD { p: &u32 }\nimpl Drop for VD {\n    fn drop(&mut self) {}\n}\nview struct F { f: fn(u32) -> u32 }\nstruct Bx<T> { p: *mut T }\nstruct Hold<T: view> { v: T }\nstruct Two<T> { a: (T, T) }\nfn plain(p: P, c: C, r: R, h: HasR, v: V, vd: VD, f: F, a: &u32, b: &mut u32, q: *const R, t: (VD, u32), o: Option<VD>, w: [R; 2], two: Two<u8>) {}\nfn gen<T>(x: T, h: Hold<T>, b: Bx<T>) {}\nfn gen_copy<T: Copy>(x: T, h: Hold<T>, t: (T, R)) {}\nfn gen_view<T: view>(x: T, h: Hold<T>) {}\nfn main() {\n    let t = (1u8, R.{ fd: 1i32 });\n}\n";
+
+// The program over the stand-in core through the body checker, then `bkinds`.
+fn run(main_src: &str) -> (test_kit.Out, sigs.Sigs, tc_rows.Typeck, bkinds.BKinds) {
+    let mut k = test_kit.kit();
+    let m = k.package("main", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(m, "std", s);
+    k.file(m, "main", main_src);
+    k.file(s, "core", CORE);
+    let o = k.run();
+    let mut fl = files.FileList.empty();
+    fl.pkg_builtin.push(false);
+    fl.pkg_builtin.push(true);
+    fl.pkg_root.push(true);
+    fl.pkg_root.push(false);
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let (_, order) = dump.sigs_order(&sg, &o.ds);
+    let _ = kinds.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, order.as_slice());
+    let mut tc = typeck.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, true, sigs.baseline(mem.str_bytes("x86_64-linux")));
+    let bk = bkinds.build(&mut tc, &mut sg, &o.ds, &o.md, &o.tree);
+    return (o, sg, tc, bk);
+}
+
+fn decl(o: &test_kit.Out, name: &str) -> u32 {
+    return o.item(o.module("main"), name);
+}
+
+// The type of param i of fn f.
+fn param(o: &test_kit.Out, sg: &sigs.Sigs, f: &str, i: usize) -> u32 {
+    return sg.params.row(decl(o, f) as usize)[i];
+}
+
+// The bits of param i of fn f in f's environment.
+fn bits(o: &test_kit.Out, sg: &sigs.Sigs, bk: &bkinds.BKinds, f: &str, i: usize) -> u16 {
+    let d = decl(o, f);
+    return bk.at(bk.env.as_slice()[d as usize], param(o, sg, f, i));
+}
+
+test fn concrete_types() {
+    let (o, sg, _, bk) = run(MAIN);
+    debug.assert(bits(&o, &sg, &bk, "plain", 0) == K | FREE, "a struct without impls: no bit");
+    debug.assert(bits(&o, &sg, &bk, "plain", 1) == K | FREE | COPY, "`impl Copy`: copy");
+    debug.assert(bits(&o, &sg, &bk, "plain", 2) == K | FREE | DROP | DIMPL, "`impl Drop`: drop glue and its own destructor");
+    debug.assert(bits(&o, &sg, &bk, "plain", 3) == K | FREE | DROP, "a field with drop glue: drop glue, no destructor of its own");
+    debug.assert(bits(&o, &sg, &bk, "plain", 4) == K | FREE | REF, "a view: ref-like");
+    debug.assert(bits(&o, &sg, &bk, "plain", 5) == K | FREE | REF | DROP | DIMPL | DEEP, "a view with a destructor: its drop reaches references");
+    debug.assert(bits(&o, &sg, &bk, "plain", 6) == K | FREE | REF | FN, "a fn value field: may hold a fn");
+    debug.assert(bits(&o, &sg, &bk, "plain", 7) == K | FREE | COPY | REF, "`&u32`: Copy and ref-like");
+    debug.assert(bits(&o, &sg, &bk, "plain", 8) == K | FREE | REF, "`&mut u32`: not Copy");
+    debug.assert(bits(&o, &sg, &bk, "plain", 9) == K | FREE | COPY, "a raw pointer: Copy, no drop glue, not ref-like");
+    debug.assert(bits(&o, &sg, &bk, "plain", 10) == K | FREE | REF | DROP | DEEP, "a tuple element whose destructor reaches references");
+    debug.assert(bits(&o, &sg, &bk, "plain", 11) == K | FREE | REF | DROP | DEEP, "a payload: ref-like through the type argument, drop through the field");
+    debug.assert(bits(&o, &sg, &bk, "plain", 12) == K | FREE | DROP, "an array of a type with drop glue");
+    debug.assert(bk.env.as_slice()[decl(&o, "plain") as usize] == 0, "a fn without generics: the empty environment");
+    debug.assert(bk.env.as_slice()[decl(&o, "P") as usize] == NONE, "a struct: no body");
+}
+
+test fn generic_params_per_environment() {
+    let (o, sg, _, bk) = run(MAIN);
+    let eg = bk.env.as_slice()[decl(&o, "gen") as usize];
+    let ec = bk.env.as_slice()[decl(&o, "gen_copy") as usize];
+    let ev = bk.env.as_slice()[decl(&o, "gen_view") as usize];
+    debug.assert(eg == 0 && ec != 0 && ev != 0 && ec != ev, "bounds and `view` make environments of their own");
+    let t = param(&o, &sg, "gen", 0);
+    debug.assert(t == param(&o, &sg, "gen_copy", 0) && t == param(&o, &sg, "gen_view", 0), "one param type in three fns");
+    debug.assert(bk.at(eg, t) == K | DROP | FN, "an unbounded param: may need drop, may hold a fn");
+    debug.assert(bk.at(ec, t) == K | COPY | FN, "`T: Copy`: Copy, no drop glue");
+    debug.assert(bk.at(ev, t) == K | REF | DROP | FN | DEEP, "`T: view`: ref-like, and its drop may reach references");
+    debug.assert(bits(&o, &sg, &bk, "gen", 1) == K | DROP | FN, "a field of param type");
+    debug.assert(bits(&o, &sg, &bk, "gen", 2) == K | FN, "a raw pointer to a param: no drop glue, a fn through the type argument");
+    debug.assert(bits(&o, &sg, &bk, "gen_copy", 1) == K | FN, "a field of a Copy param: no drop glue");
+    debug.assert(bits(&o, &sg, &bk, "gen_copy", 2) == K | DROP | FN, "a tuple of a Copy param and a type with drop glue");
+    debug.assert(bits(&o, &sg, &bk, "gen_view", 1) == K | REF | DROP | FN | DEEP, "a field of a view param");
+    let h = param(&o, &sg, "gen", 1);
+    debug.assert(bk.row(0, h) != NONE && bk.at(0, h) & FREE == 0, "a type with params is not answered for every environment");
+    let a = param(&o, &sg, "plain", 7);
+    debug.assert(bk.at(ec, a) == bk.at(0, a) && bk.at(ev, a) == bk.at(0, a), "a type without params answers alike in every environment");
+}
+
+test fn reached_and_auto_ref_types() {
+    let (o, sg, _, bk) = run(MAIN);
+    let tab = &sg.cx.tab;
+    let none = vec.Vec::<u32>.new();
+    let p = param(&o, &sg, "plain", 0);
+    let rp = tab.find(types.TK_REF, 0, p, none.as_slice());
+    let mp = tab.find(types.TK_REF, 1, p, none.as_slice());
+    debug.assert(rp != NONE && mp != NONE, "`&P` and `&mut P` are interned");
+    debug.assert(bk.at(0, rp) == K | FREE | COPY | REF && bk.at(0, mp) == K | FREE | REF, "and answered");
+    let u8t = tab.find(types.TK_INT, 0, types.W_8, none.as_slice());
+    let pair = [u8t, u8t];
+    let uu = tab.find(types.TK_TUPLE, 0, 0, &pair);
+    debug.assert(uu != NONE && bk.at(0, uu) == K | FREE | COPY, "a substituted field `(u8, u8)` of `Two<u8>`");
+    let r = param(&o, &sg, "plain", 2);
+    let lt = [u8t, r];
+    let ur = tab.find(types.TK_TUPLE, 0, 0, &lt);
+    debug.assert(ur != NONE && bk.at(0, ur) == K | FREE | DROP, "a type only a `let` names");
+    debug.assert(bk.at(0, 0xffff_0000) == 0, "a type without a row is unknown");
+    for j in 1..bk.rows() {
+        debug.assert(bk.key.as_slice()[j - 1] < bk.key.as_slice()[j], "rows sorted, each once");
+    }
+}
+
+test fn unknown_field() {
+    let (o, sg, _, bk) = run("struct Bad { x: Missing }\nfn f(b: Bad, o: Option<Bad>, r: &Bad, n: u32) {}\nfn main() {}\n");
+    debug.assert(bits(&o, &sg, &bk, "f", 0) & K == 0, "a field that did not lower: unknown");
+    debug.assert(bits(&o, &sg, &bk, "f", 1) & K == 0, "a type holding it by value: unknown");
+    debug.assert(bits(&o, &sg, &bk, "f", 2) & K == 0, "a reference to it: unknown");
+    debug.assert(bits(&o, &sg, &bk, "f", 3) == K | FREE | COPY, "an unrelated type: answered");
+}

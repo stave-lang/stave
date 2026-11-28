@@ -1,0 +1,365 @@
+// Body kinds (types/bkinds): the kind bits of every type a body's MIR names, in that body's
+// generic environment (its params' bounds and `view` flags, `traits.env_of`), as rows sorted by
+// (environment, T). A type without generic params answers alike in every environment: its row is
+// under environment 0 and has `B_FREE`.
+//
+// Bits (stage0's per-body type queries):
+// - `copy`: the Copy goal in the environment, decided by the checker's solver (`tc.tq.tr`).
+// - `drop` (drop glue): a `drop-impl` ADT or a generic param that is not Copy, reached by value
+//   through ADT fields, tuple and array elements.
+// - `ref` (carries an origin set): a reference, fn value, `view` ADT, or `view` param, reached
+//   through elements and type arguments, not through a raw pointer or ADT fields.
+// - `fn` (may hold a fn value): a fn value or generic param, reached through every component and
+//   every ADT field.
+// - `drop-impl`: an ADT whose first applying `Drop` impl of its own package (empty environment)
+//   exists; an ADT type with generic params: its ADT has one (some instance may run it).
+// - `deep` (dropping it may run a destructor on a value that holds references): `ref` and
+//   `drop`, and a `drop-impl` ADT or a type that is no ADT, tuple, or array, reached by value
+//   only through types that are `ref` and `drop` themselves.
+// - `known`: the row is answered. A type that reaches a field the table could not make (taller
+//   than the table holds, or of the error type) is not; neither is a type without a row. An
+//   unknown answer is never read as Copy or as no drop: its body is unknown.
+//
+// Types: per body the checker checked (its last check), every node and binding type and the
+// decl's own type (a fn's return); `&L` and `&mut L` for every level L a root reaches through
+// references (auto-ref receivers); and every type those reach through components and ADT fields
+// (made on the way). The table grows here, so a later pass only looks types up (`find`).
+//
+// Passes: the closure as (environment, T) pairs with its component edges; the Copy goals and
+// the `Drop` impl-applies queries, solved once with the checker's goals; `drop`, `ref`, `fn`,
+// `deep`, and the unknown mark as reachability rounds over the reversed edges (`layout.reach`).
+import ast;
+import consteval;
+import decls;
+import layout;
+import modules;
+import sigs;
+import tc_rows;
+import traits;
+import ir.types;
+import ir.umap;
+import prims.col;
+import prims.search;
+import prims.sort;
+import std.idx;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = idx.NONE;
+
+pub const B_KNOWN: u16 = 1;
+pub const B_COPY: u16 = 2;
+pub const B_DROP: u16 = 4;
+pub const B_REF: u16 = 8;
+pub const B_FN: u16 = 16;
+pub const B_DROP_IMPL: u16 = 32;
+pub const B_DEEP: u16 = 64;
+pub const B_FREE: u16 = 128;
+
+// The walks an edge belongs to: every edge is an `fn` edge.
+const E_FN: u8 = 1;
+const E_REF: u8 = 2;
+const E_DROP: u8 = 4;
+
+pub struct BKinds {
+    // per decl: the environment its body's types are answered in (NONE: no body checked)
+    pub env: vec.Vec<u32>,
+    // rows: key `search.pair(environment, T)`, sorted, each once; their bits
+    pub key: vec.Vec<u64>,
+    pub bits: vec.Vec<u16>,
+}
+
+impl BKinds {
+    pub fn rows(&self) -> usize {
+        return self.key.len();
+    }
+
+    // The row of (e, t), or NONE.
+    pub fn row(&self, e: u32, t: u32) -> u32 {
+        let k = search.pair(e, t);
+        let i = search.lower_bound(self.key.as_slice(), k);
+        if i < self.key.len() && self.key.as_slice()[i] == k { return i as% u32; }
+        return NONE;
+    }
+
+    // The bits of type t in environment e; without `B_KNOWN`: unknown.
+    pub fn at(&self, e: u32, t: u32) -> u16 {
+        let i = self.row(e, t);
+        if i != NONE { return self.bits.as_slice()[i as usize]; }
+        if e == 0 { return 0; }
+        let j = self.row(0, t);
+        if j != NONE && self.bits.as_slice()[j as usize] & B_FREE != 0 { return self.bits.as_slice()[j as usize]; }
+        return 0;
+    }
+}
+
+// The closure being made: its (environment, T) pairs by key, and the edges between them.
+struct Pairs {
+    map: umap.Map,
+    env: vec.Vec<u32>,
+    ty: vec.Vec<u32>,
+    todo: vec.Vec<u32>,
+    src: vec.Vec<u32>,
+    dst: vec.Vec<u32>,
+    ek: vec.Vec<u8>,
+    // per pair: an ADT field of it could not be made
+    bad: vec.Vec<bool>,
+}
+
+impl Pairs {
+    // The pair of t in environment e (environment 0 when t has no generic params), made if new.
+    fn add(&mut self, tr: &mut traits.Traits, tab: &types.Table, e: u32, t: u32) -> u32 {
+        tr.ensure_comp(tab);
+        let pe = if tr.comp.hasp.as_slice()[t as usize] then e else 0u32;
+        let n = self.ty.len() as% u32;
+        let v = self.map.insert(search.pair(pe, t), n);
+        if v == n {
+            self.env.push(pe);
+            self.ty.push(t);
+            self.bad.push(false);
+            self.todo.push(n);
+        }
+        return v;
+    }
+
+    fn edge(&mut self, a: u32, b: u32, k: u8) {
+        self.src.push(a);
+        self.dst.push(b);
+        self.ek.push(k);
+    }
+
+    // The edges of kind k: (sources, destinations), only from the pairs `keep` allows.
+    fn edges(&self, k: u8, keep: &[bool]) -> (vec.Vec<u32>, vec.Vec<u32>) {
+        let mut s = vec.Vec::<u32>.new();
+        let mut d = vec.Vec::<u32>.new();
+        for j in 0..self.src.len() {
+            let a = self.src.as_slice()[j];
+            if self.ek.as_slice()[j] & k == 0 || !keep[a as usize] { continue; }
+            s.push(a);
+            d.push(self.dst.as_slice()[j]);
+        }
+        return (s, d);
+    }
+}
+
+// The edge kinds of the components (`types.Table.kids`) of a type with tag `tag`.
+fn kid_edges(tag: u8) -> u8 {
+    if tag == types.TK_TUPLE || tag == types.TK_ARRAY { return E_FN | E_REF | E_DROP; }
+    if tag == types.TK_REF || tag == types.TK_PTR { return E_FN; }
+    return E_FN | E_REF;
+}
+
+fn in_table(tab: &types.Table, t: u32) -> bool {
+    return t != types.ERR && (t as usize) < tab.len();
+}
+
+// The kinds of every checked body's types (`tc` after `typeck.build`). The type table grows
+// (fields, auto-ref types) and the checker's solver takes more goals.
+pub fn build(tc: &mut tc_rows.Typeck, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, tree: &ast.Ast) -> BKinds {
+    let nd = ds.decls();
+    let mut env = col.filled(nd, NONE);
+    // per environment: the scope of a body with it (the environment's words are its param rows')
+    let mut e_sc = vec.Vec::<consteval.Scope>.new();
+    let mut root_e = vec.Vec::<u32>.new();
+    let mut root_t = vec.Vec::<u32>.new();
+    for d in 0..nd {
+        if tc.last_pass.as_slice()[d] == 0 { continue; }
+        let k = ds.kind.as_slice()[d];
+        let mut sc = consteval.no_scope();
+        if k == decls.DK_FN || k == decls.DK_METHOD {
+            let st = sigs.self_of(&mut sg.cx, ds, d as% u32);
+            sc = sigs.scope_of(&sg.cx, ds, d as% u32, st);
+        }
+        let e = tc.tq.tr.env_of(sg, sc.par_lo, sc.par_hi, sc.own_lo, sc.own_hi);
+        env.as_mut_slice()[d] = e;
+        while e_sc.len() <= e as usize {
+            e_sc.push(consteval.no_scope());
+        }
+        e_sc.as_mut_slice()[e as usize] = sc;
+        let it = ds.item.as_slice()[d] as usize;
+        let g = tree.item_node.as_slice()[it] as usize + ds.node.as_slice()[d] as usize;
+        let lo = g - tree.size.as_slice()[g] as usize;
+        for r in lo..g + 1 {
+            root_e.push(e);
+            root_t.push(tc.nty.as_slice()[r]);
+            root_e.push(e);
+            root_t.push(tc.loc.as_slice()[r]);
+        }
+        root_e.push(e);
+        root_t.push(sg.cx.ty.as_slice()[d]);
+    }
+    let mut bk = build_roots(tc, sg, ds, md, e_sc.as_slice(), root_e.as_slice(), root_t.as_slice());
+    bk.env = env;
+    return bk;
+}
+
+// The rows of the roots (root_t[k] in environment root_e[k]; a value that is no type of the
+// table is skipped) and of everything they reach, `env` left empty. e_sc: per environment a
+// scope with it.
+pub fn build_roots(tc: &mut tc_rows.Typeck, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, e_sc: &[consteval.Scope], root_e: &[u32], root_t: &[u32]) -> BKinds {
+    let tq = &mut tc.tq;
+    let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());
+    let mut ps = Pairs.{
+        map: umap.Map.new(),
+        env: vec.Vec::<u32>.new(),
+        ty: vec.Vec::<u32>.new(),
+        todo: vec.Vec::<u32>.new(),
+        src: vec.Vec::<u32>.new(),
+        dst: vec.Vec::<u32>.new(),
+        ek: vec.Vec::<u8>.new(),
+        bad: vec.Vec::<bool>.new(),
+    };
+    // each root once: its pair, then the auto-ref types of its levels
+    let mut seen = umap.Map.new();
+    for k in 0..root_t.len() {
+        let e = root_e[k];
+        let mut l = root_t[k];
+        if !in_table(&tab, l) || seen.get(search.pair(e, l)) != NONE { continue; }
+        let _ = seen.insert(search.pair(e, l), 0);
+        let _ = ps.add(&mut tq.tr, &tab, e, l);
+        loop {
+            for m in 0..2u32 {
+                let r = tab.mk_ref(m == 1, l);
+                if in_table(&tab, r) { let _ = ps.add(&mut tq.tr, &tab, e, r); }
+            }
+            if tab.tag_of(l) != types.TK_REF { break; }
+            l = tab.b_of(l);
+        }
+    }
+    // the closure: components, then ADT fields
+    let mut kids = vec.Vec::<u32>.new();
+    while ps.todo.len() > 0 {
+        let i = ps.todo.as_slice()[ps.todo.len() - 1];
+        ps.todo.truncate(ps.todo.len() - 1);
+        let e = ps.env.as_slice()[i as usize];
+        let t = ps.ty.as_slice()[i as usize];
+        let tag = tab.tag_of(t);
+        tab.kids(t, &mut kids);
+        let ke = kid_edges(tag);
+        for x in 0..kids.len() {
+            let j = ps.add(&mut tq.tr, &tab, e, kids.as_slice()[x]);
+            ps.edge(i, j, ke);
+        }
+        if tag != types.TK_ADT { continue; }
+        tq.pa.make(&mut tab, &tq.sh, t);
+        kids.clear();
+        kids.extend_from_slice(tq.pa.fields(t));
+        for x in 0..kids.len() {
+            let f = kids.as_slice()[x];
+            if !in_table(&tab, f) {
+                ps.bad.as_mut_slice()[i as usize] = true;
+                continue;
+            }
+            let j = ps.add(&mut tq.tr, &tab, e, f);
+            ps.edge(i, j, E_FN | E_DROP);
+        }
+    }
+    // the questions: Copy per pair; the `Drop` impls of each ADT type without generic params
+    let n = ps.ty.len();
+    let copy_tr = tq.tr.lang.copy_tr;
+    let none = vec.Vec::<u32>.new();
+    let mut cg = vec.Vec::<u32>.with_capacity(n);
+    for i in 0..n {
+        cg.push(tq.tr.goal_env(&tab, ps.env.as_slice()[i], ps.ty.as_slice()[i], copy_tr, none.as_slice()));
+    }
+    let drop_k = tq.tr.im.trait_pos(tq.tr.lang.drop);
+    let mut dq_lo = col.filled(n + 1, 0u32);
+    let mut dq = vec.Vec::<u32>.new();
+    let mut cands = vec.Vec::<u32>.new();
+    for i in 0..n {
+        dq_lo.as_mut_slice()[i] = dq.len() as% u32;
+        let t = ps.ty.as_slice()[i];
+        if tab.tag_of(t) != types.TK_ADT || drop_k == NONE || tq.tr.comp.hasp.as_slice()[t as usize] { continue; }
+        let h = traits.head(&tab, t);
+        tq.tr.candidates_at(&tab, drop_k, t, &mut cands);
+        for x in 0..cands.len() {
+            let c = cands.as_slice()[x];
+            if tq.tr.im.head_of.as_slice()[c as usize] != h || !traits.own_package(ds, md, c, tab.a_of(t)) { continue; }
+            dq.push(tq.tr.applies_q(&mut tab, sg, c, t));
+        }
+    }
+    dq_lo.as_mut_slice()[n] = dq.len() as% u32;
+    sg.cx.tab = tab;
+    tq.solve(sg);
+    let tab = &sg.cx.tab;
+    tq.tr.ensure_comp(tab);
+    // the marks
+    let mut cp = col.filled(n, false);
+    let mut dimpl = col.filled(n, false);
+    let mut m_ref = col.filled(n, false);
+    let mut m_drop = col.filled(n, false);
+    let mut m_fn = col.filled(n, false);
+    let all = col.filled(n, true);
+    for i in 0..n {
+        let t = ps.ty.as_slice()[i];
+        let tag = tab.tag_of(t);
+        let c = tq.tr.is(cg.as_slice()[i]);
+        cp.as_mut_slice()[i] = c;
+        if tag == types.TK_ADT {
+            let a = tab.a_of(t);
+            let mut di = false;
+            if tq.tr.comp.hasp.as_slice()[t as usize] {
+                di = tq.tr.adt_drop.as_slice()[a as usize];
+            } else {
+                for q in dq_lo.as_slice()[i] as usize..dq_lo.as_slice()[i + 1] as usize {
+                    di = di || tq.tr.holds(dq.as_slice()[q]);
+                }
+            }
+            dimpl.as_mut_slice()[i] = di;
+            m_drop.as_mut_slice()[i] = di;
+            m_ref.as_mut_slice()[i] = ds.flags.as_slice()[a as usize] & decls.F_VIEW != 0;
+        } else if tag == types.TK_PARAM {
+            let e = ps.env.as_slice()[i] as usize;
+            let r = if e < e_sc.len() then e_sc[e].row(tab.a_of(t)) else NONE;
+            m_ref.as_mut_slice()[i] = r != NONE && sg.cx.gens.is_view.as_slice()[r as usize];
+            m_drop.as_mut_slice()[i] = !c;
+            m_fn.as_mut_slice()[i] = true;
+        } else if tag == types.TK_REF || tag == types.TK_FN {
+            m_ref.as_mut_slice()[i] = true;
+            m_fn.as_mut_slice()[i] = tag == types.TK_FN;
+        }
+    }
+    let (rs, rd) = ps.edges(E_REF, all.as_slice());
+    let is_ref = layout.reach(n, rs.as_slice(), rd.as_slice(), m_ref.as_slice());
+    let (dsrc, dd) = ps.edges(E_DROP, all.as_slice());
+    let is_drop = layout.reach(n, dsrc.as_slice(), dd.as_slice(), m_drop.as_slice());
+    let (fs, fd) = ps.edges(E_FN, all.as_slice());
+    let is_fn = layout.reach(n, fs.as_slice(), fd.as_slice(), m_fn.as_slice());
+    let unk = layout.reach(n, fs.as_slice(), fd.as_slice(), ps.bad.as_slice());
+    let mut both = col.filled(n, false);
+    let mut m_deep = col.filled(n, false);
+    for i in 0..n {
+        let b = is_ref.as_slice()[i] && is_drop.as_slice()[i];
+        both.as_mut_slice()[i] = b;
+        let tag = tab.tag_of(ps.ty.as_slice()[i]);
+        let open = tag == types.TK_ADT || tag == types.TK_TUPLE || tag == types.TK_ARRAY;
+        m_deep.as_mut_slice()[i] = b && (dimpl.as_slice()[i] || !open);
+    }
+    let (es, ed) = ps.edges(E_DROP, both.as_slice());
+    let is_deep = layout.reach(n, es.as_slice(), ed.as_slice(), m_deep.as_slice());
+    // the rows, sorted by key
+    let mut keys = vec.Vec::<u64>.with_capacity(n);
+    for i in 0..n {
+        keys.push(search.pair(ps.env.as_slice()[i], ps.ty.as_slice()[i]));
+    }
+    let perm = sort.sort_perm(keys.as_slice());
+    let mut key = vec.Vec::<u64>.with_capacity(n);
+    let mut bits = vec.Vec::<u16>.with_capacity(n);
+    for j in 0..n {
+        let i = perm.as_slice()[j] as usize;
+        key.push(keys.as_slice()[i]);
+        let mut b: u16 = 0;
+        if !tq.tr.comp.hasp.as_slice()[ps.ty.as_slice()[i] as usize] { b = b | B_FREE; }
+        if !unk.as_slice()[i] {
+            b = b | B_KNOWN;
+            if cp.as_slice()[i] { b = b | B_COPY; }
+            if is_drop.as_slice()[i] { b = b | B_DROP; }
+            if is_ref.as_slice()[i] { b = b | B_REF; }
+            if is_fn.as_slice()[i] { b = b | B_FN; }
+            if dimpl.as_slice()[i] { b = b | B_DROP_IMPL; }
+            if is_deep.as_slice()[i] { b = b | B_DEEP; }
+        }
+        bits.push(b);
+    }
+    return BKinds.{ env: vec.Vec::<u32>.new(), key: key, bits: bits };
+}
