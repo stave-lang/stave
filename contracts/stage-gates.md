@@ -285,9 +285,10 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
     OWNER` when the owner whose flag a tested drop tests is not the row's (an assignment's old
     value: the local assigned).
   - `find KIND F O ..`, by (KIND, F, O), then by the line's text with every local no line
-    before names written `l?` and no place type; the locals the lines name first are numbered
-    in this order. One line per finding (two equal findings print two equal lines). What the
-    builder found and the checks
+    before the `find` lines names written `l?` and no place type (of findings equal so, the
+    builder's first); the locals the lines name first are numbered in this order. One line
+    per finding (two equal findings print two equal lines). What the builder found and the
+    checks
     report, at the start `F O` of its span: `move F O PLACE WHY` (E0504; WHY `behind`,
     `capture F O`, `drop PLACE`, `static`, `part PLACE reborrow|pattern|replace`), `guard F O
     move|assign|mut-borrow PLACE` or `guard F O try` (E0505), `temp-write F O` (E0503 case
