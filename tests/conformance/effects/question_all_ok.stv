@@ -3,24 +3,24 @@
 // them with `?` from callees that deny the same set. The Err and None paths are taken at run time.
 enum E { Neg, Big(u32) }
 
-fn check(x: u32) -> Result<u32, E> without(alloc, trap, recursive, lock, unsafe, io, block) {
+fn check(x: u32) -> Result<u32, E> without(alloc, trap, rec, lock, unsafe, io, block) {
     if x == 13 { return Result.Err(E.Neg); }
     if x > 100 { return Result.Err(E.Big(x)); }
     return Result.Ok(x);
 }
 
-fn twice(a: u32, b: u32) -> Result<u32, E> without(alloc, trap, recursive, lock, unsafe, io, block) {
+fn twice(a: u32, b: u32) -> Result<u32, E> without(alloc, trap, rec, lock, unsafe, io, block) {
     let p = check(a)?;
     let q = check(b)?;
     return Result.Ok(p +% q);
 }
 
-fn even(a: u32) -> Option<u32> without(alloc, trap, recursive, lock, unsafe, io, block) {
+fn even(a: u32) -> Option<u32> without(alloc, trap, rec, lock, unsafe, io, block) {
     if (a & 1) != 0 { return Option.None; }
     return Option.Some(a);
 }
 
-fn both(a: u32, b: u32) -> Option<u32> without(alloc, trap, recursive, lock, unsafe, io, block) {
+fn both(a: u32, b: u32) -> Option<u32> without(alloc, trap, rec, lock, unsafe, io, block) {
     let x = even(a)?;
     let y = even(b)?;
     return Option.Some(x +% y);

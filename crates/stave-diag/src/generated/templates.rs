@@ -733,6 +733,34 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0030",
+        severity: Severity::Error,
+        area: "lex-parse",
+        rule: "a type after `->` ends in a fn type's `needs(..)` or `without(..)` outside parentheses: the clause could be read as the returned fn type's or as the fn's own; parenthesize the type with its clauses or the type alone",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "kw", kind: HoleKind::TextLiteral, choices: &["needs", "without"] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{kw}` after a returned fn type is ambiguous: parenthesize",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "the returned fn type's `{kw}`, or the fn's own?" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `-> (fn(..) {kw}(..))` for the returned fn type's clause (the edits), or `-> (fn(..)) {kw}(..)` for the clause of the fn that `->` belongs to",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "open", replacement: "(" },
+                        EditTemplate { at: "close", replacement: ")" },
+                    ],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0101",
         severity: Severity::Error,
         area: "resolve",
@@ -6429,7 +6457,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         located: true,
         holes: &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "rec", "lock", "unsafe", "io", "block", "park"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
         ],
@@ -6505,7 +6533,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         located: true,
         holes: &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "rec", "lock", "unsafe", "io", "block", "park"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "from", kind: HoleKind::Type, choices: &[] },
             Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
@@ -6559,7 +6587,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "not an effect" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`, `park`",
+                    description: "use one of `alloc`, `trap`, `rec`, `lock`, `unsafe`, `io`, `block`, `park`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

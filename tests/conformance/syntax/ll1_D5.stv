@@ -1,15 +1,21 @@
 //~ CHECK-ONLY
-// D5: `needs(..)` directly after a fn type binds to that (innermost) fn type.
+// D5: `needs(..)` directly after a fn type binds to that (innermost) fn type. After `->` the type
+// is parenthesized either way (the bare form is E0030: syntax/parse_neg_ret_fn_clause.stv).
 fn fast() needs(avx2) { }
 
 fn plain() { }
 
 // the returned fn type needs avx2; `pick` itself needs nothing
-fn pick() -> fn() needs(avx2) {
+fn pick() -> (fn() needs(avx2)) {
     return fast;
 }
 
-// parenthesized: `pick_needs` itself needs avx2
+// `pick_needs` itself needs avx2
 fn pick_needs() -> (fn()) needs(avx2) {
     return plain;
+}
+
+// not after `->`: the clause is the param type's
+fn call(f: fn() needs(avx2)) needs(avx2) {
+    f();
 }

@@ -5,7 +5,7 @@
 //! by name. Always stage0.
 //!
 //! - human: `<file>:<line>:<col>: <fn>: <effects>` (effects space-separated in the order
-//!   `alloc trap recursive lock unsafe io block park`, or `none`)
+//!   `alloc trap rec lock unsafe io block park`, or `none`)
 //! - `--json`: one object per line,
 //!   `{"file":"src/main.stv","line":3,"col":4,"fn":"main.g","effects":["alloc","trap"]}`
 //!

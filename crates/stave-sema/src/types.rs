@@ -1021,6 +1021,18 @@ pub(crate) fn feature_names(bits: u64) -> Vec<&'static str> {
     fs.maximal().into_iter().map(|f| f.name()).collect()
 }
 
+/// Whether the spelling of `t` ends in a fn type's `needs(..)` / `without(..)`: a fn type with
+/// clauses, behind any number of references and raw pointers.
+fn ends_in_clause<I: Interner + ?Sized>(cx: &I, mut t: TypeId) -> bool {
+    loop {
+        match cx.kind(t) {
+            TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => t = *inner,
+            TypeKind::Fn { features, deny, .. } => return !feature_names(*features).is_empty() || *deny != 0,
+            _ => return false,
+        }
+    }
+}
+
 /// The longest text [`display`] writes before it elides the rest: a type that shares
 /// components may have exponentially many leaves (`(T, T)` nested 64 deep).
 const DISPLAY_MAX: usize = 4096;
@@ -1108,7 +1120,15 @@ fn display_into<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId, s: &
             s.push(')');
             if *ret != cx.fixed_ty(ids::UNIT) {
                 s.push_str(" -> ");
+                // a returned fn type's clauses would read as this one's: parenthesized (E0030)
+                let paren = ends_in_clause(cx, *ret);
+                if paren {
+                    s.push('(');
+                }
                 rec(*ret, s);
+                if paren {
+                    s.push(')');
+                }
             }
             let f = feature_names(*features);
             if !f.is_empty() {

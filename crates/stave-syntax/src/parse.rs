@@ -842,14 +842,29 @@ fn parse_item_into<T: Trace + TraceNew>(
     };
     let before = nodes.len();
     match run(tokens, begin, end, start, nodes, s, &mut T::new()) {
-        Ok(()) => match empty_obligation(src, tokens, begin, end) {
+        Ok(()) => {
             // E0013 case `empty` (contracts/parse-errors.md "Empty obligation"): dropped
-            Some(at) => {
+            if let Some(at) = empty_obligation(src, tokens, begin, end) {
                 nodes.truncate(before);
-                (false, make_diag("E0013", Some("empty"), &[], tok_span(src, tokens, file, at, 0), &[]))
+                return (
+                    false,
+                    make_diag("E0013", Some("empty"), &[], tok_span(src, tokens, file, at, 0), &[]),
+                );
             }
-            None => (true, None),
-        },
+            // E0030 (contracts/parse-errors.md "Returned fn type clause"): dropped
+            if let Some(c) = ret_fn_clause(tokens, begin, end, &nodes[before..]) {
+                nodes.truncate(before);
+                let kw = if tokens[c.kw].kind == Term::KwNeeds as u8 { "needs" } else { "without" };
+                let open = Span::new(file, tokens[c.fn_tok].start, 0);
+                let close = Span::new(file, token_end(src, tokens, c.close), 0);
+                let primary = tok_span(src, tokens, file, c.kw, 0);
+                return (
+                    false,
+                    make_diag("E0030", None, &[("kw", kw)], primary, &[("open", open), ("close", close)]),
+                );
+            }
+            (true, None)
+        }
         Err(f) => {
             nodes.truncate(before);
             (false, error_diag(src, tokens, file, begin, end, &f))
@@ -866,6 +881,66 @@ fn empty_obligation(src: &[u8], tokens: &[Token], begin: usize, end: usize) -> O
             && tokens[i + 2].kind == Term::StrLit as u8
             && token_end(src, tokens, i + 2).saturating_sub(tokens[i + 2].start) == 2
     })
+}
+
+/// A fn type's clause at the end of a type after `->`: its first clause keyword, its `fn` token,
+/// and the `)` that closes its last clause.
+struct RetFnClause {
+    kw: usize,
+    fn_tok: usize,
+    close: usize,
+}
+
+/// Of the fn types in an item's postorder `nodes` that have a `needs` / `without` clause and
+/// follow `->` past only `&`, `&&`, `mut`, `const`, `*` tokens, the one whose first clause comes
+/// first (grammar D5 gives it the clause; a reader may give it to the fn of the `->`).
+fn ret_fn_clause(tokens: &[Token], begin: usize, end: usize, nodes: &[Node]) -> Option<RetFnClause> {
+    let clause = |k: u8| k == NodeKind::Needs.id() || k == NodeKind::Without.id();
+    let mut best: Option<RetFnClause> = None;
+    for (n, node) in nodes.iter().enumerate() {
+        let fn_tok = node.a as usize;
+        if node.kind != NodeKind::TypeBase.id()
+            || tokens.get(fn_tok).map(|t| t.kind) != Some(Term::KwFn as u8)
+        {
+            continue;
+        }
+        // direct children, last first: the clauses close the fn type
+        let lo = n.saturating_sub(node.b as usize);
+        let (mut first, mut last) = (None, None);
+        let mut c = n;
+        while c > lo {
+            c -= 1;
+            if clause(nodes[c].kind) {
+                first = Some(nodes[c].a as usize);
+                last = last.or(first);
+            }
+            c = c.saturating_sub(nodes[c].b as usize);
+        }
+        let (Some(kw), Some(last)) = (first, last) else { continue };
+        if best.as_ref().is_some_and(|b| b.kw < kw) {
+            continue;
+        }
+        let mut j = fn_tok;
+        let after_arrow = loop {
+            if j <= begin {
+                break false;
+            }
+            j -= 1;
+            let k = tokens[j].kind;
+            if k == Term::MinusGt as u8 {
+                break true;
+            }
+            let prefix = [Term::Amp, Term::AmpAmp, Term::KwMut, Term::KwConst, Term::Star];
+            if !prefix.iter().any(|&t| t as u8 == k) {
+                break false;
+            }
+        };
+        let close = (last..end).find(|&k| tokens[k].kind == Term::RParen as u8);
+        if let (true, Some(close)) = (after_arrow, close) {
+            best = Some(RetFnClause { kw, fn_tok, close });
+        }
+    }
+    best
 }
 
 /// Builds a fresh trace per item.

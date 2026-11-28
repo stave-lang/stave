@@ -98,7 +98,7 @@ const OP_VECG: u8 = 10;
 const V3: u32 = 60;
 const V4: u32 = 1980;
 // The effect names, by deny bit.
-const EFFECTS: &str = "alloc trap recursive lock unsafe io block park";
+const EFFECTS: &str = "alloc trap rec lock unsafe io block park";
 const PARK: u8 = 128;
 
 // The closure of feature set `bits` under implication.
@@ -935,6 +935,13 @@ fn array_of(cx: &mut consteval.Cx, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.I
     return cx.tab.key(types.TK_SLICE, elem, al);
 }
 
+// The name an `Effect` token spells: an `Ident`'s text, or the keyword `unsafe` or `rec`.
+fn effect_name(t: &lex.Tokens, nm: &intern.Interned, tok: u32) -> &[u8] from nm {
+    let k = tk(t, tok);
+    if k == terminals.T_IDENT { return sym_text(nm, tok); }
+    return mem.str_bytes(if k == terminals.T_KW_REC then "rec" else "unsafe");
+}
+
 // E0708 for each unknown name of `Needs` row nd, E1404 for each of `Without` row wd (NONE: none).
 fn unknown_names(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, it: u32, base: usize, nd: u32, wd: u32) {
     if nd != NONE {
@@ -949,7 +956,7 @@ fn unknown_names(sg: &mut Sigs, tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Inte
         let ks = tree.kids.row(wd as usize);
         for j in 0..ks.len() {
             let tok = tree.tok.as_slice()[base + ks[j] as usize];
-            let name = if tk(t, tok) == terminals.T_IDENT then sym_text(nm, tok) else mem.str_bytes("unsafe");
+            let name = effect_name(t, nm, tok);
             let (ok, _) = effect_of(name);
             if !ok { sg.rows.add(D_E1404, it, tok, tok, NONE, NONE, ERR, consteval.no_scope()); }
         }
@@ -975,7 +982,7 @@ fn deny_bits(tree: &ast.Ast, t: &lex.Tokens, nm: &intern.Interned, set: &source.
     for j in 0..ks.len() {
         let e = base + ks[j] as usize;
         let tok = tree.tok.as_slice()[e];
-        let name = if tk(t, tok) == terminals.T_IDENT then sym_text(nm, tok) else mem.str_bytes("unsafe");
+        let name = effect_name(t, nm, tok);
         let (ok, b) = effect_of(name);
         if ok { bits = bits | b; }
     }

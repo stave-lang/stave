@@ -29,7 +29,7 @@ view struct H {
     f: fn() without(io),
 }
 
-fn pick(c: bool) -> fn() without(io) {
+fn pick(c: bool) -> (fn() without(io)) {
     return if c then noisy else quiet; //~ ERROR E1403
 }
 

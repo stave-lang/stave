@@ -161,6 +161,18 @@ fn push_const(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, nm: &intern.Interned, sc: &
     }
 }
 
+// Whether the spelling of type t ends in a fn type's `needs(..)` / `without(..)`: a fn type with
+// clauses, behind any number of references and raw pointers.
+fn ends_in_clause(tab: &types.Table, t: u32) -> bool {
+    let mut u = t;
+    while u != types.ERR && u != NONE && (tab.tag_of(u) == types.TK_REF || tab.tag_of(u) == types.TK_PTR) { u = tab.b_of(u); }
+    if u == types.ERR || u == NONE || tab.tag_of(u) != types.TK_FN { return false; }
+    let xs = tab.x(u);
+    let np = tab.a_of(u) as usize;
+    let feats = ((xs[np + 1] as u64) << 32) | (xs[np + 2] as u64);
+    return feats != 0 || xs[np + 3] != 0;
+}
+
 // ` needs(f, ..)` and ` without(e, ..)` of fn type t, as its type writes them.
 fn fn_clauses(out: &mut vec.Vec<u8>, tab: &types.Table, t: u32) {
     let xs = tab.x(t);
@@ -288,7 +300,11 @@ pub fn display(out: &mut vec.Vec<u8>, sg: &sigs.Sigs, ds: &decls.Decls, nm: &int
             // the clauses last, then the return type, then the params in reverse
             if deny != 0 || feats != 0 { st.push(P_CLAUSES, v, 0); }
             if !(tab.tag_of(ret) == types.TK_TUPLE && tab.x(ret).len() == 0) {
+                // a returned fn type's clauses would read as this one's: parenthesized (E0030)
+                let paren = ends_in_clause(tab, ret);
+                if paren { st.piece(RPAREN); }
                 st.ty(ret, d1);
+                if paren { st.piece(LPAREN); }
                 st.piece(ARROW);
             }
             st.piece(RPAREN);

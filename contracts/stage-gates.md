@@ -92,7 +92,7 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
       in the flat numbering (`param i`) and print on the parent's line. `params`: the receiver
       first. `ret`: `tuple` (unit) without `->`. `needs`: the features as `fntype` prints them
       ([checked-ir.md](checked-ir.md)), empty after E0709. `deny`: the `without` effects in the
-      order `alloc trap recursive lock unsafe io block park`. `RO`: a return `from` entry, in
+      order `alloc trap rec lock unsafe io block park`. `RO`: a return `from` entry, in
       source order, `p` or `copy p` (p = the param's index in `params`; a name that is no param
       has no entry). `PO`: a parameter `from` entry, `a<b` or `a<copy b` (`a: &mut V from b`, a
       and b param indices), sorted by (a, b, copy), unique; an entry with E0514, E0515, E0520,

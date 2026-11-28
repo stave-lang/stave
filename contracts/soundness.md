@@ -506,7 +506,7 @@ they call does not count; an `extern "C"` import has every effect but those its 
 claim of its block's obligation, never checked); a system-call intrinsic is `io`; `call_on_stack`
 and `cpu_init` have every effect; a trapping instruction of the node's checked IR after the removal
 of proven checks is `trap`, and a `panic.out_of_memory` there is `alloc`; membership in a call cycle
-is `recursive` and `trap`; an `unsafe(..)` outside the built-in packages is `unsafe`; a `scope` and
+is `rec` and `trap`; an `unsafe(..)` outside the built-in packages is `unsafe`; a `scope` and
 the runtime's file waits (`read`, `write`, `pread64`, `pwrite64`, `openat`, `flock`) are `block`; a
 `spawn` is `alloc io trap`. A node's set is its own effects and, over each edge, the callee's set
 minus the deny clause of a fn-value call's type: every value of that type is checked where it is

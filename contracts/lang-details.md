@@ -146,6 +146,15 @@ Each limit is decided in one place; every reader of a size takes a size past `u6
   `dispatch fn`, or a fn value. A false `ensures` panics at the `return`. The stderr line after
   the panic line is the clause's source text.
 - Each operand of a clause's top-level `&&` is its own check.
+- Every value a clause touches (each expression, call result, receiver, argument, field read, fn
+  value called) must be `Frozen`, and no callee may reach a `static` that is not: no atomics
+  (`load()` included), `Cell`, `Mutex`, or fn-value calls (E0211 `frozen`, `static`); a generic
+  `T` there needs `T: Frozen`.
+- An `ensures` reads params only of `&`, `&mut`, or Copy type: the body may have moved the
+  others, and a `&mut` param it moved is E0502 there. Nor does it read `v` when the return type
+  holds a `&mut` `from v` (a Copy `old(v..)` is fine).
+- A clause is borrow-checked as fn code where it runs, removed or not: what `old(e)` borrows stays
+  borrowed until the `ensures` clauses (`old(&*p)` then `*p = 1;` = E0501: write `old(*p)`).
 - The compiler proves checks from what holds before them: earlier clauses, branches, type ranges,
   `+` / `-` by constants, widening casts.
   - A check that always holds is removed. A `requires` implied by the clauses before it is

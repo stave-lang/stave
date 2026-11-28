@@ -1,5 +1,5 @@
 //~ CHECK-ONLY
-// E1404: a deny clause names only `alloc trap recursive lock unsafe io block park`, on fn items,
+// E1404: a deny clause names only `alloc trap rec lock unsafe io block park`, on fn items,
 // in fn types, and on `extern "C"` imports.
 fn f() without(alloc, gc) { //~ ERROR E1404
 }

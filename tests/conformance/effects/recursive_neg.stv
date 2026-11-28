@@ -1,5 +1,5 @@
 //~ CHECK-ONLY
-// `without(recursive)`: `g` reaches the call cycle of `walk` through `h`.
+// `without(rec)`: `g` reaches the call cycle of `walk` through `h`.
 rec fn walk(n: u32) -> u32 {
     return if n == 0u32 then 0u32 else walk(n -% 1u32);
 }
@@ -8,7 +8,7 @@ fn h(n: u32) -> u32 {
     return walk(n);
 }
 
-fn g(n: u32) -> u32 without(recursive) { //~ ERROR E1401
+fn g(n: u32) -> u32 without(rec) { //~ ERROR E1401
     return h(n);
 }
 

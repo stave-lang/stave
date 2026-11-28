@@ -178,8 +178,8 @@ fn main() {}
     is(&m, "main.scoped.0", &[]);
     is(&m, "main.raw", &["unsafe"]);
     assert_eq!(m["main.ext"], Effects::ALL);
-    is(&m, "main.walk", &["trap", "recursive"]);
-    is(&m, "main.calls_walk", &["trap", "recursive"]);
+    is(&m, "main.walk", &["trap", "rec"]);
+    is(&m, "main.calls_walk", &["trap", "rec"]);
     is(&m, "main.plain", &[]);
     is(&m, "runtime.alloc.alloc", &["alloc", "trap"]);
     is(&m, "runtime.os.futex", &["lock"]);
@@ -226,7 +226,7 @@ fn one(f: fn(u32) -> u32 without(trap), x: u32) -> u32 { return f(x); }
 fn two(f: fn(u32) -> u32 without(trap, alloc), g: fn(u32) -> u32 without(trap), x: u32) -> u32 {
     return f(g(x));
 }
-fn pick() -> fn(u32) -> u32 without(trap) { return safe; }
+fn pick() -> (fn(u32) -> u32 without(trap)) { return safe; }
 fn returned(x: u32) -> u32 {
     let f = pick();
     return f(x);
@@ -460,7 +460,7 @@ fn recursion_and_effect_diagnostics_use_source_names() {
     let (p, tc, errs) = load_any(
         "fn apply(f: fn(u32) -> u32, x: u32) -> u32 { return f(x); }
 fn spin(n: u32) -> u32 { return apply(spin, n -% 1u32); }
-fn g(n: u32) -> u32 without(recursive) { return spin(n); }
+fn g(n: u32) -> u32 without(rec) { return spin(n); }
 fn main() {
     let a = g(3u32);
 }
@@ -476,7 +476,7 @@ fn main() {
         assert!(!m.contains('{'), "{m}");
         assert!(m.contains("main.spin") || m.contains("main.apply"), "{m}");
     }
-    assert!(eff[0].1.contains("`main.g` denies `recursive`, but it reaches `main."), "{eff:?}");
+    assert!(eff[0].1.contains("`main.g` denies `rec`, but it reaches `main."), "{eff:?}");
 }
 
 /// The sets do not depend on the worker count (per-level steps collect in SCC order).

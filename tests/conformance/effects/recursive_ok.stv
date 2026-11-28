@@ -1,10 +1,10 @@
 //~ CHECK-ONLY
-// `without(recursive)`: `g` calls `h` twice, and nothing it reaches is part of a call cycle.
+// `without(rec)`: `g` calls `h` twice, and nothing it reaches is part of a call cycle.
 fn h(n: u32) -> u32 {
     return n +% 1u32;
 }
 
-fn g(n: u32) -> u32 without(recursive) {
+fn g(n: u32) -> u32 without(rec) {
     return h(h(n));
 }
 

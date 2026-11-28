@@ -82,6 +82,21 @@ impl Gen {
         }
     }
 
+    /// A type after `->`. One that ends in a fn type (past `&`, `&mut`, `*const`, `*mut`) is
+    /// parenthesized: its own clauses, or the clauses that follow it, would end it (E0030).
+    fn ret_ty(&mut self, d: u32) {
+        let at = self.out.len();
+        self.ty(d);
+        let mut t = &self.out[at..];
+        while let Some(r) = ["&mut ", "& ", "*const ", "*mut "].iter().find_map(|p| t.strip_prefix(p)) {
+            t = r;
+        }
+        if t.starts_with("fn(") {
+            self.out.insert_str(at, "( ");
+            self.w(")");
+        }
+    }
+
     fn ty(&mut self, d: u32) {
         if d == 0 {
             let t = TYPES[self.pick(TYPES.len())];
@@ -130,7 +145,7 @@ impl Gen {
                 self.w("fn(");
                 self.ty(d - 1);
                 self.w(") ->");
-                self.ty(d - 1);
+                self.ret_ty(d - 1);
                 if self.chance(30) {
                     self.w("needs(avx2)");
                 }
@@ -610,7 +625,7 @@ impl Gen {
         self.params(with_self);
         if self.chance(60) {
             self.w("->");
-            self.ty(2);
+            self.ret_ty(2);
             if self.chance(20) {
                 self.w("from a + copy self");
             }
