@@ -1,20 +1,35 @@
 //~ PARSE-ONLY
 // D5: `without(..)` directly after a fn type binds to that (innermost) fn type, after its
-// `needs(..)` if any.
+// `needs(..)` if any. After `->` the type is parenthesized either way (the bare form is E0030).
 
 // the returned fn type is `without(alloc)`; `pick` itself denies nothing
-fn pick() -> fn() without(alloc) {
+fn pick() -> (fn() without(alloc)) {
     return plain;
 }
 
-// parenthesized: `pick_without` itself is `without(alloc)`
+// `pick_without` itself is `without(alloc)`
 fn pick_without() -> (fn()) without(alloc) {
     return plain;
 }
 
 // both clauses belong to the returned fn type
-fn pick_both() -> fn() needs(avx2) without(trap) {
+fn pick_both() -> (fn() needs(avx2) without(trap)) {
     return fast;
+}
+
+// the returned fn type's clause, then `pick_own`'s
+fn pick_own() -> (fn() without(trap)) without(io) {
+    return plain;
+}
+
+// a fn type returning a fn type, both parenthesized at their `->`
+fn nest(f: fn() -> (fn() without(io))) -> (fn() -> (fn() without(io))) {
+    return f;
+}
+
+// a prefix outside or inside the parentheses
+fn by_ref(f: &fn() without(io)) -> &(fn() without(io)) {
+    return f;
 }
 
 fn plain() {}

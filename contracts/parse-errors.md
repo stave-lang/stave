@@ -49,6 +49,17 @@ contains `unsafe` `(` StrLit where the literal is exactly `""` gets E0013 (case 
 first such `unsafe` token, and is dropped like an item with a syntax error. This covers every
 unsafe site kind (block, expression, fn, method, trait, impl), since all are rule `Unsafe`.
 
+**Returned fn type clause**: an item that parses without error and has no empty obligation but
+has a fn type (a `TypeBase` starting with `fn`) with a `Needs` or `Without` child, where the
+tokens before that `fn`, skipping `&`, `&&`, `mut`, `const`, and `*`, end with `->`, gets E0030 at
+its first clause keyword (hole `kw`: `needs` or `without`); of several such fn types
+the one whose first clause comes first in the item. The item is dropped like one with a syntax
+error. Grammar D5 reads the clause as the fn type's, but a reader can take it for the clause of
+the fn (or fn type) that `->` belongs to, so the type must be parenthesized either way. Roles:
+`open`, an empty span at the start of the `fn` token, and `close`, an empty span at the end of
+the `)` that closes the fn type's last clause; the fix inserts `(` and `)` there, the reading D5
+gives.
+
 ## E0004: expected set and found token
 
 Both parsers print E0004 as `unexpected <found>, expected one of: <expected>` (diagnostics.toml),

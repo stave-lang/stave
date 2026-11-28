@@ -588,6 +588,52 @@ fn empty_obligation(kinds: &[u8], start: &[u32], src: &[u8], lo: usize, hi: usiz
     return ast.NONE;
 }
 
+// Of the fn types among nodes base.. (the current item's, postorder) that have a `Needs` or
+// `Without` child and follow `->` past only `&`, `&&`, `mut`, `const`, `*` tokens of kinds[lo..],
+// the one whose first clause comes first: its first clause keyword, its `fn` token, and the `)`
+// closing its last clause; `ast.NONE` three times when there is none. Grammar D5 gives such a
+// clause to the fn type; a reader may give it to the fn of the `->`.
+fn ret_fn_clause(kinds: &[u8], out: &ast.Ast, base: usize, lo: usize, hi: usize) -> (u32, u32, u32) {
+    let kind = out.kind.as_slice();
+    let tok = out.tok.as_slice();
+    let size = out.size.as_slice();
+    let mut best = (ast.NONE, ast.NONE, ast.NONE);
+    for n in base..kind.len() {
+        let ft = tok[n] as usize;
+        if kind[n] != node_kinds.KIND_TYPE_BASE || ft >= hi || kinds[ft] != terminals.T_KW_FN { continue; }
+        // direct children, last first: the clauses close the fn type
+        let mut first = ast.NONE;
+        let mut last = ast.NONE;
+        let low = n - (size[n] as usize);
+        let mut c = n;
+        while c > low {
+            c = c - 1;
+            if kind[c] == node_kinds.KIND_NEEDS || kind[c] == node_kinds.KIND_WITHOUT {
+                first = tok[c];
+                if last == ast.NONE { last = first; }
+            }
+            c = c - (size[c] as usize);
+        }
+        if first == ast.NONE || (best.0 != ast.NONE && best.0 < first) { continue; }
+        let mut j = ft;
+        let mut arrow = false;
+        while j > lo {
+            j = j - 1;
+            let k = kinds[j];
+            if k == terminals.T_MINUS_GT {
+                arrow = true;
+                break;
+            }
+            if k != terminals.T_AMP && k != terminals.T_AMP_AMP && k != terminals.T_KW_MUT && k != terminals.T_KW_CONST && k != terminals.T_STAR { break; }
+        }
+        if !arrow { continue; }
+        let mut r = last as usize;
+        while r < hi && kinds[r] != terminals.T_R_PAREN { r = r + 1; }
+        if r < hi { best = (first, ft as% u32, r as% u32); }
+    }
+    return best;
+}
+
 // Parses item r of the cut and appends its nodes (none when it is dropped) and verdict to out.
 fn parse_item(t: &Tables, s: &mut Scratch, set: &source.SourceSet, toks: &lex.Tokens, cut: &items.Items, r: usize, out: &mut ast.Ast) {
     let kinds = toks.kind.as_slice();
@@ -625,6 +671,15 @@ fn parse_item(t: &Tables, s: &mut Scratch, set: &source.SourceSet, toks: &lex.To
         out.truncate(base);
         f.tok = at;
         out.end_item(ast.DROP_EMPTY_OBLIGATION, f);
+        return;
+    }
+    let (kw, fn_tok, close) = ret_fn_clause(kinds, &*out, base, lo, hi);
+    if kw != ast.NONE {
+        out.truncate(base);
+        f.tok = kw;
+        f.open_tok = fn_tok;
+        f.top = close;
+        out.end_item(ast.DROP_RET_FN_CLAUSE, f);
         return;
     }
     out.add_kids(base, &mut s.kids);

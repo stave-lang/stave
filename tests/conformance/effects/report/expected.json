@@ -3,11 +3,11 @@
 {"file":"src/main.stv","line":13,"col":4,"fn":"main.add_wrap","effects":[]}
 {"file":"src/main.stv","line":17,"col":4,"fn":"main.first","effects":["trap"]}
 {"file":"src/main.stv","line":22,"col":4,"fn":"main.total","effects":[]}
-{"file":"src/main.stv","line":30,"col":8,"fn":"main.depth","effects":["trap","recursive"]}
+{"file":"src/main.stv","line":30,"col":8,"fn":"main.depth","effects":["trap","rec"]}
 {"file":"src/main.stv","line":34,"col":4,"fn":"main.read","effects":["unsafe"]}
 {"file":"src/main.stv","line":38,"col":4,"fn":"main.c_abs","effects":["unsafe"]}
 {"file":"src/main.stv","line":42,"col":4,"fn":"main.id<bool>","effects":[]}
 {"file":"src/main.stv","line":42,"col":4,"fn":"main.id<u32>","effects":[]}
 {"file":"src/main.stv","line":46,"col":4,"fn":"main.apply","effects":[]}
-{"file":"src/main.stv","line":50,"col":4,"fn":"main.main","effects":["trap","recursive","unsafe"]}
+{"file":"src/main.stv","line":50,"col":4,"fn":"main.main","effects":["trap","rec","unsafe"]}
 {"file":"src/main.stv","line":61,"col":19,"fn":"main.main.0","effects":[]}

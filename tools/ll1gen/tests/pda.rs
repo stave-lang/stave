@@ -281,7 +281,7 @@ fn sum_avx2(xs: &[f32]) -> f32 needs(avx2, fma) {
     for i in 0..n { }
     return acc.sum();
 }
-fn h() -> fn(i32, &T) -> &T needs(avx2) { return g; }
+fn h() -> (fn(i32, &T) -> &T needs(avx2)) { return g; }
 fn k() -> (fn()) needs(avx2) { }
 test fn t1() { let a: [i32; 3] = [1, 2, 3]; let b = [0u8; 16]; let c = a[0]; }
 kernel fn kk(xs: &mut [f32]) { }

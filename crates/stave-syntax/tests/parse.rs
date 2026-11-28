@@ -237,11 +237,16 @@ fn rec_and_without_in_the_tree() {
     assert_eq!(withouts(src), vec![(NodeKind::FnDecl, vec!["alloc".to_string(), "unsafe".to_string()])]);
     // D5: `without` directly after a fn type belongs to that fn type
     let w = |e: &str| vec![e.to_string()];
-    assert_eq!(withouts("fn f() -> fn() without(io) { }"), vec![(NodeKind::TypeBase, w("io"))]);
+    assert_eq!(withouts("fn f() -> (fn() without(io)) { }"), vec![(NodeKind::TypeBase, w("io"))]);
     assert_eq!(withouts("fn f() -> (fn()) without(io) { }"), vec![(NodeKind::FnDecl, w("io"))]);
     assert_eq!(
         withouts("fn f(g: fn(u8) -> u8 needs(avx2) without(trap)) -> u8 needs(avx2) without(lock) { }"),
         vec![(NodeKind::TypeBase, w("trap")), (NodeKind::FnDecl, w("lock"))]
+    );
+    // the effect `rec` is the keyword
+    assert_eq!(
+        withouts("fn f() without(rec, unsafe) { }"),
+        vec![(NodeKind::FnDecl, vec!["rec".to_string(), "unsafe".to_string()])]
     );
     // the parser takes any name; the closed effect set is checked after parsing
     assert_eq!(withouts("fn f() without(frobnicate) { }"), vec![(NodeKind::FnDecl, w("frobnicate"))]);
@@ -266,6 +271,7 @@ fn rec_and_without_in_the_tree() {
         "async",
         "await",
         "yield",
+        "effect",
     ] {
         assert_eq!(one_at(&format!("fn f() {{ let {w} = 1; }}")), ("E0004", w.into()), "{w}");
     }
@@ -348,4 +354,47 @@ fn diagnostics_canonically_sorted() {
     let mut sorted = offs.clone();
     sorted.sort();
     assert_eq!(offs, sorted);
+}
+
+/// E0030: a type after `->` that ends in a fn type's clause outside parentheses. The fix inserts
+/// `(` before the `fn` and `)` after the clauses (the reading D5 gives).
+#[test]
+fn returned_fn_type_clause() {
+    let fixed = |src: &str| {
+        let d = one(src);
+        assert_eq!(d.code(), "E0030", "{src}");
+        let mut out = src.to_string();
+        let mut edits = d.fix().expect("fix").edits.clone();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.span.offset));
+        for e in edits {
+            assert_eq!(e.span.len, 0);
+            out.insert_str(e.span.offset as usize, &e.replacement);
+        }
+        out
+    };
+    assert_eq!(one_at("fn f() -> fn() without(io) { }"), ("E0030", "without".into()));
+    assert_eq!(one_at("fn f() -> fn(u8) -> u8 needs(avx2) without(io) { }"), ("E0030", "needs".into()));
+    assert_eq!(fixed("fn f() -> fn() without(io) { }"), "fn f() -> (fn() without(io)) { }");
+    assert_eq!(
+        fixed("fn f() -> &mut fn() needs(avx2) without(io) { }"),
+        "fn f() -> &mut (fn() needs(avx2) without(io)) { }"
+    );
+    assert_eq!(fixed("fn f() -> *const fn() needs(avx2) { }"), "fn f() -> *const (fn() needs(avx2)) { }");
+    // the first clause of the item: the param's returned fn type, not the fn's
+    assert_eq!(
+        fixed("fn f(g: fn() -> fn() needs(avx2)) -> fn() without(io) { }"),
+        "fn f(g: fn() -> (fn() needs(avx2))) -> fn() without(io) { }"
+    );
+    // in a closure and a trait signature
+    assert_eq!(one_at("fn f() { let c = fn() -> fn() without(io) { }; }"), ("E0030", "without".into()));
+    assert_eq!(one_at("trait T { fn m(&self) -> fn() needs(avx2); }"), ("E0030", "needs".into()));
+    // the item is dropped; the next one parses
+    let pf = parse_file(b"fn f() -> fn() without(io) { }\nfn g() { }", F);
+    assert_eq!(pf.items.iter().map(|i| i.ok).collect::<Vec<_>>(), vec![false, true]);
+    // parenthesized either way, or not after `->`: accepted
+    ok("fn f() -> (fn() without(io)) { }");
+    ok("fn f() -> (fn()) without(io) { }");
+    ok("fn f() -> &(fn() without(io)) { }");
+    ok("fn f(g: fn(u8) -> u8 needs(avx2)) -> [fn() without(io); 2] { }");
+    ok("fn f() -> fn() -> u8 { }");
 }

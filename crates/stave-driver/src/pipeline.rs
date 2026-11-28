@@ -150,7 +150,7 @@ impl Stage {
             // is final after typeck.
             "E0005" => return Some(Stage::Typeck),
             // E0004 also comes from the item cut (pre-item run, late import): both are front end.
-            "E0004" | "E0011" | "E0012" | "E0013" | "E0014" => return Some(Stage::Parse),
+            "E0004" | "E0011" | "E0012" | "E0013" | "E0014" | "E0030" => return Some(Stage::Parse),
             "E0019" | "E0020" | "E0021" | "E0022" | "E0023" | "E0025" | "E0026" | "E0027" | "E0028" => {
                 return Some(Stage::Parse);
             }

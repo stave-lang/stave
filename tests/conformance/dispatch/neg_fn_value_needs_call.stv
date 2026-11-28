@@ -20,7 +20,7 @@ fn ap<T>(f: fn(T) -> T needs(avx2), x: T) -> T {
     return f(x); //~ ERROR E0704
 }
 
-fn get() -> fn(u32) -> u32 needs(avx2) {
+fn get() -> (fn(u32) -> u32 needs(avx2)) {
     return k;
 }
 

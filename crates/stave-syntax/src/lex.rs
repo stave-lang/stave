@@ -247,6 +247,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
             b"emulate" => KwEmulate,
             b"ensures" => KwEnsures,
             b"exists" => KwExists,
+            b"effect" => KwEffect,
             _ => return None,
         },
         b'f' => match s {

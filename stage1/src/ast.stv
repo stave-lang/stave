@@ -35,10 +35,14 @@ pub const DROP_SYNTAX: u8 = 4;
 pub const DROP_EMPTY_OBLIGATION: u8 = 5;
 // An item with no tokens.
 pub const DROP_EMPTY: u8 = 6;
+// The item parses but a type after `->` ends in a fn type's clause outside parentheses.
+pub const DROP_RET_FN_CLAUSE: u8 = 7;
 
 // Where and how the parser stopped in a dropped item.
 // - `tok`: the global token index of the lookahead (the virtual EOF after the item is the item's
-//   end); for a pre-item or late import its first token; for an empty obligation the `unsafe`.
+//   end); for a pre-item or late import its first token; for an empty obligation the `unsafe`;
+//   for a returned fn type clause its first clause keyword, with `open_tok` the fn type's `fn`
+//   and `top` the `)` closing its last clause.
 // - `expected`: the expected-set id: a terminal id (that terminal alone), `NT_BIT | nt` (every
 //   terminal with an entry in nonterminal nt's table row, in terminal order; for a late import
 //   without `import`), or `NONE16`.

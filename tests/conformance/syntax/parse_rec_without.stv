@@ -1,7 +1,7 @@
 //~ PARSE-ONLY
 // `rec fn` marks a fn that may be part of a call cycle: on fn items, methods, test fns, and after
 // `pub` and `unsafe("..")`. `without(..)` follows `needs(..)` and precedes `requires`/`ensures`;
-// fn types carry it after their `needs(..)`. The effect names: alloc trap recursive lock unsafe
+// fn types carry it after their `needs(..)`. The effect names: alloc trap rec lock unsafe
 // io block park.
 rec fn walk(n: u32) -> u32 {
     return if n == 0 then 0 else walk(n - 1) + 1;
@@ -27,7 +27,7 @@ fn hot(xs: &[u32]) -> u32 without(alloc, trap, lock) {
     return 0;
 }
 
-fn all(xs: &[u32]) -> u32 needs(avx2) without(alloc, trap, recursive, lock, unsafe, io, block) requires(xs.len() > 0) {
+fn all(xs: &[u32]) -> u32 needs(avx2) without(alloc, trap, rec, lock, unsafe, io, block) requires(xs.len() > 0) {
     return xs[0];
 }
 

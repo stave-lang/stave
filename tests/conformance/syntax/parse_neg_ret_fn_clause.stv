@@ -1,0 +1,34 @@
+//~ PARSE-ONLY
+// E0030: a type after `->` that ends in a fn type's `needs(..)` / `without(..)` outside
+// parentheses. Grammar D5 gives the clause to the fn type, a reader may give it to the fn the
+// `->` belongs to: write `-> (fn() without(io))` or `-> (fn()) without(io)`.
+fn a() -> fn() needs(avx2) { return f; } //~ ERROR E0030
+fn b() -> fn() without(io) { return f; } //~ ERROR E0030
+fn c() -> fn() needs(avx2) without(io) { return f; } //~ ERROR E0030
+fn d() -> fn(u32) -> u32 without(trap) { return g; } //~ ERROR E0030
+fn e() -> &fn() without(io) { return h; } //~ ERROR E0030
+fn k() -> *const fn() without(io) { return p; } //~ ERROR E0030
+
+// in a fn type: the clause of the returned fn type, or of the param's fn type?
+fn param(f: fn() -> fn() without(io)) { } //~ ERROR E0030
+
+// the first such clause of the item is reported
+fn twice(f: fn() -> fn() needs(avx2), //~ ERROR E0030
+         g: fn() -> fn() without(io)) { }
+
+// a closure's return type follows the same rule
+fn closure() {
+    let m = fn() -> fn() without(io) { return f; }; //~ ERROR E0030
+}
+
+trait T {
+    fn m(&self) -> fn() needs(avx2); //~ ERROR E0030
+}
+
+// accepted: parenthesized, or not after `->`
+fn ok1() -> (fn() without(io)) { return f; }
+fn ok2() -> (fn()) without(io) { return f; }
+fn ok3(f: fn(u32) -> u32 needs(avx2)) -> u32 { return 0; }
+fn ok4() -> fn() { return f; }
+fn ok5() -> fn() -> u32 { return f; }
+fn ok6() -> [fn() without(io); 2] { return fs; }

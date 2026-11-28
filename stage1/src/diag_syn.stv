@@ -6,6 +6,7 @@
 //   balanced file deeper than `MAX_DEPTH` has one E0005 at the first opener over the limit.
 // - A dropped item has one diagnostic: the tokens before the first item and a late `import` are
 //   E0004 with the expected set of the `File` row; an `unsafe("")` is E0013 case `empty`; a
+//   clause of a fn type ending a type after `->` is E0030; a
 //   failed parse is the first refinement of the rule list that matches the stored parser state
 //   (`ast.Fail`), else E0004 with the terminals of the failing row (generated `ll1_table`) in
 //   terminal order.
@@ -367,7 +368,7 @@ pub fn syntactic(d: &mut diag.Diags, lx: &lex.Lexer, set: &source.SourceSet, tok
     let mut any = false;
     for r in 0..tree.items() {
         let s = tree.status.as_slice()[r];
-        if s == ast.DROP_PRE_ITEM || s == ast.DROP_LATE_IMPORT || s == ast.DROP_SYNTAX || s == ast.DROP_EMPTY_OBLIGATION { any = true; }
+        if s == ast.DROP_PRE_ITEM || s == ast.DROP_LATE_IMPORT || s == ast.DROP_SYNTAX || s == ast.DROP_EMPTY_OBLIGATION || s == ast.DROP_RET_FN_CLAUSE { any = true; }
     }
     if !any { return; }
     let tb = tabs();
@@ -375,7 +376,7 @@ pub fn syntactic(d: &mut diag.Diags, lx: &lex.Lexer, set: &source.SourceSet, tok
     let starts = toks.start.as_slice();
     for r in 0..tree.items() {
         let status = tree.status.as_slice()[r];
-        if status != ast.DROP_PRE_ITEM && status != ast.DROP_LATE_IMPORT && status != ast.DROP_SYNTAX && status != ast.DROP_EMPTY_OBLIGATION { continue; }
+        if status != ast.DROP_PRE_ITEM && status != ast.DROP_LATE_IMPORT && status != ast.DROP_SYNTAX && status != ast.DROP_EMPTY_OBLIGATION && status != ast.DROP_RET_FN_CLAUSE { continue; }
         let f = cut.file.as_slice()[r] as usize;
         let base = ft[f] as usize;
         let end = ft[f + 1] as usize;
@@ -389,6 +390,14 @@ pub fn syntactic(d: &mut diag.Diags, lx: &lex.Lexer, set: &source.SourceSet, tok
         } else if status == ast.DROP_EMPTY_OBLIGATION {
             let span = s.span(fl.tok as i64 - fbase, 0);
             d.begin(13, "empty");
+            d.end(f as% u32, span.0, span.1);
+        } else if status == ast.DROP_RET_FN_CLAUSE {
+            let kw = fl.tok as i64 - fbase;
+            let span = s.span(kw, 0);
+            d.begin(30, "");
+            d.arg("kw", mem.str_bytes(if s.kind(kw) == terminals.T_KW_NEEDS then "needs" else "without"));
+            d.role("open", f as% u32, s.span(fl.open_tok as i64 - fbase, 0).0, 0);
+            d.role("close", f as% u32, s.end(fl.top as i64 - fbase), 0);
             d.end(f as% u32, span.0, span.1);
         } else {
             let span = s.span(lo, 0);

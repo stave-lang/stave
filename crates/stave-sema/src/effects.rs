@@ -2,7 +2,7 @@
 //! clause `without(..)` checked against it (E1401), and fn values made where a fn type with a
 //! deny clause is wanted (E1403 case `made`).
 //!
-//! **Effects** ([`Effects`]): `alloc trap recursive lock unsafe io block park`. `park` (a wait on a
+//! **Effects** ([`Effects`]): `alloc trap rec lock unsafe io block park`. `park` (a wait on a
 //! completion queue) is a part of `block`: every source of `park` also gives `block`, and a deny
 //! clause that names `block` denies `park` too ([`Effects::deny_of_name`]). Nothing has `park`:
 //! a source with every effect has all but it ([`Effects::ALL`]), and a fn type never has it
@@ -16,7 +16,7 @@
 //! | intrinsic `call_on_stack`, `cpu_init` (they run code no edge shows) | [`Effects::ALL`] |
 //! | a trapping instruction of the checked IR after the removal of proven bounds and contract checks ([`NodeIr`]; a kept `ensures` check is its failure call) | `trap` |
 //! | `panic.out_of_memory` in that IR | `alloc` |
-//! | membership in a call cycle (an SCC that is a cycle) | `recursive`, `trap` (stack overflow) |
+//! | membership in a call cycle (an SCC that is a cycle) | `rec`, `trap` (stack overflow) |
 //! | `unsafe("..")` block or expression, outside the built-in packages | `unsafe` |
 //! | a `scope { }` (it waits for its threads at the end) | `block` |
 //! | the runtime fns of [`FD_WAITS`] (a read, write, open, or `flock` that may sleep until another process or thread acts on the file) | `block` |
@@ -90,8 +90,7 @@ impl Effects {
     /// code the call graph does not show has it.
     pub const ALL: Effects = Effects(0x7f);
     /// The effect names, by bit.
-    pub const NAMES: [&'static str; 8] =
-        ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"];
+    pub const NAMES: [&'static str; 8] = ["alloc", "trap", "rec", "lock", "unsafe", "io", "block", "park"];
 
     pub fn of_name(s: &str) -> Option<Effects> {
         Self::NAMES.iter().position(|&n| n == s).map(|i| Effects(1 << i))

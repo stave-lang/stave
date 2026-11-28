@@ -352,6 +352,17 @@ labels = [{ at = "primary", text = "`/*` here" }]
 fix = { description = "start each comment line with `//`" }
 
 [[diag]]
+code = "E0030"
+severity = "error"
+area = "lex-parse"
+rule = "a type after `->` ends in a fn type's `needs(..)` or `without(..)` outside parentheses: the clause could be read as the returned fn type's or as the fn's own; parenthesize the type with its clauses or the type alone"
+holes = { kw = "text-literal" }
+choices = { kw = ["needs", "without"] }
+message = "`{kw}` after a returned fn type is ambiguous: parenthesize"
+labels = [{ at = "primary", text = "the returned fn type's `{kw}`, or the fn's own?" }]
+fix = { description = "write `-> (fn(..) {kw}(..))` for the returned fn type's clause (the edits), or `-> (fn(..)) {kw}(..)` for the clause of the fn that `->` belongs to", applicability = "maybe", edits = [{ at = "open", replacement = "(" }, { at = "close", replacement = ")" }] }
+
+[[diag]]
 code = "E0101"
 severity = "error"
 area = "resolve"
@@ -2528,7 +2539,7 @@ severity = "error"
 area = "effects"
 rule = "a fn with a deny clause has a denied effect through what it can call; checked per instance of a generic fn; names the call chain and the op; at the denied effect, or for an instance at the call that instantiates it; case `self` when the op is in the fn itself"
 holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
-choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
+choices = { effect = ["alloc", "trap", "rec", "lock", "unsafe", "io", "block", "park"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
 message = "`{fn}` denies `{effect}`, but it reaches `{at}`, which {op}"
 labels = [{ at = "primary", text = "`{fn}` must not have `{effect}`" }, { at = "deny", text = "`{effect}` denied here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
 fix = { description = "remove `{effect}` from the deny clause, or change the calls so that `{at}` is not reached" }
@@ -2553,7 +2564,7 @@ severity = "error"
 area = "effects"
 rule = "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1 (every fn type denies `park`); case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)"
 holes = { from = "type", to = "type", effect = "text-literal", fn = "path", at = "path", op = "text-literal" }
-choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
+choices = { effect = ["alloc", "trap", "rec", "lock", "unsafe", "io", "block", "park"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
 message = "`{from}` cannot be used as `{to}`: it does not deny `{effect}`"
 labels = [{ at = "primary", text = "coerced here" }]
 fix = { description = "add `{effect}` to the deny clause of `{from}`, or remove it from `{to}`" }
@@ -2571,7 +2582,7 @@ rule = "unknown effect name in a deny clause"
 holes = { name = "name" }
 message = "unknown effect `{name}`"
 labels = [{ at = "primary", text = "not an effect" }]
-fix = { description = "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`, `park`" }
+fix = { description = "use one of `alloc`, `trap`, `rec`, `lock`, `unsafe`, `io`, `block`, `park`" }
 
 [[diag]]
 code = "E1405"
