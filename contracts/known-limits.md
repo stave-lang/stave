@@ -90,8 +90,12 @@ generated programs under it: it is the oracle that finds checker holes. Its limi
   detection. A program in which one thread waits for another before the join (a spin on an atomic)
   never ends there; the gate lists such programs as not runnable.
 - Leaks, destructors that never run, and hangs are reported by neither mode.
-- The memory mode, not the tracker, finds out-of-bounds and misaligned accesses, uninitialised
-  bytes other than moved-out ones, a second `free`, and `p.read()` of a Copy type.
+- The memory mode, not the tracker, finds out-of-bounds accesses, reads of bytes never written,
+  and a second `free`. Neither finds a misaligned plain load or store, or a read of a slot that
+  a `p.read()` of a Copy type left uninitialised. In every mode the interpreter faults a
+  misaligned atomic, `load_aligned`, `store_aligned` or streaming store, a call through a
+  function value at other params or another return type than it was made at, and a call of
+  words that no function was made into.
 - The captures of a function value are not walked: a function value that is a param, a field or a
   result is not judged for what it captures, and its captures are not protected by a call. A value
   with more than 4096 reference words is not judged for a `from` clause.

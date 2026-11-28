@@ -54,7 +54,7 @@ pub mod witness;
 
 pub use build::{BuildError, FuncBuilder};
 pub use host::{BufferHost, Host, SysResult, SyscallAbi};
-pub use interp::{Config, Interp, InterpError, Outcome, Trap, Val};
+pub use interp::{Config, Interp, InterpError, Outcome, Trap, Val, fn_word};
 pub use ir::{
     Block, Body, BorrowMark, CastKind, ClauseKind, Clauses, Const, DataRef, DataTarget, EventKind, EventMark,
     Func, FuncId, InstanceId, IntrinsicId, Module, Op, Operand, PanicKind, Prefetch, PrefetchLoc, Site,

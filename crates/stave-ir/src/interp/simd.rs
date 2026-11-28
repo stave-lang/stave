@@ -430,6 +430,9 @@ impl<H: Host> Interp<'_, H> {
                 }
                 let w = (lane.bits() / 8) as u128;
                 let at = |k: usize| (base as u128).wrapping_add((i + k as u128) * w) as u64;
+                if op == LoadAligned {
+                    Self::aligned(at(0), n as u64 * w as u64, fid, site)?;
+                }
                 if mask.is_none() {
                     self.track_vec(regs, arg(0)?, at(0), n as u64 * w as u64, false)?;
                 }
@@ -463,6 +466,9 @@ impl<H: Host> Interp<'_, H> {
                 }
                 let w = (lane.bits() / 8) as u128;
                 let at = |k: usize| (base as u128).wrapping_add((i + k as u128) * w) as u64;
+                if matches!(op, StoreAligned | StoreStream) {
+                    Self::aligned(at(0), n as u64 * w as u64, fid, site)?;
+                }
                 if mask.is_none() {
                     self.track_vec(regs, arg(0)?, at(0), v.len() as u64 * w as u64, true)?;
                 }

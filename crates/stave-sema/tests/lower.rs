@@ -75,7 +75,7 @@ fn run(m: &mut Module, abi: SyscallAbi, files: &[(String, Vec<u8>)]) -> Run {
     let entry = m.find_func("runtime.start.entry").expect("runtime.start.entry");
     let trap = m.find_func("runtime.panic.trap").expect("runtime.panic.trap");
     let mut host = BufferHost::new(abi);
-    host.values.insert(stave_ir::intrinsics::Kind::MainAddr, stub.0 as u64);
+    host.values.insert(stave_ir::intrinsics::Kind::MainAddr, stave_ir::fn_word(stub));
     host.values.insert(stave_ir::intrinsics::Kind::SignalHandlerAddr, 0);
     for (k, v) in files {
         host.files.insert(k.as_bytes().to_vec(), v.clone());

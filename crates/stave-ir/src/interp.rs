@@ -9,8 +9,9 @@
 //! no IR calls, so the interpreter never runs its body).
 //!
 //! Values ([`Val`]): scalars are raw `u64` bits (ints normalized to their type, floats as IEEE
-//! bits, `bool` 0/1, `char` code point, pointers and fn values as addresses / function indices);
-//! fat pointers are `(address, length)`; tuples, structs and arrays are `Agg` of their fields;
+//! bits, `bool` 0/1, `char` code point, pointers as addresses, the code word of a fn value as
+//! [`fn_word`] gives it); fat pointers are `(address, length)` and fn values `(code word,
+//! environment)`; tuples, structs and arrays are `Agg` of their fields;
 //! an enum is `Agg[tag, fields of that variant..]`; a vector or mask is `Agg` of its lanes (mask
 //! lanes 0 / 1).
 //!
@@ -490,6 +491,21 @@ pub enum InterpError {
         func: FuncId,
         site: Site,
     },
+    /// An atomic, an aligned or streaming vector access, or a streaming store at `addr`, which
+    /// is not a multiple of the `align` bytes it needs: undefined behaviour.
+    MisalignedFault {
+        addr: u64,
+        align: u64,
+        func: FuncId,
+        site: Site,
+    },
+    /// A `call.ind` in `func` through a fn value of `callee` whose type there does not have the
+    /// params and return type `callee` was made a fn value at: undefined behaviour.
+    FnSignatureFault {
+        callee: FuncId,
+        func: FuncId,
+        site: Site,
+    },
     Unreachable {
         func: FuncId,
         block: Block,
@@ -499,7 +515,8 @@ pub enum InterpError {
         func: FuncId,
         site: Site,
     },
-    /// A fn value that names no function.
+    /// A code word that names no function: not the [`fn_word`] of one, as a fn item or
+    /// `fn.make` holds it.
     BadFnValue(u64),
     Layout {
         ty: TypeId,
@@ -543,6 +560,19 @@ enum Step {
 type R<T> = Result<T, InterpError>;
 
 const MAX_AGG_LEN: u64 = 1 << 24;
+
+/// The high half of the code word of a fn value without an environment. No small int and no
+/// address of the simulated memory has it, so a word that was not made from a function names
+/// none.
+const FN_WORD: u64 = 0xf17e_c0de << 32;
+/// The high half for a fn value with an environment (`fn.make`).
+const FN_WORD_ENV: u64 = FN_WORD | 1 << 32;
+
+/// The code word of a fn value of `f` without an environment: what a fn item holds, and what
+/// `call_on_stack` takes (so a host answers `main_addr` with one).
+pub fn fn_word(f: FuncId) -> u64 {
+    FN_WORD | u64::from(f.0)
+}
 
 /// The interpreter over one module.
 pub struct Interp<'m, H: Host> {
@@ -1169,7 +1199,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 Ok(Val::Pair(*a, n as u64))
             }
             // a fn value is (code, environment); a fn item has no environment
-            Operand::Func(f) => Ok(Val::Pair(f.0 as u64, 0)),
+            Operand::Func(f) => Ok(Val::Pair(fn_word(f), 0)),
             Operand::Type(_) => Err(malformed("type operand")),
         }
     }
@@ -1219,6 +1249,40 @@ impl<'m, H: Host> Interp<'m, H> {
             Some(Cls::Int(t)) => t.value(bits),
             _ => bits as i128,
         })
+    }
+
+    /// The function the code word `x` names, and whether its fn value has an environment.
+    fn fn_of(&self, x: u64) -> R<(FuncId, bool)> {
+        let env = match x & !u64::from(u32::MAX) {
+            FN_WORD => false,
+            FN_WORD_ENV => true,
+            _ => return Err(InterpError::BadFnValue(x)),
+        };
+        let f = FuncId(x as u32);
+        if self.m.func(f).is_none() {
+            return Err(InterpError::BadFnValue(x));
+        }
+        Ok((f, env))
+    }
+
+    /// Whether fn type `t` has the params and return type at which `f` was made a fn value: those
+    /// of `f`, without its trailing environment param if the value has an environment. The
+    /// features of the two may differ.
+    fn made_at(&self, f: FuncId, env: bool, t: TypeId) -> bool {
+        let (Some(g), Some(TypeKey::FnType { params, ret, .. })) = (self.m.func(f), self.m.types.key(t))
+        else {
+            return false;
+        };
+        let own = g.params.len().checked_sub(usize::from(env)).and_then(|n| g.params.get(..n));
+        own == Some(params.as_slice()) && verify::ret_matches(&self.m.types, g.ret, *ret)
+    }
+
+    /// Faults an access at `addr` that needs a multiple of `align` bytes and is not at one.
+    fn aligned(addr: u64, align: u64, func: FuncId, site: Site) -> R<()> {
+        if !addr.is_multiple_of(align) {
+            return Err(InterpError::MisalignedFault { addr, align, func, site });
+        }
+        Ok(())
     }
 
     fn layout(&self, t: TypeId) -> R<&crate::layout::Layout> {
@@ -1938,10 +2002,9 @@ impl<'m, H: Host> Interp<'m, H> {
             Op::Cast(kind) => {
                 let t = ty.ok_or(malformed("cast type"))?;
                 let src = arg(0)?;
-                // a fn item casts as a pointer: its code address, which here is the fn index
-                // (what `call.ind` and `call_on_stack` decode)
+                // a fn item casts as a pointer: its code address, here its code word
                 let (from, x) = match (src, self.ocls(body, src)) {
-                    (Operand::Func(f), _) => (arith::CastTy::Ptr, u64::from(f.0)),
+                    (Operand::Func(f), _) => (arith::CastTy::Ptr, fn_word(f)),
                     (_, None) => {
                         let v = body.int_const(src).ok_or(malformed("cast operand"))?;
                         (arith::CastTy::Int(IntTy::new(64, v < 0)), s!(0))
@@ -2060,6 +2123,11 @@ impl<'m, H: Host> Interp<'m, H> {
                     .ok_or(malformed("store type"))?;
                 let a = s!(0);
                 let v = self.eval(body, regs, arg(1)?)?;
+                if op == Op::StoreStream {
+                    // a lane type or a vector: aligned to its size
+                    let size = self.layout(t)?.size;
+                    Self::aligned(a, size, fid, site)?;
+                }
                 if self.bt.is_some() {
                     let n = self.layout(t)?.size;
                     self.track(Self::tag_of(regs, p), a, n, true, fid, i)?;
@@ -2120,7 +2188,7 @@ impl<'m, H: Host> Interp<'m, H> {
             },
             Op::FnMake => {
                 let Operand::Func(f) = arg(0)? else { return Err(malformed("fn.make code")) };
-                Val::Pair(f.0 as u64, s!(1))
+                Val::Pair(FN_WORD_ENV | u64::from(f.0), s!(1))
             }
             Op::SliceLen => Val::S(self.pair(body, regs, arg(0)?)?.1),
             Op::SlicePtr => Val::tagged(self.pair(body, regs, arg(0)?)?.0, Self::tag_of(regs, arg(0)?)),
@@ -2139,24 +2207,27 @@ impl<'m, H: Host> Interp<'m, H> {
                         _ => return Err(malformed("callee")),
                     },
                     _ => {
-                        let (x, e) = self.pair(body, regs, arg(0)?)?;
-                        env = Some(e);
-                        let idx = u32::try_from(x).map_err(|_| InterpError::BadFnValue(x))?;
-                        if idx as usize >= self.m.funcs.len() {
-                            return Err(InterpError::BadFnValue(x));
+                        let callee = arg(0)?;
+                        let (x, e) = self.pair(body, regs, callee)?;
+                        let (f, has_env) = self.fn_of(x)?;
+                        match callee {
+                            // the verifier matched the call's args and result with the fn item's
+                            Operand::Func(_) => {}
+                            Operand::Value(v)
+                                if body.value_ty(v).is_some_and(|t| self.made_at(f, has_env, t)) => {}
+                            _ => return Err(InterpError::FnSignatureFault { callee: f, func: fid, site }),
                         }
-                        FuncId(idx)
+                        env = has_env.then_some(e);
+                        f
                     }
                 };
                 let mut vals = Vec::with_capacity(args.len());
                 for &a in args.iter().skip(1) {
                     vals.push(self.eval(body, regs, a)?);
                 }
-                // `call.ind` passes the fn value's environment as a trailing argument; a callee
-                // without the environment param (a fn item) ignores it
-                if let Some(e) = env
-                    && m.funcs.get(f.index()).is_some_and(|g| g.params.len() == vals.len() + 1)
-                {
+                // `call.ind` passes the fn value's environment as a trailing argument; a fn item
+                // takes none (it ignores the word natively)
+                if let Some(e) = env {
                     vals.push(Val::S(e));
                 }
                 let dest = body.insts.result.get(iu).copied().flatten();
@@ -2182,13 +2253,10 @@ impl<'m, H: Host> Interp<'m, H> {
                     // `call_on_stack(f, arg, top)`: calls fn value `f` with `arg` (the stack switch
                     // is not modelled: interpreter frames have no machine stack).
                     let x = vals.first().and_then(|v| v.bits()).ok_or(malformed("call_on_stack callee"))?;
-                    let idx = u32::try_from(x).map_err(|_| InterpError::BadFnValue(x))?;
-                    if idx as usize >= self.m.funcs.len() {
-                        return Err(InterpError::BadFnValue(x));
-                    }
+                    let (f, _) = self.fn_of(x)?;
                     let a = vals.get(1).cloned().unwrap_or(Val::S(0));
                     let dest = body.insts.result.get(iu).copied().flatten();
-                    return Ok(Step::Call(FuncId(idx), vec![a], dest));
+                    return Ok(Step::Call(f, vec![a], dest));
                 }
                 if kind == IntrKind::CopyBytes {
                     let u = |k: usize| vals.get(k).and_then(Val::bits).ok_or(malformed("copy_bytes operand"));
@@ -2214,6 +2282,10 @@ impl<'m, H: Host> Interp<'m, H> {
                         SysResult::Exit(c) => return Ok(Step::Exit(c)),
                     }
                 } else {
+                    if let IntrKind::Atomic { wide, .. } = kind {
+                        let p = vals.first().and_then(Val::bits).ok_or(malformed("atomic operand"))?;
+                        Self::aligned(p, if wide { 8 } else { 4 }, fid, site)?;
+                    }
                     if self.bt.is_some() {
                         self.track_atomic(kind, regs, args, &vals, fid, i)?;
                     }

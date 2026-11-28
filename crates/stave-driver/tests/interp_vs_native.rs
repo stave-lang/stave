@@ -538,6 +538,123 @@ fn malformed_mask_load_masked_reads_only_checked_lanes() {
     assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
 }
 
+/// A program that reads a fn value of type `made`, of the fn `item`, back as type `used`, and
+/// calls it.
+fn reinterpreted_fn_source(item: &str, made: &str, used: &str, call: &str) -> String {
+    format!(
+        r#"{item}
+
+fn main() -> i32 {{
+    let f: {made} = target;
+    let g = unsafe("a fn value read as another fn type: undefined behaviour") *(&f as *const {made} as *const {used});
+    let r = {call};
+    return (r % 7) as% i32;
+}}
+"#
+    )
+}
+
+/// A program whose `body` finds in `at` an address 4 bytes past a multiple of 16, with 64 zeroed
+/// bytes from there in its frame.
+fn misaligned_source(body: &str) -> String {
+    format!(
+        r#"import std.atomic;
+
+fn main() -> i32 {{
+    let mut buf: [f32x4; 5] = [f32x4.splat(0.0), f32x4.splat(0.0), f32x4.splat(0.0), f32x4.splat(0.0), f32x4.splat(0.0)];
+    let at = (&mut buf as *mut [f32x4; 5] as usize) + 4;
+{body}
+    return 0;
+}}
+"#
+    )
+}
+
+/// `body` on `s`, a `&mut [f32 align 16]` of 8 elements forged at `at`.
+fn forged_slice_source(body: &str) -> String {
+    misaligned_source(&format!(
+        r#"    let mut parts: [usize; 2] = [at, 8];
+    let q = &mut parts as *mut [usize; 2] as *mut &mut [f32 align 16];
+    let s: &mut [f32 align 16] = unsafe("the address is not a multiple of 16: undefined behaviour") q.read();
+{body}"#
+    ))
+}
+
+/// A call through a fn value at other params or another return type than it was made at, a call
+/// of words that name no fn, a misaligned atomic, and an aligned or streaming access off its
+/// alignment are undefined behaviour: the interpreter reports each, in its checking mode too.
+#[test]
+fn undefined_fn_values_and_misaligned_accesses_are_interpreter_faults() {
+    let inc = "fn target(x: u32) -> u32 {\n    return x + 1;\n}";
+    let half = "fn target(x: f32) -> f32 {\n    return x * 0.5;\n}";
+    let two = "fn target(x: u32, y: usize) -> u32 {\n    return x + y as% u32;\n}";
+    let signature =
+        |item, made, used, call| (reinterpreted_fn_source(item, made, used, call), "FnSignatureFault");
+    let atomic = |ty: &str, off: u32| {
+        misaligned_source(&format!(
+            r#"    let p = (at + {off}) as *const atomic.{ty};
+    let a: &atomic.{ty} = unsafe("the address is not a multiple of the atomic's size: undefined behaviour") &*p;
+    let old = a.fetch_add(5);"#
+        ))
+    };
+    let raw_stream = |ty: &str, x: &str| {
+        misaligned_source(&format!(
+            r#"    let p = at as *mut {ty};
+    unsafe("p is not aligned to its pointee: undefined behaviour") {{
+        p.write_stream({x});
+    }}"#
+        ))
+    };
+    let cases: Vec<(&str, (String, &str))> = vec![
+        ("param", signature(inc, "fn(u32) -> u32", "fn(u64) -> u64", "g(4294967296)")),
+        ("arity", signature(inc, "fn(u32) -> u32", "fn(u32, u32) -> u32", "g(1, 2)")),
+        ("float", signature(half, "fn(f32) -> f32", "fn(u32) -> u32", "g(1082130432)")),
+        ("environment", signature(two, "fn(u32, usize) -> u32", "fn(u32) -> u32", "g(1)")),
+        (
+            "words",
+            (
+                r#"fn main() -> i32 {
+    let words: [usize; 2] = [3, 0];
+    let g = unsafe("integer words read as a fn value: undefined behaviour") *(&words as *const [usize; 2] as *const fn() -> u32);
+    return g() as% i32;
+}
+"#
+                .into(),
+                "BadFnValue(3)",
+            ),
+        ),
+        ("atomic_u32", (atomic("U32", 2), "align: 4,")),
+        ("atomic_u64", (atomic("U64", 0), "align: 8,")),
+        ("load_aligned", (forged_slice_source("    let v = f32x4.load_aligned(s, 0);"), "align: 16,")),
+        ("store_aligned", (forged_slice_source("    f32x4.splat(1.0).store_aligned(s, 4);"), "align: 16,")),
+        ("store_stream", (forged_slice_source("    f32x4.splat(1.0).store_stream(s, 0);"), "align: 16,")),
+        ("write_stream_vector", (raw_stream("f32x4", "f32x4.splat(1.0)"), "align: 16,")),
+        ("write_stream_scalar", (raw_stream("u64", "7"), "align: 8,")),
+    ];
+    let tmp = TempDir::new("ivn-ub").unwrap();
+    let mut failures = Vec::new();
+    for (name, (source, want)) in &cases {
+        let path = tmp.path().join(format!("{name}.stv"));
+        std::fs::write(&path, source).unwrap();
+        for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
+            let out = lower_only(&path, target);
+            for check in [false, true] {
+                let limits = Limits { check, ..Limits::default() };
+                match interp::run(out.for_interp().unwrap(), "main.main", target, &[], &[], limits) {
+                    Err(e)
+                        if e.contains(want)
+                            && (!want.starts_with("align") || e.contains("MisalignedFault")) => {}
+                    Err(e) => failures.push(format!("{name} [{target} check={check}]: {e}")),
+                    Ok(r) => {
+                        failures.push(format!("{name} [{target} check={check}]: ran on\n{}", show(&r.ran)))
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
+}
+
 /// The check-only SIMD positives lower to verified checked IR on both arches.
 #[test]
 fn simd_positives_lower() {

@@ -362,6 +362,14 @@ pub(crate) fn pointee(types: &TypeTable, t: TypeId) -> Option<TypeId> {
     }
 }
 
+/// Whether a fn with return `r` (`None`: unit) has the return type `t` of a fn type.
+pub(crate) fn ret_matches(types: &TypeTable, r: Option<TypeId>, t: TypeId) -> bool {
+    match r {
+        Some(r) => r == t,
+        None => types.key(t).is_some_and(|k| k.is_unit()),
+    }
+}
+
 /// Fields of a tuple / struct type (not enums, not arrays).
 pub(crate) fn record_fields(types: &TypeTable, t: TypeId) -> Option<Vec<TypeId>> {
     match types.key(t) {
@@ -770,7 +778,7 @@ impl<'a> FnVerifier<'a> {
                 let g = self.m.func(fi).ok_or("function out of range")?;
                 match key {
                     TypeKey::FnType { params, ret, .. }
-                        if *params == g.params && self.ret_matches(g.ret, *ret) =>
+                        if *params == g.params && ret_matches(&self.m.types, g.ret, *ret) =>
                     {
                         Ok(())
                     }
@@ -791,13 +799,6 @@ impl<'a> FnVerifier<'a> {
                 TypeKey::FnType { params: p2, ret: r2, .. },
             ) => p1 == p2 && r1 == r2,
             _ => false,
-        }
-    }
-
-    fn ret_matches(&self, r: Option<TypeId>, t: TypeId) -> bool {
-        match r {
-            Some(r) => r == t,
-            None => self.key(t).is_some_and(|k| k.is_unit()),
         }
     }
 
@@ -1271,7 +1272,7 @@ impl<'a> FnVerifier<'a> {
                 let Some((&et, ps)) = g.params.split_last() else {
                     return Err("fn.make code has no environment param".into());
                 };
-                if ps != &params[..] || !self.ret_matches(g.ret, *ret) {
+                if ps != &params[..] || !ret_matches(&self.m.types, g.ret, *ret) {
                     return Err(format!("fn.make: @{} does not match {}", g.instance, tn(t)));
                 }
                 match self.cls(et) {
