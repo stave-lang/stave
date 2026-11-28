@@ -10,8 +10,9 @@
 // the error type), int or float.
 //
 // Entry points: `resolve`, `force`, `poison`, `fix`, `unite` (literal groups); `coerce` (a
-// coercion site), `coercible`, `unify` (stage0's `unify_operands`); `set_hint`; `known` (a type
-// from the signatures); `err` (a type error whose value is not modeled: `UNK`); `resolve_e`,
+// coercion site), `coerce_arg` (an argument's), `coercible`, `unify` (stage0's
+// `unify_operands`); `set_hint`; `known` (a type from the signatures); `err` (a type error whose
+// value is not modeled: `UNK`); `resolve_e`,
 // `force_e`, `fix_err` (the error type, see `typeck`); `report`, `report_span`,
 // `mismatch` (a type error stage0 reports: a row of `dg`); `cast_ok` (the cast table);
 // `poison_kids`, `unknown` (a
@@ -27,6 +28,7 @@ import lex;
 import sigs;
 import source;
 import tc_builtins;
+import tc_facts;
 import tc_traits;
 import tc_useful;
 import ir.types;
@@ -90,6 +92,8 @@ pub struct Typeck {
     // the name `old` (NONE: not in the program); the contract clause being checked (`CL_*`), the
     // `old(..)` calls open in it
     pub old_s: u32,
+    // the name `fmt` (NONE: not in the program)
+    pub fmt_s: u32,
     pub clause: u8,
     pub old_depth: u32,
     pub args: vec.Vec<u32>,
@@ -193,6 +197,17 @@ pub struct Typeck {
     pub cur_d: u32,
     pub pass: u32,
     pub last_pass: vec.Vec<u32>,
+    // the facts kept for the passes after the checker (`tc_facts`)
+    pub fx: tc_facts.Facts,
+    // the auto-deref level of the method the last `recv_method` found; the field the last
+    // `field_sym` found (NONE: none) and whether it is a column
+    pub lv: u32,
+    pub fdecl: u32,
+    pub fcol: bool,
+    // the coercion sites of a fn type, their coercions decided when the body's check ends
+    // (`tc_closure.fn_coercions`): node, wanted type
+    pub fq_node: vec.Vec<u32>,
+    pub fq_want: vec.Vec<u32>,
 }
 
 pub const LIT_INT: u32 = 0xffff_fff0;
@@ -601,14 +616,26 @@ impl Typeck {
             self.fix_err(v);
             return;
         }
+        if want != NONE { self.fx.cw.as_mut_slice()[e] = want; }
         if v == UNK { return; }
         if is_lit(v) {
             if !self.fix(tab, v, want) { self.mismatch(e, v, want, why); }
             return;
         }
-        if v == want || v == self.t_never { return; }
-        if self.coercible(tab, v, want) { return; }
         let fns = tab.tag_of(v) == types.TK_FN && tab.tag_of(want) == types.TK_FN;
+        if fns {
+            self.fq_node.push(e as% u32);
+            self.fq_want.push(want);
+        }
+        if v == want { return; }
+        if v == self.t_never {
+            self.fx.set_co(e, tc_facts.C_NEVER);
+            return;
+        }
+        if self.coercible(tab, v, want) {
+            if !fns { self.fx.set_co(e, tc_facts.coercion(tab, v, want, self.string)); }
+            return;
+        }
         let fstr = want == self.t_ref_str && self.string != NONE && tab.tag_of(v) == types.TK_ADT && tab.a_of(v) == self.string;
         if fns || fstr {
             // fn types: decided from the node's arms and how its value was made; `String` to
@@ -621,6 +648,13 @@ impl Typeck {
         // a node without a value (a module, type, or fn path) is no mismatch
         if v == NONE { return; }
         self.mismatch(e, v, want, why);
+    }
+
+    // `coerce` of argument node a against its parameter type want: a `&mut` one is reborrowed
+    // (stage0's `note_reborrow`).
+    pub fn coerce_arg(&mut self, tab: &types.Table, a: usize, want: u32, why: u32) {
+        self.coerce(tab, a, want, why);
+        if is_mut_ref(tab, want) { self.fx.reborrow(a); }
     }
 
     // stage0's implicit coercions: `&mut T` to `&T`, `&[T; N]` and `&[T align A]` to `&[T]`
@@ -706,6 +740,11 @@ impl Typeck {
     }
 }
 
+// Whether v is a `&mut` reference type.
+fn is_mut_ref(tab: &types.Table, v: u32) -> bool {
+    return v != NONE && v != UNK && v != ERR && !is_lit(v) && tab.tag_of(v) == types.TK_REF && tab.a_of(v) == 1;
+}
+
 // Whether fn types v and want have the same params and return.
 pub fn fn_same(tab: &types.Table, v: u32, want: u32) -> bool {
     let n = tab.a_of(v) as usize;
@@ -747,8 +786,10 @@ impl Typeck {
             }
             let want = self.bt.param(tab, callee, c, j);
             if kd == tc_builtins.A_ALIGNED {
-                // E0606 or a mismatch (later stages'): the call's value is its return type
-                let _ = self.force_at(a);
+                // E0606 or a mismatch (later stages'): the call's value is its return type; a
+                // `&mut` one is reborrowed
+                let v = self.force_at(a);
+                if is_mut_ref(tab, v) { self.fx.reborrow(a); }
                 continue;
             }
             if kd == tc_builtins.A_INDEX {
@@ -760,7 +801,7 @@ impl Typeck {
             if tab.tag_of(want) == types.TK_MASK && v != want && v != UNK && v != NONE && !is_lit(v) && tab.tag_of(v) == types.TK_MASK {
                 continue;
             }
-            self.coerce(tab, a, want, NONE);
+            self.coerce_arg(tab, a, want, NONE);
             if tc_builtins.is_div_const(callee) {
                 self.dc_row.push(a as% u32);
                 self.dc_ty.push(want);

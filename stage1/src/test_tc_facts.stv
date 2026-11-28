@@ -1,0 +1,265 @@
+// Tests of the checker's facts (`tc_facts`) over programs with a stand-in std core: the targets
+// of path, field, tuple, index, call, method, operator, and `?` steps (receiver adjustments,
+// auto-derefs, variant and field positions, values after the step), the bindings kept per body
+// across bodies and rounds, the coercion at each site with its wanted type, binding modes and
+// or-pattern bindings, `for` loop kinds with their `next`, f-string holes, and body flags.
+import decls;
+import dump;
+import files;
+import generated.node_kinds;
+import kinds;
+import sigs;
+import tc_facts;
+import tc_rows;
+import test_kit;
+import typeck;
+import ir.types;
+import std.debug;
+import std.mem;
+import std.vec;
+
+const NONE: u32 = tc_facts.NONE;
+
+const CORE: &str = "pub enum Option<T: view> { Some(T), None }\npub trait Copy {}\npub trait Drop {\n    fn drop(&mut self);\n}\npub trait Add {\n    fn add(self, rhs: Self) -> Self;\n}\npub trait Display {\n    fn fmt(&self);\n}\nimpl Display for u32 {\n    fn fmt(&self) {}\n}\n";
+
+const STRING: &str = "pub struct String { n: usize }\n";
+
+// The program through the body checker, over the stand-in core and `std.string`.
+fn check(main_src: &str) -> (test_kit.Out, sigs.Sigs, tc_rows.Typeck) {
+    let mut k = test_kit.kit();
+    let m = k.package("main", false, true, false);
+    let s = k.package("std", true, false, false);
+    k.dep(m, "std", s);
+    k.file(m, "main", main_src);
+    k.file(s, "core", CORE);
+    k.file(s, "string", STRING);
+    let o = k.run();
+    let mut fl = files.FileList.empty();
+    fl.pkg_builtin.push(false);
+    fl.pkg_builtin.push(true);
+    fl.pkg_root.push(true);
+    fl.pkg_root.push(false);
+    let mut sg = sigs.build(&fl, &o.md, &o.ds, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, &o.res);
+    let (_, order) = dump.sigs_order(&sg, &o.ds);
+    let _ = kinds.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, order.as_slice());
+    let tc = typeck.build(&mut sg, &o.ds, &fl, &o.md, &o.nm, &o.set, &o.toks, &o.cut, &o.tree, true, sigs.baseline(mem.str_bytes("x86_64-linux")));
+    return (o, sg, tc);
+}
+
+// The global token at byte d of the k-th `pat` of the main file.
+fn tok(o: &test_kit.Out, pat: &str, k: usize, d: u32) -> u32 {
+    let off = o.at(0, pat, k) + d;
+    let ft = o.toks.file_tok.as_slice();
+    for g in ft[0]..ft[1] {
+        if o.toks.start.as_slice()[g as usize] == off { return g; }
+    }
+    return NONE;
+}
+
+// The one target row at that token (NONE: none or several).
+fn row(o: &test_kit.Out, tc: &tc_rows.Typeck, pat: &str, k: usize, d: u32) -> usize {
+    let t = tok(o, pat, k, d);
+    return tc.fx.find(t) as usize;
+}
+
+// The node row of kind k whose first token is at byte d of the k-th `pat`.
+fn node(o: &test_kit.Out, pat: &str, n: usize, d: u32, k: u8) -> usize {
+    let t = tok(o, pat, n, d);
+    for g in 0..o.tree.nodes() {
+        if o.tree.tok.as_slice()[g] == t && o.tree.kind.as_slice()[g] == k { return g; }
+    }
+    return NONE as usize;
+}
+
+fn item(o: &test_kit.Out, name: &str) -> u32 {
+    return o.item(o.module("main"), name);
+}
+
+// The first decl of kind k named name.
+fn decl_named(o: &test_kit.Out, k: u8, name: &str) -> u32 {
+    let s = o.sym(name);
+    for d in 0..o.ds.decls() {
+        if o.ds.kind.as_slice()[d] == k && o.ds.name.as_slice()[d] == s { return d as% u32; }
+    }
+    return NONE;
+}
+
+fn u32_t(sg: &mut sigs.Sigs) -> u32 {
+    return sg.cx.tab.int(false, types.W_32);
+}
+
+const STEPS: &str = "struct P { a: u32, b: u32 }\nstruct W<T> { v: T }\nenum E { A, B(u32), C { x: u32 } }\nimpl P {\n    fn get(&self) -> u32 { return self.b; }\n    fn put(&mut self, x: u32) { self.a = x; }\n}\nfn id<T>(x: T) -> T { return x; }\nconst K: u32 = 3;\nfn main() {\n    let mut p = P.{ a: 1, b: 2 };\n    let r = &p;\n    let x = r.b;\n    let y = p.get();\n    let q = &mut p;\n    q.put(K);\n    let z = id::<u32>(x);\n    let e = E.B(1u32);\n    let f = E.A;\n    let g = E.C.{ x: 1 };\n    let t = (1u8, 2u16);\n    let u = t.1;\n    let arr = [1u32, 2u32];\n    let v = arr[0];\n    let s = &arr[0..1];\n    let h: fn(u32) -> u32 = id::<u32>;\n    let k = h(3);\n    let w = W.{ v: 1u8 };\n    let n = s.len();\n}\n";
+
+test fn steps() {
+    let (o, mut sg, tc) = check(STEPS);
+    let u32t = u32_t(&mut sg);
+    let fx = &tc.fx;
+    let pd = item(&o, "P");
+    let fr = row(&o, &tc, "r.b", 0, 2);
+    debug.assert(fr != NONE as usize && fx.kind.as_slice()[fr] == tc_facts.T_FIELD, "a field: one row at its name");
+    debug.assert(fx.decl.as_slice()[fr] == pd && fx.idx.as_slice()[fr] == 1 && fx.derefs.as_slice()[fr] == 1, "the struct, the field's position, one auto-deref through `&P`");
+    debug.assert(fx.val.as_slice()[fr] == u32t, "the field's type");
+    let get = decl_named(&o, decls.DK_METHOD, "get");
+    let mr = row(&o, &tc, "p.get()", 0, 2);
+    debug.assert(mr != NONE as usize && fx.kind.as_slice()[mr] == tc_facts.T_METHOD && fx.decl.as_slice()[mr] == get, "a method call: its method at the name");
+    debug.assert(fx.derefs.as_slice()[mr] == 0 && fx.adj.as_slice()[mr] == tc_facts.A_AUTOREF, "`&self` on a value: auto-ref, no deref");
+    debug.assert(fx.val.as_slice()[mr] == u32t, "the call's result");
+    let pr = row(&o, &tc, "q.put(K)", 0, 2);
+    debug.assert(fx.derefs.as_slice()[pr] == 1 && fx.adj.as_slice()[pr] == tc_facts.A_AUTOREF | tc_facts.A_MUT | tc_facts.A_REBORROW, "`&mut self` through `&mut P`: a deref, `&mut`, reborrowed");
+    let kr = row(&o, &tc, "q.put(K)", 0, 6);
+    debug.assert(fx.kind.as_slice()[kr] == tc_facts.T_GLOBAL && fx.decl.as_slice()[kr] == item(&o, "K"), "a const: its decl");
+    let ir = row(&o, &tc, "id::<u32>(x)", 0, 9);
+    debug.assert(fx.kind.as_slice()[ir] == tc_facts.T_FN && fx.decl.as_slice()[ir] == item(&o, "id"), "a generic call: its fn at the `(`");
+    let (gk, gx, _) = fx.binding(ir, 0);
+    debug.assert(gk == types.GA_TYPE && gx == u32t, "its binding: the turbofish's type");
+    let br = row(&o, &tc, "E.B(1u32)", 0, 3);
+    debug.assert(fx.kind.as_slice()[br] == tc_facts.T_VARIANT && fx.idx.as_slice()[br] == 1, "a tuple variant: at the `(`, its position");
+    let er = item(&o, "E");
+    debug.assert(sg.cx.tab.tag_of(fx.val.as_slice()[br]) == types.TK_ADT && sg.cx.tab.a_of(fx.val.as_slice()[br]) == er, "the enum made");
+    let ar = row(&o, &tc, "E.A", 0, 2);
+    debug.assert(fx.kind.as_slice()[ar] == tc_facts.T_VARIANT && fx.idx.as_slice()[ar] == 0, "a unit variant: at its name");
+    let cr = row(&o, &tc, "E.C.{", 0, 3);
+    debug.assert(fx.kind.as_slice()[cr] == tc_facts.T_VARIANT && fx.idx.as_slice()[cr] == 2, "a record variant: at the `.{`");
+    let tr = row(&o, &tc, "t.1", 0, 2);
+    debug.assert(fx.kind.as_slice()[tr] == tc_facts.T_TUPLE && fx.idx.as_slice()[tr] == 1 && fx.derefs.as_slice()[tr] == 0, "a tuple element: at its number");
+    debug.assert(fx.val.as_slice()[tr] == sg.cx.tab.int(false, types.W_16), "the element's type");
+    let xr = row(&o, &tc, "arr[0]", 0, 3);
+    debug.assert(fx.kind.as_slice()[xr] == tc_facts.T_INDEX && fx.val.as_slice()[xr] == u32t, "an index: at the `[`");
+    let sr = row(&o, &tc, "arr[0..1]", 0, 3);
+    debug.assert(fx.kind.as_slice()[sr] == tc_facts.T_SLICE, "a range index: a sub-slice");
+    let vr = row(&o, &tc, "id::<u32>;", 0, 8);
+    debug.assert(fx.kind.as_slice()[vr] == tc_facts.T_FN && sg.cx.tab.tag_of(fx.val.as_slice()[vr]) == types.TK_FN, "a fn item made a value: at its last token, its fn type");
+    let hv = node(&o, "id::<u32>;", 0, 0, node_kinds.KIND_PRIMARY);
+    debug.assert(fx.co.as_slice()[hv] & tc_facts.C_KIND == tc_facts.C_FN_ITEM, "a fn item value converts");
+    let cv = row(&o, &tc, "h(3)", 0, 1);
+    debug.assert(fx.kind.as_slice()[cv] == tc_facts.T_FN_VALUE && fx.val.as_slice()[cv] == u32t, "a call through a fn value");
+    let wr = row(&o, &tc, "W.{", 0, 1);
+    debug.assert(fx.kind.as_slice()[wr] == tc_facts.T_STRUCT && fx.decl.as_slice()[wr] == item(&o, "W"), "a struct literal: at the `.{`");
+    let (wk, wx, _) = fx.binding(wr, 0);
+    debug.assert(wk == types.GA_TYPE && wx == sg.cx.tab.int(false, types.W_8), "its inferred binding");
+    let lr = row(&o, &tc, "s.len()", 0, 2);
+    debug.assert(fx.kind.as_slice()[lr] == tc_facts.T_BUILTIN && fx.derefs.as_slice()[lr] == 1 && fx.adj.as_slice()[lr] == tc_facts.A_AUTOREF, "`len` of a `&[u32]`: a built-in, a deref, by reference");
+    let md = item(&o, "main");
+    debug.assert(fx.body.as_slice()[md as usize] == tc_facts.B_CHECKED, "a body without errors or unknown nodes");
+}
+
+const BODIES: &str = "fn id<T>(x: T) -> T { return x; }\nfn sum<const N: usize>(a: [u32; N]) -> u32 { return a[0]; }\nstruct S { v: u32 }\nimpl S {\n    fn get(&self) -> u32 { return self.v; }\n}\nfn a1() -> u32 {\n    let s = S.{ v: 1 };\n    let x = s.get();\n    return id(x);\n}\nfn a2() -> u8 {\n    return id(2u8);\n}\nfn a3() -> u32 {\n    let a = [1u32, 2u32, 3u32];\n    return sum(a);\n}\nfn bad() {\n    let x: u32 = true;\n}\n";
+
+test fn bindings_per_body() {
+    let (o, mut sg, tc) = check(BODIES);
+    let fx = &tc.fx;
+    let r1 = row(&o, &tc, "id(x)", 0, 2);
+    let r2 = row(&o, &tc, "id(2u8)", 0, 2);
+    debug.assert(r1 != NONE as usize && r2 != NONE as usize, "one row per call: a body checked again keeps its last check's");
+    let (k1, x1, _) = fx.binding(r1, 0);
+    let (k2, x2, _) = fx.binding(r2, 0);
+    debug.assert(k1 == types.GA_TYPE && x1 == u32_t(&mut sg), "the first body's binding, kept after later bodies");
+    debug.assert(k2 == types.GA_TYPE && x2 == sg.cx.tab.int(false, types.W_8), "the second body's");
+    let a1 = item(&o, "a1") as usize;
+    debug.assert(tc.last_pass.as_slice()[a1] > 1, "a method call on a struct: the body is checked again after the trait questions");
+    let r3 = row(&o, &tc, "sum(a)", 0, 3);
+    let (k3, x3, y3) = fx.binding(r3, 0);
+    debug.assert(k3 == types.GA_VALUE && x3 == 0 && y3 == 3, "a const binding: its value (high word, low word)");
+    let bad = item(&o, "bad") as usize;
+    debug.assert(fx.body.as_slice()[bad] & tc_facts.B_ERROR != 0, "a type error: the error flag");
+    let arg = node(&o, "id(x)", 0, 3, node_kinds.KIND_PRIMARY);
+    debug.assert(fx.cw.as_slice()[arg] == u32_t(&mut sg), "an argument's wanted type: its param with the call's bindings");
+}
+
+const COERCE: &str = "fn take(s: &[u32]) {}\nfn rd(m: &u32) {}\nfn wr(m: &mut u32) {}\nfn ts(s: &str) {}\nfn nv() -> never { loop {} }\nfn run(q: &mut u32, c: bool) {\n    let a = [1u32, 2u32];\n    take(&a);\n    let mut x: u32 = 1;\n    rd(&mut x);\n    wr(q);\n    ts(f\"{x}\");\n    if c {\n        let n: u32 = nv();\n    }\n}\n";
+
+test fn coercions() {
+    let (o, mut sg, tc) = check(COERCE);
+    let fx = &tc.fx;
+    let u32t = u32_t(&mut sg);
+    let a = node(&o, "&a", 0, 0, node_kinds.KIND_UNARY);
+    debug.assert(fx.co.as_slice()[a] == tc_facts.C_ARRAY_SLICE, "`&[u32; 2]` to `&[u32]`");
+    let sl = sg.cx.tab.key(types.TK_SLICE, u32t, 0);
+    debug.assert(fx.cw.as_slice()[a] == sg.cx.tab.mk_ref(false, sl), "the wanted type: the param's");
+    let m = node(&o, "&mut x", 0, 0, node_kinds.KIND_UNARY);
+    debug.assert(fx.co.as_slice()[m] == tc_facts.C_MUT_SHARED, "`&mut u32` to `&u32`");
+    let w = node(&o, "wr(q)", 0, 3, node_kinds.KIND_PRIMARY);
+    debug.assert(fx.co.as_slice()[w] == tc_facts.C_REBORROW, "a `&mut` argument for a `&mut` param: reborrowed, no other coercion");
+    let f = node(&o, "f\"{x}\"", 0, 0, node_kinds.KIND_PRIMARY);
+    debug.assert(fx.co.as_slice()[f] == tc_facts.C_FMT_STR, "an f-string to `&str`");
+    let hr = row(&o, &tc, "f\"{x}\"", 0, 0);
+    debug.assert(hr != NONE as usize && fx.kind.as_slice()[hr] == tc_facts.T_DISPLAY && fx.decl.as_slice()[hr] == decl_named(&o, decls.DK_TRAIT_METHOD, "fmt") && fx.ty.as_slice()[hr] == u32t, "a hole: `Display.fmt` on its value");
+    let n = node(&o, "nv()", 1, 0, node_kinds.KIND_POSTFIX);
+    debug.assert(fx.co.as_slice()[n] == tc_facts.C_NEVER, "`never` to any type");
+}
+
+const PATS: &str = "enum Sh { A(u32), B(u32), C }\nfn m(s: Sh, r: &Sh) -> u32 {\n    let (a, mut b) = (1u32, 2u32);\n    match s {\n        Sh.A(x) | Sh.B(x) => { b = x; }\n        Sh.C => {}\n    }\n    match r {\n        Sh.A(y) => { return *y; }\n        _ => {}\n    }\n    return a + b;\n}\n";
+
+test fn modes_and_alternatives() {
+    let (o, _, tc) = check(PATS);
+    let fx = &tc.fx;
+    let a = node(&o, "(a, mut b)", 0, 1, node_kinds.KIND_PATTERN);
+    let b = node(&o, "(a, mut b)", 0, 4, node_kinds.KIND_PATTERN);
+    debug.assert(fx.bm.as_slice()[a] == tc_facts.BM_MOVE && fx.bm.as_slice()[b] == tc_facts.BM_MOVE, "by-value bindings");
+    let y = node(&o, "A(y)", 0, 2, node_kinds.KIND_PATTERN);
+    debug.assert(fx.bm.as_slice()[y] == tc_facts.BM_REF, "a binding under `&Sh`: by reference");
+    let x0 = node(&o, "x)", 0, 0, node_kinds.KIND_PATTERN);
+    let x1 = node(&o, "x)", 1, 0, node_kinds.KIND_PATTERN);
+    debug.assert(fx.canon.as_slice()[x1] == x0 as% u32 && fx.canon.as_slice()[x0] == NONE, "a later alternative's binding stands for the first's");
+}
+
+const LOOPS: &str = "struct It { n: u32 }\nimpl It {\n    fn next(&mut self) -> Option<u32> { return Option.None; }\n}\nfn fk(xs: &[u32], ys: &mut [u32], a: [u32; 2]) {\n    for i in 0..3u32 {}\n    for x in xs {}\n    for x in ys {}\n    for x in a {}\n    for x in [1u32, 2u32] {}\n    let i1 = It.{ n: 0 };\n    for x in i1 {}\n    let mut i2 = It.{ n: 0 };\n    for x in &mut i2 {}\n    for v: u32x4 in xs {} tail scalar (z) {}\n}\n";
+
+test fn loops() {
+    let (o, _, tc) = check(LOOPS);
+    let fx = &tc.fx;
+    let k = node_kinds.KIND_FOR_STMT;
+    debug.assert(fx.fk.as_slice()[node(&o, "for i", 0, 0, k)] == tc_facts.FK_RANGE, "a range");
+    debug.assert(fx.fk.as_slice()[node(&o, "for x", 0, 0, k)] == tc_facts.FK_SEQ, "a `&[u32]`");
+    debug.assert(fx.fk.as_slice()[node(&o, "for x", 1, 0, k)] == tc_facts.FK_SEQ_MUT, "a `&mut [u32]`");
+    debug.assert(fx.fk.as_slice()[node(&o, "for x", 2, 0, k)] == tc_facts.FK_NONE, "an array place: not decided here");
+    debug.assert(fx.fk.as_slice()[node(&o, "for x", 3, 0, k)] == tc_facts.FK_ARRAY, "an array literal");
+    debug.assert(fx.fk.as_slice()[node(&o, "for x", 4, 0, k)] == tc_facts.FK_ITER, "an iterator by value");
+    debug.assert(fx.fk.as_slice()[node(&o, "for x", 5, 0, k)] == tc_facts.FK_ITER_MUT, "an iterator through `&mut`");
+    debug.assert(fx.fk.as_slice()[node(&o, "for v", 0, 0, k)] == tc_facts.FK_SEQ | tc_facts.FK_CHUNK, "a chunk loop");
+    let nr = row(&o, &tc, "for x in i1", 0, 0);
+    debug.assert(nr != NONE as usize && fx.kind.as_slice()[nr] == tc_facts.T_NEXT && fx.decl.as_slice()[nr] == decl_named(&o, decls.DK_METHOD, "next"), "an iterator's `next` at the `for`");
+}
+
+const OPS: &str = "struct V { x: u32 }\nimpl Copy for V {}\nimpl Add for V {\n    fn add(self, rhs: Self) -> Self { return V.{ x: self.x + rhs.x }; }\n}\ntrait Tr {\n    fn m(&self) -> u32;\n}\nfn gb<T: Tr>(x: &T) -> u32 { return x.m() + Tr.m(x); }\nfn tq(o: Option<u32>) -> Option<u32> {\n    let v = o?;\n    return Option.Some(v);\n}\nfn addv(a: V, b: V) -> V { return a + b; }\n";
+
+test fn operators_traits_try() {
+    let (o, mut sg, tc) = check(OPS);
+    let fx = &tc.fx;
+    let u32t = u32_t(&mut sg);
+    let pr = row(&o, &tc, "a + b", 0, 2);
+    debug.assert(pr != NONE as usize && fx.kind.as_slice()[pr] == tc_facts.T_OP && fx.decl.as_slice()[pr] == decl_named(&o, decls.DK_TRAIT, "Add") && fx.idx.as_slice()[pr] == 0, "a user operator: its trait");
+    let m = decl_named(&o, decls.DK_TRAIT_METHOD, "m");
+    let br = row(&o, &tc, "x.m()", 0, 2);
+    debug.assert(fx.kind.as_slice()[br] == tc_facts.T_METHOD && fx.decl.as_slice()[br] == m && fx.derefs.as_slice()[br] == 1 && fx.adj.as_slice()[br] == tc_facts.A_AUTOREF, "a bound's method through `&T`");
+    debug.assert(sg.cx.tab.tag_of(fx.ty.as_slice()[br]) == types.TK_PARAM, "its `Self`: the param");
+    let tr = row(&o, &tc, "Tr.m(x)", 0, 4);
+    debug.assert(fx.kind.as_slice()[tr] == tc_facts.T_TRAIT && fx.decl.as_slice()[tr] == m, "a trait method named through its trait: at the `(`");
+    debug.assert(sg.cx.tab.tag_of(fx.ty.as_slice()[tr]) == types.TK_PARAM, "its `Self` from the call");
+    let qr = row(&o, &tc, "o?", 0, 1);
+    debug.assert(fx.kind.as_slice()[qr] == tc_facts.T_TRY && fx.val.as_slice()[qr] == u32t && sg.cx.tab.tag_of(fx.ty.as_slice()[qr]) == types.TK_ADT, "`?`: the operand's type and the value");
+}
+
+test fn unknown_and_duplicates() {
+    let mut f = tc_facts.new(4, 2);
+    let r = f.target(7, 0, 1, tc_facts.T_FIELD, 3, 0, 0, 0, NONE, NONE);
+    f.set_val(r, 5);
+    let _ = f.target(7, 0, 1, tc_facts.T_FIELD, 3, 0, 0, 0, NONE, NONE);
+    let _ = f.target(9, 1, 2, tc_facts.T_INDEX, NONE, 0, 1, 0, NONE, NONE);
+    let _ = f.target(9, 1, 2, tc_facts.T_SLICE, NONE, 0, 1, 0, NONE, NONE);
+    let _ = f.target(11, 1, 1, tc_facts.T_FN, 3, 0, 0, 0, NONE, NONE);
+    let _ = f.target(12, 1, 2, tc_facts.T_DISPLAY, NONE, 0, 0, 0, NONE, NONE);
+    let _ = f.target(12, 1, 2, tc_facts.T_DISPLAY, NONE, 0, 0, 0, NONE, NONE);
+    let mut last = vec.Vec::<u32>.new();
+    last.push(1);
+    last.push(2);
+    f.finish(last.as_slice());
+    let (lo, hi) = f.at(7);
+    debug.assert(hi == lo + 1 && f.kind.as_slice()[lo] == tc_facts.T_UNK, "two rows that differ (one value decided): one unknown row");
+    let (lo2, _) = f.at(9);
+    debug.assert(f.kind.as_slice()[lo2] == tc_facts.T_UNK, "two kinds at one token: unknown");
+    debug.assert(f.find(11) == NONE, "a row of an earlier check of its body: dropped");
+    let (lo3, hi3) = f.at(12);
+    debug.assert(hi3 == lo3 + 2, "the holes of an f-string: one row each");
+    debug.assert(tc_facts.for_kind(&types.Table.new(), types.ERR, false, false) == tc_facts.FK_NONE, "no source: no kind");
+}

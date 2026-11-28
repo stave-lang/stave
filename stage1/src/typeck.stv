@@ -30,7 +30,7 @@
 // `NONE` (printed `-`): a node that denotes no value (the head of a path naming a module, type,
 // or fn), or that the checker never visits (types, patterns, nodes outside any body).
 //
-// The checker is eleven modules, each owning one concern:
+// The checker is twelve modules, each owning one concern:
 // - `typeck` (this one): the walk, statements, primaries, operators, casts, `for` loops, array
 //   literals; the entry point `build` and its rounds.
 // - `tc_rows`: the state (`Typeck`: the node rows and the body's literal groups) and what every
@@ -47,6 +47,9 @@
 // - `tc_ops`: user operators through their operator traits.
 // - `tc_closure`: closure literals, and the coercions a node's form decides (`node_coercions`).
 // - `tc_diag`: the fix each E0201 row names (`fixes`).
+// - `tc_facts`: the facts kept for the passes after the checker (step targets, the bindings of
+//   each body's calls, coercions, binding modes, `for` kinds, body flags), recorded where the
+//   other modules decide them; `facts_end` ends them after the rounds.
 import ast;
 import consteval;
 import decls;
@@ -64,6 +67,7 @@ import tc_builtins;
 import tc_chain;
 import tc_closure;
 import tc_diag;
+import tc_facts;
 import tc_ops;
 import tc_pat;
 import tc_rows;
@@ -150,6 +154,8 @@ impl tc_rows.Typeck {
         self.fc_node.clear();
         self.fc_want.clear();
         self.fc_why.clear();
+        self.fq_node.clear();
+        self.fq_want.clear();
         self.dc_row.clear();
         self.dc_ty.clear();
         self.pats.truncate(1);
@@ -224,6 +230,37 @@ impl tc_rows.Typeck {
                 let x = self.resolve_e(v);
                 self.nty.as_mut_slice()[r] = if is_lit(x) then UNK else x;
             }
+        }
+        self.fn_coercions(&sg.cx.tab, t, tree);
+        self.fx.keep_binds(d, self.binds.as_slice(), self.cargs.as_slice());
+    }
+
+    // After the rounds: the facts of each body's last check (`tc_facts.finish`) and its flags (an
+    // error: a type error row of the last check, a node or a pattern binding of the error type).
+    fn facts_end(&mut self, ds: &decls.Decls, tree: &ast.Ast) {
+        self.fx.finish(self.last_pass.as_slice());
+        for i in 0..self.dg.len() {
+            let d = self.dg.d.as_slice()[i];
+            if d != NONE && self.dg.pass.as_slice()[i] == self.last_pass.as_slice()[d as usize] {
+                let o = self.fx.body.as_slice()[d as usize];
+                self.fx.body.as_mut_slice()[d as usize] = o | tc_facts.B_ERROR;
+            }
+        }
+        for d in 0..ds.decls() {
+            if self.last_pass.as_slice()[d] == 0 { continue; }
+            let it = ds.item.as_slice()[d] as usize;
+            let g = tree.item_node.as_slice()[it] as usize + ds.node.as_slice()[d] as usize;
+            let lo = g - tree.size.as_slice()[g] as usize;
+            let mut fl = self.fx.body.as_slice()[d] | tc_facts.B_CHECKED;
+            for r in lo..g + 1 {
+                let v = self.nty.as_slice()[r];
+                // a param of the error type is the signature's error, not the body's
+                let k = kind(tree, r);
+                let bound = k != K_PARAM && k != K_SELF_PARAM && self.loc.as_slice()[r] == ERR;
+                if v == ERR || bound { fl = fl | tc_facts.B_ERROR; }
+                if v == UNK { fl = fl | tc_facts.B_UNKNOWN; }
+            }
+            self.fx.body.as_mut_slice()[d] = fl;
         }
     }
 
@@ -824,7 +861,7 @@ impl tc_rows.Typeck {
                 self.chain_apply(sg, ds, tree, r, last);
             }
             let _ = self.chain_steps(sg, ds, nm, set, t, cut, tree, r, NONE);
-            return self.chain_final(sg, ds, r);
+            return self.chain_final(sg, ds, tree, r);
         }
         if k == K_IF_EXPR { return self.if_value(sg, tree, r); }
         if k == K_MATCH {
@@ -899,7 +936,13 @@ impl tc_rows.Typeck {
         let dk = ds.kind.as_slice()[target as usize];
         if dk == decls.DK_CONST || dk == decls.DK_STATIC {
             let ty = sg.cx.ty.as_slice()[target as usize];
-            return if ty == ERR || ty == NONE then UNK else ty;
+            let v = if ty == ERR || ty == NONE then UNK else ty;
+            // a chain's head has its target from the chain
+            if !head {
+                let x = self.fact(first_tok(tree, r), tc_facts.T_GLOBAL, target, 0, 0, 0, NONE, NONE);
+                self.fx.set_val(x, v);
+            }
+            return v;
         }
         if dk == decls.DK_FN && !head {
             let ks = tree.kids.row(r);
@@ -908,7 +951,7 @@ impl tc_rows.Typeck {
             let b = if ga == NONE then NONE else self.targs_row(sg, ds, nm, set, t, cut, tree, target, ga, NONE);
             if b == UNK { return UNK; }
             let h = self.hint.as_slice()[r];
-            return self.fn_item_value(sg, r, target, b, h);
+            return self.fn_item_value(sg, tree, r, target, b, h);
         }
         return if head then NONE else UNK;
     }
@@ -1411,13 +1454,16 @@ impl tc_rows.Typeck {
             let it = self.expr_kid(tree, r);
             let src = if it == NONE then UNK else self.force_at(it as usize);
             let mut b = self.acc.as_slice()[r];
+            let chunk = chunk_vec(&sg.cx.tab, b) != NONE;
+            let n0 = self.fx.rows();
             // a chunk loop binds its vector annotation whatever the source's element
-            if chunk_vec(&sg.cx.tab, b) == NONE {
-                let e = self.element(sg, ds, nm, src);
+            if !chunk {
+                let e = self.element(sg, ds, nm, src, first_tok(tree, r));
                 // an annotation the element does not match is the binding's type (an E0201 of a
                 // later stage)
                 if b == NONE { b = e; }
             }
+            self.for_fact(&sg.cx.tab, t, tree, r, it, src, chunk, self.fx.rows() > n0);
             let pat = self.base + tree.kids.row(r)[0] as usize;
             self.let_pattern(sg, ds, nm, set, t, cut, tree, pat, b);
             return true;
@@ -1459,11 +1505,28 @@ impl tc_rows.Typeck {
         }
     }
 
+    // The kind of `for` row r (`tc_facts.FK_*`) over source row it of type src, a chunk loop or
+    // not; next: the loop's `next` was found (a target row at the `for`).
+    fn for_fact(&mut self, tab: &types.Table, t: &lex.Tokens, tree: &ast.Ast, r: usize, it: u32, src: u32, chunk: bool, next: bool) {
+        let b = self.acc.as_slice()[r];
+        if it == NONE || src == UNK || src == NONE || src == ERR || b == UNK { return; }
+        // an array source is a value no place can be: an array literal, a chain ending in a call
+        let n = it as usize;
+        let k = kind(tree, n);
+        let last = tree.tok_end.as_slice()[n] - 1;
+        let value = (k == K_PRIMARY && tk(t, first_tok(tree, n)) == terminals.T_L_BRACKET) || (k == K_POSTFIX && tk(t, last) == terminals.T_R_PAREN);
+        let mut fk = tc_facts.for_kind(tab, src, chunk, value);
+        if next {
+            fk = if tab.tag_of(src) == types.TK_REF then tc_facts.FK_ITER_MUT else tc_facts.FK_ITER;
+        }
+        self.fx.fk.as_mut_slice()[r] = fk;
+    }
+
     // The element a `for` loop over a source of type src binds (stage0 `element_type`): an int
     // range's int, an array's element, `&T` / `&mut T` over a referenced array or slice, and over
     // an iterator (a struct, enum, or generic param, or `&mut` one) X of its `next(&mut self) ->
-    // Option<X>`, the method a call `src.next()` finds.
-    fn element(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, src: u32) -> u32 {
+    // Option<X>`, the method a call `src.next()` finds (its target at the loop's token tok).
+    fn element(&mut self, sg: &mut sigs.Sigs, ds: &decls.Decls, nm: &intern.Interned, src: u32, tok: u32) -> u32 {
         if src == UNK { return UNK; }
         if src == NONE { return self.err(); }
         let tab = &mut sg.cx.tab;
@@ -1493,7 +1556,12 @@ impl tc_rows.Typeck {
         if tab2.tag_of(ret) != types.TK_ADT || tab2.a_of(ret) != self.opt || self.opt == NONE { return self.err(); }
         let xs = tab2.x(ret);
         if xs.len() < 3 || xs[0] != types.GA_TYPE { return self.err(); }
-        return self.known(xs[1]);
+        let el = self.known(xs[1]);
+        if el != UNK {
+            let x = self.fact(tok, tc_facts.T_NEXT, m, 0, 0, 0, b, inst);
+            self.fx.set_val(x, ret);
+        }
+        return el;
     }
 }
 
@@ -1734,6 +1802,7 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         soa: soa,
         soa_mod: md.soa_mod,
         old_s: modules.lookup(&nm.tab, mem.str_bytes("old")),
+        fmt_s: modules.lookup(&nm.tab, mem.str_bytes("fmt")),
         clause: tc_rows.CL_NONE,
         old_depth: 0,
         args: vec.Vec::<u32>.new(),
@@ -1796,6 +1865,12 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         cur_d: NONE,
         pass: 0,
         last_pass: col.filled(ds.decls(), 0u32),
+        fx: tc_facts.new(n, ds.decls()),
+        lv: 0,
+        fdecl: NONE,
+        fcol: false,
+        fq_node: vec.Vec::<u32>.new(),
+        fq_want: vec.Vec::<u32>.new(),
     };
     // rounds (`tc_traits`): the bodies that asked a trait question without an answer are checked
     // again after the questions are solved
@@ -1817,6 +1892,7 @@ pub fn build(sg: &mut sigs.Sigs, ds: &decls.Decls, fl: &files.FileList, md: &mod
         tc.tq.last = tc.tq.round + 1 >= tc_traits.MAX_ROUNDS;
         todo = next;
     }
+    tc.facts_end(ds, tree);
     return tc;
 }
 
