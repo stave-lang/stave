@@ -1,0 +1,196 @@
+//~ CHECK-ONLY
+// The `stave loops` golden (loops_forms.expected.json, crates/stave-cli/tests/loops_report.rs),
+// built against the pinned stand-in library: one row per loop statement, its form and class, and
+// the places a range loop indexes with its variable and uses in no other way.
+
+const WEIGHTS: [u32; 4] = [1u32, 2u32, 3u32, 4u32];
+
+struct Cols {
+    xs: [u32; 8],
+    ys: [u32; 8],
+    n: u32,
+}
+
+struct Counter {
+    at: u32,
+}
+
+impl Counter {
+    fn next(&mut self) -> Option<u32> {
+        if self.at == 3 {
+            return Option.None;
+        }
+        self.at += 1;
+        return Option.Some(self.at);
+    }
+
+    fn bump(&mut self) {
+        self.at += 1;
+    }
+
+    fn peek(&self) -> u32 {
+        return self.at;
+    }
+}
+
+impl Cols {
+    // `self.xs` is also reached by a method on `self`; `self.ys` too
+    fn total(&self) -> u32 {
+        let mut s = 0u32;
+        for i in 0..8usize {
+            s +%= self.xs[i] +% self.ys[i] +% self.first();
+        }
+        for i in 0..8usize {
+            s +%= self.xs[i] +% self.n;
+        }
+        return s;
+    }
+
+    fn first(&self) -> u32 {
+        return self.xs[0];
+    }
+}
+
+// three slices, one written
+fn product(xs: &[f32], ys: &[f32], out: &mut [f32]) {
+    for i in 0..out.len() {
+        out[i] = xs[i] * ys[i];
+    }
+}
+
+// `xs[i + 1]` makes `xs` no source
+fn neighbor(xs: &[u32], out: &mut [u32]) {
+    for i in 0..out.len() {
+        out[i] = xs[i + 1] -% xs[i];
+    }
+}
+
+// no element at the loop variable
+fn plain(xs: &[u32]) -> u32 {
+    let mut s = 0u32;
+    for i in 0..xs.len() - 1 {
+        s +%= xs[i + 1];
+    }
+    for _ in 0..3u32 {
+        s +%= 1;
+    }
+    for i in 0..4u32 {
+        s +%= i;
+    }
+    return s;
+}
+
+// the whole slice is used besides its elements
+fn whole(xs: &[u32], ys: &[u32]) -> u32 {
+    let mut s = 0u32;
+    for i in 0..xs.len() {
+        s +%= xs[i] +% xs.len() as% u32 +% ys[(i)];
+    }
+    return s;
+}
+
+// `&mut` borrows, read-and-write, a method that borrows the element `&mut` and one that does not
+fn writes(a: &mut [u32], b: &mut [u32], c: &mut [Counter], d: &mut [Counter], e: &mut Cols) -> u32 {
+    let mut s = 0u32;
+    for i in 0..a.len() {
+        let p = &mut a[i];
+        *p +%= 1;
+        b[i] += 1;
+        c[i].bump();
+        s +%= d[i].peek();
+    }
+    for i in 0..8usize {
+        e.ys[i] = e.xs[i] +% e.n;
+    }
+    for i in 0..d.len() {
+        d[i].at = 0;
+    }
+    return s;
+}
+
+// constants, and indices that are fixed through the loop or not
+fn prefixes(grid: &[[u32; 4]], row: usize) -> u32 {
+    let mut s = 0u32;
+    for i in 0..4usize {
+        s +%= WEIGHTS[i] +% grid[row][i];
+    }
+    let mut r = 0usize;
+    for i in 0..4usize {
+        s +%= grid[r][i];
+        r = 1 - r;
+    }
+    for i in 0..2usize {
+        for j in 0..4usize {
+            s +%= grid[i][j];
+        }
+    }
+    for i in 0..2usize {
+        let line = &grid[i];
+        s +%= line[i];
+    }
+    for i in 0..=3usize {
+        s +%= WEIGHTS[i];
+    }
+    return s;
+}
+
+// a `mut` loop variable need not be the iteration's index
+fn moved(xs: &[u32]) -> u32 {
+    let mut s = 0u32;
+    for mut i in 0..xs.len() {
+        s +%= xs[i];
+        i = 0;
+        s +%= i as% u32;
+    }
+    return s;
+}
+
+fn others(xs: &[u32]) -> u32 {
+    let mut s = 0u32;
+    let mut k = 0usize;
+    while k < xs.len() {
+        k += 1;
+    }
+    loop {
+        break;
+    }
+    for x in xs {
+        s +%= *x;
+    }
+    for x in WEIGHTS {
+        s +%= x;
+    }
+    let c = Counter.{ at: 0u32 };
+    for x in c {
+        s +%= x;
+    }
+    for v: u32x4 in xs {
+        s +%= v.reduce_add_wrap();
+    } tail scalar (x) {
+        s +%= x;
+    }
+    return s;
+}
+
+fn in_closure(xs: &[u32]) -> u32 {
+    let sum = fn(ys: &[u32]) -> u32 {
+        let mut s = 0u32;
+        for k in 0..ys.len() {
+            s +%= ys[k];
+        }
+        return s;
+    };
+    return sum(xs);
+}
+
+// one row, not one per instance
+fn copy_all<T: Copy>(src: &[T], dst: &mut [T]) {
+    for i in 0..dst.len() {
+        dst[i] = src[i];
+    }
+}
+
+fn instances(a: &[u32], b: &mut [u32], c: &[f32], d: &mut [f32]) {
+    copy_all(a, b);
+    copy_all(c, d);
+}

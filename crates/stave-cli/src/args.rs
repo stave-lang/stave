@@ -19,6 +19,7 @@ pub enum Cmd {
     Fix,
     UnsafeReport,
     Effects,
+    Loops,
     Dup,
     Fmt,
     Lowering,
@@ -37,6 +38,7 @@ impl Cmd {
             Cmd::Fix => "fix",
             Cmd::UnsafeReport => "unsafe-report",
             Cmd::Effects => "effects",
+            Cmd::Loops => "loops",
             Cmd::Dup => "dup",
             Cmd::Fmt => "fmt",
             Cmd::Lowering => "lowering",
@@ -55,6 +57,7 @@ impl Cmd {
             Cmd::Fix,
             Cmd::UnsafeReport,
             Cmd::Effects,
+            Cmd::Loops,
             Cmd::Dup,
             Cmd::Fmt,
             Cmd::Lowering,
@@ -159,9 +162,10 @@ pub struct Args {
     pub input: Option<usize>,
     pub watch: bool,
     pub alloc_check: bool,
-    /// `unsafe-report --json`, `effects --json`, `dup --json`.
+    /// `unsafe-report --json`, `effects --json`, `loops --json`, `dup --json`.
     pub json: bool,
-    /// `dup --all`: also the classes inside the built-in packages.
+    /// `dup --all`: also the classes inside the built-in packages. `loops --all`: the loops of
+    /// every package.
     pub all: bool,
     /// `dup --min-size N`.
     pub min_size: Option<u32>,
@@ -222,6 +226,9 @@ commands:
   unsafe-report [PKG_DIR] [--json]
   effects [PKG_DIR] [--json]
                         (the effects of each fn of the program's own packages)
+  loops [PKG_DIR] [--json] [--all]
+                        (the loops of the root package and their classes; --all: of every
+                        package)
   dup [PKG_DIR] [--target T] [--all] [--min-size N] [--json]
       [--baseline FILE | --write-baseline FILE]
                         (classes of fns with the same code, and re-declared consts;
@@ -278,6 +285,7 @@ fn allowed(cmd: Cmd, flag: &str) -> bool {
         Cmd::Fix => matches!(flag, "--dry-run" | "--target" | "--diagnostics"),
         // These always run in stage0 whatever --compiler says (cli-stage1.md).
         Cmd::UnsafeReport | Cmd::Effects => matches!(flag, "--json" | "--compiler"),
+        Cmd::Loops => matches!(flag, "--json" | "--all"),
         Cmd::Dup => matches!(
             flag,
             "--json" | "--compiler" | "--target" | "--all" | "--min-size" | "--baseline" | "--write-baseline"
@@ -741,6 +749,9 @@ mod tests {
         assert!(args("run s.stv").run_args.is_empty());
         assert!(args("unsafe-report --json").json);
         assert!(args("effects pkg --json").json);
+        let a = args("loops pkg --json --all");
+        assert_eq!((a.cmd, a.json, a.all), (Cmd::Loops, true, true));
+        assert!(!args("loops").all && usage("loops --compiler cpu").contains("does not take --compiler"));
         let a = args("fix pkg --dry-run --diagnostics json");
         assert_eq!((a.cmd, a.dry_run, a.diagnostics), (Cmd::Fix, true, DiagFormat::Json));
         assert_eq!(a.pkg_dir, Some(PathBuf::from("pkg")));

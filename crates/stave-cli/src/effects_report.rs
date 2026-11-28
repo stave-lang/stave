@@ -90,6 +90,19 @@ pub(crate) fn run(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     EXIT_OK
 }
 
+/// A report's name of file `f`: the diagnostics path, or `<package>/<path in the package>` for a
+/// file the diagnostics name by an install path.
+pub(crate) fn report_file(prog: &stave_sema::Program, f: stave_diag::FileId) -> String {
+    prog.file(f).map_or(String::new(), |f| {
+        if f.display_path.starts_with('/') {
+            let pkg = prog.packages.get(f.package.0 as usize).map_or("", |p| p.name.as_str());
+            format!("{pkg}/{}", f.rel_path)
+        } else {
+            f.display_path.clone()
+        }
+    })
+}
+
 /// The report text.
 fn render(
     output: &pipeline::Output,
@@ -119,14 +132,7 @@ fn render(
     for (k, &(n, effects)) in groups.iter().enumerate() {
         let span = g.nodes[n as usize].span;
         let loc = output.files().locate(span)?;
-        let file = prog.file(span.file).map_or(String::new(), |f| {
-            if f.display_path.starts_with('/') {
-                let pkg = prog.packages.get(f.package.0 as usize).map_or("", |p| p.name.as_str());
-                format!("{pkg}/{}", f.rel_path)
-            } else {
-                f.display_path.clone()
-            }
-        });
+        let file = report_file(prog, span.file);
         rows.push(((span.file, span.offset), names[k].clone(), file, loc.line, loc.col, effects));
     }
     rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
