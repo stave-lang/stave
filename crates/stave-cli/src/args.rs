@@ -128,9 +128,9 @@ pub enum DiagFormat {
 }
 
 /// `--dump` stages, in contract order (stage-gates.md).
-pub const DUMP_STAGES: [&str; 14] = [
-    "tokens", "items", "ast", "strings", "names", "sigs", "kinds", "types", "borrow", "lir", "ir", "opt",
-    "diags", "stats",
+pub const DUMP_STAGES: [&str; 15] = [
+    "tokens", "items", "ast", "strings", "names", "sigs", "kinds", "types", "mir", "borrow", "lir", "ir",
+    "opt", "diags", "stats",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,0 +1,155 @@
+body d14 10 17 ok
+t0 int s 32
+t1 ref t0
+t2 ref mut t3
+t3 param 0
+local l0 param0 9 t1 - - - -
+local l1 param1 14 t2 - - - -
+block b0 return
+  17 return const 17
+body d16 11 23 ok
+t0 str
+t1 ref t0
+t2 ref mut t4
+t3 tuple
+t4 param 0
+local l0 param0 9 t1 - - - -
+local l1 param1 14 t2 - - - -
+local l2 temp - t2 21 stmt - -
+local l3 temp 19 t3 21 stmt 108:113 -
+loan L0 19 l1.*m:t4 - reserved
+loan L1 19 l1.*m:t4 - mut
+block b0 return
+  19 assign l2 init ref-mut l1.*m:t4 L0
+  19 activate l2 L0 L1
+  19 assign l3 init call[move l2 19, copy l0 17] tok 110 flows - stores[]
+  23 return const 23
+body d20 15 13 ok
+t0 str
+t1 ref t0
+t2 ref mut t3
+t3 adt d17
+local l0 param0 5 t2 - - - -
+local l1 param1 10 t1 - - - -
+block b0 return
+  13 return const 13
+body d21 12 7 ok
+t0 str
+t1 ref t0
+local l0 param0 4 t1 - - - -
+block b0 return
+  7 return const 7
+body d25 4 12 ok
+t0 int u 32
+local l0 param0 2 t0 - - - -
+local l1 temp 9 t0 10 stmt - -
+local l2 temp 9 t0 10 stmt - -
+block b0 return
+  9 assign l1 init pure[copy l0 7, const 8]
+  9 assign l2 init use copy l1 9
+  9 return copy l2 9
+body d26 2 40 ok
+t0 int u 16
+t1 int u 64
+t2 int u size
+t3 int s 8
+t4 float 32
+t5 float 64
+t6 bool
+t7 ref t10
+t8 ptr const t4
+t9 array t1 3
+t10 slice t3
+t11 tuple t6 t5
+t12 adt d22
+t13 adt d29 t0
+local l0 param0 5 t13 - - - -
+local l1 param1 8 t12 - - - -
+local l2 param2 14 t7 - - - -
+local l3 param3 19 t9 - - - -
+local l4 param4 24 t8 - - - -
+local l5 param5 31 t11 - - - -
+local l6 temp - t7 38 stmt - -
+local l7 temp 37 t2 38 stmt 73:77 -
+loan L0 37 l2.*:t10 - -
+block b0 return
+  37 assign l6 init ref l2.*:t10 L0
+  37 assign l7 init call[copy l6 37] tok 75 flows - stores[]
+  37 return copy l7 37
+body d27 3 20 ok
+t0 int u 32
+t1 fntype t0 -> t0
+local l0 param0 6 t1 - - - -
+local l1 param1 9 t0 - - - -
+local l2 temp 17 t0 18 stmt 100:103 -
+block b0 return
+  17 assign l2 init call[copy l0 17, copy l1 15] tok 101 flows - stores[]
+  17 return copy l2 17
+body d28 5 78 ok
+t0 int u 16
+t1 int u 32
+t2 int u 64
+t3 int u size
+t4 int s 8
+t5 int s 32
+t6 float 32
+t7 float 64
+t8 bool
+t9 ref t6
+t10 ref t13
+t11 ptr const t6
+t12 array t2 3
+t13 array t4 2
+t14 tuple t8 t7
+t15 adt d22
+t16 adt d29 t0
+local l0 temp 6 t6 7 stmt - -
+local l1 bind 3 t6 - - - -
+local l2 temp 16 t12 17 stmt - -
+local l3 bind 8 t12 - - - -
+local l4 temp 25 t13 26 stmt - -
+local l5 bind 18 t13 - - - -
+local l6 temp 36 t16 56 stmt 173:186 -
+local l7 temp 40 t15 56 stmt 188:193 -
+local l8 temp - t10 56 stmt - -
+local l9 temp - t9 56 stmt - -
+local l10 temp 50 t11 56 stmt - -
+local l11 temp 53 t14 56 stmt - -
+local l12 temp 55 t3 56 stmt 171:212 -
+local l13 bind 27 t3 - - - -
+local l14 temp 62 t1 63 stmt 217:222 -
+local l15 bind 57 t1 - - - -
+local l16 temp 67 t8 76 stmt - -
+local l17 temp 71 t8 76 stmt - -
+local l18 temp 72 t8 76 stmt - -
+local l19 temp 75 t5 76 stmt - -
+loan L0 42 l5 - -
+loan L1 45 l1 - -
+block b0 branch b1 b2
+  6 assign l0 init use const 6
+  3 assign l1 init use copy l0 3
+  16 assign l2 init agg[const 13, const 14, const 15]
+  8 assign l3 init use copy l2 8
+  25 assign l4 init agg[const 23, const 24]
+  18 assign l5 init use copy l4 18
+  36 assign l6 init agg[const 33, const 34]
+  40 assign l7 init agg[const 38]
+  42 assign l8 init ref l5 L0
+  45 assign l9 init ref l1 L1
+  50 assign l10 init pure[copy l9 45]
+  53 assign l11 init agg[const 51, const 52]
+  55 assign l12 init call[move l6 36, move l7 40, copy l8 42, copy l3 43, copy l10 50, copy l11 53] tok 172 flows - stores[]
+  27 assign l13 init use copy l12 27
+  62 assign l14 init call[const 59, const 60] tok 218 flows - stores[]
+  57 assign l15 init use copy l14 57
+  67 assign l16 init pure[copy l13 64, const 66]
+block b1 goto b2
+  71 assign l17 init pure[copy l15 68, const 70]
+block b2 branch b3 b5
+  72 assign l18 init pure[]
+block b3 goto b4
+  73 assign l19 init use const 73
+block b4 return
+  75 return copy l19 75
+block b5 goto b4
+  74 assign l19 init use const 74

@@ -35,6 +35,7 @@
 pub mod bits;
 pub mod cfg;
 pub mod check;
+pub mod dump;
 pub mod live;
 pub mod loans;
 pub mod locks;
@@ -83,6 +84,8 @@ pub struct Borrowck {
     pub schedules: stave_sema::drops::Schedules,
     /// What the dataflow did, summed over the bodies.
     pub cost: loans::Cost,
+    /// With [`Options::mir`]: the `mir` dump sections of each top body by decl ([`dump`]), sorted.
+    pub mir: Option<Vec<(stave_sema::DeclId, String)>>,
 }
 
 impl Borrowck {
@@ -98,6 +101,8 @@ impl Borrowck {
 pub struct Options {
     /// Collect the `borrow` dump.
     pub dump: bool,
+    /// Collect the `mir` dump.
+    pub mir: bool,
 }
 
 struct One {
@@ -112,6 +117,8 @@ struct One {
     closures: Vec<(stave_diag::Span, Option<Vec<stave_sema::TypeId>>)>,
     schedule: stave_sema::drops::Schedule,
     cost: loans::Cost,
+    /// With [`Options::mir`]: the body's `mir` sections, printed while its type overlay lives.
+    mir: Option<String>,
 }
 
 /// Borrow-checks every fn body of the program without a type error.
@@ -147,8 +154,20 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
             .collect()
     });
     let mut out = Borrowck { skipped, ..Borrowck::default() };
+    if opts.mir {
+        let mut mir: Vec<(stave_sema::DeclId, String)> = Vec::new();
+        for tb in tc.bodies.iter().filter(|b| b.has_error && tc.sigs.fn_sig(b.decl).is_some()) {
+            let mut s = String::new();
+            dump::header(&mut s, tb.decl, None, tb.item.0, tb.node, dump::State::Error);
+            mir.push((tb.decl, s));
+        }
+        out.mir = Some(mir);
+    }
     for (tb, r) in todo.iter().zip(results) {
         let Some(mut r) = r else { continue };
+        if let (Some(mir), Some(s)) = (&mut out.mir, r.mir.take()) {
+            mir.push((tb.decl, s));
+        }
         out.checked += 1;
         out.schedules.insert(tb.decl, std::mem::take(&mut r.schedule));
         out.max_rounds = out.max_rounds.max(r.rounds);
@@ -184,6 +203,9 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
     }
     out.dump.sort();
     out.dump.dedup();
+    if let Some(mir) = &mut out.mir {
+        mir.sort_by_key(|x| x.0);
+    }
     out.time = t0.elapsed();
     out
 }
@@ -242,6 +264,11 @@ fn check_body(
         closures: Vec::new(),
         schedule: schedule_of(&body),
         cost: loans::Cost::default(),
+        mir: opts.mir.then(|| {
+            let mut s = String::new();
+            dump::sections(&mut s, &icx, &tys.ov, tb.decl, tb.node, &body);
+            s
+        }),
     };
     if body.unsupported.is_none() && body.internal.is_none() {
         check_tree(&body, &mut tys, opts, tb.item.0, &mut one);

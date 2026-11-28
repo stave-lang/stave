@@ -337,6 +337,7 @@ fn compile_steps(
     opts.keep_lowered = a.dump.contains(&"lir");
     opts.emit_ir = a.cmd == Cmd::Ir;
     opts.borrow_dump = a.dump.contains(&"borrow");
+    opts.mir_dump = a.dump.contains(&"mir");
     prof::mark("setup");
     let output = pipeline::run_on(&pool, &path, &lib, &opts);
 

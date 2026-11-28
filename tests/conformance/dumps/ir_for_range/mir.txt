@@ -1,0 +1,83 @@
+body d14 6 17 ok
+t0 int s 32
+t1 ref t0
+t2 ref mut t3
+t3 param 0
+local l0 param0 9 t1 - - - -
+local l1 param1 14 t2 - - - -
+block b0 return
+  17 return const 17
+body d16 7 23 ok
+t0 str
+t1 ref t0
+t2 ref mut t4
+t3 tuple
+t4 param 0
+local l0 param0 9 t1 - - - -
+local l1 param1 14 t2 - - - -
+local l2 temp - t2 21 stmt - -
+local l3 temp 19 t3 21 stmt 108:113 -
+loan L0 19 l1.*m:t4 - reserved
+loan L1 19 l1.*m:t4 - mut
+block b0 return
+  19 assign l2 init ref-mut l1.*m:t4 L0
+  19 activate l2 L0 L1
+  19 assign l3 init call[move l2 19, copy l0 17] tok 110 flows - stores[]
+  23 return const 23
+body d20 11 13 ok
+t0 str
+t1 ref t0
+t2 ref mut t3
+t3 adt d17
+local l0 param0 5 t2 - - - -
+local l1 param1 10 t1 - - - -
+block b0 return
+  13 return const 13
+body d21 8 7 ok
+t0 str
+t1 ref t0
+local l0 param0 4 t1 - - - -
+block b0 return
+  7 return const 7
+body d22 0 29 ok
+t0 int u 64
+t1 range t0
+local l0 param0 2 t0 - - - -
+local l1 temp 10 t0 11 stmt - -
+local l2 bind 7 t0 - - - mut
+local l3 temp 15 t1 25 stmt - -
+local l4 temp 15 t0 25 stmt - -
+local l5 bind 12 t0 - - - matched
+local l6 temp 20 t0 22 stmt - -
+local l7 temp 20 t0 22 stmt - -
+block b0 goto b1
+  10 assign l1 init use const 10
+  7 assign l2 init use copy l1 7
+  15 assign l3 init pure[const 13, copy l0 14]
+block b1 branch b2 b3
+block b2 goto b1
+  15 assign l4 init use const 15
+  12 assign l5 init use copy l4 12
+  20 assign l6 init pure[copy l2 18, copy l5 19]
+  20 assign l7 init use copy l6 20
+  16 assign l2 set use copy l7 20
+  12 dead l5
+block b3 return
+  26 return copy l2 26
+loop b1 b3 [b1 b2]
+body d23 1 15 ok
+t0 int u 64
+t1 int s 32
+t2 bool
+local l0 temp 6 t0 13 stmt 45:48 -
+local l1 temp 9 t2 13 stmt - -
+local l2 temp 12 t1 13 stmt - -
+block b0 branch b1 b3
+  6 assign l0 init call[const 4] tok 46 flows - stores[]
+  9 assign l1 init pure[copy l0 6, const 8]
+block b1 goto b2
+  10 assign l2 init use const 10
+block b2 return
+  12 return copy l2 12
+block b3 goto b2
+  11 assign l2 init use const 11

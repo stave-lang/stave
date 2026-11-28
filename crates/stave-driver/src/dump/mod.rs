@@ -8,13 +8,14 @@
 //! packages (`F` = rank of (package, path), `I` numbered file after file, `S`/`D`/`T` the
 //! canonical stave-sema ids).
 //!
-//! Implemented: `tokens items ast strings names sigs kinds types borrow lir ir opt diags stats`
+//! Implemented: `tokens items ast strings names sigs kinds types mir borrow lir ir opt diags stats`
 //! (`sigs` is [`stave_sema::dump_sigs`], the printer of the decl table and signature types;
 //! `kinds` is [`stave_sema::dump_kinds`], the kinds, layouts, and impls of those types; `types` is
 //! [`stave_sema::dump_types`], the one printer of the expression-node set and TypeKey text; `lir`,
 //! `ir`, and `opt` are [`stave_ir::print_module`] of the module at level `lowered`, `checked`,
 //! and `opt` (module `ir`), and none of those files exists when the build has error
-//! diagnostics). `borrow` is stave-borrow's per-access lines (module `borrow`).
+//! diagnostics). `mir` is stave-borrow's [`stave_borrow::dump`] of the borrow CFG of every body
+//! (module `mir`); `borrow` is stave-borrow's per-access lines (module `borrow`).
 
 mod ast;
 mod borrow;
@@ -22,6 +23,7 @@ mod diags;
 mod ir;
 mod items;
 mod kinds;
+mod mir;
 mod names;
 mod sigs;
 mod stats;
@@ -50,6 +52,7 @@ pub enum DumpStage {
     Sigs,
     Kinds,
     Types,
+    Mir,
     Borrow,
     Lir,
     Ir,
@@ -59,7 +62,7 @@ pub enum DumpStage {
 }
 
 impl DumpStage {
-    pub const ALL: [DumpStage; 14] = [
+    pub const ALL: [DumpStage; 15] = [
         DumpStage::Tokens,
         DumpStage::Items,
         DumpStage::Ast,
@@ -68,6 +71,7 @@ impl DumpStage {
         DumpStage::Sigs,
         DumpStage::Kinds,
         DumpStage::Types,
+        DumpStage::Mir,
         DumpStage::Borrow,
         DumpStage::Lir,
         DumpStage::Ir,
@@ -86,6 +90,7 @@ impl DumpStage {
             DumpStage::Sigs => "sigs",
             DumpStage::Kinds => "kinds",
             DumpStage::Types => "types",
+            DumpStage::Mir => "mir",
             DumpStage::Borrow => "borrow",
             DumpStage::Lir => "lir",
             DumpStage::Ir => "ir",
@@ -152,6 +157,7 @@ pub fn render(stage: DumpStage, out: &Output, w: &mut dyn Write) -> Result<(), D
         },
         DumpStage::Diags => diags::write(out, w),
         DumpStage::Stats => stats::write(out, w).map_err(io),
+        DumpStage::Mir => mir::write(out, w),
         DumpStage::Borrow => borrow::write(out, w),
         // Callers skip the IR dumps when there are error diagnostics ([`write_dumps`]).
         DumpStage::Lir => ir::write(Level::Lowered, out, w),
@@ -264,8 +270,8 @@ mod tests {
         assert_eq!(
             all,
             [
-                "tokens", "items", "ast", "strings", "names", "sigs", "kinds", "types", "borrow", "lir",
-                "ir", "opt", "diags", "stats"
+                "tokens", "items", "ast", "strings", "names", "sigs", "kinds", "types", "mir", "borrow",
+                "lir", "ir", "opt", "diags", "stats"
             ]
         );
     }

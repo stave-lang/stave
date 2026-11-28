@@ -1,5 +1,5 @@
 //! Dump determinism: a 10k-line gen-corpus package, built with the shipped std and runtime,
-//! dumped with `tokens,items,ast,strings,names,sigs,kinds,types,diags,ir,lir` (`ir` and `lir`: the
+//! dumped with `tokens,items,ast,strings,names,sigs,kinds,types,diags,ir,lir,mir` (`ir` and `lir`: the
 //! IR text of a debug lowering, `Options::lower`) under 1, 2, and 12 worker
 //! threads and under the shuffle knob (`STAVE_SEMA_SHUFFLE=<seed>`, here
 //! `Options::shuffle_seed`: it permutes stave-sema's internal interning and decl creation order)
@@ -13,7 +13,7 @@ use stave_driver::dump::{DumpStage, render_to_vec};
 use stave_driver::pipeline::{self, Goal, Options};
 use stave_driver::shipped::Library;
 
-const STAGES: [DumpStage; 11] = [
+const STAGES: [DumpStage; 12] = [
     DumpStage::Tokens,
     DumpStage::Items,
     DumpStage::Ast,
@@ -25,6 +25,7 @@ const STAGES: [DumpStage; 11] = [
     DumpStage::Diags,
     DumpStage::Ir,
     DumpStage::Lir,
+    DumpStage::Mir,
 ];
 
 /// The generated package, made once for all tests of this file (they run in parallel: two
@@ -60,6 +61,7 @@ fn dumps(pool: &rayon::ThreadPool, root: &Path, shuffle: Option<u64>) -> Vec<Vec
     opts.shuffle_seed = shuffle;
     opts.lower = true;
     opts.keep_lowered = true;
+    opts.mir_dump = true;
     let out = pipeline::run_on(pool, root, &shipped(), &opts);
     pool.install(|| STAGES.iter().map(|&s| render_to_vec(s, &out).unwrap()).collect())
 }
@@ -95,6 +97,9 @@ fn dumps_identical_across_threads_shuffles_and_runs() {
     assert!(ir.contains("fn.make"), "the m2 corpus lowers closures with environments");
     assert!(base[10].len() > 100_000, "lir dump unexpectedly small");
     assert!(base[10].starts_with(b"stave.ir 4 "), "lir header");
+    assert!(base[11].len() > 1_000_000, "mir dump unexpectedly small");
+    let mir = String::from_utf8_lossy(&base[11]);
+    assert!(mir.contains(".0 ") && mir.lines().all(|l| !l.starts_with("body ") || l.ends_with(" ok")));
     let differs = |got: &[Vec<u8>], what: &str| {
         for (k, s) in STAGES.iter().enumerate() {
             assert!(got[k] == base[k], "{} differs {what}", s.name());

@@ -1,0 +1,46 @@
+t0 copy,send,sync,sized,flat,frozen depth 1 size 1 align 1
+t1 copy,send,sync,sized,flat,frozen depth 1 size 4 align 4
+t2 copy,send,sync,sized,flat,frozen depth 1 size 8 align 8
+t3 copy,send,sync,sized,flat,frozen depth 1 size 4 align 4
+t4 copy,send,sync,sized,flat,frozen depth 1 size 1 align 1
+t5 send,sync,frozen depth 1 size unsized
+t6 copy,view,send,sync,sized,frozen depth 2 size 8 align 8
+t7 copy,view,send,sync,sized,frozen depth 2 size 16 align 8
+t8 copy,view,sized depth 3 size 8 align 8
+t9 copy,view,send,sync,sized,frozen depth 2 size 8 align 8
+t10 copy,view,send,sync,sized,frozen depth 2 size 8 align 8
+t11 copy,view,send,sync,sized depth 2 size 8 align 8
+t12 view,send,sync,sized,frozen depth 2 size 8 align 8
+t13 view,sized depth 3 size 8 align 8
+t14 view,send,sync,sized,frozen depth 2 size 8 align 8
+t15 view,send,sync,sized,frozen depth 2 size 8 align 8
+t16 view,send,sync,sized,frozen depth 2 size 8 align 8
+t17 view,sized depth 2 size 8 align 8
+t18 view,send,sync,sized depth 2 size 8 align 8
+t19 copy,sized,frozen depth 2 size 8 align 8
+t20 copy,send,sync,sized,flat,frozen depth 1 size 0 align 1 fields[]
+t21 view,sized,drop-impl,drop,lock depth 4 size 16 align 8 fields[0 8]
+t22 sized,drop depth 3 size param
+t23 send,sized depth 2 size 4 align 4 fields[0]
+t24 sized,drop depth 2 size param
+t25 send,sync,sized,frozen,drop depth 3 size 8 align 4 tag 4 variants[[] [4]]
+t26 send,sync,sized,flat,frozen depth 2 size 8 align 8 fields[0]
+t27 send,sync,sized,flat,frozen depth 2 size 4 align 4 fields[0]
+t28 send,sync,sized,frozen,drop-impl,drop depth 2 size 4 align 4 fields[0]
+t29 sized,drop depth 1 size param
+t30 send,sync,sized depth 1 size param
+impl d66 trait - head d45 gen 0 methods[d67 d68]
+impl d14 trait d19 head d7 gen 2 methods[]
+impl d13 trait d19 head d10 gen 2 methods[]
+impl d33 trait d27 head i32 gen 0 methods[d34]
+impl d35 trait d27 head str gen 0 methods[d36]
+impl d15 trait d29 head d7 gen 2 methods[d16]
+impl d64 trait d29 head d50 gen 0 methods[d65]
+impl d39 trait d31 head d37 gen 0 methods[d40]
+apply t3 d27 [d33]
+apply t5 d27 [d35]
+apply t21 d19 []
+apply t21 d29 [d15]
+apply t22 d19 []
+apply t26 d31 [d39]
+apply t28 d29 [d64]

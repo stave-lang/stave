@@ -1,0 +1,155 @@
+//~ CHECK-ONLY
+// Dump golden (mir): the borrow CFG of each body. A two-phase `&mut self` call, a loop with
+// `break` and `continue`, a `match` with a guard and a binding moved in its arm, contract
+// clauses with `old(e)` and `result`, a static, a `scope` with two spawns, a closure with
+// captures and its environment, a nested closure, code after a loop without `break` (blocks
+// the entry does not reach), an assignment over a value with drop glue, and the findings of
+// E0504, E0505, and E0503 case `temporary`; a body with a type error prints only its header.
+struct Res {
+    pub id: u32,
+}
+
+impl Drop for Res {
+    fn drop(&mut self) {
+    }
+}
+
+struct Counter {
+    pub n: u32,
+}
+
+impl Counter {
+    pub fn bump(&mut self, by: u32) -> u32 {
+        self.n = self.n + by;
+        return self.n;
+    }
+
+    pub fn get(&self) -> u32 {
+        return self.n;
+    }
+}
+
+static LIMIT: u32 = 100;
+
+fn eat(r: Res) {
+}
+
+fn keep(r: &Res) -> bool {
+    return r.id > 0;
+}
+
+fn take(r: Res) -> bool {
+    return true;
+}
+
+fn mk(i: u32) -> Res {
+    return Res.{ id: i };
+}
+
+fn two_phase(c: &mut Counter) -> u32 {
+    return c.bump(c.get());
+}
+
+fn loops(k: u32) -> u32 {
+    let mut i: u32 = 0;
+    let mut s: u32 = 0;
+    while i < k {
+        i = i + 1;
+        if i == 3 {
+            continue;
+        }
+        if s > LIMIT {
+            break;
+        }
+        s = s + i;
+    }
+    return s;
+}
+
+fn arms(o: Option<Res>) -> u32 {
+    match o {
+        Option.Some(r) if keep(&r) => {
+            eat(r);
+            return 1;
+        }
+        Option.Some(r) => {
+            return r.id;
+        }
+        Option.None => {
+            return 0;
+        }
+    }
+}
+
+fn clauses(c: &mut Counter, by: u32) -> u32 requires(by < 10) ensures(result == old(c.n) + by) {
+    return c.bump(by);
+}
+
+fn threads(a: u32, b: &mut u32) {
+    scope {
+        spawn {
+            let x = a + 1;
+        }
+        spawn {
+            *b = a;
+        }
+    }
+}
+
+fn closures(k: u32) -> u32 {
+    let mut n: u32 = 0;
+    let add = fn(x: u32) -> u32 {
+        let twice = fn(y: u32) -> u32 { return y + y; };
+        n = n + twice(x);
+        return n + k;
+    };
+    return add(1);
+}
+
+fn dead_tail(c: &mut Counter) -> u32 {
+    loop {
+        c.n = c.bump(1);
+    }
+    let n = c.get();
+    return n;
+}
+
+fn reassign(k: u32) -> u32 {
+    let mut r = mk(k);
+    if k > 1 {
+        return r.id;
+    }
+    r = mk(k + 1);
+    return r.id;
+}
+
+fn deref_move(r: &Res) -> Res {
+    return *r; //~ ERROR E0504
+}
+
+fn guard_move(o: u32, other: Res) -> u32 {
+    match o {
+        3 if take(other) => { //~ ERROR E0505
+            return 1;
+        }
+        _ => {
+            return 0;
+        }
+    }
+}
+
+fn temp_write() {
+    mk(1).id = 2; //~ ERROR E0503
+}
+
+fn typed_wrong() -> u32 {
+    return true; //~ ERROR E0201
+}
+
+fn main() -> i32 {
+    let mut c = Counter.{ n: 0 };
+    let mut b: u32 = 0;
+    threads(1, &mut b);
+    let s = two_phase(&mut c) + loops(5) + arms(Option.Some(mk(2))) + clauses(&mut c, 1) + closures(2);
+    return s as% i32;
+}

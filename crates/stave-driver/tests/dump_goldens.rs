@@ -1,9 +1,9 @@
 //! Dump goldens: `tests/conformance/dumps/<case>/input` is a package; the expected `tokens.txt
-//! items.txt ast.txt strings.txt names.txt sigs.txt kinds.txt types.txt diags.txt` sit next to it
+//! items.txt ast.txt strings.txt names.txt sigs.txt kinds.txt types.txt mir.txt diags.txt` sit next to it
 //! (formats: contracts/stage-gates.md). `stats.txt` must be written and is never compared. Dumps
 //! cover the whole program, so the cases build against the pinned stand-in library
 //! `tests/conformance/dumps/_lib` (`std/`, an empty `runtime/`; the CLI test uses it through
-//! `STAVE_STD_DIR`), the `kinds_` cases and `ir_drop_flags` against `_lib_kinds` (`_lib` plus
+//! `STAVE_STD_DIR`), the `kinds_` and `mir_` cases and `ir_drop_flags` against `_lib_kinds` (`_lib` plus
 //! the marker traits, `std.cell`, and `std.sync`): the goldens do not move with the shipped std/.
 //!
 //! IR text goldens (contracts/checked-ir.md): every `ir_<construct>/` case is a package `input`
@@ -12,7 +12,7 @@
 //! `ir.release.txt` of a `--release` lowering (instance root sets; the `ir_bounds_*` cases: the
 //! bounds checks left in each mode, which must be the same ones) and `opt.release.txt` (its
 //! `--dump=opt`). A case whose input has an error diagnostic has none of them, and none may be
-//! written for it. Every `ir_` case also has the `sigs.txt` and `kinds.txt` of a check.
+//! written for it. Every `ir_` case also has the `sigs.txt`, `kinds.txt`, and `mir.txt` of a check.
 //!
 //! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!). No
 //! case has a diagnostic pointing into a library file ([`golden_paths`]).
@@ -32,7 +32,7 @@ use stave_driver::dump::{DumpStage, emit_text, render_to_vec, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
 
-const CASES: [&str; 9] = [
+const CASES: [&str; 10] = [
     "valid_small",
     "dropped_item",
     "unbalanced",
@@ -42,13 +42,14 @@ const CASES: [&str; 9] = [
     "sigs_errors",
     "kinds_layout",
     "kinds_errors",
+    "mir_forms",
 ];
 /// The `ir_` cases that also have a golden of the release lowering.
 const RELEASE_CASES: [&str; 3] = ["ir_bounds_kept", "ir_bounds_removed", "ir_roots"];
 /// The `ir_` cases that also have the golden of the release passes' output (`opt.release.txt`).
 const OPT_CASES: [&str; 5] =
     ["ir_bounds_kept", "ir_bounds_removed", "ir_roots", "ir_for_range", "ir_for_chunk_scalar"];
-const COMPARED: [DumpStage; 9] = [
+const COMPARED: [DumpStage; 10] = [
     DumpStage::Tokens,
     DumpStage::Items,
     DumpStage::Ast,
@@ -57,6 +58,7 @@ const COMPARED: [DumpStage; 9] = [
     DumpStage::Sigs,
     DumpStage::Kinds,
     DumpStage::Types,
+    DumpStage::Mir,
     DumpStage::Diags,
 ];
 
@@ -68,15 +70,17 @@ fn dumps_dir(case: &str) -> PathBuf {
     repo().join("tests/conformance/dumps").join(case)
 }
 
-/// The pinned library of `case`: `_lib_kinds` for the `kinds_` cases and for `ir_drop_flags`
-/// (its owners need the `Drop` trait), else `_lib`.
+/// The pinned library of `case`: `_lib_kinds` for the `kinds_` and `mir_` cases and for
+/// `ir_drop_flags` (their owners need the `Drop` trait), else `_lib`.
 fn golden_std(case: &str) -> Library {
-    let lib = if case.starts_with("kinds_") || case == "ir_drop_flags" { "_lib_kinds" } else { "_lib" };
+    let kinds = case.starts_with("kinds_") || case.starts_with("mir_") || case == "ir_drop_flags";
+    let lib = if kinds { "_lib_kinds" } else { "_lib" };
     Library::in_dir(&repo().join("tests/conformance/dumps").join(lib))
 }
 
 fn output(case: &str, threads: usize) -> Output {
-    let opts = Options::new(Goal::Check).threads(Some(threads));
+    let mut opts = Options::new(Goal::Check).threads(Some(threads));
+    opts.mir_dump = true;
     pipeline::run(&dumps_dir(case).join("input"), &golden_std(case), &opts).unwrap()
 }
 
@@ -225,6 +229,12 @@ fn golden_properties() {
             "valid_small" | "intern_collision" | "sigs_decls" | "kinds_layout" => {
                 assert!(read(&dir.join("diags.txt")).is_empty())
             }
+            "mir_forms" => {
+                let d = read(&dir.join("diags.txt"));
+                for code in ["E0201", "E0503", "E0504", "E0505"] {
+                    assert!(d.contains(&format!("\"code\":\"{code}\"")), "{code}: {d}");
+                }
+            }
             "sigs_errors" => {
                 let d = read(&dir.join("diags.txt"));
                 assert!(d.contains("\"code\":\"E0101\"") && d.contains("\"code\":\"E0203\""), "{d}");
@@ -318,6 +328,209 @@ fn semantic_dump_properties() {
             let names = read(&dir.join("names.txt"));
             assert!(names.contains(" -> local "), "{case}: locals resolve");
             assert!(names.contains(" -> decl "), "{case}: items resolve");
+        }
+    }
+}
+
+/// `mir` field rules, checked independently of the golden text: sections by (D, k), a nested
+/// section right after its fn's; only an `ok` section has lines after its header; in one, each
+/// of `t<j>`, `l<j>`, `L<j>`, `b<j>` is defined once, dense from 0, in its line kind's order, and
+/// every one a line names is defined; the blocks are numbered in the preorder of a depth-first
+/// walk from `b0` over the printed successors, then by walks from the least-keyed block left; a local a statement names first after the params
+/// and captures has the next number.
+#[test]
+fn mir_dump_properties() {
+    let mut cases: Vec<String> = CASES.iter().map(|c| c.to_string()).collect();
+    cases.extend(ir_cases());
+    let mut ok = 0;
+    for case in &cases {
+        let out = output(case, 1);
+        let text = String::from_utf8(render_to_vec(DumpStage::Mir, &out).unwrap()).unwrap();
+        check_lines(&format!("{case}/mir.txt"), &text);
+        let mut sections: Vec<(String, Vec<&str>)> = Vec::new();
+        for l in text.lines() {
+            match l.strip_prefix("body ") {
+                Some(h) => sections.push((h.to_string(), Vec::new())),
+                None => {
+                    sections.last_mut().unwrap_or_else(|| panic!("{case}: line before a header")).1.push(l)
+                }
+            }
+        }
+        let mut last: Option<(u32, Option<u32>)> = None;
+        let mut top_ok = false;
+        for (h, lines) in &sections {
+            let f: Vec<&str> = h.splitn(4, ' ').collect();
+            assert_eq!(f.len(), 4, "{case}: header {h}");
+            let (d, k) = match f[0].strip_prefix('d').unwrap().split_once('.') {
+                Some((d, k)) => (d.parse::<u32>().unwrap(), Some(k.parse::<u32>().unwrap())),
+                None => (f[0][1..].parse::<u32>().unwrap(), None),
+            };
+            f[1].parse::<u32>().unwrap();
+            f[2].parse::<u32>().unwrap();
+            assert!(last.is_none_or(|p| p < (d, k)), "{case}: sections out of order at {h}");
+            if k.is_some() {
+                assert!(
+                    top_ok && last.is_some_and(|p| p.0 == d),
+                    "{case}: nested section without its fn: {h}"
+                );
+            }
+            last = Some((d, k));
+            let state_ok = f[3] == "ok";
+            if k.is_none() {
+                top_ok = state_ok;
+            }
+            assert!(
+                state_ok
+                    || f[3] == "error"
+                    || f[3].starts_with("unsupported \"")
+                    || f[3].starts_with("internal \""),
+                "{case}: state {h}"
+            );
+            if !state_ok {
+                assert!(lines.is_empty(), "{case}: lines after {h}");
+                continue;
+            }
+            ok += 1;
+            check_section(case, h, lines);
+        }
+    }
+    assert!(ok > 100, "{ok} ok sections");
+}
+
+/// The number of word `w` that names `<p><n>`, alone or as the root of a place (`l3.f1.*m:t2`),
+/// or, for `t`, as the type of a place.
+fn mir_ref(w: &str, p: char) -> Option<u32> {
+    let w = match (p, w.rsplit_once(":t")) {
+        ('t', Some((place, t))) if place.starts_with('l') => &w[w.len() - t.len() - 1..],
+        _ => w,
+    };
+    let rest = w.strip_prefix(p)?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let (n, tail) = rest.split_at(digits);
+    let place = p == 'l' && (tail.starts_with('.') || tail.starts_with(':'));
+    (!n.is_empty() && (tail.is_empty() || place)).then(|| n.parse().unwrap())
+}
+
+/// The `<p><n>` a `mir` line names, in order.
+fn mir_refs(line: &str, p: char) -> Vec<u32> {
+    line.split([' ', '[', ']', ',']).filter_map(|w| mir_ref(w, p)).collect()
+}
+
+/// The numbering rules of one `ok` section of `mir_dump_properties`.
+fn check_section(case: &str, h: &str, lines: &[&str]) {
+    let kinds = ["t", "local", "loan", "block"];
+    let mut seen = [0u32; 4];
+    let mut phase = 0;
+    let mut succs: Vec<Vec<u32>> = Vec::new();
+    let mut fixed = 0;
+    // per loan: the local of its place and the loan it reborrows whole
+    let mut loans: Vec<(u32, Option<u32>)> = Vec::new();
+    let mut stmts: Vec<&str> = Vec::new();
+    // per block: its statement nodes (`-` sorts last)
+    let mut keys: Vec<Vec<u32>> = Vec::new();
+    for l in lines {
+        let w: Vec<&str> = l.split(' ').collect();
+        let k = if l.starts_with("  ") {
+            stmts.push(l);
+            keys.last_mut().unwrap().push(w[2].parse().unwrap_or(u32::MAX));
+            continue;
+        } else if mir_ref(w[0], 't').is_some() {
+            0
+        } else if let Some(k) = kinds.iter().position(|x| *x == w[0]) {
+            k
+        } else {
+            assert!(["loop", "drop", "find", "deep"].contains(&w[0]), "{case} {h}: line {l}");
+            4
+        };
+        assert!(k >= phase, "{case} {h}: line kinds out of order at {l}");
+        phase = k;
+        if k == 4 {
+            continue;
+        }
+        let id = if k == 0 { w[0] } else { w[1] };
+        let n = mir_ref(id, ['t', 'l', 'L', 'b'][k]).unwrap_or_else(|| panic!("{case} {h}: {l}"));
+        assert_eq!(n, seen[k], "{case} {h}: {l}");
+        seen[k] += 1;
+        match k {
+            1 if w[2].starts_with("param") || w[2] == "capture" => {
+                assert_eq!(fixed, n, "{case} {h}: params and captures come first: {l}");
+                fixed += 1;
+            }
+            2 => loans.push((mir_ref(w[3], 'l').unwrap(), mir_ref(w[4], 'L'))),
+            3 => {
+                succs.push(mir_refs(l, 'b').into_iter().skip(1).collect());
+                keys.push(Vec::new());
+            }
+            _ => {}
+        }
+    }
+    for l in lines {
+        for (p, k) in [('t', 0), ('l', 1), ('L', 2), ('b', 3)] {
+            for n in mir_refs(l, p) {
+                assert!(n < seen[k], "{case} {h}: {p}{n} undefined in {l}");
+            }
+        }
+    }
+    // blocks: preorder of the depth-first walk from b0, then walks from the least-keyed block
+    // left, those no block left leads to first
+    let n = succs.len();
+    let mut order = Vec::new();
+    let mut done = vec![false; n];
+    let walk = |from: u32, done: &mut Vec<bool>, order: &mut Vec<u32>| {
+        let mut stack = vec![from];
+        while let Some(b) = stack.pop() {
+            if std::mem::replace(&mut done[b as usize], true) {
+                continue;
+            }
+            order.push(b);
+            stack.extend(succs[b as usize].iter().rev());
+        }
+    };
+    walk(0, &mut done, &mut order);
+    // the expected numbering is the identity, so a numbered block's number is its index
+    while order.len() < n {
+        let left: Vec<usize> = (0..n).filter(|&b| !done[b]).collect();
+        let mut led = vec![false; n];
+        for &b in &left {
+            for &s in &succs[b] {
+                led[s as usize] = true;
+            }
+        }
+        let key = |b: usize| {
+            let next: Vec<u32> =
+                succs[b].iter().map(|&s| if done[s as usize] { s } else { u32::MAX }).collect();
+            (keys[b].clone(), next)
+        };
+        let roots: Vec<usize> = left.iter().copied().filter(|&b| !led[b]).collect();
+        let pool = if roots.is_empty() { &left } else { &roots };
+        let start = pool.iter().copied().min_by_key(|&b| key(b)).unwrap();
+        walk(start as u32, &mut done, &mut order);
+    }
+    assert_eq!(order, (0..n as u32).collect::<Vec<_>>(), "{case} {h}: blocks not in the walk order");
+    // locals and loans: numbered where the statements first name them, a loan's place right
+    // after the loan
+    let (mut next_l, mut next_loan) = (fixed, 0u32);
+    let local = |n: u32, next_l: &mut u32| {
+        assert!(n <= *next_l, "{case} {h}: l{n} named before l{next_l}");
+        if n == *next_l {
+            *next_l += 1;
+        }
+    };
+    for l in &stmts {
+        for w in l.split([' ', '[', ']', ',']) {
+            if let Some(n) = mir_ref(w, 'l') {
+                local(n, &mut next_l);
+            }
+            let mut at = mir_ref(w, 'L');
+            while let Some(n) = at {
+                assert!(n <= next_loan, "{case} {h}: L{n} named before L{next_loan}: {l}");
+                if n < next_loan {
+                    break;
+                }
+                next_loan += 1;
+                local(loans[n as usize].0, &mut next_l);
+                at = loans[n as usize].1;
+            }
         }
     }
 }
@@ -599,14 +812,14 @@ fn kinds_lines_and_ir_layouts() {
     assert!(compared > 150 && compared_records > 20, "{compared} types, {compared_records} records compared");
 }
 
-/// `sigs.txt` and `kinds.txt` of every `ir_` case (a check, the pinned library).
+/// `sigs.txt`, `kinds.txt`, and `mir.txt` of every `ir_` case (a check, the pinned library).
 #[test]
-fn sigs_and_kinds_goldens_of_ir_cases() {
+fn sigs_kinds_and_mir_goldens_of_ir_cases() {
     let bless = std::env::var_os("STAVE_BLESS").is_some();
     let mut failures = Vec::new();
     for case in ir_cases() {
         let out = output(&case, 2);
-        for stage in [DumpStage::Sigs, DumpStage::Kinds] {
+        for stage in [DumpStage::Sigs, DumpStage::Kinds, DumpStage::Mir] {
             let got = String::from_utf8(render_to_vec(stage, &out).unwrap()).unwrap();
             let file = stage.file_name();
             let want_path = dumps_dir(&case).join(&file);
@@ -928,7 +1141,8 @@ fn deep_program(name: &str, src: &str) -> (Output, Vec<(DumpStage, String)>) {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{name}.stv"));
     std::fs::write(&path, format!("{DEEP_BASE}{src}")).unwrap();
-    let opts = Options::new(Goal::Check).threads(Some(2));
+    let mut opts = Options::new(Goal::Check).threads(Some(2));
+    opts.mir_dump = true;
     let out = pipeline::run(&path, &golden_std("kinds_"), &opts).unwrap();
     let dumps = dumps_on_small_stack(&out);
     (out, dumps)
@@ -1108,7 +1322,8 @@ fn deep_types_on_a_small_stack() {
     // `S0 ..= S1101` of a chain of structs `S0 .. S2100` past the depth limit.
     for (f, n_over) in [("neg_polyrec_walks", 0), ("match_search_limit", 1102)] {
         let path = repo().join("tests/conformance/types").join(format!("{f}.stv"));
-        let opts = Options::new(Goal::Check).threads(Some(2));
+        let mut opts = Options::new(Goal::Check).threads(Some(2));
+        opts.mir_dump = true;
         let out = pipeline::run(&path, &Library::in_dir(&repo()), &opts).unwrap();
         let dumps = dumps_on_small_stack(&out);
         let kinds = stage(&dumps, DumpStage::Kinds);
