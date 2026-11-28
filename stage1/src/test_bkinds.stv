@@ -1,8 +1,8 @@
 // Tests of `bkinds` over a program with a stand-in std core: the bits of param types of plain,
 // generic, Copy-bounded, and view-bounded fns (one generic param type answered in three
 // environments), drop glue and destructors reaching references, fn values through fields,
-// auto-ref types, types only a body names, substituted fields, and a type whose field did not
-// lower (unknown).
+// auto-ref types, types only a body names, substituted fields, conditional `Copy` and `Drop`
+// impls (const arguments too), and a type whose field did not lower (unknown).
 import bkinds;
 import dump;
 import files;
@@ -129,6 +129,29 @@ test fn reached_and_auto_ref_types() {
     for j in 1..bk.rows() {
         debug.assert(bk.key.as_slice()[j - 1] < bk.key.as_slice()[j], "rows sorted, each once");
     }
+}
+
+const IMPLS: &str = "struct R { fd: i32 }\nimpl Drop for R {\n    fn drop(&mut self) {}\n}\nstruct W<T: view> { v: T }\nimpl<T: Copy> Copy for W<T> {}\nstruct D<T: view> { v: T }\nimpl Drop for D<u32> {\n    fn drop(&mut self) {}\n}\nstruct Ph<T: view> { x: u32 }\nstruct CB<const N: usize> { x: u32 }\nimpl Drop for CB<3> {\n    fn drop(&mut self) {}\n}\nstruct M1 { p: *const M2 }\nstruct M2 { p: *const M1 }\nimpl Copy for M1 {}\nimpl Copy for M2 {}\nfn conc(a: W<u8>, b: W<R>, c: W<&u32>, d: D<u32>, e: D<u8>, f: Ph<R>, g: Ph<fn()>, h: CB<3>, i: CB<4>, j: M1) {}\nfn gen<T>(a: W<T>, b: D<T>, c: Ph<T>) {}\nfn gen_copy<T: Copy>(a: W<T>, b: D<T>) {}\nfn cgen<const N: usize>(a: CB<N>, b: [R; N]) {}\nfn main() {}\n";
+
+test fn conditional_impls_and_const_args() {
+    let (o, sg, _, bk) = run(IMPLS);
+    debug.assert(bits(&o, &sg, &bk, "conc", 0) == K | FREE | COPY, "a conditional `impl Copy` that applies");
+    debug.assert(bits(&o, &sg, &bk, "conc", 1) == K | FREE | DROP, "one whose bound fails: not Copy");
+    debug.assert(bits(&o, &sg, &bk, "conc", 2) == K | FREE | REF, "an impl param without `view` does not apply to a view");
+    debug.assert(bits(&o, &sg, &bk, "conc", 3) == K | FREE | DROP | DIMPL, "the instance a `Drop` impl names runs it");
+    debug.assert(bits(&o, &sg, &bk, "conc", 4) == K | FREE, "another instance has no destructor");
+    debug.assert(bits(&o, &sg, &bk, "conc", 5) == K | FREE, "a param no field holds: no drop glue");
+    debug.assert(bits(&o, &sg, &bk, "conc", 6) == K | FREE | REF | FN, "but ref-like and a fn through the type argument");
+    debug.assert(bits(&o, &sg, &bk, "conc", 7) == K | FREE | DROP | DIMPL, "a `Drop` impl of one const argument");
+    debug.assert(bits(&o, &sg, &bk, "conc", 8) == K | FREE, "another const argument");
+    debug.assert(bits(&o, &sg, &bk, "conc", 9) == K | FREE | COPY, "types that reach each other through pointers");
+    debug.assert(bits(&o, &sg, &bk, "gen", 0) == K | DROP | FN, "a conditional `impl Copy` whose bound the environment lacks");
+    debug.assert(bits(&o, &sg, &bk, "gen", 1) == K | DROP | FN | DIMPL, "a type with params: any `Drop` impl of its ADT counts");
+    debug.assert(bits(&o, &sg, &bk, "gen", 2) == K | FN, "a param no field holds");
+    debug.assert(bits(&o, &sg, &bk, "gen_copy", 0) == K | COPY | FN, "the bound in the environment");
+    debug.assert(bits(&o, &sg, &bk, "gen_copy", 1) == K | DROP | FN | DIMPL, "a destructor of another instance");
+    debug.assert(bits(&o, &sg, &bk, "cgen", 0) == K | DROP | DIMPL, "a const param: some instance may run the destructor");
+    debug.assert(bits(&o, &sg, &bk, "cgen", 1) == K | DROP, "an array of const param length: drop glue, answered in its environment only");
 }
 
 test fn unknown_field() {

@@ -158,8 +158,6 @@ fn in_table(tab: &types.Table, t: u32) -> bool {
 pub fn build(tc: &mut tc_rows.Typeck, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, tree: &ast.Ast) -> BKinds {
     let nd = ds.decls();
     let mut env = col.filled(nd, NONE);
-    // per environment: the scope of a body with it (the environment's words are its param rows')
-    let mut e_sc = vec.Vec::<consteval.Scope>.new();
     let mut root_e = vec.Vec::<u32>.new();
     let mut root_t = vec.Vec::<u32>.new();
     for d in 0..nd {
@@ -172,10 +170,6 @@ pub fn build(tc: &mut tc_rows.Typeck, sg: &mut sigs.Sigs, ds: &decls.Decls, md: 
         }
         let e = tc.tq.tr.env_of(sg, sc.par_lo, sc.par_hi, sc.own_lo, sc.own_hi);
         env.as_mut_slice()[d] = e;
-        while e_sc.len() <= e as usize {
-            e_sc.push(consteval.no_scope());
-        }
-        e_sc.as_mut_slice()[e as usize] = sc;
         let it = ds.item.as_slice()[d] as usize;
         let g = tree.item_node.as_slice()[it] as usize + ds.node.as_slice()[d] as usize;
         let lo = g - tree.size.as_slice()[g] as usize;
@@ -188,15 +182,15 @@ pub fn build(tc: &mut tc_rows.Typeck, sg: &mut sigs.Sigs, ds: &decls.Decls, md: 
         root_e.push(e);
         root_t.push(sg.cx.ty.as_slice()[d]);
     }
-    let mut bk = build_roots(tc, sg, ds, md, e_sc.as_slice(), root_e.as_slice(), root_t.as_slice());
+    let mut bk = build_roots(tc, sg, ds, md, root_e.as_slice(), root_t.as_slice());
     bk.env = env;
     return bk;
 }
 
-// The rows of the roots (root_t[k] in environment root_e[k]; a value that is no type of the
-// table is skipped) and of everything they reach, `env` left empty. e_sc: per environment a
-// scope with it.
-pub fn build_roots(tc: &mut tc_rows.Typeck, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, e_sc: &[consteval.Scope], root_e: &[u32], root_t: &[u32]) -> BKinds {
+// The rows of the roots (root_t[k] in environment root_e[k], an environment of `traits.env_of`;
+// a value that is no type of the table is skipped) and of everything they reach, `env` left
+// empty.
+pub fn build_roots(tc: &mut tc_rows.Typeck, sg: &mut sigs.Sigs, ds: &decls.Decls, md: &modules.Modules, root_e: &[u32], root_t: &[u32]) -> BKinds {
     let tq = &mut tc.tq;
     let mut tab = mem.replace(&mut sg.cx.tab, types.Table.new());
     let mut ps = Pairs.{
@@ -309,9 +303,7 @@ pub fn build_roots(tc: &mut tc_rows.Typeck, sg: &mut sigs.Sigs, ds: &decls.Decls
             m_drop.as_mut_slice()[i] = di;
             m_ref.as_mut_slice()[i] = ds.flags.as_slice()[a as usize] & decls.F_VIEW != 0;
         } else if tag == types.TK_PARAM {
-            let e = ps.env.as_slice()[i] as usize;
-            let r = if e < e_sc.len() then e_sc[e].row(tab.a_of(t)) else NONE;
-            m_ref.as_mut_slice()[i] = r != NONE && sg.cx.gens.is_view.as_slice()[r as usize];
+            m_ref.as_mut_slice()[i] = tq.tr.env_view(ps.env.as_slice()[i], tab.a_of(t));
             m_drop.as_mut_slice()[i] = !c;
             m_fn.as_mut_slice()[i] = true;
         } else if tag == types.TK_REF || tag == types.TK_FN {
