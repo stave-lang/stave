@@ -5,9 +5,11 @@
 // solver in the body's environment (a generic param: its bounds); else the error type, as
 // stage0's: E0206 without an impl, E0422 when the operand is not Copy (a generic param without
 // the operator's bound is stage0's E0901, not reported here). A goal not answered yet leaves the
-// operator unknown for this round (`tc_traits`).
+// operator unknown for this round (`tc_traits`). An operator through its trait has a target
+// (`tc_facts.T_OP`): the trait and the operand type.
 import generated.terminals;
 import sigs;
+import tc_facts;
 import tc_rows;
 import tc_traits;
 import ir.types;
@@ -78,6 +80,8 @@ impl tc_rows.Typeck {
         }
         if a == tc_traits.A_WAIT || c == tc_traits.A_WAIT { return UNK; }
         if c == tc_traits.A_NO { return self.e0422_operand(sg, e, k, tr, t, tok); }
+        let x = self.fact(tok, tc_facts.T_OP, tr, k as% u32, 0, 0, NONE, t);
+        self.fx.set_val(x, t);
         return t;
     }
 

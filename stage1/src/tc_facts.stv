@@ -1,0 +1,434 @@
+// The body checker's facts for the passes after it (types/facts): what it decides at a step, a
+// coercion site, a pattern binding, or a `for` loop, stored once so a later pass reads that
+// answer and never decides it again.
+//
+// Targets, as stage0's `TypedBody.targets` and `implicit`: one row per step the checker resolves,
+// keyed by global token: the name token of a path step, field, or method; the `(` of a call; the
+// `[` of an index; the `.{` of a struct literal; the operator token of a user operator; the int
+// token of a tuple element; the `?`; the last token of a fn item made a value; the `for` token of
+// a loop's `next`; the f-string token of each hole's `Display.fmt` (one row per hole, in order).
+// Rows are appended while the bodies are checked, tagged with the body's decl and check
+// (`pass`); `finish` keeps the rows of each body's last check, sorted by token (stable). A step
+// without a row, a row of kind `T_UNK`, and a token the checker gave two different rows (both
+// become `T_UNK`) are unknown: the reader's body is unknown.
+//
+// Columns of a row: `kind`; `decl` by kind; `idx` a field, element, or variant position, an
+// operator trait's position in `traits.OPS`; `derefs` the auto-derefs before the step; `adj` the
+// receiver's adjustment (`A_*`); `blo` the call's bindings (after `finish`: a word of `bw`, NONE:
+// none); `ty` by kind; `val` the value after the step (a call's result, a field's type; `UNK`:
+// not decided), a type no node has when the step is not the chain's last.
+//
+// Bindings: the generic bindings of a body's calls are scratch of one check. Each check keeps its
+// pool at its end, raw (a type, `tc_rows.CB | k` a const binding, NONE unbound; after a struct
+// literal's bindings the field decl each field expression names), with the body's const
+// arguments (three words each), one range per decl: the last check's.
+//
+// Node facts, per global node row, reset with the checker's rows when a body is checked again:
+// `co` the coercion made at a coercion site (`C_*`, with `C_REBORROW` for a `&mut` argument);
+// `cw` the type wanted there (an argument: its param type with the call's bindings); `bm` a
+// pattern binding's mode; `canon` the first alternative's binding that a binding of a later
+// or-pattern alternative stands for (NONE: none); `fk` a `for` loop's kind; `call` the target
+// row an `Args` or `StructLit` row's call fills, and a chain's pending method.
+//
+// Per decl, after the rounds: `body` flags (`B_*`).
+import sigs;
+import tc_builtins;
+import ir.types;
+import prims.col;
+import prims.search;
+import prims.sort;
+import std.idx;
+import std.mem;
+import std.vec;
+
+pub const NONE: u32 = idx.NONE;
+const UNK: u32 = tc_builtins.UNK;
+const ERR: u32 = types.ERR;
+// A const binding in a bindings pool (`tc_rows.CB`): `CB | k`, its argument three words of the
+// body's const arguments from word 3k.
+const CB: u32 = 0x4000_0000;
+
+// Target kinds and their columns:
+// - `T_FN` (a call, or a fn item made a value): decl the fn, or the method named through its
+//   type (`Type.m(..)`); blo.
+// - `T_METHOD` (`recv.m(..)`, at the name): decl the impl method or the bound's trait method;
+//   derefs, adj; ty the type the impl's arguments come from: `Self` at the found level, or for a
+//   call without bindings in an impl with a const param, the impl decl's key with its arguments;
+//   blo.
+// - `T_TRAIT` (a trait method named through its trait or a generic param, `Tr.m(..)`, `T.m(..)`,
+//   at the `(`): decl the trait method; ty its `Self`; blo (`Self` its last binding).
+// - `T_BUILTIN` (a built-in method, at the name; a type-relative built-in, at the name): decl
+//   the built-in (`tc_builtins`); ty the receiver type at the found level, or the type named;
+//   derefs, adj.
+// - `T_OP` (a user operator, at its token): decl the operator trait, idx its position; ty the
+//   operand type.
+// - `T_VARIANT` (a unit variant value at its name, a tuple variant's `(`, a record variant's
+//   `.{`): decl the variant, idx its position; val the enum type made.
+// - `T_STRUCT` (`.{`): decl the struct; val the type made; blo (its fields after its bindings).
+// - `T_FIELD`: decl the struct, idx the field's position, derefs. `T_COLUMN` (a column of a
+//   `std.soa.Soa`): decl the record struct, idx, derefs. `T_TUPLE`: idx, derefs.
+// - `T_GLOBAL`: decl the const or static.
+// - `T_BIFN` (a built-in fn, at the `(`): decl its name's string, ty the type in its turbofish
+//   (NONE: none).
+// - `T_FN_VALUE` (a call through a fn value, at the `(`): ty the fn type.
+// - `T_INDEX`, `T_SLICE` (at the `[`): derefs.
+// - `T_OLD` (`old(..)`, at the `(`).
+// - `T_TRY` (`?`): ty the operand's type.
+// - `T_NEXT` (a `for` loop's `next`, at the `for`): decl the method, ty as `T_METHOD`, blo; no
+//   adjustment (the loop takes the source's address).
+// - `T_DISPLAY` (an f-string hole, at the f-string): decl `Display.fmt` (NONE: not decided), ty
+//   the hole's type with its references peeled, val the hole's type.
+pub const T_UNK: u8 = 0;
+pub const T_FN: u8 = 1;
+pub const T_METHOD: u8 = 2;
+pub const T_TRAIT: u8 = 3;
+pub const T_BUILTIN: u8 = 4;
+pub const T_OP: u8 = 5;
+pub const T_VARIANT: u8 = 6;
+pub const T_STRUCT: u8 = 7;
+pub const T_FIELD: u8 = 8;
+pub const T_TUPLE: u8 = 9;
+pub const T_COLUMN: u8 = 10;
+pub const T_GLOBAL: u8 = 11;
+pub const T_BIFN: u8 = 12;
+pub const T_FN_VALUE: u8 = 13;
+pub const T_INDEX: u8 = 14;
+pub const T_SLICE: u8 = 15;
+pub const T_OLD: u8 = 16;
+pub const T_TRY: u8 = 17;
+pub const T_NEXT: u8 = 18;
+pub const T_DISPLAY: u8 = 19;
+
+// The receiver adjustment of a method call (stage0's `Adjust`): after `derefs` dereferences, a
+// borrow (`A_AUTOREF`, `&mut` with `A_MUT`); a `&mut` receiver passed on to `&mut self` is
+// reborrowed (`A_REBORROW`).
+pub const A_AUTOREF: u8 = 1;
+pub const A_MUT: u8 = 2;
+pub const A_REBORROW: u8 = 4;
+
+// Coercions (stage0's `Coercion`); `C_UNK` a coercion this stage does not decide (one to a fn
+// type made through the arms of a value `if` / `match` or parentheses).
+pub const C_NONE: u8 = 0;
+pub const C_NEVER: u8 = 1;
+pub const C_MUT_SHARED: u8 = 2;
+pub const C_ARRAY_SLICE: u8 = 3;
+pub const C_UNALIGN: u8 = 4;
+pub const C_STRING_STR: u8 = 5;
+pub const C_FMT_STR: u8 = 6;
+pub const C_FN_ITEM: u8 = 7;
+pub const C_UNK: u8 = 15;
+pub const C_KIND: u8 = 15;
+pub const C_REBORROW: u8 = 0x80;
+
+// Binding modes: not a binding or not decided, the value itself, a shared or mut reference.
+pub const BM_NONE: u8 = 0;
+pub const BM_MOVE: u8 = 1;
+pub const BM_REF: u8 = 2;
+pub const BM_MUT: u8 = 3;
+
+// `for` loop kinds (stage0's `ForKind`), with `FK_CHUNK` for a chunk loop (an annotation, as
+// written, that is a vector or a reference to one); `FK_NONE` no kind decided: a source that is
+// none (E0219), unknown, or a place this stage does not tell from a value.
+pub const FK_NONE: u8 = 0;
+pub const FK_RANGE: u8 = 1;
+pub const FK_ARRAY: u8 = 2;
+pub const FK_SEQ: u8 = 3;
+pub const FK_SEQ_MUT: u8 = 4;
+pub const FK_ITER: u8 = 5;
+pub const FK_ITER_MUT: u8 = 6;
+pub const FK_KIND: u8 = 7;
+pub const FK_CHUNK: u8 = 0x80;
+
+// Body flags: checked; a type error of its last check (a row, or a node or pattern binding of
+// the error type; a param's is its signature's, as stage0's `has_error`); a node not decided (`?`).
+pub const B_CHECKED: u8 = 1;
+pub const B_ERROR: u8 = 2;
+pub const B_UNKNOWN: u8 = 4;
+
+pub struct Facts {
+    pub tok: vec.Vec<u32>,
+    pub d: vec.Vec<u32>,
+    pub pass: vec.Vec<u32>,
+    pub kind: vec.Vec<u8>,
+    pub decl: vec.Vec<u32>,
+    pub idx: vec.Vec<u32>,
+    pub derefs: vec.Vec<u16>,
+    pub adj: vec.Vec<u8>,
+    pub blo: vec.Vec<u32>,
+    pub ty: vec.Vec<u32>,
+    pub val: vec.Vec<u32>,
+    pub co: vec.Vec<u8>,
+    pub cw: vec.Vec<u32>,
+    pub bm: vec.Vec<u8>,
+    pub canon: vec.Vec<u32>,
+    pub fk: vec.Vec<u8>,
+    pub call: vec.Vec<u32>,
+    // per decl: its bindings (words of `bw` from `b_lo`, `b_n` of them) and const arguments
+    // (words of `cw3` from `c_lo`, `c_n`), its last check's
+    pub b_lo: vec.Vec<u32>,
+    pub b_n: vec.Vec<u32>,
+    pub bw: vec.Vec<u32>,
+    pub c_lo: vec.Vec<u32>,
+    pub c_n: vec.Vec<u32>,
+    pub cw3: vec.Vec<u32>,
+    pub body: vec.Vec<u8>,
+}
+
+// The facts of a program of n node rows and nd decls, none recorded.
+pub fn new(n: usize, nd: usize) -> Facts {
+    return Facts.{
+        tok: vec.Vec::<u32>.new(),
+        d: vec.Vec::<u32>.new(),
+        pass: vec.Vec::<u32>.new(),
+        kind: vec.Vec::<u8>.new(),
+        decl: vec.Vec::<u32>.new(),
+        idx: vec.Vec::<u32>.new(),
+        derefs: vec.Vec::<u16>.new(),
+        adj: vec.Vec::<u8>.new(),
+        blo: vec.Vec::<u32>.new(),
+        ty: vec.Vec::<u32>.new(),
+        val: vec.Vec::<u32>.new(),
+        co: col.filled(n, C_NONE),
+        cw: col.filled(n, NONE),
+        bm: col.filled(n, BM_NONE),
+        canon: col.filled(n, NONE),
+        fk: col.filled(n, FK_NONE),
+        call: col.filled(n, NONE),
+        b_lo: col.filled(nd, 0u32),
+        b_n: col.filled(nd, 0u32),
+        bw: vec.Vec::<u32>.new(),
+        c_lo: col.filled(nd, 0u32),
+        c_n: col.filled(nd, 0u32),
+        cw3: vec.Vec::<u32>.new(),
+        body: col.filled(nd, 0u8),
+    };
+}
+
+impl Facts {
+    pub fn rows(&self) -> usize {
+        return self.tok.len();
+    }
+
+    // The node facts of rows lo..=hi back to none (a body checked again).
+    pub fn reset(&mut self, lo: usize, hi: usize) {
+        for r in lo..hi + 1 {
+            self.co.as_mut_slice()[r] = C_NONE;
+            self.cw.as_mut_slice()[r] = NONE;
+            self.bm.as_mut_slice()[r] = BM_NONE;
+            self.canon.as_mut_slice()[r] = NONE;
+            self.fk.as_mut_slice()[r] = FK_NONE;
+            self.call.as_mut_slice()[r] = NONE;
+        }
+    }
+
+    // A target row of check pass of body d at token tok; its value not decided yet. Its index.
+    pub fn target(&mut self, tok: u32, d: u32, pass: u32, kind: u8, decl: u32, idx: u32, derefs: u32, adj: u8, blo: u32, ty: u32) -> u32 {
+        let r = self.tok.len() as% u32;
+        self.tok.push(tok);
+        self.d.push(d);
+        self.pass.push(pass);
+        self.kind.push(kind);
+        self.decl.push(decl);
+        self.idx.push(idx);
+        self.derefs.push(if derefs > 0xffff then 0xffffu16 else derefs as% u16);
+        self.adj.push(adj);
+        self.blo.push(if blo == UNK then NONE else blo);
+        self.ty.push(ty);
+        self.val.push(UNK);
+        return r;
+    }
+
+    // The value after the step of row r (NONE: no row).
+    pub fn set_val(&mut self, r: u32, v: u32) {
+        if r == NONE { return; }
+        self.val.as_mut_slice()[r as usize] = v;
+    }
+
+    pub fn set_ty(&mut self, r: u32, t: u32) {
+        if r == NONE { return; }
+        self.ty.as_mut_slice()[r as usize] = t;
+    }
+
+    // Coercion kind c at node e, a reborrow it has kept.
+    pub fn set_co(&mut self, e: usize, c: u8) {
+        let o = self.co.as_slice()[e];
+        self.co.as_mut_slice()[e] = (o & C_REBORROW) | c;
+    }
+
+    pub fn reborrow(&mut self, e: usize) {
+        let o = self.co.as_slice()[e];
+        self.co.as_mut_slice()[e] = o | C_REBORROW;
+    }
+
+    // Keeps the bindings pool and const arguments of body d's check that ends.
+    pub fn keep_binds(&mut self, d: u32, binds: &[u32], cargs: &[u32]) {
+        self.b_lo.as_mut_slice()[d as usize] = self.bw.len() as% u32;
+        self.b_n.as_mut_slice()[d as usize] = binds.len() as% u32;
+        self.bw.extend_from_slice(binds);
+        self.c_lo.as_mut_slice()[d as usize] = self.cw3.len() as% u32;
+        self.c_n.as_mut_slice()[d as usize] = cargs.len() as% u32;
+        self.cw3.extend_from_slice(cargs);
+    }
+
+    // After the rounds (last_pass: per decl its last check): the rows of each body's last check,
+    // sorted by token, their bindings rows as words of `bw`; a token with two different rows
+    // (beside the holes of an f-string) is unknown.
+    pub fn finish(&mut self, last_pass: &[u32]) {
+        let mut keep = vec.Vec::<u32>.new();
+        let mut keys = vec.Vec::<u32>.new();
+        for r in 0..self.tok.len() {
+            let d = self.d.as_slice()[r] as usize;
+            if self.pass.as_slice()[r] != last_pass[d] { continue; }
+            keep.push(r as% u32);
+            keys.push(self.tok.as_slice()[r]);
+        }
+        let perm = sort.sort_perm(keys.as_slice());
+        let mut f = new(0, 0);
+        let mut last = NONE;
+        for k in 0..perm.len() {
+            let r = keep.as_slice()[perm.as_slice()[k] as usize] as usize;
+            let tok = self.tok.as_slice()[r];
+            let b = self.blo.as_slice()[r];
+            let d = self.d.as_slice()[r];
+            let blo = if b == NONE then NONE else self.b_lo.as_slice()[d as usize] + b;
+            if last != NONE && f.tok.as_slice()[last as usize] == tok && self.kind.as_slice()[r] != T_DISPLAY {
+                if self.same(r, &f, last as usize, blo) { continue; }
+                f.kind.as_mut_slice()[last as usize] = T_UNK;
+                continue;
+            }
+            last = f.target(tok, d, self.pass.as_slice()[r], self.kind.as_slice()[r], self.decl.as_slice()[r], self.idx.as_slice()[r], self.derefs.as_slice()[r] as u32, self.adj.as_slice()[r], blo, self.ty.as_slice()[r]);
+            f.val.as_mut_slice()[last as usize] = self.val.as_slice()[r];
+        }
+        mem.swap(&mut self.tok, &mut f.tok);
+        mem.swap(&mut self.d, &mut f.d);
+        mem.swap(&mut self.pass, &mut f.pass);
+        mem.swap(&mut self.kind, &mut f.kind);
+        mem.swap(&mut self.decl, &mut f.decl);
+        mem.swap(&mut self.idx, &mut f.idx);
+        mem.swap(&mut self.derefs, &mut f.derefs);
+        mem.swap(&mut self.adj, &mut f.adj);
+        mem.swap(&mut self.blo, &mut f.blo);
+        mem.swap(&mut self.ty, &mut f.ty);
+        mem.swap(&mut self.val, &mut f.val);
+    }
+
+    // Whether row r (its bindings row blo, as words of `bw`) says what row k of f says.
+    fn same(&self, r: usize, f: &Facts, k: usize, blo: u32) -> bool {
+        return self.kind.as_slice()[r] == f.kind.as_slice()[k] && self.decl.as_slice()[r] == f.decl.as_slice()[k] && self.idx.as_slice()[r] == f.idx.as_slice()[k] && self.derefs.as_slice()[r] == f.derefs.as_slice()[k] && self.adj.as_slice()[r] == f.adj.as_slice()[k] && blo == f.blo.as_slice()[k] && self.ty.as_slice()[r] == f.ty.as_slice()[k] && self.val.as_slice()[r] == f.val.as_slice()[k];
+    }
+
+    // The rows at token tok (after `finish`): lo..hi.
+    pub fn at(&self, tok: u32) -> (usize, usize) {
+        let lo = search.lower_bound(self.tok.as_slice(), tok);
+        let hi = search.upper_bound(self.tok.as_slice(), tok);
+        return (lo, hi);
+    }
+
+    // The one row at token tok (after `finish`), NONE when none or several.
+    pub fn find(&self, tok: u32) -> u32 {
+        let (lo, hi) = self.at(tok);
+        return if hi == lo + 1 then lo as% u32 else NONE;
+    }
+
+    // Binding i of target row r (after `finish`) as a generic argument's three words (`types.GA_*`,
+    // x, y); `GA_ERROR` for an unbound one, a row without bindings, or one past the pool.
+    pub fn binding(&self, r: usize, i: usize) -> (u32, u32, u32) {
+        let b = self.blo.as_slice()[r];
+        let d = self.d.as_slice()[r] as usize;
+        let end = self.b_lo.as_slice()[d] + self.b_n.as_slice()[d];
+        if b == NONE || b + i as% u32 >= end { return (types.GA_ERROR, NONE, NONE); }
+        let v = self.bw.as_slice()[b as usize + i];
+        if v == NONE { return (types.GA_ERROR, NONE, NONE); }
+        if v & 0xc000_0000 != CB { return (types.GA_TYPE, v, 0); }
+        let k = 3 * (v & ~CB);
+        if k + 3 > self.c_n.as_slice()[d] { return (types.GA_ERROR, NONE, NONE); }
+        let at = (self.c_lo.as_slice()[d] + k) as usize;
+        let w = &self.cw3.as_slice()[at..at + 3];
+        return (w[0], w[1], w[2]);
+    }
+
+    // The types the targets name beside node types: per row its `ty` and `val` with the row's
+    // decl: the types whose kinds are asked in that decl's environment beside its nodes'.
+    pub fn row_roots(&self, out_d: &mut vec.Vec<u32>, out_t: &mut vec.Vec<u32>) {
+        for r in 0..self.tok.len() {
+            let d = self.d.as_slice()[r];
+            for j in 0..2usize {
+                let t = if j == 0 then self.ty.as_slice()[r] else self.val.as_slice()[r];
+                if t == NONE || t == UNK || t == ERR { continue; }
+                out_d.push(d);
+                out_t.push(t);
+            }
+        }
+    }
+
+    // The types wanted at the coercion sites of rows lo..=hi (an argument's: its param type with
+    // the call's bindings), whose kinds are asked in their body's environment.
+    pub fn node_roots(&self, lo: usize, hi: usize, out: &mut vec.Vec<u32>) {
+        for r in lo..hi + 1 {
+            let t = self.cw.as_slice()[r];
+            if t != NONE && t != UNK && t != ERR { out.push(t); }
+        }
+    }
+}
+
+// The coercion stage0's `coercible` names from type v to want, both decided and different, of
+// which `tc_rows.coercible` holds (`std.string.String` the decl string, NONE: none).
+pub fn coercion(tab: &types.Table, v: u32, want: u32, string: u32) -> u8 {
+    if tab.tag_of(v) == types.TK_FN { return C_FN_ITEM; }
+    let vm = tab.a_of(v) == 1;
+    let wm = tab.a_of(want) == 1;
+    let vi = tab.b_of(v);
+    let wi = tab.b_of(want);
+    if !wm && vm && vi == wi { return C_MUT_SHARED; }
+    let vt = tab.tag_of(vi);
+    if tab.tag_of(wi) == types.TK_SLICE && tab.b_of(wi) == 0 {
+        if vt == types.TK_ARRAY { return C_ARRAY_SLICE; }
+        if vt == types.TK_SLICE { return C_UNALIGN; }
+    }
+    if string != NONE && vt == types.TK_ADT && tab.a_of(vi) == string { return C_STRING_STR; }
+    return C_UNK;
+}
+
+// The receiver adjustment of a method taking `self` as sk (`sigs.SF_SELF_*`) found at auto-deref
+// level lv (stage0's `adjust_for`).
+pub fn adjust(sk: u16, lv: u32) -> u8 {
+    if sk == sigs.SF_SELF_REF { return A_AUTOREF; }
+    if sk == sigs.SF_SELF_MUT { return A_AUTOREF | A_MUT | (if lv > 0 then A_REBORROW else 0u8); }
+    return 0;
+}
+
+// The adjustment of a built-in method on a receiver of type c at its level: a slice's, an array's,
+// and a `str`'s take it by reference.
+pub fn builtin_adjust(tab: &types.Table, c: u32) -> u8 {
+    let t = tab.tag_of(c);
+    return if t == types.TK_SLICE || t == types.TK_ARRAY || t == types.TK_STR then A_AUTOREF else 0u8;
+}
+
+// The references a value of type ty is reached through (the auto-derefs of a step on it).
+pub fn ref_depth(tab: &types.Table, ty: u32) -> u32 {
+    let mut x = ty;
+    let mut n: u32 = 0;
+    while tab.tag_of(x) == types.TK_REF {
+        x = tab.b_of(x);
+        n = n + 1;
+    }
+    return n;
+}
+
+// The kind of a `for` loop over a source of type src (decided, not the error type) with chunk
+// annotation or not, stage0's `for_source` without its E0219 cases: an array only when value
+// (the source a value no place can be: an array literal or a call's result); an iterator by its
+// `next` (`FK_NONE` here, the caller decides).
+pub fn for_kind(tab: &types.Table, src: u32, chunk: bool, value: bool) -> u8 {
+    let tag = tab.tag_of(src);
+    let c = if chunk then FK_CHUNK else 0u8;
+    if tag == types.TK_RANGE {
+        if chunk || tab.tag_of(tab.a_of(src)) != types.TK_INT { return FK_NONE; }
+        return FK_RANGE;
+    }
+    if tag == types.TK_ARRAY { return if value then FK_ARRAY | c else FK_NONE; }
+    if tag != types.TK_REF { return FK_NONE; }
+    let it = tab.tag_of(tab.b_of(src));
+    if it == types.TK_ARRAY || it == types.TK_SLICE { return (if tab.a_of(src) == 1 then FK_SEQ_MUT else FK_SEQ) | c; }
+    return FK_NONE;
+}

@@ -11,6 +11,11 @@
 // fn value made right there (a closure literal or a fn item, through wrappers) also converts to
 // a type that denies more effects (it is made with them); an f-string (through parentheses)
 // converts to `&str`; any other is a type error.
+//
+// The coercion facts (`tc_facts`) of the sites whose two types are fn types (`fn_coercions`), as
+// stage0's `coerce` notes them, decided when the body's check ends: a value of another fn type
+// that converts, or a fn value made right there that gains the wanted deny clause, is
+// `C_FN_ITEM`; a node that converts through its arms is not decided here (`C_UNK`).
 import ast;
 import consteval;
 import decls;
@@ -21,6 +26,7 @@ import items;
 import lex;
 import sigs;
 import source;
+import tc_facts;
 import tc_rows;
 import ir.types;
 import std.vec;
@@ -114,7 +120,9 @@ impl tc_rows.Typeck {
             let want = self.fc_want.as_slice()[i];
             let why = self.fc_why.as_slice()[i];
             if tab.tag_of(want) != types.TK_FN {
-                if !fstring_node(t, tree, self.base, e) {
+                if fstring_node(t, tree, self.base, e) {
+                    self.fx.set_co(e, tc_facts.C_FMT_STR);
+                } else {
                     let v = self.resolve_at(e);
                     self.mismatch(e, v, want, why);
                 }
@@ -139,6 +147,27 @@ impl tc_rows.Typeck {
         self.fc_node.clear();
         self.fc_want.clear();
         self.fc_why.clear();
+    }
+
+    // The coercion facts of the fn-type coercion sites of the body (`fq_node`, `fq_want`), its
+    // check done (see the top).
+    pub fn fn_coercions(&mut self, tab: &types.Table, t: &lex.Tokens, tree: &ast.Ast) {
+        let mut arms = vec.Vec::<u32>.new();
+        for i in 0..self.fq_node.len() {
+            let e = self.fq_node.as_slice()[i] as usize;
+            let want = self.fq_want.as_slice()[i];
+            value_arms(t, tree, self.base, e, &mut arms);
+            if arms.len() != 1 || arms.as_slice()[0] as usize != e {
+                self.fx.set_co(e, tc_facts.C_UNK);
+                continue;
+            }
+            let v = self.resolve_at(e);
+            if v == want || v == UNK || v == NONE || is_lit(v) || tab.tag_of(v) != types.TK_FN { continue; }
+            let (shape, widened) = tc_rows.fn_conv(tab, v, want, self.proven);
+            if shape && (widened == 0 || self.made_fn_value(t, tree, e)) { self.fx.set_co(e, tc_facts.C_FN_ITEM); }
+        }
+        self.fq_node.clear();
+        self.fq_want.clear();
     }
 
     // Whether node n's value is a fn value made right there: n or a node it wraps (stage0

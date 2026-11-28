@@ -24,9 +24,11 @@
 // prints `?`), a const pattern whose value the evaluator does not give (a `char`, float, pointer
 // or fn const): the checks over such a pattern are not made.
 //
-// Owns: the `loc` rows of binding nodes inside patterns; the pattern stack `pat_*`, the lowered
-// patterns `pats`, the match rows `mr_*` and open matches `ms_*` of `tc_rows.Typeck`. Entry
-// points: `let_pattern`, `match_open`, `arm_patterns`, `match_close`.
+// Owns: the `loc` rows of binding nodes inside patterns, and their facts (`tc_facts`: each
+// binding's mode, the first alternative's binding a later alternative's stands for); the
+// pattern stack `pat_*`, the lowered patterns `pats`, the match rows `mr_*` and open matches
+// `ms_*` of `tc_rows.Typeck`. Entry points: `let_pattern`, `match_open`, `arm_patterns`,
+// `match_close`.
 import ast;
 import consteval;
 import decls;
@@ -39,6 +41,7 @@ import lex;
 import resolve;
 import sigs;
 import source;
+import tc_facts;
 import tc_rows;
 import tc_useful;
 import ir.types;
@@ -622,6 +625,7 @@ impl tc_rows.Typeck {
         self.ob_node.push(n as% u32);
         self.ob_ty.push(bt);
         self.ob_mode.push(m);
+        self.fx.bm.as_mut_slice()[n] = if m == M_MOVE then tc_facts.BM_MOVE else if m == M_REF then tc_facts.BM_REF else tc_facts.BM_MUT;
     }
 
     // A `let` or `for` pattern row p against type ty: binds, and covers every value.
@@ -669,6 +673,7 @@ impl tc_rows.Typeck {
             self.mr_node.push(p as% u32);
             self.mr_arm.push(r as% u32);
             self.mr_fl.push(fl);
+            if alt && j > 0 { alt_canon(&mut self.fx, nm, t, tree, first, p); }
             if !alt || st == UNK || st == NONE { continue; }
             if j == 0 {
                 self.of_node.clear();
@@ -857,6 +862,24 @@ fn bindings_of(nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, p: usize, o
     }
     for j in 0..names.len() {
         out.key.push(search.pair(names.as_slice()[j], occ.as_slice()[j]));
+    }
+}
+
+// The first alternative's binding (of pattern row first) each binding of alternative alt stands
+// for, as stage0's resolver pairs them: the k-th binding of a name with the first's k-th
+// (`fx.canon`; none for a name the first does not bind as often).
+fn alt_canon(fx: &mut tc_facts.Facts, nm: &intern.Interned, t: &lex.Tokens, tree: &ast.Ast, first: usize, alt: usize) {
+    let mut fb = Binds.{ node: vec.Vec::<u32>.new(), tok: vec.Vec::<u32>.new(), mutable: vec.Vec::<bool>.new(), key: vec.Vec::<u64>.new() };
+    let mut ab = Binds.{ node: vec.Vec::<u32>.new(), tok: vec.Vec::<u32>.new(), mutable: vec.Vec::<bool>.new(), key: vec.Vec::<u64>.new() };
+    bindings_of(nm, t, tree, first, &mut fb);
+    bindings_of(nm, t, tree, alt, &mut ab);
+    let fperm = sort.sort_perm(fb.key.as_slice());
+    let fkeys = perm.gather(fb.key.as_slice(), fperm.as_slice());
+    for i in 0..ab.node.len() {
+        let k = search.lower_bound(fkeys.as_slice(), ab.key.as_slice()[i]);
+        if k == fkeys.len() || fkeys.as_slice()[k] != ab.key.as_slice()[i] { continue; }
+        let f = fperm.as_slice()[k] as usize;
+        fx.canon.as_mut_slice()[ab.node.as_slice()[i] as usize] = fb.node.as_slice()[f];
     }
 }
 
