@@ -1193,6 +1193,12 @@ impl Traits {
         return (0, 0, false);
     }
 
+    // Whether param p has `view` in environment e (a param the environment does not list: no).
+    pub fn env_view(&self, e: u32, p: u32) -> bool {
+        let (_, _, v) = self.env_param(e, p);
+        return v;
+    }
+
     // Whether param p implements tr with targs in the current environment: a bound names them
     // (Copy: the trait alone), or tr is Frozen and a bound is Flat.
     fn env_holds(&self, p: u32, tr: u32, targs: &[u32]) -> bool {
